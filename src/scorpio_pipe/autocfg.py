@@ -207,7 +207,7 @@ def build_autoconfig(
     # attach setup as an internal field
     frames["__setup__"] = setup
 
-    calib = {"superbias_path": "calib/superbias.fits"}
+    calib = {"superbias_path": "calib/superbias.fits", "superflat_path": "calib/superflat.fits"}
     return AutoConfig(
         data_dir=str(data_dir),
         object_name=object_name,
