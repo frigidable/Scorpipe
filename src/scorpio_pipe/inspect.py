@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Iterable
 
 import pandas as pd
@@ -70,6 +71,11 @@ def _norm_obj(s: str | None) -> str:
         return ""
     return "".join(ch for ch in s.strip().upper() if ch.isalnum())
 
+def _norm_obj_tokens(s: str | None) -> str:
+    if not s:
+        return ""
+    return re.sub(r"[^0-9A-Z]+", " ", s.strip().upper()).strip()
+
 
 def _safe_get(header, *keys, default=None):
     for k in keys:
@@ -94,6 +100,7 @@ def classify_frame(header) -> str:
     exptime = _safe_get(header, "EXPTIME", "EXPOSURE", default=None)
 
     obj_n = _norm_obj(obj)
+    obj_tokens = _norm_obj_tokens(obj)
     im_n = _norm_obj(imtyp)
 
     # bias: exptime==0 или по типу
@@ -111,7 +118,7 @@ def classify_frame(header) -> str:
         return "flat"
 
     # lamp/neon/arc
-    if any(x in obj_n for x in ("NEON", "AR", "HG", "HE", "LAMP", "ARC")) or "ARC" in im_n:
+    if re.search(r"\b(NEON|LAMP|ARC|AR|HG|HE)\b", obj_tokens) or "ARC" in im_n:
         return "neon"
 
     # sky
@@ -251,4 +258,3 @@ def inspect_dataset(data_dir: Path, max_files: int | None = None) -> InspectResu
         n_nightlog_rows=len(log_meta),
         open_errors=open_errors,
     )
-
