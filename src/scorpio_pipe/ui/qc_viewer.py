@@ -20,6 +20,7 @@ class QCItem:
 DEFAULT_QC_ITEMS: list[QCItem] = [
     QCItem("Manifest (JSON)", "report/manifest.json", "text"),
     QCItem("Superbias (FITS)", "calib/superbias.fits", "fits"),
+    QCItem("Cosmics summary (JSON)", "cosmics/summary.json", "text"),
     # legacy flat layout (still supported)
     QCItem("Superneon (PNG)", "wavesol/superneon.png", "image"),
     QCItem("Peaks candidates (CSV)", "wavesol/peaks_candidates.csv", "text"),

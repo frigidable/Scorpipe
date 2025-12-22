@@ -124,6 +124,28 @@ def task_superflat():
     }
 
 
+def task_cosmics():
+    cfg = _load_cfg()
+    work_dir = Path(cfg["work_dir"])
+    out = work_dir / "cosmics" / "summary.json"
+
+    obj_list = cfg["frames"].get("obj", [])
+    sky_list = cfg["frames"].get("sky", [])
+    file_dep = [_cfg_path()] + [Path(p) for p in obj_list + sky_list]
+
+    def _action():
+        from scorpio_pipe.stages.cosmics import clean_cosmics
+
+        clean_cosmics(_cfg_path(), out_dir=out.parent)
+
+    return {
+        "actions": [_action],
+        "file_dep": file_dep,
+        "targets": [out],
+        "clean": True,
+    }
+
+
 def task_superneon():
     """Build stacked super-neon + candidates."""
     def _action():

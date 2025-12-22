@@ -134,9 +134,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
             "1  Project & data",
             "2  Config & setup",
             "3  Calibrations",
-            "4  SuperNeon",
-            "5  Line ID",
-            "6  Wavelength solution",
+            "4  Clean Cosmics",
+            "5  SuperNeon",
+            "6  Line ID",
+            "7  Wavelength solution",
         ]:
             it = QtWidgets.QListWidgetItem(title)
             it.setIcon(self._icon_status("idle"))
@@ -155,6 +156,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.page_project = self._build_page_project()
         self.page_config = self._build_page_config()
         self.page_calib = self._build_page_calib()
+        self.page_cosmics = self._build_page_cosmics()
         self.page_superneon = self._build_page_superneon()
         self.page_lineid = self._build_page_lineid()
         self.page_wavesol = self._build_page_wavesol()
@@ -162,6 +164,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.page_project,
             self.page_config,
             self.page_calib,
+            self.page_cosmics,
             self.page_superneon,
             self.page_lineid,
             self.page_wavesol,
@@ -956,13 +959,13 @@ class LauncherWindow(QtWidgets.QMainWindow):
         lay.addStretch(1)
         foot = QtWidgets.QHBoxLayout()
         lay.addLayout(foot)
-        self.btn_to_superneon = QtWidgets.QPushButton("Go to SuperNeon →")
+        self.btn_to_cosmics = QtWidgets.QPushButton("Go to Cosmics →")
         foot.addStretch(1)
-        foot.addWidget(self.btn_to_superneon)
+        foot.addWidget(self.btn_to_cosmics)
 
         self.btn_run_calib.clicked.connect(self._do_run_calib)
         self.btn_qc_calib.clicked.connect(self._open_qc_viewer)
-        self.btn_to_superneon.clicked.connect(lambda: self.steps.setCurrentRow(3))
+        self.btn_to_cosmics.clicked.connect(lambda: self.steps.setCurrentRow(3))
         return w
 
     def _do_run_calib(self) -> None:
@@ -977,6 +980,58 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._maybe_auto_qc()
         except Exception as e:
             self._set_step_status(2, "fail")
+            self._log_exception(e)
+
+    # --------------------------- page: cosmics ---------------------------
+
+    def _build_page_cosmics(self) -> QtWidgets.QWidget:
+        w = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(w)
+        lay.setSpacing(12)
+
+        g = _box("Clean Cosmics")
+        lay.addWidget(g)
+        gl = QtWidgets.QVBoxLayout(g)
+        lbl = QtWidgets.QLabel(
+            "Clean cosmic rays in object/sky frames using a simple median filter.\n"
+            "Outputs are written under work_dir/cosmics/."
+        )
+        lbl.setWordWrap(True)
+        gl.addWidget(lbl)
+
+        row = QtWidgets.QHBoxLayout()
+        self.btn_run_cosmics = QtWidgets.QPushButton("Run: Clean cosmics")
+        self.btn_run_cosmics.setProperty("primary", True)
+        self.btn_qc_cosmics = QtWidgets.QPushButton("QC")
+        row.addWidget(self.btn_run_cosmics)
+        row.addWidget(self.btn_qc_cosmics)
+        row.addStretch(1)
+        gl.addLayout(row)
+
+        lay.addStretch(1)
+        foot = QtWidgets.QHBoxLayout()
+        lay.addLayout(foot)
+        self.btn_to_superneon = QtWidgets.QPushButton("Go to SuperNeon →")
+        foot.addStretch(1)
+        foot.addWidget(self.btn_to_superneon)
+
+        self.btn_run_cosmics.clicked.connect(self._do_run_cosmics)
+        self.btn_qc_cosmics.clicked.connect(self._open_qc_viewer)
+        self.btn_to_superneon.clicked.connect(lambda: self.steps.setCurrentRow(4))
+        return w
+
+    def _do_run_cosmics(self) -> None:
+        if not self._ensure_cfg_saved():
+            return
+        self._set_step_status(3, "running")
+        try:
+            ctx = load_context(self._cfg_path)
+            run_sequence(ctx, ["cosmics"])
+            self._log_info("Cosmics cleaning done")
+            self._set_step_status(3, "ok")
+            self._maybe_auto_qc()
+        except Exception as e:
+            self._set_step_status(3, "fail")
             self._log_exception(e)
 
     # --------------------------- page: superneon ---------------------------
@@ -1014,21 +1069,21 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         self.btn_run_superneon.clicked.connect(self._do_run_superneon)
         self.btn_qc_superneon.clicked.connect(self._open_qc_viewer)
-        self.btn_to_lineid.clicked.connect(lambda: self.steps.setCurrentRow(4))
+        self.btn_to_lineid.clicked.connect(lambda: self.steps.setCurrentRow(5))
         return w
 
     def _do_run_superneon(self) -> None:
         if not self._ensure_cfg_saved():
             return
-        self._set_step_status(3, "running")
+        self._set_step_status(4, "running")
         try:
             ctx = load_context(self._cfg_path)
             run_sequence(ctx, ["superneon"])
             self._log_info("SuperNeon done")
-            self._set_step_status(3, "ok")
+            self._set_step_status(4, "ok")
             self._maybe_auto_qc()
         except Exception as e:
-            self._set_step_status(3, "fail")
+            self._set_step_status(4, "fail")
             self._log_exception(e)
 
     # --------------------------- page: lineid ---------------------------
@@ -1109,7 +1164,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.act_export_selected_pair_set.triggered.connect(self._do_export_selected_pair_set)
         self.act_export_current_pairs.triggered.connect(self._do_export_current_pairs)
         self.act_export_user_library_zip.triggered.connect(self._do_export_user_library_zip)
-        self.btn_to_wavesol.clicked.connect(lambda: self.steps.setCurrentRow(5))
+        self.btn_to_wavesol.clicked.connect(lambda: self.steps.setCurrentRow(6))
         return w
 
     def _current_pairs_path(self) -> Path | None:
@@ -1482,16 +1537,16 @@ class LauncherWindow(QtWidgets.QMainWindow):
     def _do_wavesolution(self) -> None:
         if not self._ensure_cfg_saved():
             return
-        self._set_step_status(5, "running")
+        self._set_step_status(6, "running")
         try:
             ctx = load_context(self._cfg_path)
             out = run_wavesolution(ctx)
             self._log_info("Wavelength solution done")
-            self._set_step_status(5, "ok")
+            self._set_step_status(6, "ok")
             self._log_info("Outputs:\n" + "\n".join(f"  {k}: {v}" for k, v in out.items()))
             self._maybe_auto_qc()
         except Exception as e:
-            self._set_step_status(5, "fail")
+            self._set_step_status(6, "fail")
             self._log_exception(e)
 
     # --------------------------- misc helpers ---------------------------
@@ -1694,9 +1749,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
             return
         chain = [
             (2, "Calibrations", self._do_run_calib),
-            (3, "SuperNeon", self._do_run_superneon),
-            (4, "LineID", self._do_open_lineid),
-            (5, "Wavelength solution", self._do_wavesolution),
+            (3, "Cosmics", self._do_run_cosmics),
+            (4, "SuperNeon", self._do_run_superneon),
+            (5, "LineID", self._do_open_lineid),
+            (6, "Wavelength solution", self._do_wavesolution),
         ]
         for row, name, fn in chain:
             try:
@@ -1713,6 +1769,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_make_cfg.setEnabled(has_inspect)
         self.btn_suggest_workdir.setEnabled(True)
         self.btn_run_calib.setEnabled(self._cfg_path is not None or bool(self.edit_cfg_path.text().strip()))
+        self.btn_run_cosmics.setEnabled(self.btn_run_calib.isEnabled())
         self.btn_run_superneon.setEnabled(self.btn_run_calib.isEnabled())
         self.btn_open_lineid.setEnabled(self.btn_run_calib.isEnabled())
         self.btn_run_wavesol.setEnabled(self.btn_run_calib.isEnabled())
