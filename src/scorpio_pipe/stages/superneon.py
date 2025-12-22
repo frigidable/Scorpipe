@@ -497,13 +497,6 @@ def build_superneon(cfg: dict[str, Any]) -> SuperNeonResult:
         sigma, used_snr, min_height, prominence, distance, int(len(pk)),
     )
 
-    pk = _find_peaks_simple(
-        prof,
-        min_height=float(min_height) if min_height is not None else None,
-        prominence=float(prominence),
-        distance=int(wcfg.get("peak_distance", 3)),
-    )
-
     hdr["PKSIG"] = (float(sigma), "Robust background sigma used for peak thresholds")
     hdr["PKHGT"] = (float(min_height), "Peak min height (above median)")
     hdr["PKPRM"] = (float(prominence), "Peak prominence (above median)")
