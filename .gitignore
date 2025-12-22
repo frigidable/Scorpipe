@@ -1,0 +1,24 @@
+# Python virtual environments
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Data processing outputs
+work/
+results/
+
+# Astronomical data files
+*.fits
+*.fit
+*.fts
+
+# Build artifacts
+build/
+dist/
+
+# Logs
+logs/
+*.log
