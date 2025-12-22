@@ -104,6 +104,26 @@ def task_superbias():
     }
 
 
+def task_superflat():
+    cfg = _load_cfg()
+    work_dir = Path(cfg["work_dir"])
+    out = work_dir / "calib" / "superflat.fits"
+
+    flat_list = cfg["frames"].get("flat", [])
+
+    def _action():
+        from scorpio_pipe.stages.calib import build_superflat
+        # передаём путь к YAML-конфигу, который задан через $env:CONFIG
+        build_superflat(_cfg_path(), out_path=out)
+
+    return {
+        "actions": [_action],
+        "file_dep": [_cfg_path()] + [Path(p) for p in flat_list],
+        "targets": [out],
+        "clean": True,
+    }
+
+
 def task_superneon():
     """Build stacked super-neon + candidates."""
     def _action():
@@ -214,13 +234,22 @@ def task_sky_sub():
     obj_list = cfg["frames"].get("obj", [])
     sky_list = cfg["frames"].get("sky", [])
     superbias = Path(cfg.get("calib", {}).get("superbias_path") or (work_dir / "calib" / "superbias.fits"))
+    superflat = Path(cfg.get("calib", {}).get("superflat_path") or (work_dir / "calib" / "superflat.fits"))
     lambda_map = work_dir / "wavesol" / "lambda_map.fits"
+
+    flat_list = cfg["frames"].get("flat", [])
+    file_dep = [Path(cfg["config_path"]), superbias, lambda_map] + [Path(p) for p in obj_list + sky_list]
+    task_dep = ["wavelength_solution"]
+
+    if flat_list:
+        file_dep.append(superflat)
+        task_dep.append("superflat")
 
     return {
         "actions": [(_touch, (out, {"stage": "sky_sub", "n_obj": len(obj_list), "n_sky": len(sky_list)}))],
-        "file_dep": [Path(cfg["config_path"]), superbias, lambda_map] + [Path(p) for p in obj_list + sky_list],
+        "file_dep": file_dep,
         "targets": [out],
-        "task_dep": ["wavelength_solution"],
+        "task_dep": task_dep,
         "clean": True,
     }
 

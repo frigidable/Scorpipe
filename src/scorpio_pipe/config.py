@@ -97,6 +97,18 @@ def load_config(cfg_path: str | Path) -> dict[str, Any]:
                 cand2 = (Path(project_root) / sb_raw).resolve()
                 sb = cand1 if cand1.exists() else cand2
             calib["superbias_path"] = str(sb)
+        if calib.get("superflat_path"):
+            sf_raw = Path(_norm_path_str(str(calib["superflat_path"])) )
+            if sf_raw.is_absolute():
+                sf = sf_raw
+            else:
+                # Prefer:
+                # 1) inside work_dir (calib/superflat.fits)
+                # 2) relative to project root (work/run1/calib/superflat.fits)
+                cand1 = (wd / sf_raw).resolve()
+                cand2 = (Path(project_root) / sf_raw).resolve()
+                sf = cand1 if cand1.exists() else cand2
+            calib["superflat_path"] = str(sf)
         cfg["calib"] = calib
 
     # resolve frame paths: if relative, treat as relative to data_dir (preferred)
