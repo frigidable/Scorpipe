@@ -67,6 +67,14 @@ def run_superneon(ctx: RunContext) -> list[Path]:
     return outs
 
 
+def run_cosmics(ctx: RunContext) -> Path:
+    from scorpio_pipe.stages.cosmics import clean_cosmics
+
+    out = ctx.work_dir / "cosmics" / "summary.json"
+    log.info("Clean cosmics → %s", out)
+    return clean_cosmics(ctx.cfg, out_dir=out.parent)
+
+
 def run_lineid_prepare(ctx: RunContext) -> Path:
     """Open the interactive LineID GUI and write hand_pairs.txt."""
 
@@ -128,6 +136,7 @@ def run_wavesolution(ctx: RunContext) -> dict[str, str]:
 TASKS: dict[str, callable] = {
     "manifest": run_manifest,
     "superbias": run_superbias,
+    "cosmics": run_cosmics,
     "superneon": run_superneon,
     "lineid_prepare": run_lineid_prepare,
     "wavesolution": run_wavesolution,

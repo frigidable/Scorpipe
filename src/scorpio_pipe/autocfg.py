@@ -54,6 +54,11 @@ class AutoConfig:
                 "bias_combine": "mean",  # or: median
                 "bias_sigma_clip": 0.0,  # set to e.g. 5.0 to suppress cosmics
             },
+            cosmics={
+                "enabled": True,
+                "sigma_clip": 5.0,
+                "apply_to": ["obj", "sky"],
+            },
             runtime={
                 "n_jobs": 0,  # 0/None = auto
             },
