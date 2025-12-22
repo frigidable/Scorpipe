@@ -181,17 +181,27 @@ def task_lineid_prepare():
 
 def task_wavesol():
     cfg = _load_cfg()
-    work_dir = Path(cfg["work_dir"])
-    out = work_dir / "wavesol" / "lambda_map.fits"
+    from scorpio_pipe.stages.wavesolution import build_wavesolution
+    from scorpio_pipe.wavesol_paths import wavesol_dir
 
-    neon_list = cfg["frames"].get("neon", [])
-    superbias = Path(cfg.get("calib", {}).get("superbias_path") or (work_dir / "calib" / "superbias.fits"))
+    outdir = wavesol_dir(cfg)
+    superneon_fits = outdir / "superneon.fits"
+    hand_pairs = outdir / "hand_pairs.txt"
 
     return {
-        "actions": [(_touch, (out, {"stage": "wavesol", "n_neon": len(neon_list)}))],
-        "file_dep": [Path(cfg["config_path"]), superbias] + [Path(p) for p in neon_list],
-        "targets": [out],
-        "task_dep": ["superbias"],
+        "actions": [(build_wavesolution, (cfg,))],
+        "file_dep": [Path(cfg["config_path"]), superneon_fits, hand_pairs],
+        "targets": [
+            outdir / "wavesolution_1d.png",
+            outdir / "wavesolution_1d.json",
+            outdir / "residuals_1d.csv",
+            outdir / "wavesolution_2d.json",
+            outdir / "residuals_2d.csv",
+            outdir / "lambda_map.fits",
+            outdir / "wavelength_matrix.png",
+            outdir / "residuals_2d.png",
+        ],
+        "task_dep": ["superneon", "lineid_prepare"],
         "clean": True,
     }
 
