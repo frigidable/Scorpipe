@@ -1,93 +1,204 @@
-# Scorpio Pipe instrument knowledge base
-#
-# IMPORTANT
-# - FITS headers + night calibrations are the source of truth.
-# - Values here are used for: UI hints, sanity checks, default ranges/linelists.
-# - Many values are intentionally marked as "approx" until you paste exact manual tables.
-
+version: 2025-12-22
 instruments:
-  SCORPIO:
-    display_name: "SCORPIO (SCORPIO-1)"
-    type: "focal_reducer"
-    plate_scale_arcsec_per_pix: 0.18
-    fov_arcmin: [6.1, 6.1]
-    slit_length_arcmin: 6.0
-    detector:
-      ccd_model: "EEV 42-40"
-      format: [2048, 2048]
-      pixel_size_um: 13.5
-      readout_noise_e: {value: [1.8, 4.0], quality: "typical"}
-      dark_current_e_per_min: {value: 0.03, quality: "typical"}
-    grisms:
-      - id: "VPHG400"
-        grooves_lmm: 400
-        range_A: {value: [3600, 7500], quality: "approx"}
-        dispersion_A_per_pix: {value: 5.0, quality: "approx"}
-        notes: "Wide coverage; watch 2nd order on red end."
-      - id: "VPHG550G"
-        grooves_lmm: 550
-        dispersion_A_per_pix: {value: 2.0, quality: "approx"}
-        fwhm_A_at_slit_arcsec: {"1.0": {value: [6.0, 8.0], quality: "approx"}}
-      - id: "VPHG550R"
-        grooves_lmm: 550
-        notes: "Red-optimized; fringing/OH residuals can be stronger."
-      - id: "VPHG1200B"
-        grooves_lmm: 1200
-        dispersion_A_per_pix: {value: 0.9, quality: "typical"}
-        fwhm_A_at_slit_arcsec: {"1.0": {value: [2.0, 3.0], quality: "approx"}}
-      - id: "VPHG1200G"
-        grooves_lmm: 1200
-      - id: "VPHG1200R"
-        grooves_lmm: 1200
-        notes: "Red; fringing + dense OH."
-      - id: "VPHG1800R"
-        grooves_lmm: 1800
-        notes: "High R; LSF modelling strongly recommended."
-      - id: "VPHG2300G"
-        grooves_lmm: 2300
-      - id: "VPHG3000B"
-        grooves_lmm: 3000
-
-  SCORPIO-2:
-    display_name: "SCORPIO-2"
-    type: "focal_reducer"
-    plate_scale_arcsec_per_pix: 0.18
-    fov_arcmin: [6.4, 6.4]
-    slit_length_arcmin: 6.0
-    detector:
-      ccd_model: "e2v CCD42-90"
-      format: [4600, 2048]
-      pixel_size_um: 13.5
-      gain_e_per_adu: {value: [0.5, 2.0], quality: "varies"}
-      readout_noise_e: {value: [1.8, 4.0], quality: "varies"}
-    grisms:
-      - id: "VPHG940@600"
-        grooves_lmm: 940
-        range_A: {value: [3500, 8500], quality: "approx"}
-      - id: "VPHG1026@735"
-        grooves_lmm: 1026
-        range_A: {value: [5800, 9500], quality: "approx"}
-        notes: "OH forest; good sky model matters."
-      - id: "VPHG1200@540"
-        grooves_lmm: 1200
-        range_A: {value: [3800, 7200], quality: "approx"}
-      - id: "VPHG1800@510"
-        grooves_lmm: 1800
-        range_A: {value: [4300, 5900], quality: "approx"}
-      - id: "VPHG1800@590"
-        grooves_lmm: 1800
-        range_A: {value: [5000, 7250], quality: "published"}
-        dispersion_A_per_pix: {value: 0.50, quality: "published"}
-        fwhm_A_at_slit_arcsec:
-          "1.0": {value: 3.0, quality: "published"}
-          "0.7": {value: 2.1, quality: "published"}
-          "0.5": {value: 1.5, quality: "published"}
-      - id: "VPHG1800@660"
-        grooves_lmm: 1800
-        range_A: {value: [5500, 7300], quality: "approx"}
-      - id: "VPHG2400@415"
-        grooves_lmm: 2400
-        range_A: {value: [3500, 5100], quality: "approx"}
-      - id: "VPHG3000@400"
-        grooves_lmm: 3000
-        range_A: {value: [3800, 4500], quality: "approx"}
+- id: SCORPIO
+  label: SCORPIO-1
+  spectrograph_family: scorpio
+  detector:
+    model: EEV42-40
+    format_px:
+    - 2048
+    - 2048
+    pixel_um: 13.5
+  grisms:
+  - id: VPHG400
+    grooves_lmm: 400
+    range_A:
+    - 3500
+    - 9500
+    dispersion_A_per_pix: 3.0
+    fwhm_A_at_slit_arcsec:
+      '1.0': 13.0
+  - id: VPHG550G
+    grooves_lmm: 550
+    range_A:
+    - 3500
+    - 7200
+    dispersion_A_per_pix: 2.1
+    fwhm_A_at_slit_arcsec:
+      '1.0': 10.0
+  - id: VPHG550R
+    grooves_lmm: 550
+    range_A:
+    - 6000
+    - 10000
+    dispersion_A_per_pix: 2.1
+    fwhm_A_at_slit_arcsec:
+      '1.0': 10.0
+  - id: VPHG1200B
+    grooves_lmm: 1200
+    range_A:
+    - 3600
+    - 5400
+    dispersion_A_per_pix: 0.87
+    fwhm_A_at_slit_arcsec:
+      '1.0': 5.5
+  - id: VPHG1200G
+    grooves_lmm: 1200
+    range_A:
+    - 4000
+    - 5700
+    dispersion_A_per_pix: 0.88
+    fwhm_A_at_slit_arcsec:
+      '1.0': 5.0
+  - id: VPHG1200R
+    grooves_lmm: 1200
+    range_A:
+    - 5700
+    - 7500
+    dispersion_A_per_pix: 0.86
+    fwhm_A_at_slit_arcsec:
+      '1.0': 5.0
+  - id: VPHG1200IR
+    grooves_lmm: 1200
+    range_A:
+    - 7600
+    - 9300
+    dispersion_A_per_pix: 0.86
+    fwhm_A_at_slit_arcsec:
+      '1.0': 5.0
+  - id: VPHG1800R
+    grooves_lmm: 1800
+    range_A:
+    - 6100
+    - 7100
+    dispersion_A_per_pix: 0.52
+    fwhm_A_at_slit_arcsec:
+      '1.0': 2.5
+  - id: VPHG2300G
+    grooves_lmm: 2300
+    range_A:
+    - 4700
+    - 5500
+    dispersion_A_per_pix: 0.38
+    fwhm_A_at_slit_arcsec:
+      '1.0': 2.2
+  plate_scale_arcsec_per_pix: 0.18
+  fov_arcmin:
+  - 6.1
+  - 6.1
+  slit_length_arcmin: 6.0
+- id: SCORPIO-2
+  label: SCORPIO-2
+  spectrograph_family: scorpio
+  detector:
+    model: E2V
+    variants:
+      E2V42-90:
+        format_px:
+        - 4612
+        - 2048
+        pixel_um: 13.5
+        plate_scale_arcsec_per_pix: 0.18
+      E2V261-84:
+        format_px:
+        - 4096
+        - 2048
+        pixel_um: 15.0
+        plate_scale_arcsec_per_pix: 0.2
+  grisms:
+  - id: VPHG940@600
+    grooves_lmm: 940
+    range_A:
+    - 3500
+    - 8500
+    dispersion_A_per_pix: 1.16
+    fwhm_A_at_slit_arcsec:
+      '1.0': 7.0
+      '0.7': 5.0
+      '0.5': 3.5
+  - id: VPHG1026@735
+    grooves_lmm: 1026
+    range_A:
+    - 5800
+    - 9500
+    dispersion_A_per_pix: 1.02
+    fwhm_A_at_slit_arcsec:
+      '1.0': 6.1
+      '0.7': 4.3
+      '0.5': 3.0
+  - id: VPHG1200@540
+    grooves_lmm: 1200
+    range_A:
+    - 3650
+    - 7250
+    dispersion_A_per_pix: 0.87
+    fwhm_A_at_slit_arcsec:
+      '1.0': 5.2
+      '0.7': 3.6
+      '0.5': 2.6
+  - id: VPHG1200@860
+    grooves_lmm: 1200
+    range_A:
+    - 7400
+    - 10900
+    dispersion_A_per_pix: 0.85
+    fwhm_A_at_slit_arcsec:
+      '1.0': 5.1
+      '0.7': 3.6
+      '0.5': 2.5
+  - id: VPHG1800@500
+    grooves_lmm: 1800
+    range_A:
+    - 4000
+    - 6200
+    dispersion_A_per_pix: 0.5
+    fwhm_A_at_slit_arcsec:
+      '1.0': 3.0
+      '0.7': 2.1
+      '0.5': 1.5
+  - id: VPHG1800@590
+    grooves_lmm: 1800
+    range_A:
+    - 5000
+    - 7250
+    dispersion_A_per_pix: 0.5
+    fwhm_A_at_slit_arcsec:
+      '1.0': 3.0
+      '0.7': 2.1
+      '0.5': 1.5
+  - id: VPHG1800@660
+    grooves_lmm: 1800
+    range_A:
+    - 5500
+    - 7800
+    dispersion_A_per_pix: 0.51
+    fwhm_A_at_slit_arcsec:
+      '1.0': 3.0
+      '0.7': 2.1
+      '0.5': 1.5
+  - id: VPHG2300@510
+    grooves_lmm: 2300
+    range_A:
+    - 4300
+    - 6000
+    dispersion_A_per_pix: 0.4
+    fwhm_A_at_slit_arcsec:
+      '1.0': 2.2
+      '0.7': 1.5
+      '0.5': 1.1
+  - id: VPHG2400@415
+    grooves_lmm: 2400
+    range_A:
+    - 3500
+    - 5100
+    dispersion_A_per_pix: 0.36
+    fwhm_A_at_slit_arcsec:
+      '1.0': 2.2
+      '0.7': 1.5
+      '0.5': 1.1
+    notes: Spectropolarimetry only (per SCORPIO-2 docs).
+  plate_scale_arcsec_per_pix: 0.18
+  fov_arcmin:
+  - 6.4
+  - 6.4
+  slit_length_arcmin: 6.0

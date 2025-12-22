@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import traceback
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,16 @@ from scorpio_pipe.ui.pipeline_runner import (
 from scorpio_pipe.ui.qc_viewer import QCViewer
 from scorpio_pipe.ui.pair_rejector import clean_pairs_interactively
 from scorpio_pipe.wavesol_paths import slugify_disperser, wavesol_dir
-from scorpio_pipe.pairs_library import find_builtin_pairs_for_disperser
+from scorpio_pipe.pairs_library import (
+    list_pair_sets,
+    find_builtin_pairs_for_disperser,
+    save_user_pair_set,
+    copy_pair_set_to_workdir,
+    user_pairs_root,
+    export_pair_set,
+    export_user_library_zip,
+    export_user_library_folder,
+)
 from scorpio_pipe.ui.theme import apply_theme, load_ui_settings
 from scorpio_pipe.instrument_db import find_grism, load_instrument_db
 
@@ -117,14 +127,21 @@ class LauncherWindow(QtWidgets.QMainWindow):
         # Left: steps
         self.steps = QtWidgets.QListWidget()
         self.steps.setFixedWidth(270)
-        self.steps.addItems([
+
+        # Step list with status icons (commercial UX: you always see progress).
+        self._step_items = []  # list[QtWidgets.QListWidgetItem]
+        for title in [
             "1  Project & data",
             "2  Config & setup",
             "3  Calibrations",
             "4  SuperNeon",
             "5  Line ID",
             "6  Wavelength solution",
-        ])
+        ]:
+            it = QtWidgets.QListWidgetItem(title)
+            it.setIcon(self._icon_status("idle"))
+            self.steps.addItem(it)
+            self._step_items.append(it)
         self.steps.setCurrentRow(0)
         splitter.addWidget(self.steps)
 
@@ -175,6 +192,65 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         # Initial state
         self._update_enables()
+        # refresh derived UI state
+        try:
+            self._update_setup_hint()
+        except Exception:
+            pass
+        try:
+            self._refresh_pair_sets_combo()
+            self._refresh_pairs_label()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'lbl_wavesol_dir') and self._cfg:
+                self.lbl_wavesol_dir.setText(f"wavesol: {wavesol_dir(self._cfg)}")
+        except Exception:
+            pass
+
+    # --------------------------- step status ---------------------------
+
+    _STATUS_ICONS: dict[str, QtGui.QIcon] | None = None
+
+    def _icon_status(self, status: str) -> QtGui.QIcon:
+        """Small colored status dot used in the step list."""
+        status = (status or "idle").strip().lower()
+        if self._STATUS_ICONS is None:
+            self._STATUS_ICONS = {}
+            def _dot(color: QtGui.QColor) -> QtGui.QIcon:
+                pm = QtGui.QPixmap(14, 14)
+                pm.fill(QtCore.Qt.transparent)
+                p = QtGui.QPainter(pm)
+                p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+                p.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0, 60), 1.0))
+                p.setBrush(color)
+                p.drawEllipse(1, 1, 12, 12)
+                p.end()
+                return QtGui.QIcon(pm)
+            self._STATUS_ICONS.update({
+                "idle": _dot(QtGui.QColor(140, 140, 140)),
+                "running": _dot(QtGui.QColor(47, 111, 237)),
+                "ok": _dot(QtGui.QColor(46, 160, 67)),
+                "warn": _dot(QtGui.QColor(230, 159, 0)),
+                "fail": _dot(QtGui.QColor(220, 50, 47)),
+            })
+        return self._STATUS_ICONS.get(status, self._STATUS_ICONS["idle"])
+
+    def _set_step_status(self, idx: int, status: str) -> None:
+        try:
+            if hasattr(self, "_step_items") and 0 <= idx < len(self._step_items):
+                it = self._step_items[idx]
+                it.setIcon(self._icon_status(status))
+        except Exception:
+            pass
+
+    def _open_in_explorer(self, path: Path) -> None:
+        try:
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(path)))
+        except Exception as e:
+            self._log_exception(e)
+
+
 
     # --------------------------- page: project ---------------------------
 
@@ -242,6 +318,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         if not data_dir.exists():
             self._log_error("Data directory does not exist")
             return
+        self._set_step_status(0, "running")
         try:
             self._log_info(f"Inspect: {data_dir}")
             self._inspect = inspect_dataset(data_dir)
@@ -252,7 +329,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 msg += "\nOpen errors (first):\n" + "\n".join(self._inspect.open_errors)
             self.lbl_inspect.setText(msg)
             self._populate_objects_from_inspect()
+            self._set_step_status(0, "ok")
         except Exception as e:
+            self._set_step_status(0, "fail")
             self._log_exception(e)
 
     def _open_existing_cfg(self) -> None:
@@ -672,6 +751,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._log_error("Work directory is empty")
             return
 
+        self._set_step_status(1, "running")
         try:
             work_dir.mkdir(parents=True, exist_ok=True)
             cfg_path = work_dir / "config.yaml"
@@ -688,7 +768,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._log_info(f"Wrote config: {cfg_path}")
             self.edit_cfg_path.setText(str(cfg_path))
             self._load_config(cfg_path)
+            self._set_step_status(1, "ok")
         except Exception as e:
+            self._set_step_status(1, "fail")
             self._log_exception(e)
 
     def _do_reload_cfg(self) -> None:
@@ -747,6 +829,22 @@ class LauncherWindow(QtWidgets.QMainWindow):
             pass
 
         self._update_enables()
+
+        # refresh derived UI state
+        try:
+            self._update_setup_hint()
+        except Exception:
+            pass
+        try:
+            self._refresh_pair_sets_combo()
+            self._refresh_pairs_label()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'lbl_wavesol_dir') and self._cfg:
+                self.lbl_wavesol_dir.setText(f"wavesol: {wavesol_dir(self._cfg)}")
+        except Exception:
+            pass
 
     def _on_yaml_changed(self) -> None:
         # just mark state; we parse on demand
@@ -870,12 +968,15 @@ class LauncherWindow(QtWidgets.QMainWindow):
     def _do_run_calib(self) -> None:
         if not self._ensure_cfg_saved():
             return
+        self._set_step_status(2, "running")
         try:
             ctx = load_context(self._cfg_path)
             run_sequence(ctx, ["manifest", "superbias"])
             self._log_info("Calibrations done")
+            self._set_step_status(2, "ok")
             self._maybe_auto_qc()
         except Exception as e:
+            self._set_step_status(2, "fail")
             self._log_exception(e)
 
     # --------------------------- page: superneon ---------------------------
@@ -919,12 +1020,15 @@ class LauncherWindow(QtWidgets.QMainWindow):
     def _do_run_superneon(self) -> None:
         if not self._ensure_cfg_saved():
             return
+        self._set_step_status(3, "running")
         try:
             ctx = load_context(self._cfg_path)
             run_sequence(ctx, ["superneon"])
             self._log_info("SuperNeon done")
+            self._set_step_status(3, "ok")
             self._maybe_auto_qc()
         except Exception as e:
+            self._set_step_status(3, "fail")
             self._log_exception(e)
 
     # --------------------------- page: lineid ---------------------------
@@ -949,18 +1053,45 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.lbl_pairs.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         gl.addWidget(self.lbl_pairs)
 
-        row = QtWidgets.QHBoxLayout()
+        # Main actions
+        row1 = QtWidgets.QHBoxLayout()
         self.btn_open_lineid = QtWidgets.QPushButton("Open LineID GUI")
         self.btn_open_lineid.setProperty("primary", True)
-        self.btn_use_builtin = QtWidgets.QPushButton("Use built-in pairs")
-        self.btn_copy_builtin = QtWidgets.QPushButton("Copy built-in → workdir")
         self.btn_qc_lineid = QtWidgets.QPushButton("QC")
-        row.addWidget(self.btn_open_lineid)
-        row.addWidget(self.btn_use_builtin)
-        row.addWidget(self.btn_copy_builtin)
-        row.addWidget(self.btn_qc_lineid)
-        row.addStretch(1)
-        gl.addLayout(row)
+        row1.addWidget(self.btn_open_lineid)
+        row1.addWidget(self.btn_qc_lineid)
+        row1.addStretch(1)
+        gl.addLayout(row1)
+
+        # Pairs management
+        row2 = QtWidgets.QHBoxLayout()
+        row2.addWidget(QtWidgets.QLabel("Pair sets:"))
+        self.combo_pair_sets = QtWidgets.QComboBox()
+        self.combo_pair_sets.setMinimumWidth(280)
+        self.combo_pair_sets.setToolTip("Select a pair set (built-in or from your user library).")
+        self.btn_use_pair_set = QtWidgets.QPushButton("Use selected")
+        self.btn_copy_pair_set = QtWidgets.QPushButton("Copy selected → workdir")
+        self.btn_save_workdir_pairs = QtWidgets.QPushButton("Save workdir → library")
+        self.btn_open_pairs_library = QtWidgets.QPushButton("Library folder")
+        # Export options (single file or the whole user library)
+        self.btn_export_pairs = QtWidgets.QToolButton()
+        self.btn_export_pairs.setText("Export…")
+        self.btn_export_pairs.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        mexp = QtWidgets.QMenu(self.btn_export_pairs)
+        self.act_export_selected_pair_set = mexp.addAction("Export selected pair set…")
+        self.act_export_current_pairs = mexp.addAction("Export current pairs (workdir)…")
+        mexp.addSeparator()
+        self.act_export_user_library_zip = mexp.addAction("Export full user library (.zip)…")
+        self.btn_export_pairs.setMenu(mexp)
+        row2.addWidget(self.combo_pair_sets, 1)
+        row2.addWidget(self.btn_use_pair_set)
+        row2.addWidget(self.btn_copy_pair_set)
+        row2.addWidget(self.btn_save_workdir_pairs)
+        row2.addWidget(self.btn_open_pairs_library)
+        row2.addWidget(self.btn_export_pairs)
+        row2.addStretch(1)
+        gl.addLayout(row2)
+
 
         lay.addStretch(1)
         foot = QtWidgets.QHBoxLayout()
@@ -971,8 +1102,13 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         self.btn_open_lineid.clicked.connect(self._do_open_lineid)
         self.btn_qc_lineid.clicked.connect(self._open_qc_viewer)
-        self.btn_use_builtin.clicked.connect(self._do_use_builtin_pairs)
-        self.btn_copy_builtin.clicked.connect(self._do_copy_builtin_pairs)
+        self.btn_use_pair_set.clicked.connect(self._do_use_pair_set)
+        self.btn_copy_pair_set.clicked.connect(self._do_copy_pair_set)
+        self.btn_save_workdir_pairs.clicked.connect(self._do_save_workdir_pairs)
+        self.btn_open_pairs_library.clicked.connect(self._do_open_pairs_library)
+        self.act_export_selected_pair_set.triggered.connect(self._do_export_selected_pair_set)
+        self.act_export_current_pairs.triggered.connect(self._do_export_current_pairs)
+        self.act_export_user_library_zip.triggered.connect(self._do_export_user_library_zip)
         self.btn_to_wavesol.clicked.connect(lambda: self.steps.setCurrentRow(5))
         return w
 
@@ -1031,11 +1167,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
             return
 
         # point config to builtin (absolute path) — read-only mode
-        self._set_cfg_value("wavesol.hand_pairs_path", str(it.path))
+        self._set_cfg_value("wavesol.hand_pairs_path", str(it))
         self.editor_yaml.blockSignals(True)
         self.editor_yaml.setPlainText(_yaml_dump(self._cfg or {}))
         self.editor_yaml.blockSignals(False)
-        self._log_info(f"Using built-in pairs: {it.path}")
+        self._log_info(f"Using built-in pairs: {it}")
         self._refresh_pairs_label()
 
     def _do_copy_builtin_pairs(self) -> None:
@@ -1055,7 +1191,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         if dst is None:
             return
         dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.write_text(Path(it.path).read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
+        dst.write_text(Path(it).read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
         # switch to default workdir path
         self._set_cfg_value("wavesol.hand_pairs_path", "")
         self.editor_yaml.blockSignals(True)
@@ -1068,7 +1204,212 @@ class LauncherWindow(QtWidgets.QMainWindow):
     def _refresh_pairs_label(self) -> None:
         p = self._current_pairs_path()
         self.lbl_pairs.setText(f"Pairs: {p}" if p else "Pairs: —")
+        self._refresh_pair_sets_combo()
 
+
+    def _current_disperser(self) -> str:
+        disp = ""
+        if self._cfg:
+            setup = (self._cfg.get("frames", {}) or {}).get("__setup__", {})
+            if isinstance(setup, dict):
+                disp = str(setup.get("disperser", "") or "").strip()
+        return disp
+
+    def _refresh_pair_sets_combo(self) -> None:
+        if not hasattr(self, "combo_pair_sets"):
+            return
+        try:
+            disp = self._current_disperser()
+            hp_raw = ""
+            if self._cfg and isinstance(self._cfg.get("wavesol"), dict):
+                hp_raw = str((self._cfg.get("wavesol") or {}).get("hand_pairs_path", "") or "").strip()
+
+            self.combo_pair_sets.blockSignals(True)
+            self.combo_pair_sets.clear()
+            self.combo_pair_sets.addItem("Workdir: hand_pairs.txt (default)", {"origin": "workdir", "path": ""})
+
+            items = []
+            if disp:
+                for ps in list_pair_sets(disp):
+                    prefix = "Built-in" if ps.origin == "builtin" else "Library"
+                    self.combo_pair_sets.addItem(f"{prefix}: {ps.label}", {"origin": ps.origin, "path": str(ps.path)})
+                    items.append(str(ps.path))
+
+            # preselect current
+            if hp_raw:
+                want = str(Path(hp_raw).expanduser())
+                for i in range(1, self.combo_pair_sets.count()):
+                    d = self.combo_pair_sets.itemData(i) or {}
+                    if str(d.get("path", "")) == want:
+                        self.combo_pair_sets.setCurrentIndex(i)
+                        break
+            else:
+                self.combo_pair_sets.setCurrentIndex(0)
+        finally:
+            self.combo_pair_sets.blockSignals(False)
+
+    def _selected_pair_set(self) -> tuple[str, str]:
+        if not hasattr(self, "combo_pair_sets"):
+            return "workdir", ""
+        data = self.combo_pair_sets.currentData() or {}
+        origin = str(data.get("origin", "workdir"))
+        path = str(data.get("path", ""))
+        return origin, path
+
+    def _do_use_pair_set(self) -> None:
+        if not self._cfg:
+            self._log_error("Load or create config first")
+            return
+        origin, path = self._selected_pair_set()
+        if origin == "workdir" or not path:
+            self._set_cfg_value("wavesol.hand_pairs_path", "")
+            self.editor_yaml.blockSignals(True)
+            self.editor_yaml.setPlainText(_yaml_dump(self._cfg or {}))
+            self.editor_yaml.blockSignals(False)
+            self._do_save_cfg()
+            self._log_info("Using workdir hand_pairs.txt")
+            self._refresh_pairs_label()
+            return
+
+        self._set_cfg_value("wavesol.hand_pairs_path", path)
+        self.editor_yaml.blockSignals(True)
+        self.editor_yaml.setPlainText(_yaml_dump(self._cfg or {}))
+        self.editor_yaml.blockSignals(False)
+        self._do_save_cfg()
+        self._log_info(f"Using pair set: {path}")
+        self._refresh_pairs_label()
+
+    def _do_copy_pair_set(self) -> None:
+        if not self._cfg:
+            self._log_error("Load or create config first")
+            return
+        origin, path = self._selected_pair_set()
+        if origin == "workdir" or not path:
+            self._log_error("Select a built-in or library pair set first")
+            return
+        disp = self._current_disperser()
+        if not disp:
+            self._log_error("Config has no disperser in frames.__setup__")
+            return
+        # workdir must be resolved against cfg_path
+        wd = Path(str(self._cfg.get("work_dir", ""))).expanduser()
+        if not wd.is_absolute() and self._cfg_path:
+            wd = (self._cfg_path.parent / wd).resolve()
+
+        try:
+            dst = copy_pair_set_to_workdir(disp, wd, Path(path))
+        except Exception as e:
+            self._log_exception(e)
+            return
+
+        self._set_cfg_value("wavesol.hand_pairs_path", "")
+        self.editor_yaml.blockSignals(True)
+        self.editor_yaml.setPlainText(_yaml_dump(self._cfg or {}))
+        self.editor_yaml.blockSignals(False)
+        self._do_save_cfg()
+        self._log_info(f"Copied pair set → {dst}")
+        self._refresh_pairs_label()
+
+    def _do_save_workdir_pairs(self) -> None:
+        if not self._cfg:
+            self._log_error("Load or create config first")
+            return
+        disp = self._current_disperser()
+        if not disp:
+            self._log_error("Config has no disperser in frames.__setup__")
+            return
+        # always save the workdir hand_pairs.txt (not an absolute built-in path)
+        pairs_path = wavesol_dir(self._cfg) / "hand_pairs.txt"
+        if not pairs_path.exists():
+            self._log_error(f"No workdir pairs file: {pairs_path}")
+            return
+
+        default_label = f"{slugify_disperser(disp)}_pairs"
+        label, ok = QtWidgets.QInputDialog.getText(self, "Save pairs", "Name for this pair set:", text=default_label)
+        if not ok:
+            return
+        try:
+            dest = save_user_pair_set(disp, pairs_path, label=label)
+            self._log_info(f"Saved to library: {dest}")
+            self._refresh_pair_sets_combo()
+        except Exception as e:
+            self._log_exception(e)
+
+    def _do_open_pairs_library(self) -> None:
+        disp = self._current_disperser()
+        root = user_pairs_root()
+        if disp:
+            root = root / slugify_disperser(disp)
+        root.mkdir(parents=True, exist_ok=True)
+        self._open_in_explorer(root)
+
+    def _do_export_selected_pair_set(self) -> None:
+        disp = self._current_disperser()
+        if not disp:
+            self._log_error("Config has no disperser in frames.__setup__")
+            return
+        origin, path = self._selected_pair_set()
+        if not path:
+            self._log_error("No external pair set selected (choose 'Built-in: …' or 'Library: …')")
+            return
+
+        src = Path(path).expanduser()
+        default_name = src.name if src.suffix else (src.name + ".txt")
+        fn, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export pair set",
+            str(Path.home() / default_name),
+            "Text files (*.txt);;All files (*)",
+        )
+        if not fn:
+            return
+        try:
+            export_pair_set(src, Path(fn))
+            self._log_info(f"Exported pair set -> {fn}")
+        except Exception as e:
+            self._log_exception(e)
+
+    def _do_export_current_pairs(self) -> None:
+        if not self._cfg:
+            self._log_error("Load or create config first")
+            return
+        pairs_path = wavesol_dir(self._cfg) / "hand_pairs.txt"
+        if not pairs_path.exists():
+            self._log_error(f"No workdir pairs file: {pairs_path}")
+            return
+
+        fn, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export current pairs",
+            str(Path.home() / pairs_path.name),
+            "Text files (*.txt);;All files (*)",
+        )
+        if not fn:
+            return
+        try:
+            export_pair_set(pairs_path, Path(fn))
+            self._log_info(f"Exported current pairs -> {fn}")
+        except Exception as e:
+            self._log_exception(e)
+
+    def _do_export_user_library_zip(self) -> None:
+        root = user_pairs_root()
+        root.mkdir(parents=True, exist_ok=True)
+
+        default = f"scorpio_pairs_library_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+        fn, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export pair library (zip)",
+            str(Path.home() / default),
+            "Zip archive (*.zip);;All files (*)",
+        )
+        if not fn:
+            return
+        try:
+            export_user_library_zip(Path(fn), include_builtin=False)
+            self._log_info(f"Exported pair library -> {fn}")
+        except Exception as e:
+            self._log_exception(e)
     # --------------------------- page: wavesolution ---------------------------
 
     def _build_page_wavesol(self) -> QtWidgets.QWidget:
@@ -1141,13 +1482,16 @@ class LauncherWindow(QtWidgets.QMainWindow):
     def _do_wavesolution(self) -> None:
         if not self._ensure_cfg_saved():
             return
+        self._set_step_status(5, "running")
         try:
             ctx = load_context(self._cfg_path)
             out = run_wavesolution(ctx)
             self._log_info("Wavelength solution done")
+            self._set_step_status(5, "ok")
             self._log_info("Outputs:\n" + "\n".join(f"  {k}: {v}" for k, v in out.items()))
             self._maybe_auto_qc()
         except Exception as e:
+            self._set_step_status(5, "fail")
             self._log_exception(e)
 
     # --------------------------- misc helpers ---------------------------
@@ -1288,6 +1632,25 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._settings.setValue("ui/theme", mode)
         except Exception as e:
             self._log_exception(e)
+
+    def _browse_data_dir(self) -> None:
+        """Menu action: open (or pick) the raw data folder."""
+        try:
+            raw = (self.edit_data_dir.text() or "").strip()
+            if raw:
+                p = Path(raw).expanduser()
+                if p.exists():
+                    self._open_in_explorer(p)
+                    return
+            # fall back to dialog
+            d = QtWidgets.QFileDialog.getExistingDirectory(self, "Open data folder", str(Path.home()))
+            if d:
+                self.edit_data_dir.setText(d)
+                self._open_in_explorer(Path(d))
+        except Exception as e:
+            self._log_exception(e)
+
+
 
     def _menu_open_cfg(self) -> None:
         fn, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open config", str(Path.home()), "YAML (*.yaml *.yml)")
