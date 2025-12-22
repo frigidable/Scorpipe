@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scorpio-pipe"
+version = "0.1.2"
+requires-python = ">=3.10"
+dependencies = [
+  "astropy>=6",
+  "numpy",
+  "pandas",
+  "pyyaml",
+  "pydantic>=2",
+  "doit",
+  "rich",
+  "loguru",
+  "matplotlib"
+]
+
+[project.optional-dependencies]
+# GUI stack for interactive LineID (and embedded PDF viewing)
+gui = [
+  "PySide6>=6.5",
+  "PySide6-Addons>=6.5",
+  "pyqtgraph>=0.13",
+  "pymupdf>=1.23"
+]
+
+# Recommended scientific stack (better peak finding, etc.)
+science = [
+  "scipy>=1.10"
+]
+
+[project.scripts]
+scorpio-pipe = "scorpio_pipe.cli:main"
+
+[project.gui-scripts]
+# Windows: creates a no-console launcher (pythonw) so the UI can be started by double click.
+scorpio-ui = "scorpio_pipe.ui.launcher_app:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+scorpio_pipe = ["resources/**/*"]

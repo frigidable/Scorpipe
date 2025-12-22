@@ -1,0 +1,93 @@
+# Scorpio Pipe instrument knowledge base
+#
+# IMPORTANT
+# - FITS headers + night calibrations are the source of truth.
+# - Values here are used for: UI hints, sanity checks, default ranges/linelists.
+# - Many values are intentionally marked as "approx" until you paste exact manual tables.
+
+instruments:
+  SCORPIO:
+    display_name: "SCORPIO (SCORPIO-1)"
+    type: "focal_reducer"
+    plate_scale_arcsec_per_pix: 0.18
+    fov_arcmin: [6.1, 6.1]
+    slit_length_arcmin: 6.0
+    detector:
+      ccd_model: "EEV 42-40"
+      format: [2048, 2048]
+      pixel_size_um: 13.5
+      readout_noise_e: {value: [1.8, 4.0], quality: "typical"}
+      dark_current_e_per_min: {value: 0.03, quality: "typical"}
+    grisms:
+      - id: "VPHG400"
+        grooves_lmm: 400
+        range_A: {value: [3600, 7500], quality: "approx"}
+        dispersion_A_per_pix: {value: 5.0, quality: "approx"}
+        notes: "Wide coverage; watch 2nd order on red end."
+      - id: "VPHG550G"
+        grooves_lmm: 550
+        dispersion_A_per_pix: {value: 2.0, quality: "approx"}
+        fwhm_A_at_slit_arcsec: {"1.0": {value: [6.0, 8.0], quality: "approx"}}
+      - id: "VPHG550R"
+        grooves_lmm: 550
+        notes: "Red-optimized; fringing/OH residuals can be stronger."
+      - id: "VPHG1200B"
+        grooves_lmm: 1200
+        dispersion_A_per_pix: {value: 0.9, quality: "typical"}
+        fwhm_A_at_slit_arcsec: {"1.0": {value: [2.0, 3.0], quality: "approx"}}
+      - id: "VPHG1200G"
+        grooves_lmm: 1200
+      - id: "VPHG1200R"
+        grooves_lmm: 1200
+        notes: "Red; fringing + dense OH."
+      - id: "VPHG1800R"
+        grooves_lmm: 1800
+        notes: "High R; LSF modelling strongly recommended."
+      - id: "VPHG2300G"
+        grooves_lmm: 2300
+      - id: "VPHG3000B"
+        grooves_lmm: 3000
+
+  SCORPIO-2:
+    display_name: "SCORPIO-2"
+    type: "focal_reducer"
+    plate_scale_arcsec_per_pix: 0.18
+    fov_arcmin: [6.4, 6.4]
+    slit_length_arcmin: 6.0
+    detector:
+      ccd_model: "e2v CCD42-90"
+      format: [4600, 2048]
+      pixel_size_um: 13.5
+      gain_e_per_adu: {value: [0.5, 2.0], quality: "varies"}
+      readout_noise_e: {value: [1.8, 4.0], quality: "varies"}
+    grisms:
+      - id: "VPHG940@600"
+        grooves_lmm: 940
+        range_A: {value: [3500, 8500], quality: "approx"}
+      - id: "VPHG1026@735"
+        grooves_lmm: 1026
+        range_A: {value: [5800, 9500], quality: "approx"}
+        notes: "OH forest; good sky model matters."
+      - id: "VPHG1200@540"
+        grooves_lmm: 1200
+        range_A: {value: [3800, 7200], quality: "approx"}
+      - id: "VPHG1800@510"
+        grooves_lmm: 1800
+        range_A: {value: [4300, 5900], quality: "approx"}
+      - id: "VPHG1800@590"
+        grooves_lmm: 1800
+        range_A: {value: [5000, 7250], quality: "published"}
+        dispersion_A_per_pix: {value: 0.50, quality: "published"}
+        fwhm_A_at_slit_arcsec:
+          "1.0": {value: 3.0, quality: "published"}
+          "0.7": {value: 2.1, quality: "published"}
+          "0.5": {value: 1.5, quality: "published"}
+      - id: "VPHG1800@660"
+        grooves_lmm: 1800
+        range_A: {value: [5500, 7300], quality: "approx"}
+      - id: "VPHG2400@415"
+        grooves_lmm: 2400
+        range_A: {value: [3500, 5100], quality: "approx"}
+      - id: "VPHG3000@400"
+        grooves_lmm: 3000
+        range_A: {value: [3800, 4500], quality: "approx"}
