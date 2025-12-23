@@ -20,15 +20,30 @@ function Invoke-Logged {
 
   Write-Host "[$StepName] $FilePath $($ArgumentList -join ' ')" -ForegroundColor DarkCyan
 
+  # NOTE:
+  # Start-Process forbids redirecting stdout and stderr to the same file.
+  # This caused GitHub Actions to fail before even starting PyInstaller/ISCC.
+  $errLog = "$LogPath.err"
+
   $p = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -NoNewWindow -PassThru -Wait `
-        -RedirectStandardOutput $LogPath -RedirectStandardError $LogPath
+        -RedirectStandardOutput $LogPath -RedirectStandardError $errLog
 
   if ($p.ExitCode -ne 0) {
-    Write-Host "---- $StepName log tail ----" -ForegroundColor Yellow
+    Write-Host "---- $StepName stdout tail ----" -ForegroundColor Yellow
     if (Test-Path $LogPath) {
       Get-Content $LogPath -Tail 60
+    } else {
+      Write-Host "(no stdout log produced: $LogPath)" -ForegroundColor DarkYellow
     }
-    throw "$StepName failed, exit code: $($p.ExitCode). See log: $LogPath"
+
+    Write-Host "---- $StepName stderr tail ----" -ForegroundColor Yellow
+    if (Test-Path $errLog) {
+      Get-Content $errLog -Tail 60
+    } else {
+      Write-Host "(no stderr log produced: $errLog)" -ForegroundColor DarkYellow
+    }
+
+    throw "$StepName failed, exit code: $($p.ExitCode). See logs: $LogPath and $errLog"
   }
 }
 

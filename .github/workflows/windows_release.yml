@@ -81,7 +81,7 @@ jobs:
         with:
           name: Windows-build-logs
           path: |
-            packaging\windows\Output\*.log
+            packaging\windows\Output\*.log*
             packaging\windows\Output\setup.exe
 
       - name: Publish GitHub Release assets
