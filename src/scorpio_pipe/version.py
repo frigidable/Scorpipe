@@ -1,4 +1,4 @@
-__version__ = "0.2.7"
+__version__ = "0.2.9"
 
 # Human-facing pipeline release string.
-PIPELINE_VERSION = "4.7"
+PIPELINE_VERSION = "4.9"

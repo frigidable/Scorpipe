@@ -11,11 +11,21 @@
 3) Внутри будет `setup.exe` → запускайте его.
 4) После установки запускайте **Scorpipe** из Start Menu.
 
+Если в Releases ещё нет готового архива, откройте вкладку **Actions** → workflow `windows-release` → **Artifacts** (можно скачать `Scorpipe-Windows-x64.zip` напрямую).
+
 ## Для разработчика (локальная сборка на Windows)
 
 1) Установите Python 3.12.
 2) Установите Inno Setup 6 (чтобы был `iscc.exe`).
 3) В корне проекта выполните:
+
+**Самый простой путь:**
+
+```bat
+setup.bat --installer
+```
+
+Или вручную (PowerShell):
 
 ```powershell
 python -m pip install -U pip

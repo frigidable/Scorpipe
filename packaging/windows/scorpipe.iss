@@ -3,7 +3,9 @@
 
 #define AppName "Scorpipe"
 #define AppExeName "scorpipe.exe"
-#define AppVersion "4.7"
+#ifndef AppVersion
+#define AppVersion "4.9"
+#endif
 #define AppPublisher "Scorpipe"
 
 [Setup]
@@ -15,7 +17,7 @@ DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 OutputBaseFilename=setup
-OutputDir=Output
+OutputDir={#SourcePath}\Output
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern

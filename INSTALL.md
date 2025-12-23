@@ -13,12 +13,14 @@
 
 ## Вариант №2 (для разработчика): сборка из исходников
 
-Если вы работаете с репозиторием и хотите собрать EXE локально, используйте скрипты в:
+Если вы работаете с репозиторием и хотите собрать EXE локально, используйте:
 
-- `scripts/windows/setup.bat` (быстрый dev-путь)
-- `tools/setup.ps1` и `tools/setup_ui.ps1` (PowerShell)
+- `setup.bat` (в корне проекта)
+  - `setup.bat`            — install/update + build `scorpipe.exe` + run
+  - `setup.bat --build`    — только build `scorpipe.exe`
+  - `setup.bat --installer`— build `scorpipe.exe` **и затем** build `packaging\\windows\\Output\\setup.exe`
 
-Сборка релизного инсталлятора (setup.exe) оформлена в `packaging/windows`.
+Сборка релизного инсталлятора оформлена в `packaging/windows` (PyInstaller + Inno Setup).
 
 ## Где лежат сборочные файлы
 

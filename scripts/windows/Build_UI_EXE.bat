@@ -14,5 +14,5 @@ if not exist ".venv\Scripts\python.exe" (
 call ".venv\Scripts\activate.bat"
 
 REM Build onefile GUI EXE in the project root:
-powershell -NoProfile -ExecutionPolicy Bypass -File "tools\build_ui_exe.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "tools\build_ui_exe.ps1" -ProjectRoot "%ROOT%"
 pause
