@@ -5,6 +5,33 @@ Param(
 
 $ErrorActionPreference = "Stop"
 
+function Invoke-Logged {
+  param(
+    [string]$FilePath,
+    [string[]]$ArgumentList,
+    [string]$LogPath,
+    [string]$StepName
+  )
+
+  $logDir = Split-Path -Parent $LogPath
+  if ($logDir -and -not (Test-Path $logDir)) {
+    New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+  }
+
+  Write-Host "[$StepName] $FilePath $($ArgumentList -join ' ')" -ForegroundColor DarkCyan
+
+  $p = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -NoNewWindow -PassThru -Wait `
+        -RedirectStandardOutput $LogPath -RedirectStandardError $LogPath
+
+  if ($p.ExitCode -ne 0) {
+    Write-Host "---- $StepName log tail ----" -ForegroundColor Yellow
+    if (Test-Path $LogPath) {
+      Get-Content $LogPath -Tail 60
+    }
+    throw "$StepName failed, exit code: $($p.ExitCode). See log: $LogPath"
+  }
+}
+
 Write-Host "[Scorpipe] Windows build" -ForegroundColor Cyan
 
 if (-not $SkipInstall) {
@@ -13,11 +40,12 @@ if (-not $SkipInstall) {
   python -m pip install -U pyinstaller
 }
 
+New-Item -ItemType Directory -Force -Path packaging\windows\Output | Out-Null
+
 Write-Host "[Scorpipe] PyInstaller..." -ForegroundColor Cyan
-pyinstaller packaging\windows\scorpipe.spec
-if ($LASTEXITCODE -ne 0) {
-  throw "PyInstaller failed, exit code: $LASTEXITCODE"
-}
+Invoke-Logged -FilePath "python" -ArgumentList @(
+  "-m", "PyInstaller", "packaging\windows\scorpipe.spec"
+) -LogPath "packaging\windows\Output\pyinstaller.log" -StepName "PyInstaller"
 
 if (-not $SkipInstaller) {
   Write-Host "[Scorpipe] Inno Setup (setup.exe)..." -ForegroundColor Cyan
@@ -37,14 +65,17 @@ if (-not $SkipInstaller) {
   }
 
   if (-not $iscc) {
-    Write-Host "ISCC.exe not found. Install Inno Setup 6 (e.g. 'choco install innosetup -y') and retry." -ForegroundColor Yellow
-    exit 2
+    throw "ISCC.exe not found. Install Inno Setup 6 (e.g. choco install innosetup -y) and retry."
   }
 
-  & $iscc packaging\windows\scorpipe.iss
-  if ($LASTEXITCODE -ne 0) {
-    throw "Inno Setup (ISCC) failed, exit code: $LASTEXITCODE"
+  Invoke-Logged -FilePath $iscc -ArgumentList @(
+    "packaging\windows\scorpipe.iss"
+  ) -LogPath "packaging\windows\Output\iscc.log" -StepName "ISCC"
+
+  if (-not (Test-Path packaging\windows\Output\setup.exe)) {
+    throw "setup.exe was not produced (expected: packaging\\windows\\Output\\setup.exe). Check packaging\\windows\\Output\\iscc.log"
   }
+
   Write-Host "Built: packaging\\windows\\Output\\setup.exe" -ForegroundColor Green
 }
 

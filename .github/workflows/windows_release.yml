@@ -35,6 +35,17 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup -y
 
+      - name: Verify Inno Setup (ISCC)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $cmd = (Get-Command ISCC.exe -ErrorAction SilentlyContinue)
+          if ($cmd) { Write-Host ('ISCC in PATH: ' + $cmd.Source) -ForegroundColor Cyan } else { Write-Host 'ISCC not in PATH (will fallback to common locations).' -ForegroundColor Yellow }
+          $candidates = @()
+          if ($env:ProgramFiles -and (Test-Path (Join-Path $env:ProgramFiles 'Inno Setup 6\ISCC.exe'))) { $candidates += (Join-Path $env:ProgramFiles 'Inno Setup 6\ISCC.exe') }
+          if (${env:ProgramFiles(x86)} -and (Test-Path (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'))) { $candidates += (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe') }
+          if ($candidates.Count -gt 0) { Write-Host ('ISCC candidate: ' + $candidates[0]) -ForegroundColor Cyan }
+
       - name: Build scorpipe.exe + setup.exe
         shell: powershell
         run: |
@@ -62,6 +73,15 @@ jobs:
           name: Scorpipe-Windows-x64
           path: |
             Scorpipe-Windows-x64.zip
+            packaging\windows\Output\setup.exe
+
+      - name: Upload build logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-build-logs
+          path: |
+            packaging\windows\Output\*.log
             packaging\windows\Output\setup.exe
 
       - name: Publish GitHub Release assets
