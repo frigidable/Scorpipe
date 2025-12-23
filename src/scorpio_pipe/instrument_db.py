@@ -32,9 +32,28 @@ class InstrumentSpec:
 
 
 def _resource_path(*parts: str) -> Path:
-    # resources live alongside this module inside the installed package
+    """Return an on-disk path for a packaged resource.
+
+    Notes
+    -----
+    In development installs resources are next to this module.
+    In PyInstaller one-file builds they are extracted into sys._MEIPASS.
+    """
     here = Path(__file__).resolve().parent
-    return here / "resources" / Path(*parts)
+    p = here / "resources" / Path(*parts)
+    if p.exists():
+        return p
+    try:
+        import sys
+
+        mei = getattr(sys, "_MEIPASS", None)
+        if mei:
+            p2 = Path(str(mei)) / "scorpio_pipe" / "resources" / Path(*parts)
+            if p2.exists():
+                return p2
+    except Exception:
+        pass
+    return p
 
 
 @lru_cache(maxsize=1)
@@ -55,7 +74,11 @@ def load_instrument_db() -> dict[str, InstrumentSpec]:
     The list format is preferred as it preserves ordering and allows richer metadata.
     """
     p = _resource_path("instruments", "scorpio_instruments.yaml")
-    raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    try:
+        raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except FileNotFoundError:
+        # If package data is missing (e.g., a broken PyInstaller build), fall back gracefully.
+        return {}
 
     inst_raw = raw.get("instruments") if isinstance(raw, dict) else None
 

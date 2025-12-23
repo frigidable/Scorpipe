@@ -51,8 +51,17 @@ class AutoConfig:
             instrument=instrument_section,
             calib={
                 **(self.calib or {}),
-                "bias_combine": "mean",  # or: median
+                # Bias is best combined with a median to suppress rare outliers.
+                "bias_combine": "median",  # or: mean
                 "bias_sigma_clip": 0.0,  # set to e.g. 5.0 to suppress cosmics
+            },
+            cosmics={
+                "enabled": True,
+                "method": "stack_mad",
+                "k": 9.0,
+                "bias_subtract": True,
+                "save_png": True,
+                "apply_to": ["obj", "sky"],
             },
             runtime={
                 "n_jobs": 0,  # 0/None = auto
@@ -207,7 +216,7 @@ def build_autoconfig(
     # attach setup as an internal field
     frames["__setup__"] = setup
 
-    calib = {"superbias_path": "calib/superbias.fits"}
+    calib = {"superbias_path": "calib/superbias.fits", "superflat_path": "calib/superflat.fits"}
     return AutoConfig(
         data_dir=str(data_dir),
         object_name=object_name,

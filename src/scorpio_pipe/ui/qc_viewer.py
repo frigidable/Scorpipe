@@ -19,7 +19,11 @@ class QCItem:
 
 DEFAULT_QC_ITEMS: list[QCItem] = [
     QCItem("Manifest (JSON)", "report/manifest.json", "text"),
+    QCItem("QC report (HTML)", "report/index.html", "text"),
+    QCItem("QC summary (JSON)", "report/qc_report.json", "text"),
+    QCItem("Timings (JSON)", "report/timings.json", "text"),
     QCItem("Superbias (FITS)", "calib/superbias.fits", "fits"),
+    QCItem("Cosmics summary (JSON)", "cosmics/summary.json", "text"),
     # legacy flat layout (still supported)
     QCItem("Superneon (PNG)", "wavesol/superneon.png", "image"),
     QCItem("Peaks candidates (CSV)", "wavesol/peaks_candidates.csv", "text"),
@@ -116,12 +120,14 @@ class QCViewer(QtWidgets.QMainWindow):
 
         self.btn_refresh = QtWidgets.QPushButton("Refresh")
         self.btn_open_folder = QtWidgets.QPushButton("Open folder")
+        self.btn_open_file = QtWidgets.QPushButton("Open file")
         self.btn_copy_path = QtWidgets.QPushButton("Copy path")
         self.lbl_root = QtWidgets.QLabel(str(self._work_dir))
         self.lbl_root.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
 
         tb.addWidget(self.btn_refresh)
         tb.addWidget(self.btn_open_folder)
+        tb.addWidget(self.btn_open_file)
         tb.addWidget(self.btn_copy_path)
         tb.addSpacing(10)
         tb.addWidget(QtWidgets.QLabel("Work dir:"))
@@ -171,9 +177,19 @@ class QCViewer(QtWidgets.QMainWindow):
         # signals
         self.btn_refresh.clicked.connect(self.refresh)
         self.btn_open_folder.clicked.connect(self._open_folder)
+        self.btn_open_file.clicked.connect(self._open_file)
         self.btn_copy_path.clicked.connect(self._copy_selected_path)
         self.list_items.currentRowChanged.connect(self._show_current)
 
+        self.refresh()
+
+    def set_work_dir(self, work_dir: Path) -> None:
+        """Update the current work directory and refresh the view.
+
+        The Launcher reuses the same QC window between runs, so we need a public setter.
+        """
+        self._work_dir = Path(work_dir)
+        self.lbl_root.setText(str(self._work_dir))
         self.refresh()
 
     def refresh(self) -> None:
@@ -203,6 +219,12 @@ class QCViewer(QtWidgets.QMainWindow):
             _, p = self._items[self.list_items.currentRow()]
             folder = p.parent
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(folder)))
+
+    def _open_file(self) -> None:
+        if not self._items or self.list_items.currentRow() < 0:
+            return
+        _, p = self._items[self.list_items.currentRow()]
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(p)))
 
     def _copy_selected_path(self) -> None:
         if not self._items or self.list_items.currentRow() < 0:

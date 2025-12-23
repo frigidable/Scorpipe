@@ -1,9 +1,0 @@
-astropy>=6
-numpy
-pandas
-pyyaml
-pydantic>=2
-doit
-rich
-loguru
-matplotlib

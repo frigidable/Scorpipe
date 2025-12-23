@@ -97,6 +97,18 @@ def load_config(cfg_path: str | Path) -> dict[str, Any]:
                 cand2 = (Path(project_root) / sb_raw).resolve()
                 sb = cand1 if cand1.exists() else cand2
             calib["superbias_path"] = str(sb)
+        if calib.get("superflat_path"):
+            sf_raw = Path(_norm_path_str(str(calib["superflat_path"])) )
+            if sf_raw.is_absolute():
+                sf = sf_raw
+            else:
+                # Prefer:
+                # 1) inside work_dir (calib/superflat.fits)
+                # 2) relative to project root (work/run1/calib/superflat.fits)
+                cand1 = (wd / sf_raw).resolve()
+                cand2 = (Path(project_root) / sf_raw).resolve()
+                sf = cand1 if cand1.exists() else cand2
+            calib["superflat_path"] = str(sf)
         cfg["calib"] = calib
 
     # resolve frame paths: if relative, treat as relative to data_dir (preferred)
@@ -142,6 +154,32 @@ def load_config(cfg_path: str | Path) -> dict[str, Any]:
                 cfg["_profiles_applied"] = applied
 
     return cfg
+
+
+def load_config_any(cfg: Any) -> dict[str, Any]:
+    """Load config from path/dict/RunContext-like objects.
+
+    Many stages accept either a path to YAML, or an already-loaded config dict.
+    This helper keeps that behavior consistent.
+    """
+    if isinstance(cfg, (str, Path)):
+        return load_config(cfg)
+    if isinstance(cfg, dict):
+        return cfg
+
+    # Common wrappers: RunContext (ui.pipeline_runner) or similar
+    if hasattr(cfg, 'cfg'):
+        v = getattr(cfg, 'cfg')
+        if isinstance(v, dict):
+            return v
+    for attr in ('cfg_path', 'config_path'):
+        if hasattr(cfg, attr):
+            try:
+                return load_config(getattr(cfg, attr))
+            except Exception:
+                pass
+
+    raise TypeError(f'Unsupported config type: {type(cfg)}')
 
 
 def write_config(cfg: dict[str, Any], out_path: str | Path) -> None:

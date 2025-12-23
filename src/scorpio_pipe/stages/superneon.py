@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import sys
 import os
 from concurrent.futures import ThreadPoolExecutor
 import logging
@@ -15,7 +16,10 @@ log = logging.getLogger(__name__)
 # --------------------------- helpers ---------------------------
 
 def _project_root() -> Path:
-    # .../src/scorpio_pipe/stages/superneon.py -> .../scorpio_pipe
+    """Project root in source layout and PyInstaller (onefile) builds."""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        return Path(str(meipass)).resolve()
     return Path(__file__).resolve().parents[3]
 
 def _resolve_from_root(p: str | Path) -> Path:
@@ -495,13 +499,6 @@ def build_superneon(cfg: dict[str, Any]) -> SuperNeonResult:
     log.info(
         "task=superneon peaks sigma=%.3g snr=%.3g height=%.3g prom=%.3g distance=%d n_peaks=%d",
         sigma, used_snr, min_height, prominence, distance, int(len(pk)),
-    )
-
-    pk = _find_peaks_simple(
-        prof,
-        min_height=float(min_height) if min_height is not None else None,
-        prominence=float(prominence),
-        distance=int(wcfg.get("peak_distance", 3)),
     )
 
     hdr["PKSIG"] = (float(sigma), "Robust background sigma used for peak thresholds")

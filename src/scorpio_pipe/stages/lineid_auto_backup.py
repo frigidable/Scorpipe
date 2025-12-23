@@ -1,11 +1,16 @@
 ﻿from __future__ import annotations
 
 from pathlib import Path
+import sys
 from typing import Any, Tuple
 import numpy as np
 
 
 def _project_root() -> Path:
+    """Project root in source layout and PyInstaller (onefile) builds."""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        return Path(str(meipass)).resolve()
     return Path(__file__).resolve().parents[3]
 
 
@@ -154,7 +159,15 @@ def prepare_lineid(cfg: dict[str, Any]) -> dict[str, Path]:
         raise FileNotFoundError("Нужны superneon.fits и peaks_candidates.csv. Сначала запусти doit superneon.")
 
     wcfg = cfg.get("wavesol", {}) or {}
-    lines_path = _resolve_from_root(wcfg.get("neon_lines_csv", "neon_lines.csv"))
+    from scorpio_pipe.resource_utils import resolve_resource
+    lines_res = resolve_resource(
+        (wcfg.get('neon_lines_csv', 'neon_lines.csv')),
+        work_dir=work_dir,
+        config_dir=cfg.get('config_dir'),
+        project_root=cfg.get('project_root'),
+        allow_package=True,
+    )
+    lines_path = lines_res.path
     if not lines_path.exists():
         raise FileNotFoundError(f"neon_lines.csv not found: {lines_path}")
 

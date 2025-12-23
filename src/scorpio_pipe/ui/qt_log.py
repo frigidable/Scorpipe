@@ -47,17 +47,30 @@ def install(
     emitter.message.connect(_append)
 
     h = QtLogHandler(emitter)
+    # Mark the handler so we can de-duplicate cleanly on re-install.
+    setattr(h, "_scorpio_qt_log", True)
     fmt = logging.Formatter("%(levelname)s: %(message)s")
     h.setFormatter(fmt)
     h.setLevel(level)
 
+    # De-dup: if the UI is re-created, avoid stacking multiple Qt handlers.
+    root = logging.getLogger()
+    for hh in list(root.handlers):
+        if isinstance(hh, QtLogHandler) or bool(getattr(hh, "_scorpio_qt_log", False)):
+            root.removeHandler(hh)
+
+    # In the UI build we don't necessarily call `setup_logging()`, so route
+    # everything through root. Keep the named logger propagating to root.
     log = logging.getLogger(logger_name)
     log.setLevel(level)
-    log.addHandler(h)
+    log.propagate = True
+    for hh in list(log.handlers):
+        if isinstance(hh, QtLogHandler) or bool(getattr(hh, "_scorpio_qt_log", False)):
+            log.removeHandler(hh)
 
-    # Also attach to root (so third-party warnings show up sometimes)
-    root = logging.getLogger()
-    root.setLevel(min(root.level or level, level))
+    # Ensure root level is permissive enough for the UI.
+    if root.level == logging.NOTSET or root.level > level:
+        root.setLevel(level)
     root.addHandler(h)
 
     return emitter

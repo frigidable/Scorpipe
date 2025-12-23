@@ -1,2 +1,0 @@
-[console_scripts]
-scorpio-pipe = scorpio_pipe.cli:main

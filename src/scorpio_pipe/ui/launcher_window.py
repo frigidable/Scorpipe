@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import traceback
 from dataclasses import dataclass
 from datetime import datetime
@@ -21,6 +22,11 @@ from scorpio_pipe.ui.pipeline_runner import (
 )
 from scorpio_pipe.ui.qc_viewer import QCViewer
 from scorpio_pipe.ui.pair_rejector import clean_pairs_interactively
+from scorpio_pipe.ui.frame_browser import FrameBrowser, SelectedFrame
+from scorpio_pipe.ui.outputs_panel import OutputsPanel
+from scorpio_pipe.ui.inspector_dock import InspectorDock
+from scorpio_pipe.ui.run_plan_dialog import RunPlanDialog
+from scorpio_pipe.ui.config_diff import ConfigDiffDialog
 from scorpio_pipe.wavesol_paths import slugify_disperser, wavesol_dir
 from scorpio_pipe.pairs_library import (
     list_pair_sets,
@@ -97,21 +103,58 @@ def _rel_to_workdir(work_dir: Path, p: Path) -> str:
         return str(p)
 
 
+def _detect_pipeline_root() -> Path:
+    """Return a writable app root directory.
+
+    - Frozen (PyInstaller): directory of the executable
+    - Source/editable: project root (folder containing pyproject.toml)
+    """
+    try:
+        if getattr(sys, "frozen", False):
+            # In a Windows installer build the executable usually lives under
+            # Program Files which is not writable for a normal user.
+            from scorpio_pipe.app_paths import ensure_dir, user_data_root
+
+            return ensure_dir(user_data_root("Scorpipe"))
+    except Exception:
+        pass
+
+    here = Path(__file__).resolve()
+    for parent in [here.parent] + list(here.parents):
+        if (parent / "pyproject.toml").is_file() or (parent / "scripts" / "windows" / "setup.bat").is_file():
+            return parent
+    return Path.cwd().resolve()
+
+
 # --------------------------- main window ---------------------------
 
 
 class LauncherWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Scorpio Pipe")
+        try:
+            from scorpio_pipe.version import PIPELINE_VERSION
+            self.setWindowTitle(f"Scorpio Pipe v{PIPELINE_VERSION}")
+        except Exception:
+            self.setWindowTitle("Scorpio Pipe")
         self.resize(1240, 780)
 
         self._settings = load_ui_settings()
 
+        self._pipeline_root = _detect_pipeline_root()
+
+        # Status bar: always show the writable app root (important for frozen builds).
+        try:
+            self.statusBar().showMessage(f"App root: {self._pipeline_root}")
+        except Exception:
+            pass
+
         self._inspect: InspectResult | None = None
         self._cfg_path: Path | None = None
         self._cfg: dict[str, Any] | None = None
+        self._yaml_saved_text: str = ""
         self._qc: QCViewer | None = None
+        self._yaml_saved_text: str = ""
 
         # -------------- central layout --------------
         root = QtWidgets.QWidget()
@@ -134,9 +177,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
             "1  Project & data",
             "2  Config & setup",
             "3  Calibrations",
-            "4  SuperNeon",
-            "5  Line ID",
-            "6  Wavelength solution",
+            "4  Clean Cosmics",
+            "5  SuperNeon",
+            "6  Line ID",
+            "7  Wavelength solution",
         ]:
             it = QtWidgets.QListWidgetItem(title)
             it.setIcon(self._icon_status("idle"))
@@ -155,6 +199,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.page_project = self._build_page_project()
         self.page_config = self._build_page_config()
         self.page_calib = self._build_page_calib()
+        self.page_cosmics = self._build_page_cosmics()
         self.page_superneon = self._build_page_superneon()
         self.page_lineid = self._build_page_lineid()
         self.page_wavesol = self._build_page_wavesol()
@@ -162,13 +207,14 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.page_project,
             self.page_config,
             self.page_calib,
+            self.page_cosmics,
             self.page_superneon,
             self.page_lineid,
             self.page_wavesol,
         ]:
             self.stack.addWidget(p)
 
-        self.steps.currentRowChanged.connect(self.stack.setCurrentIndex)
+        self.steps.currentRowChanged.connect(self._on_step_changed)
 
         # Dock: log (collapsible)
         self.log_view = QtWidgets.QPlainTextEdit()
@@ -181,14 +227,31 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.addDockWidget(QtCore.Qt.BottomDockWidgetArea, self.dock_log)
         self.dock_log.setMinimumHeight(160)
 
+        # Dock: inspector (always visible on the right)
+        self.dock_inspector = InspectorDock(self)
+        self.dock_inspector.panel.openQCRequested.connect(self._open_qc_viewer_for)
+        self.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.dock_inspector)
+
         # Attach log handler
-        install_qt_log(self.log_view)
+        # Route Python logging into the UI log panel.
+        install_qt_log(self.log_view, logger_name="scorpio_pipe")
+
+        try:
+            import logging as _logging
+            from scorpio_pipe.version import PIPELINE_VERSION
+
+            _logging.getLogger("scorpio_pipe").info("Scorpio Pipe v%s", PIPELINE_VERSION)
+        except Exception:
+            pass
 
         self.statusBar().showMessage("Ready")
 
         # -------------- menu / toolbar --------------
         self._build_menus()
         self._build_toolbar()
+
+        self._build_statusbar_widgets()
+        self._install_shortcuts()
 
         # Initial state
         self._update_enables()
@@ -291,13 +354,49 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.lbl_inspect.setWordWrap(True)
         gl.addRow(self.btn_inspect, self.lbl_inspect)
 
+        # Overview (filled after Inspect)
+        self.g_overview = _box("Dataset overview")
+        lay.addWidget(self.g_overview)
+        ovl = QtWidgets.QHBoxLayout(self.g_overview)
+        self.lbl_overview_counts = QtWidgets.QLabel("Run Inspect to see summary…")
+        self.lbl_overview_counts.setWordWrap(True)
+        ovl.addWidget(self.lbl_overview_counts, 2)
+        # Objects list (multi-select for batch operations)
+        right = QtWidgets.QVBoxLayout()
+        self.list_overview_objects = QtWidgets.QListWidget()
+        self.list_overview_objects.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.list_overview_objects.setMaximumHeight(200)
+        self.list_overview_objects.setToolTip("Double-click an object to select it for setup. Use multi-select for batch.")
+        right.addWidget(self.list_overview_objects, 1)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        self.btn_batch_configs = QtWidgets.QPushButton("Batch: build configs")
+        self.btn_batch_run = QtWidgets.QPushButton("Batch: run")
+        btn_row.addWidget(self.btn_batch_configs)
+        btn_row.addWidget(self.btn_batch_run)
+        right.addLayout(btn_row)
+
+        ovl.addLayout(right, 1)
+        self.list_overview_objects.itemDoubleClicked.connect(self._jump_to_object_from_overview)
+        self.btn_batch_configs.clicked.connect(self._batch_build_configs)
+        self.btn_batch_run.clicked.connect(self._batch_run)
+
+        # Frame browser (table + preview)
+        self.g_frames = _box("Frames browser")
+        lay.addWidget(self.g_frames, 1)
+        fl = QtWidgets.QVBoxLayout(self.g_frames)
+        self.frame_browser = FrameBrowser()
+        fl.addWidget(self.frame_browser, 1)
+        # Use selected frame as a setup template
+        self.frame_browser.useSetupRequested.connect(self._use_setup_from_frame)
+
         # Actions
         act = QtWidgets.QHBoxLayout()
         lay.addLayout(act)
         self.btn_to_config = QtWidgets.QPushButton("Go to Config →")
         act.addStretch(1)
         act.addWidget(self.btn_to_config)
-        lay.addStretch(1)
+        # no stretch: the frame browser gets the remaining vertical space
 
         # signals
         self.btn_pick_data_dir.clicked.connect(self._pick_data_dir)
@@ -305,6 +404,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_inspect.clicked.connect(self._do_inspect)
         self.btn_to_config.clicked.connect(lambda: self.steps.setCurrentRow(1))
         self.edit_data_dir.textChanged.connect(lambda *_: self._update_enables())
+        self.edit_data_dir.textChanged.connect(lambda *_: self._refresh_statusbar())
 
         return w
 
@@ -329,10 +429,244 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 msg += "\nOpen errors (first):\n" + "\n".join(self._inspect.open_errors)
             self.lbl_inspect.setText(msg)
             self._populate_objects_from_inspect()
+            self._refresh_overview_from_inspect()
+            try:
+                if hasattr(self, "frame_browser") and getattr(self._inspect, "table", None) is not None:
+                    self.frame_browser.set_frames_df(self._inspect.table)
+            except Exception:
+                pass
+            # If work dir is still empty, auto-suggest a sensible default.
+            try:
+                if (not self.edit_work_dir.text().strip()) and (not getattr(self, "_workdir_user_edited", False)):
+                    self._suggest_work_dir()
+            except Exception:
+                pass
             self._set_step_status(0, "ok")
         except Exception as e:
             self._set_step_status(0, "fail")
             self._log_exception(e)
+    def _refresh_overview_from_inspect(self) -> None:
+        """Fill the Project page overview panel from InspectResult."""
+        try:
+            if self._inspect is None:
+                self.lbl_overview_counts.setText("—")
+                self.list_overview_objects.clear()
+                return
+            df = getattr(self._inspect, 'table', None)
+            if df is None or df.empty:
+                self.lbl_overview_counts.setText("No frames found")
+                self.list_overview_objects.clear()
+                return
+
+            # Counts by kind
+            vc = df['kind'].value_counts(dropna=False).to_dict() if 'kind' in df.columns else {}
+            total = int(len(df))
+            lines = [f"Total frames: {total}"]
+            for k in ['obj', 'sky', 'neon', 'flat', 'bias']:
+                lines.append(f"{k}: {int(vc.get(k, 0))}")
+
+            # Quick setup diversity hints (dispersers/slits/binning)
+            def _uniq(col: str) -> int:
+                try:
+                    if col in df.columns:
+                        return int(df[col].dropna().astype(str).nunique())
+                except Exception:
+                    return 0
+                return 0
+
+            lines.append('')
+            lines.append(f"Dispersers: {_uniq('disperser')}  |  Slits: {_uniq('slit')}  |  Binning: {_uniq('binning')}")
+
+            self.lbl_overview_counts.setText('\n'.join(lines))
+
+            # Objects list with counts
+            self.list_overview_objects.blockSignals(True)
+            self.list_overview_objects.clear()
+            if 'kind' in df.columns and 'object' in df.columns:
+                df_obj = df[df['kind'] == 'obj']
+                if not df_obj.empty:
+                    g = df_obj.groupby('object').size().sort_values(ascending=False)
+                    for obj, n in g.items():
+                        it = QtWidgets.QListWidgetItem(f"{obj}  ({int(n)})")
+                        it.setData(QtCore.Qt.ItemDataRole.UserRole, str(obj))
+                        self.list_overview_objects.addItem(it)
+            self.list_overview_objects.blockSignals(False)
+        except Exception as e:
+            self._log_exception(e)
+
+    def _jump_to_object_from_overview(self, item: QtWidgets.QListWidgetItem) -> None:
+        """Select the object in Config page when user double-clicks it in overview."""
+        try:
+            obj = item.data(QtCore.Qt.ItemDataRole.UserRole) or item.text()
+            obj = str(obj).split('  (')[0].strip()
+            if hasattr(self, 'combo_object'):
+                idx = self.combo_object.findText(obj)
+                if idx >= 0:
+                    self.combo_object.setCurrentIndex(idx)
+                else:
+                    self.combo_object.setCurrentText(obj)
+            self.steps.setCurrentRow(1)
+        except Exception as e:
+            self._log_exception(e)
+
+    def _selected_overview_objects(self) -> list[str]:
+        """Get selected objects from the overview list (unique, in visual order)."""
+        try:
+            items = self.list_overview_objects.selectedItems() if hasattr(self, 'list_overview_objects') else []
+        except Exception:
+            items = []
+        out: list[str] = []
+        for it in items:
+            try:
+                obj = it.data(QtCore.Qt.ItemDataRole.UserRole) or it.text()
+                obj = str(obj).split('  (')[0].strip()
+                if obj and obj not in out:
+                    out.append(obj)
+            except Exception:
+                continue
+        return out
+
+    def _batch_build_configs(self) -> None:
+        if self._inspect is None:
+            self._log_error('Run Inspect first')
+            return
+        objs = self._selected_overview_objects()
+        if not objs:
+            self._log_error('Select one or more objects in Dataset overview')
+            return
+
+        from scorpio_pipe.workdir import RunSignature, pick_smart_run_dir
+        data_dir = Path(self.edit_data_dir.text()).expanduser()
+        root = getattr(self, '_pipeline_root', None) or (data_dir.parent if data_dir.exists() else Path.home())
+        dmy = self._infer_night_date_parts()
+        if dmy is None:
+            now = datetime.now()
+            dd, mm, yyyy = int(now.day), int(now.month), int(now.year)
+        else:
+            dd, mm, yyyy = dmy
+        base = Path(root) / 'work' / f'{dd:02d}_{mm:02d}_{yyyy:04d}'
+
+        made: list[Path] = []
+        self._log_info(f'Batch: building configs for {len(objs)} objects → {base}')
+        for obj in objs:
+            try:
+                sig = RunSignature(obj, '', '', '')
+                wd = pick_smart_run_dir(base, sig, prefer_flat=True)
+                wd.mkdir(parents=True, exist_ok=True)
+                cfg_path = wd / 'config.yaml'
+                ac = build_autoconfig(self._inspect.table, data_dir, obj, wd)
+                cfg_path.write_text(ac.to_yaml_text(), encoding='utf-8')
+                made.append(cfg_path)
+                self._log_info(f'  ✔ {obj}: {cfg_path}')
+            except Exception as e:
+                self._log_exception(e)
+
+        if made:
+            self._log_info(f'Batch done: {len(made)} configs created')
+            try:
+                self.edit_cfg_path.setText(str(made[0]))
+                self._load_config(made[0])
+            except Exception:
+                pass
+            try:
+                self._open_in_explorer(base)
+            except Exception:
+                pass
+
+    def _batch_run(self) -> None:
+        """Run non-interactive steps for multiple objects sequentially.
+
+        NOTE: the LineID interactive step is NOT executed; this prepares line candidates
+        so you can open LineID later per object and then run Wavelength solution.
+        """
+        if self._inspect is None:
+            self._log_error('Run Inspect first')
+            return
+        objs = self._selected_overview_objects()
+        if not objs:
+            self._log_error('Select one or more objects in Dataset overview')
+            return
+        # Ensure configs exist (build if needed)
+        self._batch_build_configs()
+
+        # Collect configs under the night work root
+        data_dir = Path(self.edit_data_dir.text()).expanduser()
+        root = getattr(self, '_pipeline_root', None) or (data_dir.parent if data_dir.exists() else Path.home())
+        dmy = self._infer_night_date_parts()
+        if dmy is None:
+            now = datetime.now()
+            dd, mm, yyyy = int(now.day), int(now.month), int(now.year)
+        else:
+            dd, mm, yyyy = dmy
+        base = Path(root) / 'work' / f'{dd:02d}_{mm:02d}_{yyyy:04d}'
+
+        cfgs: list[tuple[str, Path]] = []
+        for obj in objs:
+            # Find the newest config.yaml whose path contains the object slug/dir created by pick_smart_run_dir
+            # Fallback: first matching by name anywhere under base.
+            best: Path | None = None
+            try:
+                cands: list[Path] = []
+                for cp in base.rglob('config.yaml'):
+                    if obj.lower() in str(cp.parent).lower():
+                        cands.append(cp)
+                if cands:
+                    best = max(cands, key=lambda p: p.stat().st_mtime)
+            except Exception:
+                pass
+            if best and best.exists():
+                cfgs.append((obj, best))
+
+        if not cfgs:
+            self._log_error('No configs found to run')
+            return
+
+        tasks = ['manifest', 'superbias', 'cosmics', 'superneon', 'lineid_prepare', 'qc_report']
+        pd = QtWidgets.QProgressDialog('Batch running…', 'Cancel', 0, len(cfgs), self)
+        pd.setWindowModality(QtCore.Qt.WindowModal)
+        pd.setMinimumDuration(0)
+        for i, (obj, cfg_path) in enumerate(cfgs, start=1):
+            if pd.wasCanceled():
+                self._log_info('Batch run canceled by user')
+                break
+            pd.setValue(i-1)
+            pd.setLabelText(f'{obj}: running non-interactive steps…')
+            QtWidgets.QApplication.processEvents()
+            try:
+                self._log_info(f'=== BATCH RUN: {obj} ===')
+                run_sequence(cfg_path, tasks, resume=True, force=False)
+                self._log_info(f'  ✔ {obj}: done')
+            except Exception as e:
+                self._log_exception(e)
+        pd.setValue(len(cfgs))
+        self._log_info('Batch run finished. Next: open LineID per object, then build Wavelength solution.')
+
+    def _use_setup_from_frame(self, sel: SelectedFrame) -> None:
+        """Fill Config page setup fields from a selected inspected frame."""
+        try:
+            if not hasattr(self, "combo_object"):
+                return
+            if sel.object:
+                self.combo_object.setCurrentText(sel.object)
+
+            def _ensure_set(combo: QtWidgets.QComboBox, value: str) -> None:
+                if not value:
+                    return
+                if combo.findText(value) < 0:
+                    combo.addItem(value)
+                combo.setCurrentText(value)
+
+            _ensure_set(self.combo_disperser, sel.disperser)
+            _ensure_set(self.combo_slit, sel.slit)
+            _ensure_set(self.combo_binning, sel.binning)
+            self._update_setup_hint()
+            self.steps.setCurrentRow(1)
+            self._log_info(
+                f"Setup from frame: object='{sel.object}', disperser='{sel.disperser}', slit='{sel.slit}', binning='{sel.binning}'"
+            )
+        except Exception as e:
+            self._log_exception(e)
+
 
     def _open_existing_cfg(self) -> None:
         fn, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open config", str(Path.home()), "YAML (*.yaml *.yml)")
@@ -349,9 +683,15 @@ class LauncherWindow(QtWidgets.QMainWindow):
         lay = QtWidgets.QVBoxLayout(w)
         lay.setSpacing(12)
 
-        # --- setup ---
+        # Two-column layout: left = target setup, right = config editor
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        lay.addWidget(splitter, 1)
+
+        # --- setup (left) ---
         g_setup = _box("Target & setup")
-        lay.addWidget(g_setup)
+        g_setup.setMinimumWidth(430)
+        splitter.addWidget(g_setup)
         fl = QtWidgets.QFormLayout(g_setup)
 
         # Object
@@ -359,6 +699,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.combo_object = QtWidgets.QComboBox()
         self.combo_object.setEditable(True)
         self.combo_object.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
+        self.combo_object.setMaxVisibleItems(25)
+        self.combo_object.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContentsOnFirstShow)
         row_obj.addWidget(self.combo_object, 1)
         row_obj.addWidget(HelpButton("Имя научного объекта (как в ночном логе / в FITS-заголовке)."))
         fl.addRow("Object", row_obj)
@@ -390,6 +732,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
         # Work dir
         row_wd = QtWidgets.QHBoxLayout()
         self.edit_work_dir = QtWidgets.QLineEdit()
+        # If the user edits the field manually, we stop auto-suggesting paths.
+        self._workdir_user_edited = False
+        self.edit_work_dir.textEdited.connect(lambda *_: setattr(self, "_workdir_user_edited", True))
         self.btn_pick_work_dir = QtWidgets.QToolButton(text="…")
         self.btn_pick_work_dir.setCursor(QtCore.Qt.PointingHandCursor)
         row_wd.addWidget(self.edit_work_dir, 1)
@@ -414,11 +759,13 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.lbl_setup_hint.setWordWrap(True)
         self.lbl_setup_hint.setStyleSheet("color: #A0A0A0;")
         fl.addRow("Setup info", self.lbl_setup_hint)
-        lay.addWidget(_hline())
 
-        # tabs: Parameters / YAML
+        # tabs: Parameters / YAML (right)
         tabs = QtWidgets.QTabWidget()
-        lay.addWidget(tabs, 1)
+        splitter.addWidget(tabs)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([430, 900])
 
         # --- quick params (tab) ---
         tab_params = QtWidgets.QWidget()
@@ -517,10 +864,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
         bar = QtWidgets.QHBoxLayout()
         yl.addLayout(bar)
         self.btn_validate_yaml = QtWidgets.QPushButton("Validate")
+        self.btn_diff_cfg = QtWidgets.QPushButton("Diff")
         self.btn_save_cfg = QtWidgets.QPushButton("Save")
         self.btn_save_cfg.setProperty("primary", True)
         self.lbl_cfg_state = QtWidgets.QLabel("—")
         bar.addWidget(self.btn_validate_yaml)
+        bar.addWidget(self.btn_diff_cfg)
         bar.addWidget(self.btn_save_cfg)
         bar.addStretch(1)
         bar.addWidget(self.lbl_cfg_state)
@@ -536,6 +885,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_reload_cfg.clicked.connect(self._do_reload_cfg)
         self.btn_apply_quick.clicked.connect(self._apply_quick_params)
         self.btn_validate_yaml.clicked.connect(self._validate_yaml)
+        self.btn_diff_cfg.clicked.connect(self._show_cfg_diff)
         self.btn_save_cfg.clicked.connect(self._do_save_cfg)
         self.editor_yaml.textChanged.connect(self._on_yaml_changed)
 
@@ -553,15 +903,110 @@ class LauncherWindow(QtWidgets.QMainWindow):
         d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select work directory", str(Path.home()))
         if d:
             self.edit_work_dir.setText(d)
+            self._workdir_user_edited = True
+            self._workdir_user_edited = True
 
+    def _infer_night_date_parts(self) -> tuple[int, int, int] | None:
+        """Infer night date as (dd, mm, yyyy) for the work/ structure.
+
+        Preferred source is the nightlog filename (e.g. s251216.txt -> 16/12/2025).
+        Falls back to DATE-OBS from the first opened FITS header if available.
+        """
+        try:
+            if self._inspect is not None:
+                p = getattr(self._inspect, "nightlog_path", None)
+                if p:
+                    import re
+
+                    stem = Path(str(p)).stem.lower()
+                    m = re.search(r"s(\d{2})(\d{2})(\d{2})", stem)
+                    if m:
+                        yy, mm, dd = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                        yyyy = (2000 + yy) if yy < 80 else (1900 + yy)
+                        return dd, mm, yyyy
+        except Exception:
+            pass
+
+        # fallback: DATE-OBS like 'YYYY-MM-DDThh:mm:ss' (or 'YYYY.MM.DD ...')
+        try:
+            if self._inspect is not None:
+                df = getattr(self._inspect, "table", None)
+                if df is not None and not df.empty and "date_obs" in df.columns:
+                    import re
+
+                    # take the most common date prefix if possible
+                    vals = df["date_obs"].dropna().astype(str).tolist()
+                    if vals:
+                        # normalize to first 10 chars when looks like a date
+                        prefixes: list[str] = []
+                        for v in vals:
+                            v = str(v).strip()
+                            m = re.search(r"(\d{4})[-./](\d{2})[-./](\d{2})", v)
+                            if m:
+                                prefixes.append(f"{m.group(1)}-{m.group(2)}-{m.group(3)}")
+                        if prefixes:
+                            # choose the most common (robust to a few bad headers)
+                            from collections import Counter
+
+                            s = Counter(prefixes).most_common(1)[0][0]
+                        else:
+                            s = str(vals[0])
+                        m = re.search(r"(\d{4})-(\d{2})-(\d{2})", s)
+                        if m:
+                            yyyy = int(m.group(1))
+                            mm = int(m.group(2))
+                            dd = int(m.group(3))
+                            return dd, mm, yyyy
+        except Exception:
+            pass
+
+        return None
+
+    
     def _suggest_work_dir(self) -> None:
+        """Suggest a default (smart) work directory.
+
+        Base convention: `<pipeline_root>/work/<dd_mm_yyyy>/`.
+
+        Smart mode:
+          - If the night folder is empty -> use it (single-run, no extra nesting).
+          - If it already contains a different run -> use `<night>/<object>/<disperser>/`
+            (and add suffixes to avoid collisions).
+        """
+        import re as _re
+
+        from scorpio_pipe.workdir import RunSignature, pick_smart_run_dir
+
         data_dir = Path(self.edit_data_dir.text()).expanduser()
-        obj = (self.combo_object.currentText() or "object").strip() or "object"
-        disp = (self.combo_disperser.currentText() or "").strip()
-        root = data_dir.parent if data_dir.exists() else Path.home()
-        obj_slug = slugify_disperser(obj)
-        disp_slug = slugify_disperser(disp)
-        wd = root / "scorpio_work" / obj_slug / disp_slug
+        root = getattr(self, "_pipeline_root", None) or (data_dir.parent if data_dir.exists() else Path.home())
+
+        dmy = self._infer_night_date_parts()
+        if dmy is None:
+            now = datetime.now()
+            dd, mm, yyyy = int(now.day), int(now.month), int(now.year)
+        else:
+            dd, mm, yyyy = dmy
+
+        night_dir = f"{dd:02d}_{mm:02d}_{yyyy:04d}"
+        base = Path(root) / "work" / night_dir
+
+        # If we already know target+setup, apply the smart collision-free picker.
+        try:
+            obj = (self.combo_object.currentText() or "").strip()
+            disp = (self.combo_disperser.currentText() or "").strip()
+            slit = (getattr(self, "combo_slit", None).currentText() if hasattr(self, "combo_slit") else "") or ""
+            slit = str(slit).strip()
+            binning = (getattr(self, "combo_binning", None).currentText() if hasattr(self, "combo_binning") else "") or ""
+            binning = str(binning).strip()
+
+            if obj:
+                sig = RunSignature(obj, disp, slit, binning)
+                wd = pick_smart_run_dir(base, sig, prefer_flat=True)
+            else:
+                wd = base
+        except Exception:
+            wd = base
+
         self.edit_work_dir.setText(str(wd))
 
     def _populate_objects_from_inspect(self) -> None:
@@ -723,11 +1168,21 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
     def _on_object_changed(self, *_: object) -> None:
         self._update_dispersers_from_inspect()
+        try:
+            if (not self.edit_work_dir.text().strip()) and (not getattr(self, "_workdir_user_edited", False)):
+                self._suggest_work_dir()
+        except Exception:
+            pass
         self._update_enables()
 
     def _on_disperser_changed(self, *_: object) -> None:
         self._update_slit_binning_from_inspect()
         self._update_setup_hint()
+        try:
+            if (not self.edit_work_dir.text().strip()) and (not getattr(self, "_workdir_user_edited", False)):
+                self._suggest_work_dir()
+        except Exception:
+            pass
         self._update_enables()
 
     # --------------------------- config file ops ---------------------------
@@ -736,6 +1191,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         if self._inspect is None:
             self._log_error("Run Inspect first")
             return
+
         data_dir = Path(self.edit_data_dir.text()).expanduser()
         obj = (self.combo_object.currentText() or "").strip()
         disp = (self.combo_disperser.currentText() or "").strip() or None
@@ -743,13 +1199,32 @@ class LauncherWindow(QtWidgets.QMainWindow):
         slit = (slit or "").strip() or None
         binning = (getattr(self, "combo_binning", None).currentText() if hasattr(self, "combo_binning") else "")
         binning = (binning or "").strip() or None
-        work_dir = Path(self.edit_work_dir.text()).expanduser()
+
+        work_dir_txt = self.edit_work_dir.text().strip()
+        if not work_dir_txt:
+            self._log_error("Work directory is empty")
+            return
+        work_dir = Path(work_dir_txt).expanduser()
+
         if not obj:
             self._log_error("Object is empty")
             return
-        if not work_dir:
-            self._log_error("Work directory is empty")
-            return
+
+        # Smart mode: if the user points to a night folder dd_mm_yyyy, avoid collisions automatically.
+        try:
+            import re as _re
+            from scorpio_pipe.workdir import RunSignature, pick_smart_run_dir
+
+            if _re.match(r"^\d{2}_\d{2}_\d{4}$", work_dir.name):
+                setup = getattr(self._inspect, "setup", {}) or {}
+                sig = RunSignature(obj, disp or "", slit or "", binning or "")
+                smart = pick_smart_run_dir(work_dir, sig, prefer_flat=True)
+                if smart != work_dir:
+                    self._log_info(f"Smart work dir: {work_dir} → {smart}")
+                    work_dir = smart
+                    self.edit_work_dir.setText(str(work_dir))
+        except Exception:
+            pass
 
         self._set_step_status(1, "running")
         try:
@@ -774,6 +1249,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._log_exception(e)
 
     def _do_reload_cfg(self) -> None:
+
         if not self._cfg_path:
             # try from edit
             s = self.edit_cfg_path.text().strip()
@@ -794,8 +1270,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._cfg = cfg
         self.lbl_cfg_state.setText(f"Loaded: {cfg_path}")
         self.editor_yaml.blockSignals(True)
-        self.editor_yaml.setPlainText(_yaml_dump(cfg))
+        yaml_txt = _yaml_dump(cfg)
+        self.editor_yaml.setPlainText(yaml_txt)
         self.editor_yaml.blockSignals(False)
+        self._yaml_saved_text = yaml_txt
 
         # fill quick widgets from cfg
         for spec in self._param_specs:
@@ -817,6 +1295,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
         # also update object/disperser/workdir if available
         try:
             self.edit_work_dir.setText(str(Path(str(cfg.get("work_dir", ""))).expanduser()))
+            # Preserve user choice from an existing config (don't auto-suggest over it)
+            if self.edit_work_dir.text().strip():
+                self._workdir_user_edited = True
             setup = (cfg.get("frames", {}) or {}).get("__setup__", {})
             if isinstance(setup, dict):
                 d = str(setup.get("disperser", "") or "")
@@ -829,6 +1310,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
             pass
 
         self._update_enables()
+        self._refresh_statusbar()
+        self._refresh_inspector()
 
         # refresh derived UI state
         try:
@@ -848,10 +1331,32 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
     def _on_yaml_changed(self) -> None:
         # just mark state; we parse on demand
+        cur = self.editor_yaml.toPlainText()
+        if self._yaml_saved_text and (cur == self._yaml_saved_text):
+            self.lbl_cfg_state.setText("No changes")
+            return
         if self._cfg_path:
             self.lbl_cfg_state.setText(f"Edited (not saved): {self._cfg_path.name}")
         else:
             self.lbl_cfg_state.setText("Edited")
+
+    def _show_cfg_diff(self) -> None:
+        try:
+            new_text = self.editor_yaml.toPlainText()
+            old_text = self._yaml_saved_text
+            if self._cfg_path and self._cfg_path.exists():
+                try:
+                    old_text = self._cfg_path.read_text(encoding="utf-8")
+                except Exception:
+                    pass
+            if not old_text:
+                old_text = ""
+            title = "Config diff"
+            if self._cfg_path:
+                title += f" — {self._cfg_path.name}"
+            ConfigDiffDialog(title, old_text, new_text, parent=self).exec()
+        except Exception as e:
+            self._log_exception(e)
 
     def _validate_yaml(self) -> None:
         cfg, err = _safe_parse_yaml(self.editor_yaml.toPlainText())
@@ -867,7 +1372,25 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._log_error(f"YAML invalid: {err}")
             return False
         self._cfg = cfg
+        self._refresh_outputs_panels()
         return True
+
+    def _refresh_outputs_panels(self) -> None:
+        mapping = [
+            ("outputs_calib", None),
+            ("outputs_cosmics", "cosmics"),
+            ("outputs_superneon", "wavesol"),
+            ("outputs_lineid", "wavesol"),
+            ("outputs_wavesol", "wavesol"),
+        ]
+        for attr, stage in mapping:
+            try:
+                if hasattr(self, attr):
+                    panel = getattr(self, attr)
+                    if isinstance(panel, OutputsPanel):
+                        panel.set_context(self._cfg, stage=stage)
+            except Exception:
+                pass
 
     def _do_save_cfg(self) -> None:
         if not self._cfg_path:
@@ -881,10 +1404,14 @@ class LauncherWindow(QtWidgets.QMainWindow):
             return
         if not self._sync_cfg_from_editor():
             return
-        self._cfg_path.write_text(self.editor_yaml.toPlainText(), encoding="utf-8")
+        txt = self.editor_yaml.toPlainText()
+        self._cfg_path.write_text(txt, encoding="utf-8")
+        self._yaml_saved_text = txt
         self._log_info(f"Saved: {self._cfg_path}")
         self.lbl_cfg_state.setText(f"Saved: {self._cfg_path.name}")
         self._update_enables()
+        self._refresh_statusbar()
+        self._refresh_inspector()
 
     def _get_cfg_value(self, dotted: str, default: Any | None = None) -> Any:
         cfg = self._cfg or {}
@@ -934,8 +1461,17 @@ class LauncherWindow(QtWidgets.QMainWindow):
         lay = QtWidgets.QVBoxLayout(w)
         lay.setSpacing(12)
 
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        lay.addWidget(splitter, 1)
+
+        # left: controls
+        left = QtWidgets.QWidget()
+        l = QtWidgets.QVBoxLayout(left)
+        l.setSpacing(12)
+
         g = _box("Calibrations")
-        lay.addWidget(g)
+        l.addWidget(g)
         gl = QtWidgets.QVBoxLayout(g)
         self.lbl_calib = QtWidgets.QLabel(
             "Build report/manifest.json and calib/superbias.fits.\n"
@@ -952,17 +1488,28 @@ class LauncherWindow(QtWidgets.QMainWindow):
         row.addWidget(self.btn_qc_calib)
         row.addStretch(1)
         gl.addLayout(row)
+        l.addStretch(1)
 
-        lay.addStretch(1)
+        splitter.addWidget(left)
+
+        # right: outputs
+        self.outputs_calib = OutputsPanel()
+        self.outputs_calib.set_context(self._cfg, stage=None)
+        splitter.addWidget(self.outputs_calib)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([650, 480])
+
+        lay.addWidget(_hline())
         foot = QtWidgets.QHBoxLayout()
         lay.addLayout(foot)
-        self.btn_to_superneon = QtWidgets.QPushButton("Go to SuperNeon →")
+        self.btn_to_cosmics = QtWidgets.QPushButton("Go to Cosmics →")
         foot.addStretch(1)
-        foot.addWidget(self.btn_to_superneon)
+        foot.addWidget(self.btn_to_cosmics)
 
         self.btn_run_calib.clicked.connect(self._do_run_calib)
         self.btn_qc_calib.clicked.connect(self._open_qc_viewer)
-        self.btn_to_superneon.clicked.connect(lambda: self.steps.setCurrentRow(3))
+        self.btn_to_cosmics.clicked.connect(lambda: self.steps.setCurrentRow(3))
         return w
 
     def _do_run_calib(self) -> None:
@@ -973,10 +1520,89 @@ class LauncherWindow(QtWidgets.QMainWindow):
             ctx = load_context(self._cfg_path)
             run_sequence(ctx, ["manifest", "superbias"])
             self._log_info("Calibrations done")
+            try:
+                if hasattr(self, "outputs_calib"):
+                    self.outputs_calib.set_context(self._cfg, stage=None)
+            except Exception:
+                pass
             self._set_step_status(2, "ok")
             self._maybe_auto_qc()
         except Exception as e:
             self._set_step_status(2, "fail")
+            self._log_exception(e)
+
+    # --------------------------- page: cosmics ---------------------------
+
+    def _build_page_cosmics(self) -> QtWidgets.QWidget:
+        w = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(w)
+        lay.setSpacing(12)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        lay.addWidget(splitter, 1)
+
+        left = QtWidgets.QWidget()
+        l = QtWidgets.QVBoxLayout(left)
+        l.setSpacing(12)
+
+        g = _box("Clean Cosmics")
+        l.addWidget(g)
+        gl = QtWidgets.QVBoxLayout(g)
+        lbl = QtWidgets.QLabel(
+            "Clean cosmic rays in object/sky frames using a simple median filter.\n"
+            "Outputs are written under work_dir/cosmics/."
+        )
+        lbl.setWordWrap(True)
+        gl.addWidget(lbl)
+
+        row = QtWidgets.QHBoxLayout()
+        self.btn_run_cosmics = QtWidgets.QPushButton("Run: Clean cosmics")
+        self.btn_run_cosmics.setProperty("primary", True)
+        self.btn_qc_cosmics = QtWidgets.QPushButton("QC")
+        row.addWidget(self.btn_run_cosmics)
+        row.addWidget(self.btn_qc_cosmics)
+        row.addStretch(1)
+        gl.addLayout(row)
+        l.addStretch(1)
+
+        splitter.addWidget(left)
+        self.outputs_cosmics = OutputsPanel()
+        self.outputs_cosmics.set_context(self._cfg, stage="cosmics")
+        splitter.addWidget(self.outputs_cosmics)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([650, 480])
+
+        lay.addWidget(_hline())
+        foot = QtWidgets.QHBoxLayout()
+        lay.addLayout(foot)
+        self.btn_to_superneon = QtWidgets.QPushButton("Go to SuperNeon →")
+        foot.addStretch(1)
+        foot.addWidget(self.btn_to_superneon)
+
+        self.btn_run_cosmics.clicked.connect(self._do_run_cosmics)
+        self.btn_qc_cosmics.clicked.connect(self._open_qc_viewer)
+        self.btn_to_superneon.clicked.connect(lambda: self.steps.setCurrentRow(4))
+        return w
+
+    def _do_run_cosmics(self) -> None:
+        if not self._ensure_cfg_saved():
+            return
+        self._set_step_status(3, "running")
+        try:
+            ctx = load_context(self._cfg_path)
+            run_sequence(ctx, ["cosmics"])
+            self._log_info("Cosmics cleaning done")
+            try:
+                if hasattr(self, "outputs_cosmics"):
+                    self.outputs_cosmics.set_context(self._cfg, stage="cosmics")
+            except Exception:
+                pass
+            self._set_step_status(3, "ok")
+            self._maybe_auto_qc()
+        except Exception as e:
+            self._set_step_status(3, "fail")
             self._log_exception(e)
 
     # --------------------------- page: superneon ---------------------------
@@ -986,8 +1612,16 @@ class LauncherWindow(QtWidgets.QMainWindow):
         lay = QtWidgets.QVBoxLayout(w)
         lay.setSpacing(12)
 
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        lay.addWidget(splitter, 1)
+
+        left = QtWidgets.QWidget()
+        l = QtWidgets.QVBoxLayout(left)
+        l.setSpacing(12)
+
         g = _box("SuperNeon")
-        lay.addWidget(g)
+        l.addWidget(g)
         gl = QtWidgets.QVBoxLayout(g)
         lbl = QtWidgets.QLabel(
             "Stack all NEON frames into a single superneon image,\n"
@@ -1004,8 +1638,17 @@ class LauncherWindow(QtWidgets.QMainWindow):
         row.addWidget(self.btn_qc_superneon)
         row.addStretch(1)
         gl.addLayout(row)
+        l.addStretch(1)
 
-        lay.addStretch(1)
+        splitter.addWidget(left)
+        self.outputs_superneon = OutputsPanel()
+        self.outputs_superneon.set_context(self._cfg, stage="wavesol")
+        splitter.addWidget(self.outputs_superneon)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([650, 480])
+
+        lay.addWidget(_hline())
         foot = QtWidgets.QHBoxLayout()
         lay.addLayout(foot)
         self.btn_to_lineid = QtWidgets.QPushButton("Go to LineID →")
@@ -1014,21 +1657,26 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         self.btn_run_superneon.clicked.connect(self._do_run_superneon)
         self.btn_qc_superneon.clicked.connect(self._open_qc_viewer)
-        self.btn_to_lineid.clicked.connect(lambda: self.steps.setCurrentRow(4))
+        self.btn_to_lineid.clicked.connect(lambda: self.steps.setCurrentRow(5))
         return w
 
     def _do_run_superneon(self) -> None:
         if not self._ensure_cfg_saved():
             return
-        self._set_step_status(3, "running")
+        self._set_step_status(4, "running")
         try:
             ctx = load_context(self._cfg_path)
             run_sequence(ctx, ["superneon"])
             self._log_info("SuperNeon done")
-            self._set_step_status(3, "ok")
+            try:
+                if hasattr(self, "outputs_superneon"):
+                    self.outputs_superneon.set_context(self._cfg, stage="wavesol")
+            except Exception:
+                pass
+            self._set_step_status(4, "ok")
             self._maybe_auto_qc()
         except Exception as e:
-            self._set_step_status(3, "fail")
+            self._set_step_status(4, "fail")
             self._log_exception(e)
 
     # --------------------------- page: lineid ---------------------------
@@ -1092,6 +1740,13 @@ class LauncherWindow(QtWidgets.QMainWindow):
         row2.addStretch(1)
         gl.addLayout(row2)
 
+        g_out = _box("Outputs")
+        lay.addWidget(g_out)
+        ol = QtWidgets.QVBoxLayout(g_out)
+        self.outputs_lineid = OutputsPanel()
+        self.outputs_lineid.set_context(self._cfg, stage="wavesol")
+        ol.addWidget(self.outputs_lineid)
+
 
         lay.addStretch(1)
         foot = QtWidgets.QHBoxLayout()
@@ -1109,7 +1764,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.act_export_selected_pair_set.triggered.connect(self._do_export_selected_pair_set)
         self.act_export_current_pairs.triggered.connect(self._do_export_current_pairs)
         self.act_export_user_library_zip.triggered.connect(self._do_export_user_library_zip)
-        self.btn_to_wavesol.clicked.connect(lambda: self.steps.setCurrentRow(5))
+        self.btn_to_wavesol.clicked.connect(lambda: self.steps.setCurrentRow(6))
         return w
 
     def _current_pairs_path(self) -> Path | None:
@@ -1205,6 +1860,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
         p = self._current_pairs_path()
         self.lbl_pairs.setText(f"Pairs: {p}" if p else "Pairs: —")
         self._refresh_pair_sets_combo()
+        try:
+            if hasattr(self, "outputs_lineid"):
+                self.outputs_lineid.set_context(self._cfg, stage="wavesol")
+        except Exception:
+            pass
 
 
     def _current_disperser(self) -> str:
@@ -1417,13 +2077,21 @@ class LauncherWindow(QtWidgets.QMainWindow):
         lay = QtWidgets.QVBoxLayout(w)
         lay.setSpacing(12)
 
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        lay.addWidget(splitter, 1)
+
+        left = QtWidgets.QWidget()
+        l = QtWidgets.QVBoxLayout(left)
+        l.setSpacing(12)
+
         g = _box("Wavelength solution (1D + 2D)")
-        lay.addWidget(g)
+        l.addWidget(g)
         gl = QtWidgets.QVBoxLayout(g)
 
         lbl = QtWidgets.QLabel(
-            "Build 1D λ(x) from hand pairs and a 2D Chebyshev λ(x,y) map from traced lines.\n"
-            "You can clean the pair list before fitting (reject bad lines)."
+            "Build 1D λ(x) from hand pairs and a 2D λ(x,y) map from traced lines.\n"
+            "You can clean (1) the pair list and (2) the 2D lamp lines used for the surface fit."
         )
         lbl.setWordWrap(True)
         gl.addWidget(lbl)
@@ -1434,17 +2102,28 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         row = QtWidgets.QHBoxLayout()
         self.btn_clean_pairs = QtWidgets.QPushButton("Clean pairs…")
+        self.btn_clean_wavesol2d = QtWidgets.QPushButton("Clean 2D lines…")
         self.btn_run_wavesol = QtWidgets.QPushButton("Run: Wavelength solution")
         self.btn_run_wavesol.setProperty("primary", True)
         self.btn_qc_wavesol = QtWidgets.QPushButton("QC")
         row.addWidget(self.btn_clean_pairs)
+        row.addWidget(self.btn_clean_wavesol2d)
         row.addWidget(self.btn_run_wavesol)
         row.addWidget(self.btn_qc_wavesol)
         row.addStretch(1)
         gl.addLayout(row)
+        l.addStretch(1)
 
-        lay.addStretch(1)
+        splitter.addWidget(left)
+        self.outputs_wavesol = OutputsPanel()
+        self.outputs_wavesol.set_context(self._cfg, stage="wavesol")
+        splitter.addWidget(self.outputs_wavesol)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([650, 480])
+
         self.btn_clean_pairs.clicked.connect(self._do_clean_pairs)
+        self.btn_clean_wavesol2d.clicked.connect(self._do_clean_wavesol2d)
         self.btn_run_wavesol.clicked.connect(self._do_wavesolution)
         self.btn_qc_wavesol.clicked.connect(self._open_qc_viewer)
         return w
@@ -1478,20 +2157,100 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._do_save_cfg()
         self._log_info(f"Pairs cleaned: {out}")
         self._refresh_pairs_label()
+        try:
+            if hasattr(self, "outputs_wavesol"):
+                self.outputs_wavesol.set_context(self._cfg, stage="wavesol")
+        except Exception:
+            pass
+
+    def _do_clean_wavesol2d(self) -> None:
+        """Interactive rejection of bad lamp lines used in 2D fit.
+
+        Works on the saved control points (wavesol/control_points_2d.csv).
+        It updates wavesol.rejected_lines_A in config.
+        """
+        if not self._ensure_cfg_saved():
+            return
+        if not self._sync_cfg_from_editor():
+            return
+        try:
+            from scorpio_pipe.wavesol_paths import wavesol_dir
+            from scorpio_pipe.ui.wavesol_2d_cleaner import Wave2DCleanConfig, Wave2DLineCleanerDialog
+        except Exception as e:
+            self._log_exception(e)
+            return
+
+        cfg = self._cfg or {}
+        outdir = Path(wavesol_dir(cfg))
+        cp_csv = outdir / "control_points_2d.csv"
+        if not cp_csv.exists():
+            self._log_error("control_points_2d.csv not found (run Wavelength solution once first)")
+            return
+
+        # read current rejected list
+        cur = self._get_cfg_value("wavesol.rejected_lines_A", [])
+        rejected = []
+        if isinstance(cur, (list, tuple)):
+            for x in cur:
+                try:
+                    rejected.append(float(x))
+                except Exception:
+                    pass
+
+        # configure model degrees from current config
+        wcfg = (cfg.get("wavesol", {}) if isinstance(cfg.get("wavesol"), dict) else {})
+        dlg_cfg = Wave2DCleanConfig(
+            model2d=str(wcfg.get("model2d", "auto")),
+            power_deg=int(wcfg.get("power_deg", max(int(wcfg.get("cheb_degx", 5)), int(wcfg.get("cheb_degy", 3))))),
+            cheb_degx=int(wcfg.get("cheb_degx", 5)),
+            cheb_degy=int(wcfg.get("cheb_degy", 3)),
+            sigma_clip=float(wcfg.get("cheb_sigma_clip", 3.0)),
+            maxiter=int(wcfg.get("cheb_maxiter", 10)),
+        )
+
+        dlg = Wave2DLineCleanerDialog(cp_csv, cfg=dlg_cfg, rejected_lines_A=rejected, parent=self)
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return
+
+        new_rej = dlg.rejected_lines()
+        self._set_cfg_value("wavesol.rejected_lines_A", new_rej)
+        self.editor_yaml.blockSignals(True)
+        self.editor_yaml.setPlainText(_yaml_dump(self._cfg or {}))
+        self.editor_yaml.blockSignals(False)
+        self._do_save_cfg()
+        self._log_info(f"Updated wavesol.rejected_lines_A (N={len(new_rej)})")
+        try:
+            if hasattr(self, "outputs_wavesol"):
+                self.outputs_wavesol.set_context(self._cfg, stage="wavesol")
+        except Exception:
+            pass
+
+        # save a couple of diagnostic plots for reports/audit
+        try:
+            saved = dlg.save_plots(outdir, stem='wavesol2d_clean')
+            if saved:
+                self._log_info('Saved 2D-clean plots:\n' + '\n'.join(f'  {s}' for s in saved))
+        except Exception as e:
+            self._log_exception(e)
 
     def _do_wavesolution(self) -> None:
         if not self._ensure_cfg_saved():
             return
-        self._set_step_status(5, "running")
+        self._set_step_status(6, "running")
         try:
             ctx = load_context(self._cfg_path)
             out = run_wavesolution(ctx)
             self._log_info("Wavelength solution done")
-            self._set_step_status(5, "ok")
+            try:
+                if hasattr(self, "outputs_wavesol"):
+                    self.outputs_wavesol.set_context(self._cfg, stage="wavesol")
+            except Exception:
+                pass
+            self._set_step_status(6, "ok")
             self._log_info("Outputs:\n" + "\n".join(f"  {k}: {v}" for k, v in out.items()))
             self._maybe_auto_qc()
         except Exception as e:
-            self._set_step_status(5, "fail")
+            self._set_step_status(6, "fail")
             self._log_exception(e)
 
     # --------------------------- misc helpers ---------------------------
@@ -1541,6 +2300,175 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._qc.show()
         self._qc.raise_()
         self._qc.activateWindow()
+
+    # --------------------------- navigation glue ---------------------------
+
+    def _current_work_dir_resolved(self) -> Path | None:
+        """Return absolute work_dir from current config/cfg_path (if possible)."""
+        cfg = self._cfg or {}
+        wd_raw = str(cfg.get('work_dir', '') or '').strip()
+        if not wd_raw:
+            return None
+        wd = Path(wd_raw).expanduser()
+        if (not wd.is_absolute()) and self._cfg_path is not None:
+            wd = (self._cfg_path.parent / wd).resolve()
+        return wd
+
+    def _current_stage_for_step(self, idx: int) -> str | None:
+        # Map UI steps to product stages for the inspector outputs view
+        return {
+            0: None,
+            1: None,
+            2: 'calib',
+            3: 'cosmics',
+            4: 'wavesol',
+            5: 'wavesol',
+            6: 'wavesol',
+        }.get(int(idx), None)
+
+    def _on_step_changed(self, idx: int) -> None:
+        try:
+            self.stack.setCurrentIndex(int(idx))
+        except Exception:
+            pass
+        self._refresh_inspector()
+        self._refresh_statusbar()
+
+    def _refresh_inspector(self) -> None:
+        try:
+            stage = self._current_stage_for_step(self.steps.currentRow())
+        except Exception:
+            stage = None
+        wd = self._current_work_dir_resolved()
+        try:
+            if hasattr(self, 'dock_inspector') and self.dock_inspector is not None:
+                self.dock_inspector.panel.set_context(self._cfg, stage=stage, work_dir=wd)
+        except Exception:
+            pass
+
+    def _open_qc_viewer_for(self, work_dir: Path) -> None:
+        """Open QC viewer and point it to the given work directory."""
+        wd = Path(work_dir).expanduser().resolve()
+        if self._qc is None:
+            self._qc = QCViewer(wd)
+        else:
+            self._qc.set_work_dir(wd)
+        self._qc.show()
+        self._qc.raise_()
+        self._qc.activateWindow()
+
+    # --------------------------- statusbar / shortcuts ---------------------------
+
+    def _build_statusbar_widgets(self) -> None:
+        sb = self.statusBar()
+        sb.setSizeGripEnabled(True)
+
+        def _mk_btn(caption: str, cb) -> QtWidgets.QToolButton:
+            b = QtWidgets.QToolButton()
+            b.setText(caption)
+            b.setCursor(QtCore.Qt.PointingHandCursor)
+            b.clicked.connect(cb)
+            b.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+            return b
+
+        self._sb_btn_data = _mk_btn('Data: —', self._open_data_folder)
+        self._sb_btn_work = _mk_btn('Work: —', self._open_work_folder)
+        self._sb_btn_cfg = _mk_btn('Cfg: —', self._open_cfg_folder)
+        self._sb_btn_report = _mk_btn('Report', self._open_report_html)
+
+        sb.addPermanentWidget(self._sb_btn_data)
+        sb.addPermanentWidget(self._sb_btn_work)
+        sb.addPermanentWidget(self._sb_btn_cfg)
+        sb.addPermanentWidget(self._sb_btn_report)
+
+        try:
+            self.edit_data_dir.textChanged.connect(lambda *_: self._refresh_statusbar())
+            self.edit_cfg_path.textChanged.connect(lambda *_: self._refresh_statusbar())
+            if hasattr(self, 'edit_work_dir'):
+                self.edit_work_dir.textChanged.connect(lambda *_: self._refresh_statusbar())
+        except Exception:
+            pass
+
+        self._refresh_statusbar()
+
+    def _short_path(self, p: Path | None) -> str:
+        if not p:
+            return '—'
+        s = str(p)
+        # keep it readable in a status bar
+        return (p.name or s)
+
+    def _refresh_statusbar(self) -> None:
+        try:
+            d = Path(self.edit_data_dir.text()).expanduser() if self.edit_data_dir.text().strip() else None
+        except Exception:
+            d = None
+        wd = self._current_work_dir_resolved()
+        cfgp = None
+        try:
+            cfgp = Path(self.edit_cfg_path.text()).expanduser() if self.edit_cfg_path.text().strip() else None
+        except Exception:
+            cfgp = None
+
+        try:
+            self._sb_btn_data.setText(f'Data: {self._short_path(d)}')
+            self._sb_btn_data.setToolTip(str(d) if d else '')
+            self._sb_btn_work.setText(f'Work: {self._short_path(wd)}')
+            self._sb_btn_work.setToolTip(str(wd) if wd else '')
+            self._sb_btn_cfg.setText(f'Cfg: {self._short_path(cfgp)}')
+            self._sb_btn_cfg.setToolTip(str(cfgp) if cfgp else '')
+        except Exception:
+            pass
+
+    def _open_data_folder(self) -> None:
+        try:
+            p = Path(self.edit_data_dir.text()).expanduser()
+            if p.exists():
+                self._open_in_explorer(p)
+        except Exception:
+            pass
+
+    def _open_work_folder(self) -> None:
+        wd = self._current_work_dir_resolved()
+        if wd and wd.exists():
+            self._open_in_explorer(wd)
+
+    def _open_cfg_folder(self) -> None:
+        try:
+            p = Path(self.edit_cfg_path.text()).expanduser()
+            if p.exists():
+                self._open_in_explorer(p.parent)
+        except Exception:
+            pass
+
+    def _open_report_html(self) -> None:
+        wd = self._current_work_dir_resolved()
+        if not wd:
+            return
+        p = wd / 'report' / 'index.html'
+        if p.exists():
+            try:
+                QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(p)))
+            except Exception:
+                pass
+        else:
+            # fallback: open folder
+            if (wd / 'report').exists():
+                self._open_in_explorer(wd / 'report')
+
+    def _install_shortcuts(self) -> None:
+        # Keep the UI fast: shortcuts call existing handlers.
+        def _sc(seq: str, cb) -> None:
+            s = QtGui.QShortcut(QtGui.QKeySequence(seq), self)
+            s.activated.connect(cb)
+
+        _sc('Ctrl+I', self._do_inspect)
+        _sc('Ctrl+S', self._do_save_cfg)
+        _sc('Ctrl+R', self._run_all_steps)
+        _sc('Ctrl+P', self._open_run_plan)
+        _sc('Ctrl+Q', self._open_qc_viewer)
+        _sc('Ctrl+O', self._open_data_folder)
+        _sc('Ctrl+W', self._open_work_folder)
 
     def _maybe_auto_qc(self) -> None:
         if getattr(self, "act_auto_qc", None) is not None and self.act_auto_qc.isChecked():
@@ -1609,6 +2537,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
         act_run_all.triggered.connect(self._run_all_steps)
         tb.addAction(act_run_all)
 
+        act_plan = QtGui.QAction("Plan", self)
+        act_plan.triggered.connect(self._open_run_plan)
+        tb.addAction(act_plan)
+
         act_qc = QtGui.QAction("QC", self)
         act_qc.triggered.connect(self._open_qc_viewer)
         tb.addAction(act_qc)
@@ -1623,6 +2555,17 @@ class LauncherWindow(QtWidgets.QMainWindow):
         act_light.triggered.connect(lambda: self._set_theme("light"))
         tb.addAction(act_dark)
         tb.addAction(act_light)
+
+    def _open_run_plan(self) -> None:
+        try:
+            if not self._sync_cfg_from_editor():
+                return
+            if not self._cfg:
+                self._log_error("No config loaded")
+                return
+            RunPlanDialog(self._cfg, parent=self).exec()
+        except Exception as e:
+            self._log_exception(e)
 
     def _set_theme(self, mode: str) -> None:
         try:
@@ -1694,9 +2637,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
             return
         chain = [
             (2, "Calibrations", self._do_run_calib),
-            (3, "SuperNeon", self._do_run_superneon),
-            (4, "LineID", self._do_open_lineid),
-            (5, "Wavelength solution", self._do_wavesolution),
+            (3, "Cosmics", self._do_run_cosmics),
+            (4, "SuperNeon", self._do_run_superneon),
+            (5, "LineID", self._do_open_lineid),
+            (6, "Wavelength solution", self._do_wavesolution),
         ]
         for row, name, fn in chain:
             try:
@@ -1713,6 +2657,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_make_cfg.setEnabled(has_inspect)
         self.btn_suggest_workdir.setEnabled(True)
         self.btn_run_calib.setEnabled(self._cfg_path is not None or bool(self.edit_cfg_path.text().strip()))
+        self.btn_run_cosmics.setEnabled(self.btn_run_calib.isEnabled())
         self.btn_run_superneon.setEnabled(self.btn_run_calib.isEnabled())
         self.btn_open_lineid.setEnabled(self.btn_run_calib.isEnabled())
         self.btn_run_wavesol.setEnabled(self.btn_run_calib.isEnabled())

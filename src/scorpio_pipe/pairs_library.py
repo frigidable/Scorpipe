@@ -9,6 +9,7 @@ import shutil
 import zipfile
 
 from scorpio_pipe.wavesol_paths import slugify_disperser
+from scorpio_pipe.app_paths import user_data_root
 
 
 ENV_USER_PAIRS_DIR = "SCORPIO_PIPE_USER_PAIRS_DIR"
@@ -37,7 +38,7 @@ def user_pairs_root() -> Path:
     env = (os.environ.get(ENV_USER_PAIRS_DIR) or "").strip()
     if env:
         return Path(env).expanduser()
-    return Path.home() / ".scorpio_pipe" / "pairs"
+    return user_data_root("Scorpipe") / "pairs"
 
 
 def ensure_user_pairs_root() -> Path:

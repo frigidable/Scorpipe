@@ -9,6 +9,7 @@ import os
 from doit import get_var
 
 from scorpio_pipe.config import load_config
+from scorpio_pipe.manifest import write_manifest
 from scorpio_pipe.log import setup_logging
 
 setup_logging(os.environ.get("SCORPIO_LOG_LEVEL"))
@@ -32,6 +33,21 @@ def _touch(path: Path, payload: dict | None = None) -> None:
         path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def _timed(stage: str, work_dir: Path, fn) -> None:
+    """Run a task action and append timing into report/timings.json.
+
+    Timings must be best-effort and never break the workflow.
+    """
+    try:
+        from scorpio_pipe.timings import timed_stage
+
+        with timed_stage(work_dir=work_dir, stage=stage):
+            fn()
+    except Exception:
+        # If timings infra fails for any reason, still run the task.
+        fn()
+
+
 _CFG_CACHE: dict | None = None
 
 
@@ -51,7 +67,7 @@ def _cfg_path() -> Path:
             "Config is required. Example (PowerShell):\n"
             "  $env:CONFIG=(Resolve-Path .\\work\\run1\\config.yaml).Path\n"
             "  .\\.venv\\Scripts\\doit.exe -f workflow/dodo.py list\n\n"
-            "Or:  .\\.venv\\Scripts\\doit.exe -f workflow/dodo.py config=work/run1/config.yaml list"
+            "Or:  .\\.venv\\Scripts\\doit.exe -f workflow/dodo.py config=work/<dd_mm_yyyy>/config.yaml list"
         )
 
     p = Path(raw).expanduser()
@@ -76,13 +92,37 @@ def task_manifest():
     work_dir = Path(cfg["work_dir"])
     out = work_dir / "report" / "manifest.json"
 
+    def _action():
+        _timed("manifest", work_dir, lambda: write_manifest(out_path=out, cfg=cfg, cfg_path=_cfg_path()))
+
     return {
-        "actions": [(_touch, (out, cfg))],
+        "actions": [_action],
         "file_dep": [_cfg_path()],
         "targets": [out],
         "clean": True,
     }
 
+def task_qc_report():
+    """Lightweight QC summary (JSON + HTML index)."""
+    cfg = _load_cfg()
+    work_dir = Path(cfg["work_dir"])
+    out_html = work_dir / "report" / "index.html"
+    out_json = work_dir / "report" / "qc_report.json"
+
+    def _action():
+        def _run():
+            from scorpio_pipe.qc_report import build_qc_report
+            build_qc_report(cfg, out_dir=out_html.parent)
+
+        _timed("qc_report", work_dir, _run)
+
+    return {
+        "actions": [_action],
+        "file_dep": [ _cfg_path(), work_dir / "report" / "manifest.json" ],
+        "targets": [out_html, out_json],
+        "task_dep": ["manifest"],
+        "clean": True,
+    }
 
 def task_superbias():
     cfg = _load_cfg()
@@ -92,9 +132,12 @@ def task_superbias():
     bias_list = cfg["frames"].get("bias", [])
 
     def _action():
-        from scorpio_pipe.stages.calib import build_superbias
-        # передаём путь к YAML-конфигу, который задан через $env:CONFIG
-        build_superbias(_cfg_path(), out_path=out)
+        def _run():
+            from scorpio_pipe.stages.calib import build_superbias
+            # передаём путь к YAML-конфигу, который задан через $env:CONFIG
+            build_superbias(_cfg_path(), out_path=out)
+
+        _timed("superbias", work_dir, _run)
 
     return {
         "actions": [_action],
@@ -104,15 +147,67 @@ def task_superbias():
     }
 
 
+def task_superflat():
+    cfg = _load_cfg()
+    work_dir = Path(cfg["work_dir"])
+    out = work_dir / "calib" / "superflat.fits"
+
+    flat_list = cfg["frames"].get("flat", [])
+
+    def _action():
+        def _run():
+            from scorpio_pipe.stages.calib import build_superflat
+            # передаём путь к YAML-конфигу, который задан через $env:CONFIG
+            build_superflat(_cfg_path(), out_path=out)
+
+        _timed("superflat", work_dir, _run)
+
+    return {
+        "actions": [_action],
+        "file_dep": [_cfg_path()] + [Path(p) for p in flat_list],
+        "targets": [out],
+        "clean": True,
+    }
+
+
+def task_cosmics():
+    cfg = _load_cfg()
+    work_dir = Path(cfg["work_dir"])
+    out = work_dir / "cosmics" / "summary.json"
+
+    obj_list = cfg["frames"].get("obj", [])
+    sky_list = cfg["frames"].get("sky", [])
+    file_dep = [_cfg_path()] + [Path(p) for p in obj_list + sky_list]
+
+    def _action():
+        def _run():
+            from scorpio_pipe.stages.cosmics import clean_cosmics
+            clean_cosmics(_cfg_path(), out_dir=out.parent)
+
+        _timed("cosmics", work_dir, _run)
+
+    return {
+        "actions": [_action],
+        "file_dep": file_dep,
+        "targets": [out],
+        "clean": True,
+    }
+
+
 def task_superneon():
     """Build stacked super-neon + candidates."""
     def _action():
         cfg = _load_cfg()
-        from scorpio_pipe.stages.superneon import build_superneon
-        build_superneon(cfg)
+        def _run():
+            from scorpio_pipe.stages.superneon import build_superneon
+            build_superneon(cfg)
+
+        _timed("superneon", Path(cfg["work_dir"]), _run)
 
     cfg = _load_cfg()
     work_dir = Path(cfg["work_dir"])
+    from scorpio_pipe.wavesol_paths import wavesol_dir as _wavesol_dir
+    outdir = _wavesol_dir(cfg)
     neon_list = cfg["frames"].get("neon", [])
 
     # bias subtraction in superneon is optional
@@ -121,9 +216,9 @@ def task_superneon():
 
     superbias = Path(cfg.get("calib", {}).get("superbias_path") or (work_dir / "calib" / "superbias.fits"))
     targets = [
-        work_dir / "wavesol" / "superneon.fits",
-        work_dir / "wavesol" / "superneon.png",
-        work_dir / "wavesol" / "peaks_candidates.csv",
+        outdir / "superneon.fits",
+        outdir / "superneon.png",
+        outdir / "peaks_candidates.csv",
     ]
 
     file_dep = [_cfg_path()] + [Path(p) for p in neon_list]
@@ -143,37 +238,35 @@ def task_superneon():
 def task_lineid_prepare():
     cfg = _load_cfg()
     w = Path(cfg["work_dir"])
-    wavesol_dir = w / "wavesol"
+    from scorpio_pipe.wavesol_paths import wavesol_dir as _wavesol_dir
+    wsol_dir = _wavesol_dir(cfg)
 
-    superneon_fits = wavesol_dir / "superneon.fits"
-    peaks_csv = wavesol_dir / "peaks_candidates.csv"
-    hand_file = wavesol_dir / "hand_pairs.txt"   # итог ручной привязки
+    superneon_fits = wsol_dir / "superneon.fits"
+    peaks_csv = wsol_dir / "peaks_candidates.csv"
+    hand_file = wsol_dir / "hand_pairs.txt"   # итог ручной привязки
 
-    # neon_lines.csv у тебя лежит в корне проекта: C:\Users\frigi\Desktop\scorpio_pipe\neon_lines.csv
-    # разрешаем и относительный вариант:
+    # neon_lines.csv: resolve from work_dir/config_dir/project_root or packaged resource
+    from scorpio_pipe.resource_utils import resolve_resource
     lines_csv = cfg.get("wavesol", {}).get("neon_lines_csv", "neon_lines.csv")
-    lines_path = Path(str(lines_csv))
-    if not lines_path.is_absolute():
-        candidates = [w / lines_path, Path(cfg.get("config_dir", w)) / lines_path, _resolve_from_root(lines_path)]
-        for c in candidates:
-            if c.exists():
-                lines_path = c
-                break
+    lines_path = resolve_resource(lines_csv, work_dir=w, config_dir=Path(cfg.get("config_dir", w)), project_root=Path(cfg.get("project_root", _project_root())), allow_package=True).path
 
     def _action():
-        from scorpio_pipe.stages.lineid import prepare_lineid
-        prepare_lineid(
-            cfg,
-            superneon_fits=superneon_fits,
-            peaks_candidates_csv=peaks_csv,
-            hand_file=hand_file,
-            neon_lines_csv=lines_path,
-            y_half=int(cfg.get("wavesol", {}).get("y_half", 20)),
-        )
+        def _run():
+            from scorpio_pipe.stages.lineid import prepare_lineid
+            prepare_lineid(
+                cfg,
+                superneon_fits=superneon_fits,
+                peaks_candidates_csv=peaks_csv,
+                hand_file=hand_file,
+                neon_lines_csv=lines_path,
+                y_half=int(cfg.get("wavesol", {}).get("y_half", 20)),
+            )
+
+        _timed("lineid_prepare", w, _run)
 
     return {
         "actions": [_action],
-        "file_dep": [Path(cfg["config_path"]), superneon_fits, peaks_csv, lines_path],
+        "file_dep": [_cfg_path(), superneon_fits, peaks_csv, lines_path],
         "targets": [hand_file],
         "verbosity": 2,
     }
@@ -181,17 +274,30 @@ def task_lineid_prepare():
 
 def task_wavesol():
     cfg = _load_cfg()
-    work_dir = Path(cfg["work_dir"])
-    out = work_dir / "wavesol" / "lambda_map.fits"
+    from scorpio_pipe.stages.wavesolution import build_wavesolution
+    from scorpio_pipe.wavesol_paths import wavesol_dir
 
-    neon_list = cfg["frames"].get("neon", [])
-    superbias = Path(cfg.get("calib", {}).get("superbias_path") or (work_dir / "calib" / "superbias.fits"))
+    outdir = wavesol_dir(cfg)
+    superneon_fits = outdir / "superneon.fits"
+    hand_pairs = outdir / "hand_pairs.txt"
+
+    def _action():
+        _timed("wavesolution", Path(cfg["work_dir"]), lambda: build_wavesolution(cfg))
 
     return {
-        "actions": [(_touch, (out, {"stage": "wavesol", "n_neon": len(neon_list)}))],
-        "file_dep": [Path(cfg["config_path"]), superbias] + [Path(p) for p in neon_list],
-        "targets": [out],
-        "task_dep": ["superbias"],
+        "actions": [_action],
+        "file_dep": [_cfg_path(), superneon_fits, hand_pairs],
+        "targets": [
+            outdir / "wavesolution_1d.png",
+            outdir / "wavesolution_1d.json",
+            outdir / "residuals_1d.csv",
+            outdir / "wavesolution_2d.json",
+            outdir / "residuals_2d.csv",
+            outdir / "lambda_map.fits",
+            outdir / "wavelength_matrix.png",
+            outdir / "residuals_2d.png",
+        ],
+        "task_dep": ["superneon", "lineid_prepare"],
         "clean": True,
     }
 
@@ -204,13 +310,26 @@ def task_sky_sub():
     obj_list = cfg["frames"].get("obj", [])
     sky_list = cfg["frames"].get("sky", [])
     superbias = Path(cfg.get("calib", {}).get("superbias_path") or (work_dir / "calib" / "superbias.fits"))
-    lambda_map = work_dir / "wavesol" / "lambda_map.fits"
+    superflat = Path(cfg.get("calib", {}).get("superflat_path") or (work_dir / "calib" / "superflat.fits"))
+    from scorpio_pipe.wavesol_paths import wavesol_dir as _wavesol_dir
+    lambda_map = _wavesol_dir(cfg) / "lambda_map.fits"
+
+    flat_list = cfg["frames"].get("flat", [])
+    file_dep = [_cfg_path(), superbias, lambda_map] + [Path(p) for p in obj_list + sky_list]
+    task_dep = ["wavelength_solution"]
+
+    if flat_list:
+        file_dep.append(superflat)
+        task_dep.append("superflat")
+
+    def _action():
+        _timed("sky_sub", work_dir, lambda: _touch(out, {"stage": "sky_sub", "n_obj": len(obj_list), "n_sky": len(sky_list)}))
 
     return {
-        "actions": [(_touch, (out, {"stage": "sky_sub", "n_obj": len(obj_list), "n_sky": len(sky_list)}))],
-        "file_dep": [Path(cfg["config_path"]), superbias, lambda_map] + [Path(p) for p in obj_list + sky_list],
+        "actions": [_action],
+        "file_dep": file_dep,
         "targets": [out],
-        "task_dep": ["wavelength_solution"],
+        "task_dep": task_dep,
         "clean": True,
     }
 
@@ -226,10 +345,14 @@ def task_linearize():
     out = work_dir / "lin" / "linearize_done.json"
 
     sky_done = work_dir / "sky" / "sky_sub_done.json"
-    lambda_map = work_dir / "wavesol" / "lambda_map.fits"
+    from scorpio_pipe.wavesol_paths import wavesol_dir as _wavesol_dir
+    lambda_map = _wavesol_dir(cfg) / "lambda_map.fits"
+
+    def _action():
+        _timed("linearize", work_dir, lambda: _touch(out, {"stage": "linearize"}))
 
     return {
-        "actions": [(_touch, (out, {"stage": "linearize"}))],
+        "actions": [_action],
         "file_dep": [sky_done, lambda_map],
         "targets": [out],
         "task_dep": ["sky_sub"],
@@ -244,8 +367,11 @@ def task_stack():
 
     lin_done = work_dir / "lin" / "linearize_done.json"
 
+    def _action():
+        _timed("stack", work_dir, lambda: _touch(out, {"stage": "stack"}))
+
     return {
-        "actions": [(_touch, (out, {"stage": "stack"}))],
+        "actions": [_action],
         "file_dep": [lin_done],
         "targets": [out],
         "task_dep": ["linearize"],
@@ -260,8 +386,11 @@ def task_extract1d():
 
     stack_done = work_dir / "stack" / "stack_done.json"
 
+    def _action():
+        _timed("extract1d", work_dir, lambda: _touch(out, {"stage": "extract1d"}))
+
     return {
-        "actions": [(_touch, (out, {"stage": "extract1d"}))],
+        "actions": [_action],
         "file_dep": [stack_done],
         "targets": [out],
         "task_dep": ["stack"],

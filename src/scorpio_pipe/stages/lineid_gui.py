@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import sys
 from typing import Optional, Iterable
 import re
 import numpy as np
@@ -14,6 +15,10 @@ from scorpio_pipe.ui import PdfViewer
 
 
 def _project_root() -> Path:
+    """Project root in source layout and PyInstaller (onefile) builds."""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        return Path(str(meipass)).resolve()
     return Path(__file__).resolve().parents[3]
 
 
@@ -194,6 +199,9 @@ class LineIdInputs:
     title: str
     atlas_pdf: Optional[Path] = None
     atlas_page0: Optional[int] = None  # 0-indexed
+    disperser: str | None = None
+    lam_min_A: float | None = None
+    lam_max_A: float | None = None
     min_amp_default: float | None = None
     min_amp_sigma_k: float = 5.0
 
@@ -221,6 +229,9 @@ def run_lineid_gui(inp: LineIdInputs) -> None:
             self.setWindowFlag(QtCore.Qt.WindowType.WindowMinimizeButtonHint, True)
             self.setSizeGripEnabled(True)
             self.setWindowTitle(inp.title)
+
+            self.lam_min_A = inp.lam_min_A
+            self.lam_max_A = inp.lam_max_A
 
             self.x = inp.x
             self.prof = inp.prof
@@ -318,6 +329,10 @@ def run_lineid_gui(inp: LineIdInputs) -> None:
             rowf.addWidget(QtWidgets.QLabel("Фильтр λ:"))
             self.edit_filter = QtWidgets.QLineEdit()
             self.edit_filter.setPlaceholderText("5400-5700 или 5852.5 или 585")
+            if self.lam_min_A is not None and self.lam_max_A is not None:
+                lo = float(self.lam_min_A); hi = float(self.lam_max_A)
+                if hi > lo:
+                    self.edit_filter.setPlaceholderText(f"Авто-диапазон: {lo:.0f}–{hi:.0f} Å (можно искать по числу)")
             rowf.addWidget(self.edit_filter, 1)
             rlay.addLayout(rowf)
 
@@ -583,6 +598,17 @@ def run_lineid_gui(inp: LineIdInputs) -> None:
         def _filter_lams(self) -> list[float]:
             txt = self.edit_filter.text().strip()
             vals = [v for v in self.ref_lams if v not in self.used]
+
+            # Auto range (per grism) — limit reference lines to the disperser window.
+            if self.lam_min_A is not None and self.lam_max_A is not None:
+                try:
+                    lo = float(self.lam_min_A); hi = float(self.lam_max_A)
+                    if hi < lo:
+                        lo, hi = hi, lo
+                    vals = [v for v in vals if (lo <= float(v) <= hi)]
+                except Exception:
+                    pass
+
             if not txt:
                 return vals
 
@@ -663,6 +689,8 @@ def run_lineid_gui(inp: LineIdInputs) -> None:
             self._refresh_table()
             self._set_status(f"Добавлено: x={x0:.3f} ↔ λ={lam:.2f}")
             self._redraw_markers()
+            # UX: после привязки очистить поле ручного ввода λ
+            self.edit_lam.clear()
 
         def _delete(self):
             row = self.table.currentRow()
@@ -768,14 +796,16 @@ def prepare_lineid(
     if neon_lines_csv is None:
         neon_lines_csv = wcfg.get("neon_lines_csv", "neon_lines.csv")
 
-    neon_lines_csv = Path(str(neon_lines_csv))
-    if not neon_lines_csv.is_absolute():
-        # try work_dir, config_dir, then repo root fallback
-        candidates = [work_dir / neon_lines_csv, base / neon_lines_csv, _resolve_from_root(neon_lines_csv)]
-        for c in candidates:
-            if c.is_file():
-                neon_lines_csv = c
-                break
+    from scorpio_pipe.resource_utils import resolve_resource
+
+    neon_lines_csv_res = resolve_resource(
+        neon_lines_csv,
+        work_dir=work_dir,
+        config_dir=base,
+        project_root=cfg.get("project_root"),
+        allow_package=True,
+    )
+    neon_lines_csv = neon_lines_csv_res.path
 
     img = fits.getdata(superneon_fits).astype(float)
     prof = _profile_1d(img, y_half=y_half)
@@ -788,36 +818,67 @@ def prepare_lineid(
     atlas_pdf = wcfg.get("atlas_pdf", "HeNeAr_atlas.pdf")
     atlas_path: Optional[Path] = None
     if atlas_pdf:
-        p = Path(str(atlas_pdf))
-        if p.is_absolute():
-            atlas_path = p
-        else:
-            for c in (work_dir / p, base / p, _resolve_from_root(p)):
-                if c.is_file():
-                    atlas_path = c
-                    break
+        from scorpio_pipe.resource_utils import resolve_resource_maybe
 
-    # Try to open the relevant atlas page automatically (0-indexed)
+        atlas_res = resolve_resource_maybe(
+            atlas_pdf,
+            work_dir=work_dir,
+            config_dir=base,
+            project_root=cfg.get("project_root"),
+            allow_package=True,
+        )
+        atlas_path = atlas_res.path if atlas_res else None
+
+    # Try to open the relevant atlas page automatically (0-indexed) + set λ window from instrument DB
     setup = (cfg.get("frames", {}) or {}).get("__setup__", {}) or {}
-    disp = str(setup.get("disperser", "")).upper()
-    atlas_page0: Optional[int] = None
-    if "GR300" in disp:
-        atlas_page0 = 0
-    elif "VPHG550" in disp:
-        atlas_page0 = 1
-    elif "VPHG1200G" in disp or "VPHG1200R" in disp:
-        atlas_page0 = 2
-    elif "VPHG1800" in disp and "@" not in disp:
-        atlas_page0 = 3
-    elif "VPHG940" in disp or "VPHG1026" in disp:
-        atlas_page0 = 4
-    elif "1200@540" in disp or "1200@860" in disp:
-        atlas_page0 = 5
-    elif "1800@590" in disp:
-        atlas_page0 = 6
-    elif "2400@415" in disp:
-        atlas_page0 = 7
+    disp_raw = str(setup.get("disperser", "") or "").strip()
+    disp_norm = "".join(ch for ch in disp_raw.upper() if ch.isalnum())
 
+    atlas_page0: Optional[int] = None
+    if disp_norm:
+        # SCORPIO-1 (classic pages)
+        if "GR300" in disp_norm:
+            atlas_page0 = 0
+        elif "VPHG550" in disp_norm and "G" in disp_raw.upper():
+            atlas_page0 = 1
+
+        # SCORPIO-2 (explicit central λ pages) — check these BEFORE generic "1200"/"1800"
+        elif "1200540" in disp_norm or "1200860" in disp_norm:
+            atlas_page0 = 5
+        elif "1800590" in disp_norm:
+            atlas_page0 = 6
+        elif "2400415" in disp_norm:
+            atlas_page0 = 7
+
+        # Fallbacks
+        elif "VPHG1200" in disp_norm:
+            atlas_page0 = 2
+        elif "VPHG1800" in disp_norm:
+            atlas_page0 = 3
+        elif "VPHG940" in disp_norm or "VPHG1026" in disp_norm:
+            atlas_page0 = 4
+
+    # Wavelength window (Å) for filtering the reference line list
+    lam_min_A = None
+    lam_max_A = None
+    try:
+        from scorpio_pipe.instrument_db import find_grism
+
+        inst_name = None
+        inst_section = cfg.get("instrument") if isinstance(cfg.get("instrument"), dict) else {}
+        if isinstance(inst_section, dict):
+            inst_name = str(inst_section.get("name") or "").strip() or None
+        if not inst_name:
+            inst_name = str(setup.get("instrument") or "").strip() or None
+
+        gr = find_grism(inst_name, disp_raw)
+        r = gr.get("range_A") if isinstance(gr, dict) else None
+        if isinstance(r, (list, tuple)) and len(r) == 2:
+            lam_min_A = float(r[0])
+            lam_max_A = float(r[1])
+    except Exception:
+        lam_min_A = None
+        lam_max_A = None
     t = title or f"LineID | {cfg.get('object','OBJECT')}"
     min_amp_default = wcfg.get("gui_min_amp", None)
     min_amp_sigma_k = float(wcfg.get("gui_min_amp_sigma_k", 5.0))
@@ -829,6 +890,9 @@ def prepare_lineid(
         title=t,
         atlas_pdf=atlas_path,
         atlas_page0=atlas_page0,
+        disperser=disp_raw,
+        lam_min_A=lam_min_A,
+        lam_max_A=lam_max_A,
         min_amp_default=(float(min_amp_default) if min_amp_default is not None else None),
         min_amp_sigma_k=min_amp_sigma_k,
     ))

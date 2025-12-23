@@ -1,4 +1,4 @@
-# scorpio-pipe — руководство пользователя (v1.4.2)
+# scorpio-pipe — руководство пользователя (release v4.2)
 
 Пайплайн для первичной редукции длиннощелевых данных SCORPIO (BTA). Проект в активной разработке, но текущая версия уже закрывает:
 
@@ -11,9 +11,13 @@
 
 В корне репозитория лежит файл **HeNeAr_atlas.pdf** (можно заменить своим).
 
-### Что нового в v1.4.2
+### Что нового в v4.2
 
-- Исправлен краш UI при **Run selected** (ошибка `TypeError: ... not 'RunContext'`).
+- Единый **реестр продуктов** (expected outputs) — используется в QC/UI/CLI.
+- **QC report**: `work_dir/report/index.html` + `qc_report.json` с метриками wavesolution/cosmics.
+- **Тайминги** каждого шага: `work_dir/report/timings.json`.
+- `doit`-задачи корректно поддерживают структуру `wavesol/<disperser>/...`.
+- Добавлены простые pytest‑тесты и CI workflow.
 
 ---
 
@@ -93,7 +97,7 @@ $env:CONFIG=(Resolve-Path .\work\ngc2146sat\config.yaml).Path
 После установки проекта в venv появится файл:
 
 ```text
-.venv\Scripts\scorpio-ui.exe
+.venv\Scripts\scorpipe.exe
 ```
 
 Его можно запускать двойным кликом — это **gui‑script**, поэтому окно терминала не открывается.
@@ -116,7 +120,10 @@ $env:CONFIG=(Resolve-Path .\work\ngc2146sat\config.yaml).Path
 ./tools/build_ui_exe.ps1
 ```
 
-После этого `dist/ScorpioPipeUI.exe` можно запускать двойным кликом.
+После этого `./scorpipe.exe` можно запускать двойным кликом.
+
+> Для обычных пользователей проще поставить **setup.exe** из GitHub Releases —
+> он установит Scorpipe и создаст ярлык.
 
 ---
 

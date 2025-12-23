@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from scorpio_pipe.config import load_config
+from scorpio_pipe.manifest import write_manifest
+from scorpio_pipe.validation import validate_config
+from scorpio_pipe.qc_report import build_qc_report
 
 
 log = logging.getLogger("scorpio")
@@ -30,6 +33,13 @@ class RunContext:
 def load_context(cfg_path: str | Path) -> RunContext:
     cfg_path = Path(cfg_path).expanduser().resolve()
     cfg = load_config(cfg_path)
+
+    # Early validation (fail-fast with human-friendly message)
+    rep = validate_config(cfg, strict_paths=False)
+    if not rep.ok:
+        msgs = [f"[{i.code}] {i.message}" for i in rep.errors]
+        raise ValueError("Invalid config\n" + "\n".join(msgs))
+
     work_dir = Path(cfg["work_dir"]).expanduser().resolve()
     return RunContext(cfg_path=cfg_path, cfg=cfg, work_dir=work_dir)
 
@@ -37,8 +47,15 @@ def load_context(cfg_path: str | Path) -> RunContext:
 def run_manifest(ctx: RunContext) -> Path:
     out = ctx.work_dir / "report" / "manifest.json"
     log.info("Write manifest → %s", out)
-    _touch(out, ctx.cfg)
+    write_manifest(out_path=out, cfg=ctx.cfg, cfg_path=ctx.cfg_path)
     return out
+
+
+
+def run_qc_report(ctx: RunContext) -> Path:
+    out = ctx.work_dir / "report" / "index.html"
+    log.info("Build QC report → %s", out)
+    return build_qc_report(ctx.cfg, out_dir=out.parent)
 
 
 def run_superbias(ctx: RunContext) -> Path:
@@ -65,6 +82,14 @@ def run_superneon(ctx: RunContext) -> list[Path]:
         wavesol_dir / "peaks_candidates.csv",
     ]
     return outs
+
+
+def run_cosmics(ctx: RunContext) -> Path:
+    from scorpio_pipe.stages.cosmics import clean_cosmics
+
+    out = ctx.work_dir / "cosmics" / "summary.json"
+    log.info("Clean cosmics → %s", out)
+    return clean_cosmics(ctx.cfg, out_dir=out.parent)
 
 
 def run_lineid_prepare(ctx: RunContext) -> Path:
@@ -127,24 +152,67 @@ def run_wavesolution(ctx: RunContext) -> dict[str, str]:
 
 TASKS: dict[str, callable] = {
     "manifest": run_manifest,
+    "qc_report": run_qc_report,
     "superbias": run_superbias,
+    "cosmics": run_cosmics,
     "superneon": run_superneon,
     "lineid_prepare": run_lineid_prepare,
     "wavesolution": run_wavesolution,
 }
 
 
-def run_sequence(cfg_path: str | Path | RunContext, task_names: list[str]) -> dict[str, object]:
+def run_sequence(
+    cfg_path: str | Path | RunContext,
+    task_names: list[str],
+    *,
+    resume: bool = False,
+    force: bool = False,
+) -> dict[str, object]:
     """Run a sequence of pipeline steps.
 
-    Accepts either a path to config.yaml or a pre-built RunContext.
+    Parameters
+    ----------
+    cfg_path : path | RunContext
+        A path to config.yaml or a pre-built RunContext.
+    task_names : list[str]
+        Task names in execution order.
+    resume : bool
+        If True, skip a task when its expected products already exist.
+    force : bool
+        If True, never skip tasks (even if products exist).
     """
+
+    from scorpio_pipe.timings import append_timing, timed_stage
+    from scorpio_pipe.products import products_for_task, task_is_complete
 
     ctx = cfg_path if isinstance(cfg_path, RunContext) else load_context(cfg_path)
     outputs: dict[str, object] = {}
+
     for name in task_names:
         fn = TASKS.get(name)
         if fn is None:
             raise ValueError(f"Unknown task: {name}")
-        outputs[name] = fn(ctx)
+
+        if resume and not force and task_is_complete(ctx.cfg, name):
+            ps = products_for_task(ctx.cfg, name)
+            try:
+                append_timing(
+                    work_dir=ctx.work_dir,
+                    stage=name,
+                    seconds=0.0,
+                    ok=True,
+                    extra={
+                        "skipped": True,
+                        "reason": "products already exist",
+                        "products": [str(p.path) for p in ps],
+                    },
+                )
+            except Exception:
+                pass
+            outputs[name] = {"skipped": True, "reason": "products already exist"}
+            continue
+
+        with timed_stage(work_dir=ctx.work_dir, stage=name):
+            outputs[name] = fn(ctx)
+
     return outputs

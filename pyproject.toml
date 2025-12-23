@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scorpio-pipe"
-version = "0.1.2"
+version = "0.2.7"
 requires-python = ">=3.10"
 dependencies = [
   "astropy>=6",
@@ -32,12 +32,19 @@ science = [
   "scipy>=1.10"
 ]
 
+# Dev tooling (tests / lint). Optional.
+dev = [
+  "pytest>=8",
+  "ruff>=0.7"
+]
+
 [project.scripts]
 scorpio-pipe = "scorpio_pipe.cli:main"
 
 [project.gui-scripts]
 # Windows: creates a no-console launcher (pythonw) so the UI can be started by double click.
 scorpio-ui = "scorpio_pipe.ui.launcher_app:main"
+scorpipe = "scorpio_pipe.ui.launcher_app:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

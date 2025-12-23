@@ -1,5 +1,5 @@
 param(
-  [string]$Name = "ScorpioPipeUI"
+  [string]$Name = "scorpipe"
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,9 +28,12 @@ pyinstaller `
   --workpath "build\pyinstaller" `
   --specpath "build\pyinstaller" `
   --paths "src" `
+  --add-data "src\scorpio_pipe\resources;scorpio_pipe\resources" `
   --hidden-import "PySide6.QtPdf" `
   --hidden-import "PySide6.QtPdfWidgets" `
   --hidden-import "pymupdf" `
+  --hidden-import "fitz" `
+  --hidden-import "pyqtgraph" `
   "tools\run_ui.py"
 
 Write-Host "Done. EXE is in .\$Name.exe" -ForegroundColor Green
