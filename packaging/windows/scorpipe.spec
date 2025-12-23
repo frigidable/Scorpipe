@@ -13,7 +13,14 @@ from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
-ROOT = Path(__file__).resolve().parents[2]
+import os
+
+ROOT = Path(os.environ.get("SCORPIPE_REPO_ROOT", Path.cwd())).resolve()
+# sanity: if run from packaging/windows, climb to repo root
+if not (ROOT / "pyproject.toml").exists() and (ROOT / ".." / "pyproject.toml").exists():
+    ROOT = (ROOT / "..").resolve()
+if not (ROOT / "pyproject.toml").exists() and (ROOT / ".." / ".." / "pyproject.toml").exists():
+    ROOT = (ROOT / ".." / "..").resolve()
 
 block_cipher = None
 

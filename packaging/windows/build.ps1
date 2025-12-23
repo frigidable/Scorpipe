@@ -49,6 +49,10 @@ function Invoke-Logged {
 
 Write-Host "[Scorpipe] Windows build" -ForegroundColor Cyan
 
+# Repo root for PyInstaller spec (do not rely on __file__ in spec)
+$env:SCORPIPE_REPO_ROOT = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+Write-Host "[Scorpipe] Repo root: $env:SCORPIPE_REPO_ROOT" -ForegroundColor DarkCyan
+
 if (-not $SkipInstall) {
   python -m pip install -U pip
   pip install -e ".[gui]"
