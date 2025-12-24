@@ -29,6 +29,16 @@ EXPECTED_COLUMNS = [
 ]
 
 
+# Stable display order for frame kinds (used by UI browsers)
+KIND_ORDER = [
+    'bias',
+    'flat',
+    'neon',
+    'obj',
+    'sky',
+    'sunsky',
+]
+
 def _binning_from_header(hdr) -> str:
     """Return binning as 'Bx×By' when possible, else ''."""
     # common formats: CCDSUM='1 1', BINNING='1x1', BINX/BINY, CDELT1? (not reliable)
@@ -121,7 +131,10 @@ def classify_frame(header) -> str:
     if re.search(r"\b(NEON|LAMP|ARC|AR|HG|HE)\b", obj_tokens) or "ARC" in im_n:
         return "neon"
 
-    # sky
+    # sky / sunsky
+    # NOTE: some observers mark scattered-light frames as "sunsky"; keep it separate from normal sky.
+    if "SUNSKY" in obj_n:
+        return "sunsky"
     if "SKY" in obj_n:
         return "sky"
 

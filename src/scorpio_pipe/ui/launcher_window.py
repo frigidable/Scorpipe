@@ -113,9 +113,9 @@ def _detect_pipeline_root() -> Path:
         if getattr(sys, "frozen", False):
             # In a Windows installer build the executable usually lives under
             # Program Files which is not writable for a normal user.
-            from scorpio_pipe.app_paths import ensure_dir, user_data_root
-
-            return ensure_dir(user_data_root("Scorpipe"))
+            # Prefer the install folder for the default workspace suggestion.
+            # If it is not writable, we will fall back in _suggest_work_dir().
+            return Path(sys.executable).resolve().parent
     except Exception:
         pass
 
@@ -178,9 +178,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
             "2  Config & setup",
             "3  Calibrations",
             "4  Clean Cosmics",
-            "5  SuperNeon",
-            "6  Line ID",
-            "7  Wavelength solution",
+            "5  Flat-fielding (optional)",
+            "6  SuperNeon",
+            "7  Line ID",
+            "8  Wavelength solution",
         ]:
             it = QtWidgets.QListWidgetItem(title)
             it.setIcon(self._icon_status("idle"))
@@ -200,6 +201,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.page_config = self._build_page_config()
         self.page_calib = self._build_page_calib()
         self.page_cosmics = self._build_page_cosmics()
+        self.page_flatfield = self._build_page_flatfield()
         self.page_superneon = self._build_page_superneon()
         self.page_lineid = self._build_page_lineid()
         self.page_wavesol = self._build_page_wavesol()
@@ -208,6 +210,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.page_config,
             self.page_calib,
             self.page_cosmics,
+            self.page_flatfield,
             self.page_superneon,
             self.page_lineid,
             self.page_wavesol,
@@ -223,7 +226,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.dock_log = QtWidgets.QDockWidget("Log", self)
         self.dock_log.setObjectName("dock_log")
         self.dock_log.setWidget(self.log_view)
-        self.dock_log.setAllowedAreas(QtCore.Qt.BottomDockWidgetArea | QtCore.Qt.TopDockWidgetArea)
+        self.dock_log.setAllowedAreas(QtCore.Qt.BottomDockWidgetArea)
+        # Keep log panel stable: resize only, no float/close/move
+        self.dock_log.setFeatures(QtWidgets.QDockWidget.NoDockWidgetFeatures)
+        self.dock_log.setFloating(False)
         self.addDockWidget(QtCore.Qt.BottomDockWidgetArea, self.dock_log)
         self.dock_log.setMinimumHeight(160)
 
@@ -347,12 +353,19 @@ class LauncherWindow(QtWidgets.QMainWindow):
         row2.addWidget(self.btn_open_cfg)
         gl.addRow("Config file", row2)
 
-        # Inspect
+        # Inspect + quick preview (Frames Browser for this stage)
         self.btn_inspect = QtWidgets.QPushButton("Inspect dataset")
         self.btn_inspect.setProperty("primary", True)
+        self.btn_frames_project = QtWidgets.QPushButton("Frames…")
+        self.btn_frames_project.setToolTip("Open Frames Browser for the Project stage")
         self.lbl_inspect = QtWidgets.QLabel("—")
         self.lbl_inspect.setWordWrap(True)
-        gl.addRow(self.btn_inspect, self.lbl_inspect)
+
+        row_ins = QtWidgets.QHBoxLayout()
+        row_ins.addWidget(self.btn_inspect)
+        row_ins.addWidget(self.btn_frames_project)
+        row_ins.addStretch(1)
+        gl.addRow(row_ins, self.lbl_inspect)
 
         # Overview (filled after Inspect)
         self.g_overview = _box("Dataset overview")
@@ -381,14 +394,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_batch_configs.clicked.connect(self._batch_build_configs)
         self.btn_batch_run.clicked.connect(self._batch_run)
 
-        # Frame browser (table + preview)
-        self.g_frames = _box("Frames browser")
-        lay.addWidget(self.g_frames, 1)
-        fl = QtWidgets.QVBoxLayout(self.g_frames)
-        self.frame_browser = FrameBrowser()
-        fl.addWidget(self.frame_browser, 1)
-        # Use selected frame as a setup template
-        self.frame_browser.useSetupRequested.connect(self._use_setup_from_frame)
+        # (Frames Browser is exposed via a compact button and a global toolbar action.)
 
         # Actions
         act = QtWidgets.QHBoxLayout()
@@ -402,6 +408,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_pick_data_dir.clicked.connect(self._pick_data_dir)
         self.btn_open_cfg.clicked.connect(self._open_existing_cfg)
         self.btn_inspect.clicked.connect(self._do_inspect)
+        self.btn_frames_project.clicked.connect(lambda: self._open_frames_window('project'))
         self.btn_to_config.clicked.connect(lambda: self.steps.setCurrentRow(1))
         self.edit_data_dir.textChanged.connect(lambda *_: self._update_enables())
         self.edit_data_dir.textChanged.connect(lambda *_: self._refresh_statusbar())
@@ -430,11 +437,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.lbl_inspect.setText(msg)
             self._populate_objects_from_inspect()
             self._refresh_overview_from_inspect()
-            try:
-                if hasattr(self, "frame_browser") and getattr(self._inspect, "table", None) is not None:
-                    self.frame_browser.set_frames_df(self._inspect.table)
-            except Exception:
-                pass
             # If work dir is still empty, auto-suggest a sensible default.
             try:
                 if (not self.edit_work_dir.text().strip()) and (not getattr(self, "_workdir_user_edited", False)):
@@ -462,7 +464,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             vc = df['kind'].value_counts(dropna=False).to_dict() if 'kind' in df.columns else {}
             total = int(len(df))
             lines = [f"Total frames: {total}"]
-            for k in ['obj', 'sky', 'neon', 'flat', 'bias']:
+            for k in ['obj', 'sky', 'sunsky', 'neon', 'flat', 'bias']:
                 lines.append(f"{k}: {int(vc.get(k, 0))}")
 
             # Quick setup diversity hints (dispersers/slits/binning)
@@ -544,7 +546,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
             dd, mm, yyyy = int(now.day), int(now.month), int(now.year)
         else:
             dd, mm, yyyy = dmy
-        base = Path(root) / 'work' / f'{dd:02d}_{mm:02d}_{yyyy:04d}'
+        from scorpio_pipe.app_paths import pick_workspace_root
+        base = pick_workspace_root(Path(root) if root else None) / f'{dd:02d}_{mm:02d}_{yyyy:04d}'
 
         made: list[Path] = []
         self._log_info(f'Batch: building configs for {len(objs)} objects → {base}')
@@ -598,7 +601,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
             dd, mm, yyyy = int(now.day), int(now.month), int(now.year)
         else:
             dd, mm, yyyy = dmy
-        base = Path(root) / 'work' / f'{dd:02d}_{mm:02d}_{yyyy:04d}'
+        from scorpio_pipe.app_paths import pick_workspace_root
+        base = pick_workspace_root(Path(root) if root else None) / f'{dd:02d}_{mm:02d}_{yyyy:04d}'
 
         cfgs: list[tuple[str, Path]] = []
         for obj in objs:
@@ -668,6 +672,45 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._log_exception(e)
 
 
+
+
+    def _open_frames_window(self, stage_key: str) -> None:
+        """Open a non-modal per-stage Frames Browser window."""
+        try:
+            from scorpio_pipe.ui.stage_frames_window import StageFramesWindow
+
+            if not hasattr(self, '_frames_windows'):
+                self._frames_windows = {}
+
+            win = self._frames_windows.get(stage_key)
+            if win is None:
+                win = StageFramesWindow(stage_key, parent=self)
+                if stage_key == 'project':
+                    try:
+                        win.useSetupRequested.connect(self._use_setup_from_frame)
+                    except Exception:
+                        pass
+                self._frames_windows[stage_key] = win
+
+            inspect_df = None
+            data_dir = None
+            try:
+                if getattr(self, '_inspect', None) is not None:
+                    inspect_df = getattr(self._inspect, 'table', None)
+                    data_dir = getattr(self._inspect, 'data_dir', None)
+            except Exception:
+                pass
+
+            if stage_key == 'project':
+                win.set_context(getattr(self, '_cfg', None), inspect_df=inspect_df, data_dir=data_dir)
+            else:
+                win.set_context(getattr(self, '_cfg', None))
+
+            win.show()
+            win.raise_()
+            win.activateWindow()
+        except Exception as e:
+            self._log_exception(e)
     def _open_existing_cfg(self) -> None:
         fn, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open config", str(Path.home()), "YAML (*.yaml *.yml)")
         if not fn:
@@ -966,19 +1009,20 @@ class LauncherWindow(QtWidgets.QMainWindow):
     def _suggest_work_dir(self) -> None:
         """Suggest a default (smart) work directory.
 
-        Base convention: `<pipeline_root>/work/<dd_mm_yyyy>/`.
+        Base convention: `<workspace_root>/<dd_mm_yyyy>/`.
+
+        Strategy (C-2 safe):
+          - try `<install_dir>/workspace/<night>/...` when writable
+          - otherwise fallback to `<LocalAppData>/Scorpipe/workspace/<night>/...`
 
         Smart mode:
           - If the night folder is empty -> use it (single-run, no extra nesting).
           - If it already contains a different run -> use `<night>/<object>/<disperser>/`
             (and add suffixes to avoid collisions).
         """
-        import re as _re
 
         from scorpio_pipe.workdir import RunSignature, pick_smart_run_dir
-
-        data_dir = Path(self.edit_data_dir.text()).expanduser()
-        root = getattr(self, "_pipeline_root", None) or (data_dir.parent if data_dir.exists() else Path.home())
+        from scorpio_pipe.app_paths import pick_workspace_root
 
         dmy = self._infer_night_date_parts()
         if dmy is None:
@@ -988,7 +1032,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
             dd, mm, yyyy = dmy
 
         night_dir = f"{dd:02d}_{mm:02d}_{yyyy:04d}"
-        base = Path(root) / "work" / night_dir
+        ws_root = pick_workspace_root(getattr(self, "_pipeline_root", None))
+        base = ws_root / night_dir
 
         # If we already know target+setup, apply the smart collision-free picker.
         try:
@@ -1373,12 +1418,14 @@ class LauncherWindow(QtWidgets.QMainWindow):
             return False
         self._cfg = cfg
         self._refresh_outputs_panels()
+        self._sync_stage_controls_from_cfg()
         return True
 
     def _refresh_outputs_panels(self) -> None:
         mapping = [
             ("outputs_calib", None),
             ("outputs_cosmics", "cosmics"),
+            ("outputs_flatfield", "flatfield"),
             ("outputs_superneon", "wavesol"),
             ("outputs_lineid", "wavesol"),
             ("outputs_wavesol", "wavesol"),
@@ -1456,6 +1503,107 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
     # --------------------------- page: calibrations ---------------------------
 
+
+
+    def _cfg_get(self, cfg: dict[str, Any] | None, path: list[str], default: Any = None) -> Any:
+        cur: Any = cfg or {}
+        for key in path:
+            if not isinstance(cur, dict) or key not in cur:
+                return default
+            cur = cur[key]
+        return cur
+
+    def _editor_patch_cfg(self, mutator) -> None:
+        """Safely patch YAML in the editor and resync internal config."""
+        # The single source of truth is the YAML editor shown on the Config page.
+        txt = self.editor_yaml.toPlainText()
+        cfg, err = _safe_parse_yaml(txt)
+        if err or not isinstance(cfg, dict):
+            self._log_warn(f"Cannot update YAML: {err or 'invalid YAML'}")
+            return
+        try:
+            mutator(cfg)
+        except Exception as e:
+            self._log_exception(e)
+            return
+        new_txt = _yaml_dump(cfg)
+        # Avoid re-entrant loops: block editor signals while setting text
+        try:
+            blocker = QtCore.QSignalBlocker(self.editor_yaml)
+        except Exception:
+            blocker = None
+        self.editor_yaml.setPlainText(new_txt)
+        if blocker is not None:
+            del blocker
+        # Resync internal config + validate
+        self._sync_cfg_from_editor()
+
+    def _cfg_set_path(self, path: list[str], value: Any) -> None:
+        def mut(cfg: dict[str, Any]) -> None:
+            cur = cfg
+            for k in path[:-1]:
+                if k not in cur or not isinstance(cur[k], dict):
+                    cur[k] = {}
+                cur = cur[k]
+            cur[path[-1]] = value
+        self._editor_patch_cfg(mut)
+
+    def _cfg_set_apply_to(self, block_key: str, enabled: list[str]) -> None:
+        # Preserve a stable order in YAML for readability
+        order = ['obj', 'sky', 'sunsky', 'neon', 'flat', 'bias']
+        enabled_sorted = [k for k in order if k in enabled] + [k for k in enabled if k not in order]
+        self._cfg_set_path([block_key, 'apply_to'], enabled_sorted)
+
+    def _sync_stage_controls_from_cfg(self) -> None:
+        cfg = getattr(self, '_cfg', None)
+        if not isinstance(cfg, dict):
+            return
+
+        # --- Cosmics ---
+        if hasattr(self, 'chk_cosmics_obj'):
+            apply_to = set(self._cfg_get(cfg, ['cosmics', 'apply_to'], []) or [])
+            for name, cb in [
+                ('obj', getattr(self, 'chk_cosmics_obj', None)),
+                ('sky', getattr(self, 'chk_cosmics_sky', None)),
+                ('sunsky', getattr(self, 'chk_cosmics_sunsky', None)),
+                ('neon', getattr(self, 'chk_cosmics_neon', None)),
+            ]:
+                if cb is None:
+                    continue
+                with QtCore.QSignalBlocker(cb):
+                    cb.setChecked(name in apply_to)
+            if hasattr(self, 'spin_cosmics_k'):
+                with QtCore.QSignalBlocker(self.spin_cosmics_k):
+                    self.spin_cosmics_k.setValue(int(self._cfg_get(cfg, ['cosmics', 'k'], 5) or 5))
+            if hasattr(self, 'chk_cosmics_bias'):
+                with QtCore.QSignalBlocker(self.chk_cosmics_bias):
+                    self.chk_cosmics_bias.setChecked(bool(self._cfg_get(cfg, ['cosmics', 'bias_subtract'], True)))
+            if hasattr(self, 'chk_cosmics_png'):
+                with QtCore.QSignalBlocker(self.chk_cosmics_png):
+                    self.chk_cosmics_png.setChecked(bool(self._cfg_get(cfg, ['cosmics', 'save_png'], True)))
+
+        # --- Flatfield ---
+        if hasattr(self, 'chk_flat_enabled'):
+            with QtCore.QSignalBlocker(self.chk_flat_enabled):
+                self.chk_flat_enabled.setChecked(bool(self._cfg_get(cfg, ['flatfield', 'enabled'], False)))
+            apply_to = set(self._cfg_get(cfg, ['flatfield', 'apply_to'], []) or [])
+            for name, cb in [
+                ('obj', getattr(self, 'chk_flat_obj', None)),
+                ('sky', getattr(self, 'chk_flat_sky', None)),
+                ('sunsky', getattr(self, 'chk_flat_sunsky', None)),
+                ('neon', getattr(self, 'chk_flat_neon', None)),
+            ]:
+                if cb is None:
+                    continue
+                with QtCore.QSignalBlocker(cb):
+                    cb.setChecked(name in apply_to)
+            if hasattr(self, 'chk_flat_bias'):
+                with QtCore.QSignalBlocker(self.chk_flat_bias):
+                    self.chk_flat_bias.setChecked(bool(self._cfg_get(cfg, ['flatfield', 'bias_subtract'], True)))
+            if hasattr(self, 'chk_flat_png'):
+                with QtCore.QSignalBlocker(self.chk_flat_png):
+                    self.chk_flat_png.setChecked(bool(self._cfg_get(cfg, ['flatfield', 'save_png'], True)))
+
     def _build_page_calib(self) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(w)
@@ -1484,8 +1632,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_run_calib = QtWidgets.QPushButton("Run: Manifest + Superbias")
         self.btn_run_calib.setProperty("primary", True)
         self.btn_qc_calib = QtWidgets.QPushButton("QC")
+        self.btn_frames_calib = QtWidgets.QPushButton("Frames…")
+        self.btn_frames_calib.setToolTip("Open Frames Browser for the Calibrations stage")
         row.addWidget(self.btn_run_calib)
         row.addWidget(self.btn_qc_calib)
+        row.addWidget(self.btn_frames_calib)
         row.addStretch(1)
         gl.addLayout(row)
         l.addStretch(1)
@@ -1509,6 +1660,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         self.btn_run_calib.clicked.connect(self._do_run_calib)
         self.btn_qc_calib.clicked.connect(self._open_qc_viewer)
+        self.btn_frames_calib.clicked.connect(lambda: self._open_frames_window('calib'))
         self.btn_to_cosmics.clicked.connect(lambda: self.steps.setCurrentRow(3))
         return w
 
@@ -1556,12 +1708,44 @@ class LauncherWindow(QtWidgets.QMainWindow):
         lbl.setWordWrap(True)
         gl.addWidget(lbl)
 
+        # --- per-stage params ---
+        form = QtWidgets.QFormLayout()
+        form.setLabelAlignment(QtCore.Qt.AlignLeft)
+
+        # Apply-to
+        apply_row = QtWidgets.QHBoxLayout()
+        self.chk_cosmics_obj = QtWidgets.QCheckBox("obj")
+        self.chk_cosmics_sky = QtWidgets.QCheckBox("sky")
+        self.chk_cosmics_sunsky = QtWidgets.QCheckBox("sunsky")
+        self.chk_cosmics_neon = QtWidgets.QCheckBox("neon")
+        for cb in (self.chk_cosmics_obj, self.chk_cosmics_sky, self.chk_cosmics_sunsky, self.chk_cosmics_neon):
+            apply_row.addWidget(cb)
+        apply_row.addStretch(1)
+        form.addRow("Apply to", apply_row)
+
+        # Parameters
+        self.spin_cosmics_k = QtWidgets.QSpinBox()
+        self.spin_cosmics_k.setRange(1, 99)
+        self.spin_cosmics_k.setValue(5)
+        self.spin_cosmics_k.setToolTip("Median window size (pixels). Larger is more aggressive.")
+        form.addRow("Median window (k)", self.spin_cosmics_k)
+
+        self.chk_cosmics_bias = QtWidgets.QCheckBox("Subtract superbias before cleaning")
+        self.chk_cosmics_png = QtWidgets.QCheckBox("Save QC PNGs (coverage/sum)")
+        form.addRow("", self.chk_cosmics_bias)
+        form.addRow("", self.chk_cosmics_png)
+
+        gl.addLayout(form)
+
         row = QtWidgets.QHBoxLayout()
         self.btn_run_cosmics = QtWidgets.QPushButton("Run: Clean cosmics")
         self.btn_run_cosmics.setProperty("primary", True)
         self.btn_qc_cosmics = QtWidgets.QPushButton("QC")
+        self.btn_frames_cosmics = QtWidgets.QPushButton("Frames…")
+        self.btn_frames_cosmics.setToolTip("Open Frames Browser for the Cosmics stage")
         row.addWidget(self.btn_run_cosmics)
         row.addWidget(self.btn_qc_cosmics)
+        row.addWidget(self.btn_frames_cosmics)
         row.addStretch(1)
         gl.addLayout(row)
         l.addStretch(1)
@@ -1577,13 +1761,36 @@ class LauncherWindow(QtWidgets.QMainWindow):
         lay.addWidget(_hline())
         foot = QtWidgets.QHBoxLayout()
         lay.addLayout(foot)
-        self.btn_to_superneon = QtWidgets.QPushButton("Go to SuperNeon →")
+        self.btn_to_flatfield = QtWidgets.QPushButton("Go to Flat-fielding →")
         foot.addStretch(1)
-        foot.addWidget(self.btn_to_superneon)
+        foot.addWidget(self.btn_to_flatfield)
 
         self.btn_run_cosmics.clicked.connect(self._do_run_cosmics)
         self.btn_qc_cosmics.clicked.connect(self._open_qc_viewer)
-        self.btn_to_superneon.clicked.connect(lambda: self.steps.setCurrentRow(4))
+        self.btn_frames_cosmics.clicked.connect(lambda: self._open_frames_window('cosmics'))
+        self.btn_to_flatfield.clicked.connect(lambda: self.steps.setCurrentRow(4))
+
+        # wire per-stage controls → YAML
+        def _apply_to_from_ui() -> list[str]:
+            out: list[str] = []
+            if self.chk_cosmics_obj.isChecked():
+                out.append('obj')
+            if self.chk_cosmics_sky.isChecked():
+                out.append('sky')
+            if self.chk_cosmics_sunsky.isChecked():
+                out.append('sunsky')
+            if self.chk_cosmics_neon.isChecked():
+                out.append('neon')
+            return out
+
+        for cb in (self.chk_cosmics_obj, self.chk_cosmics_sky, self.chk_cosmics_sunsky, self.chk_cosmics_neon):
+            cb.toggled.connect(lambda *_: self._cfg_set_apply_to('cosmics', _apply_to_from_ui()))
+        self.spin_cosmics_k.valueChanged.connect(lambda v: self._cfg_set_path(['cosmics', 'k'], int(v)))
+        self.chk_cosmics_bias.toggled.connect(lambda v: self._cfg_set_path(['cosmics', 'bias_subtract'], bool(v)))
+        self.chk_cosmics_png.toggled.connect(lambda v: self._cfg_set_path(['cosmics', 'save_png'], bool(v)))
+
+        # initial sync from YAML
+        self._sync_stage_controls_from_cfg()
         return w
 
     def _do_run_cosmics(self) -> None:
@@ -1603,6 +1810,133 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._maybe_auto_qc()
         except Exception as e:
             self._set_step_status(3, "fail")
+            self._log_exception(e)
+
+    # --------------------------- page: flatfield ---------------------------
+
+    def _build_page_flatfield(self) -> QtWidgets.QWidget:
+        w = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(w)
+        lay.setSpacing(12)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        lay.addWidget(splitter, 1)
+
+        left = QtWidgets.QWidget()
+        l = QtWidgets.QVBoxLayout(left)
+        l.setSpacing(12)
+
+        g = _box("Flat-fielding (optional)")
+        l.addWidget(g)
+        gl = QtWidgets.QVBoxLayout(g)
+        lbl = QtWidgets.QLabel(
+            "Apply flat-field correction after Cosmics.\n"
+            "For each object, only flats with matching OBJECT in the nightlog are used.\n"
+            "Superbias is subtracted before building and applying the flat."
+        )
+        lbl.setWordWrap(True)
+        gl.addWidget(lbl)
+
+        form = QtWidgets.QFormLayout()
+        form.setLabelAlignment(QtCore.Qt.AlignLeft)
+
+        self.chk_flat_enabled = QtWidgets.QCheckBox("Enable flat-fielding")
+        self.chk_flat_enabled.setToolTip("If disabled, the stage is skipped.")
+        form.addRow("", self.chk_flat_enabled)
+
+        apply_row = QtWidgets.QHBoxLayout()
+        self.chk_flat_obj = QtWidgets.QCheckBox("obj")
+        self.chk_flat_sky = QtWidgets.QCheckBox("sky")
+        self.chk_flat_sunsky = QtWidgets.QCheckBox("sunsky")
+        self.chk_flat_neon = QtWidgets.QCheckBox("neon")
+        for cb in (self.chk_flat_obj, self.chk_flat_sky, self.chk_flat_sunsky, self.chk_flat_neon):
+            apply_row.addWidget(cb)
+        apply_row.addStretch(1)
+        form.addRow("Apply to", apply_row)
+
+        self.chk_flat_bias = QtWidgets.QCheckBox("Subtract superbias")
+        self.chk_flat_bias.setToolTip("Recommended: keep enabled for stable flat-fielding")
+        self.chk_flat_png = QtWidgets.QCheckBox("Save QC PNGs")
+        form.addRow("", self.chk_flat_bias)
+        form.addRow("", self.chk_flat_png)
+
+        gl.addLayout(form)
+
+        row = QtWidgets.QHBoxLayout()
+        self.btn_run_flatfield = QtWidgets.QPushButton("Run: Flat-fielding")
+        self.btn_run_flatfield.setProperty("primary", True)
+        self.btn_qc_flatfield = QtWidgets.QPushButton("QC")
+        self.btn_frames_flatfield = QtWidgets.QPushButton("Frames…")
+        self.btn_frames_flatfield.setToolTip("Open Frames Browser for the Flat-fielding stage")
+        row.addWidget(self.btn_run_flatfield)
+        row.addWidget(self.btn_qc_flatfield)
+        row.addWidget(self.btn_frames_flatfield)
+        row.addStretch(1)
+        gl.addLayout(row)
+
+        l.addStretch(1)
+        splitter.addWidget(left)
+
+        self.outputs_flatfield = OutputsPanel()
+        self.outputs_flatfield.set_context(self._cfg, stage="flatfield")
+        splitter.addWidget(self.outputs_flatfield)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([650, 480])
+
+        lay.addWidget(_hline())
+        foot = QtWidgets.QHBoxLayout()
+        lay.addLayout(foot)
+        self.btn_to_superneon = QtWidgets.QPushButton("Go to SuperNeon →")
+        foot.addStretch(1)
+        foot.addWidget(self.btn_to_superneon)
+
+        # actions
+        self.btn_run_flatfield.clicked.connect(self._do_run_flatfield)
+        self.btn_qc_flatfield.clicked.connect(self._open_qc_viewer)
+        self.btn_frames_flatfield.clicked.connect(lambda: self._open_frames_window('flatfield'))
+        self.btn_to_superneon.clicked.connect(lambda: self.steps.setCurrentRow(5))
+
+        # wire controls → YAML
+        def _apply_to_from_ui() -> list[str]:
+            out: list[str] = []
+            if self.chk_flat_obj.isChecked():
+                out.append('obj')
+            if self.chk_flat_sky.isChecked():
+                out.append('sky')
+            if self.chk_flat_sunsky.isChecked():
+                out.append('sunsky')
+            if self.chk_flat_neon.isChecked():
+                out.append('neon')
+            return out
+
+        self.chk_flat_enabled.toggled.connect(lambda v: self._cfg_set_path(['flatfield', 'enabled'], bool(v)))
+        for cb in (self.chk_flat_obj, self.chk_flat_sky, self.chk_flat_sunsky, self.chk_flat_neon):
+            cb.toggled.connect(lambda *_: self._cfg_set_apply_to('flatfield', _apply_to_from_ui()))
+        self.chk_flat_bias.toggled.connect(lambda v: self._cfg_set_path(['flatfield', 'bias_subtract'], bool(v)))
+        self.chk_flat_png.toggled.connect(lambda v: self._cfg_set_path(['flatfield', 'save_png'], bool(v)))
+
+        self._sync_stage_controls_from_cfg()
+        return w
+
+    def _do_run_flatfield(self) -> None:
+        if not self._ensure_cfg_saved():
+            return
+        self._set_step_status(4, "running")
+        try:
+            ctx = load_context(self._cfg_path)
+            run_sequence(ctx, ["flatfield"])
+            self._log_info("Flat-fielding done")
+            try:
+                if hasattr(self, "outputs_flatfield"):
+                    self.outputs_flatfield.set_context(self._cfg, stage="flatfield")
+            except Exception:
+                pass
+            self._set_step_status(4, "ok")
+            self._maybe_auto_qc()
+        except Exception as e:
+            self._set_step_status(4, "fail")
             self._log_exception(e)
 
     # --------------------------- page: superneon ---------------------------
@@ -1634,8 +1968,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_run_superneon = QtWidgets.QPushButton("Run: SuperNeon")
         self.btn_run_superneon.setProperty("primary", True)
         self.btn_qc_superneon = QtWidgets.QPushButton("QC")
+        self.btn_frames_superneon = QtWidgets.QPushButton("Frames…")
+        self.btn_frames_superneon.setToolTip("Open Frames Browser for the SuperNeon stage")
         row.addWidget(self.btn_run_superneon)
         row.addWidget(self.btn_qc_superneon)
+        row.addWidget(self.btn_frames_superneon)
         row.addStretch(1)
         gl.addLayout(row)
         l.addStretch(1)
@@ -1657,13 +1994,14 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         self.btn_run_superneon.clicked.connect(self._do_run_superneon)
         self.btn_qc_superneon.clicked.connect(self._open_qc_viewer)
-        self.btn_to_lineid.clicked.connect(lambda: self.steps.setCurrentRow(5))
+        self.btn_frames_superneon.clicked.connect(lambda: self._open_frames_window('superneon'))
+        self.btn_to_lineid.clicked.connect(lambda: self.steps.setCurrentRow(6))
         return w
 
     def _do_run_superneon(self) -> None:
         if not self._ensure_cfg_saved():
             return
-        self._set_step_status(4, "running")
+        self._set_step_status(5, "running")
         try:
             ctx = load_context(self._cfg_path)
             run_sequence(ctx, ["superneon"])
@@ -1673,10 +2011,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     self.outputs_superneon.set_context(self._cfg, stage="wavesol")
             except Exception:
                 pass
-            self._set_step_status(4, "ok")
+            self._set_step_status(5, "ok")
             self._maybe_auto_qc()
         except Exception as e:
-            self._set_step_status(4, "fail")
+            self._set_step_status(5, "fail")
             self._log_exception(e)
 
     # --------------------------- page: lineid ---------------------------
@@ -1706,8 +2044,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_open_lineid = QtWidgets.QPushButton("Open LineID GUI")
         self.btn_open_lineid.setProperty("primary", True)
         self.btn_qc_lineid = QtWidgets.QPushButton("QC")
+        self.btn_frames_lineid = QtWidgets.QPushButton("Frames…")
+        self.btn_frames_lineid.setToolTip("Open Frames Browser for the LineID stage")
         row1.addWidget(self.btn_open_lineid)
         row1.addWidget(self.btn_qc_lineid)
+        row1.addWidget(self.btn_frames_lineid)
         row1.addStretch(1)
         gl.addLayout(row1)
 
@@ -1757,6 +2098,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         self.btn_open_lineid.clicked.connect(self._do_open_lineid)
         self.btn_qc_lineid.clicked.connect(self._open_qc_viewer)
+        self.btn_frames_lineid.clicked.connect(lambda: self._open_frames_window('lineid'))
         self.btn_use_pair_set.clicked.connect(self._do_use_pair_set)
         self.btn_copy_pair_set.clicked.connect(self._do_copy_pair_set)
         self.btn_save_workdir_pairs.clicked.connect(self._do_save_workdir_pairs)
@@ -1764,7 +2106,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.act_export_selected_pair_set.triggered.connect(self._do_export_selected_pair_set)
         self.act_export_current_pairs.triggered.connect(self._do_export_current_pairs)
         self.act_export_user_library_zip.triggered.connect(self._do_export_user_library_zip)
-        self.btn_to_wavesol.clicked.connect(lambda: self.steps.setCurrentRow(6))
+        self.btn_to_wavesol.clicked.connect(lambda: self.steps.setCurrentRow(7))
         return w
 
     def _current_pairs_path(self) -> Path | None:
@@ -2106,10 +2448,13 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_run_wavesol = QtWidgets.QPushButton("Run: Wavelength solution")
         self.btn_run_wavesol.setProperty("primary", True)
         self.btn_qc_wavesol = QtWidgets.QPushButton("QC")
+        self.btn_frames_wavesol = QtWidgets.QPushButton("Frames…")
+        self.btn_frames_wavesol.setToolTip("Open Frames Browser for the Wavelength solution stage")
         row.addWidget(self.btn_clean_pairs)
         row.addWidget(self.btn_clean_wavesol2d)
         row.addWidget(self.btn_run_wavesol)
         row.addWidget(self.btn_qc_wavesol)
+        row.addWidget(self.btn_frames_wavesol)
         row.addStretch(1)
         gl.addLayout(row)
         l.addStretch(1)
@@ -2126,6 +2471,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_clean_wavesol2d.clicked.connect(self._do_clean_wavesol2d)
         self.btn_run_wavesol.clicked.connect(self._do_wavesolution)
         self.btn_qc_wavesol.clicked.connect(self._open_qc_viewer)
+        self.btn_frames_wavesol.clicked.connect(lambda: self._open_frames_window('wavesol'))
         return w
 
     def _do_clean_pairs(self) -> None:
@@ -2236,7 +2582,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
     def _do_wavesolution(self) -> None:
         if not self._ensure_cfg_saved():
             return
-        self._set_step_status(6, "running")
+        self._set_step_status(7, "running")
         try:
             ctx = load_context(self._cfg_path)
             out = run_wavesolution(ctx)
@@ -2246,11 +2592,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     self.outputs_wavesol.set_context(self._cfg, stage="wavesol")
             except Exception:
                 pass
-            self._set_step_status(6, "ok")
+            self._set_step_status(7, "ok")
             self._log_info("Outputs:\n" + "\n".join(f"  {k}: {v}" for k, v in out.items()))
             self._maybe_auto_qc()
         except Exception as e:
-            self._set_step_status(6, "fail")
+            self._set_step_status(7, "fail")
             self._log_exception(e)
 
     # --------------------------- misc helpers ---------------------------
@@ -2321,9 +2667,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
             1: None,
             2: 'calib',
             3: 'cosmics',
-            4: 'wavesol',
+            4: 'flatfield',
             5: 'wavesol',
             6: 'wavesol',
+            7: 'wavesol',
         }.get(int(idx), None)
 
     def _on_step_changed(self, idx: int) -> None:
@@ -2545,6 +2892,34 @@ class LauncherWindow(QtWidgets.QMainWindow):
         act_qc.triggered.connect(self._open_qc_viewer)
         tb.addAction(act_qc)
 
+        # Frames Browser (per-stage, non-modal)
+        frames_btn = QtWidgets.QToolButton()
+        frames_btn.setText("Frames")
+        frames_btn.setPopupMode(QtWidgets.QToolButton.MenuButtonPopup)
+        frames_btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+        m = QtWidgets.QMenu(frames_btn)
+        stage_menu = [
+            ("project", "Project"),
+            ("calib", "Superbias"),
+            ("cosmics", "Cosmics"),
+            ("flatfield", "Flat-field"),
+            ("superneon", "SuperNeon"),
+            ("lineid", "LineID"),
+            ("wavesol", "Wavesol"),
+        ]
+        for key, title in stage_menu:
+            act = m.addAction(title)
+            act.triggered.connect(lambda _=False, k=key: self._open_frames_window(k))
+        frames_btn.setMenu(m)
+
+        def _stage_for_current_step() -> str:
+            idx = int(self.steps.currentRow()) if hasattr(self, 'steps') else 0
+            mapping = {0: 'project', 2: 'calib', 3: 'cosmics', 4: 'flatfield', 5: 'superneon', 6: 'lineid', 7: 'wavesol'}
+            return mapping.get(idx, 'project')
+
+        frames_btn.clicked.connect(lambda: self._open_frames_window(_stage_for_current_step()))
+        tb.addWidget(frames_btn)
+
         tb.addSeparator()
         tb.addAction(self.act_auto_qc)
 
@@ -2658,6 +3033,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_suggest_workdir.setEnabled(True)
         self.btn_run_calib.setEnabled(self._cfg_path is not None or bool(self.edit_cfg_path.text().strip()))
         self.btn_run_cosmics.setEnabled(self.btn_run_calib.isEnabled())
+        if hasattr(self, 'btn_run_flatfield'):
+            self.btn_run_flatfield.setEnabled(self.btn_run_calib.isEnabled())
         self.btn_run_superneon.setEnabled(self.btn_run_calib.isEnabled())
         self.btn_open_lineid.setEnabled(self.btn_run_calib.isEnabled())
         self.btn_run_wavesol.setEnabled(self.btn_run_calib.isEnabled())

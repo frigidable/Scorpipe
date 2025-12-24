@@ -63,6 +63,14 @@ class AutoConfig:
                 "save_png": True,
                 "apply_to": ["obj", "sky"],
             },
+            flatfield={
+                # Optional step after cosmics: divide by object-matched flats.
+                "enabled": False,
+                "bias_subtract": True,
+                "save_png": True,
+                # Neon can be optionally included by enabling it in the GUI.
+                "apply_to": ["obj", "sky", "sunsky"],
+            },
             runtime={
                 "n_jobs": 0,  # 0/None = auto
             },
@@ -197,13 +205,22 @@ def build_autoconfig(
         bias_df = bias_df[bias_df["shape"].astype(str) == str(setup_shape)]
     frames["bias"] = bias_df["path"].tolist()
 
-    # flats/neon/sky: strict by setup
-    frames["flat"] = _select_by_setup(df, "flat", setup)["path"].tolist()
+    # flats/neon/sky/sunsky: strict by setup
+    # Flats are often taken specifically for the target; prefer OBJECT-matched flats when available.
+    obj_n = _norm(object_name)
+    if "object_norm" in df.columns:
+        flat_df_obj = df[(df["kind"] == "flat") & (df["object_norm"].astype(str) == obj_n)]
+    else:
+        flat_df_obj = df.iloc[0:0]
+    if len(flat_df_obj) > 0:
+        frames["flat"] = _select_by_setup(flat_df_obj, "flat", setup)["path"].tolist()
+    else:
+        frames["flat"] = _select_by_setup(df, "flat", setup)["path"].tolist()
     frames["neon"] = _select_by_setup(df, "neon", setup)["path"].tolist()
     frames["sky"] = _select_by_setup(df, "sky", setup)["path"].tolist()
+    frames["sunsky"] = _select_by_setup(df, "sunsky", setup)["path"].tolist()
 
     # science frames for the selected object (also by setup)
-    obj_n = _norm(object_name)
     obj_df = df[(df["kind"] == "obj") & (df["object_norm"] == obj_n)].copy()
     if "mode" in obj_df.columns:
         obj_df = obj_df[obj_df["mode"].astype(str) == "Spectra"]

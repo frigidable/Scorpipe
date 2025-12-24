@@ -99,6 +99,7 @@ def _stack_mad_clean(
             hdr = hdul[0].header.copy()
         if bias_subtract and superbias is not None and superbias.shape == data.shape:
             data = data - superbias
+            hdr["BIASSUB"] = (True, "Superbias subtracted")
             hdr["HISTORY"] = "scorpio_pipe cosmics: bias subtracted using superbias.fits"
         datas.append(data)
         headers.append(hdr)

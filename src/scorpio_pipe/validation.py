@@ -2,160 +2,143 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Any
+from typing import Any
 
-from scorpio_pipe.config import load_config
-from scorpio_pipe.resource_utils import resolve_resource_maybe
 from scorpio_pipe.schema import schema_validate
 
 
-Level = Literal["error", "warning"]
-
-
-@dataclass(frozen=True)
+@dataclass
 class ValidationIssue:
-    level: Level
+    level: str  # 'error' | 'warning'
     code: str
     message: str
     hint: str | None = None
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "level": self.level,
-            "code": self.code,
-            "message": self.message,
-            "hint": self.hint,
-        }
-
 
 @dataclass
 class ValidationReport:
+    ok: bool
     errors: list[ValidationIssue]
     warnings: list[ValidationIssue]
 
-    @property
-    def ok(self) -> bool:
-        return len(self.errors) == 0
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "ok": self.ok,
-            "errors": [e.to_dict() for e in self.errors],
-            "warnings": [w.to_dict() for w in self.warnings],
-        }
+def _get(cfg: dict[str, Any], dotted: str, default: Any = None) -> Any:
+    cur: Any = cfg
+    for part in dotted.split('.'):
+        if not isinstance(cur, dict) or part not in cur:
+            return default
+        cur = cur[part]
+    return cur
 
 
-def validate_config(cfg: dict | str | Path, *, strict_paths: bool = False) -> ValidationReport:
-    """Validate configuration for early, user-friendly failures."""
+def _as_abs(p: str | Path, base_dir: Path) -> Path:
+    pp = Path(str(p)).expanduser()
+    if not pp.is_absolute():
+        pp = (base_dir / pp).resolve()
+    return pp
+
+
+def validate_config(
+    cfg_or_path: dict[str, Any] | str | Path,
+    *,
+    base_dir: Path | None = None,
+    strict_paths: bool = True,
+) -> ValidationReport:
+    """Validate config.
+
+    Parameters
+    ----------
+    cfg_or_path : dict | path
+        Either a loaded config dict or a path to config.yaml.
+    base_dir : Path, optional
+        Base dir for resolving relative paths. If cfg_or_path is a path, defaults
+        to its parent.
+    strict_paths : bool
+        If False, missing files are reported as warnings (useful for early GUI
+        preview / partially-built work dirs).
+
+    Returns
+    -------
+    ValidationReport
+        Pragmatic validation report used by both GUI and CLI.
+    """
 
     cfg_path: Path | None = None
-    if isinstance(cfg, (str, Path)):
-        cfg_path = Path(cfg).expanduser().resolve()
-        cfg_d = load_config(cfg_path)
-    elif isinstance(cfg, dict):
-        cfg_d = cfg
+    cfg: dict[str, Any]
+
+    if isinstance(cfg_or_path, dict):
+        cfg = cfg_or_path
+        base_dir = (base_dir or Path.cwd()).resolve()
     else:
-        raise TypeError(f"Unsupported config type: {type(cfg)}")
+        cfg_path = Path(cfg_or_path).expanduser().resolve()
+        from scorpio_pipe.config import load_config
+
+        cfg = load_config(cfg_path)
+        base_dir = (base_dir or cfg_path.parent).resolve()
 
     errors: list[ValidationIssue] = []
     warnings: list[ValidationIssue] = []
 
-    def err(code: str, message: str, hint: str | None = None) -> None:
-        errors.append(ValidationIssue("error", code, message, hint))
+    # --- schema (typos / types) ---
+    sch = schema_validate(cfg)
+    for it in sch.errors:
+        errors.append(ValidationIssue('error', it.code, it.message, it.hint))
+    for it in sch.warnings:
+        warnings.append(ValidationIssue('warning', it.code, it.message, it.hint))
 
-    def warn(code: str, message: str, hint: str | None = None) -> None:
-        warnings.append(ValidationIssue("warning", code, message, hint))
+    # --- basic paths ---
+    data_dir = _get(cfg, 'data_dir')
+    work_dir = _get(cfg, 'work_dir')
 
-    # Pydantic schema/type checks (backward compatible)
-    sch = schema_validate(cfg_d)
-    for i in sch.errors:
-        err(i.code, i.message, i.hint)
-    for i in sch.warnings:
-        warn(i.code, i.message, i.hint)
+    if not data_dir:
+        errors.append(ValidationIssue('error', 'DATA_DIR', 'data_dir is missing', 'Select the night folder'))
+    else:
+        p = _as_abs(str(data_dir), base_dir)
+        if not p.exists():
+            (errors if strict_paths else warnings).append(
+                ValidationIssue(
+                    'error' if strict_paths else 'warning',
+                    'DATA_DIR',
+                    f'data_dir does not exist: {p}',
+                    'Fix the path',
+                )
+            )
 
-    # Required top-level
-    if not str(cfg_d.get("work_dir", "")).strip():
-        err("CFG_WORK_DIR", "config.work_dir is missing")
-    if not str(cfg_d.get("data_dir", "")).strip():
-        err("CFG_DATA_DIR", "config.data_dir is missing")
+    if not work_dir:
+        errors.append(ValidationIssue('error', 'WORK_DIR', 'work_dir is missing', 'Choose a work directory'))
+    else:
+        try:
+            _as_abs(str(work_dir), base_dir)
+        except Exception:
+            errors.append(ValidationIssue('error', 'WORK_DIR', f'Bad work_dir: {work_dir}', 'Fix the path'))
 
-    work_dir = Path(str(cfg_d.get("work_dir", "."))).expanduser().resolve()
-    config_dir = Path(str(cfg_d.get("config_dir", work_dir))).expanduser().resolve()
-    project_root = Path(str(cfg_d.get("project_root", config_dir))).expanduser().resolve()
-
-    # Frames
-    frames = cfg_d.get("frames")
+    # --- frames ---
+    frames = _get(cfg, 'frames', {}) or {}
     if not isinstance(frames, dict):
-        err("CFG_FRAMES", "config.frames must be a mapping")
+        errors.append(ValidationIssue('error', 'FRAMES', 'frames must be a mapping', 'Recreate config'))
         frames = {}
 
-    # Minimal expectations (soft)
-    if "obj" not in frames or not isinstance(frames.get("obj"), list) or len(frames.get("obj", [])) == 0:
-        warn("CFG_NO_OBJ", "No science frames listed in frames.obj")
-
-    # Validate paths
-    def _check_list(key: str) -> None:
-        v = frames.get(key)
+    for kind in ('bias', 'flat', 'neon', 'obj', 'sky', 'sunsky'):
+        v = frames.get(kind)
         if v is None:
-            return
+            continue
         if not isinstance(v, list):
-            err("CFG_FRAME_LIST", f"frames.{key} must be a list")
-            return
-        missing = []
-        for raw in v:
+            errors.append(ValidationIssue('error', 'FRAMES', f'frames.{kind} must be a list', 'Fix YAML'))
+            continue
+        for fp in v:
             try:
-                p = Path(str(raw))
+                p = _as_abs(str(fp), base_dir)
+                if not p.exists():
+                    (warnings if not strict_paths else warnings).append(
+                        ValidationIssue(
+                            'warning',
+                            'MISSING_FRAME',
+                            f'Missing file: {kind}: {p}',
+                            'If you moved the night folder, rebuild config',
+                        )
+                    )
             except Exception:
-                missing.append(str(raw))
-                continue
-            if not p.exists():
-                missing.append(str(p))
-        if missing:
-            msg = f"{len(missing)} file(s) in frames.{key} do not exist"
-            if strict_paths:
-                err("CFG_MISSING_FILES", msg, hint="Fix paths or re-run inspect/autoconfig")
-            else:
-                warn("CFG_MISSING_FILES", msg, hint="Some stages may fail later")
+                warnings.append(ValidationIssue('warning', 'BAD_FRAME', f'Bad frame path in {kind}: {fp}', 'Fix YAML'))
 
-    for k in ("bias", "flat", "neon", "obj", "sky"):
-        _check_list(k)
-
-    # Resource checks
-    wcfg = cfg_d.get("wavesol") if isinstance(cfg_d.get("wavesol"), dict) else {}
-    neon_lines = (wcfg or {}).get("neon_lines_csv", "neon_lines.csv")
-    atlas_pdf = (wcfg or {}).get("atlas_pdf", "HeNeAr_atlas.pdf")
-
-    neon_res = resolve_resource_maybe(
-        neon_lines,
-        work_dir=work_dir,
-        config_dir=config_dir,
-        project_root=project_root,
-        allow_package=True,
-    )
-    if neon_res is None:
-        err(
-            "CFG_NEON_LINES",
-            f"Neon line list not found: {neon_lines}",
-            hint="Put neon_lines.csv near work_dir/config.yaml, or rely on packaged resource in v4.1+",
-        )
-
-    atlas_res = resolve_resource_maybe(
-        atlas_pdf,
-        work_dir=work_dir,
-        config_dir=config_dir,
-        project_root=project_root,
-        allow_package=True,
-    )
-    if atlas_res is None:
-        warn(
-            "CFG_ATLAS_PDF",
-            f"Atlas PDF not found: {atlas_pdf}",
-            hint="Optional: used for interactive line identification",
-        )
-
-    # Hygiene
-    if cfg_path is not None:
-        if "\\" in str(cfg_path):
-            warn("CFG_PATH_SLASH", "Config path contains backslashes (Windows).", hint="This is OK, but keep paths normalized if running on Linux/WSL")
-
-    return ValidationReport(errors=errors, warnings=warnings)
+    ok = len(errors) == 0
+    return ValidationReport(ok=ok, errors=errors, warnings=warnings)

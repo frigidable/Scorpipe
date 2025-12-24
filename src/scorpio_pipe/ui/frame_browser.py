@@ -47,7 +47,7 @@ class FrameBrowser(QtWidgets.QWidget):
         self.edit_search = QtWidgets.QLineEdit()
         self.edit_search.setPlaceholderText("Search object/path…")
         self.combo_kind = QtWidgets.QComboBox()
-        self.combo_kind.addItems(["all", "obj", "sky", "neon", "flat", "bias"])
+        self.combo_kind.addItems(["all", "obj", "sky", "sunsky", "neon", "flat", "bias"])
         self.combo_disperser = QtWidgets.QComboBox()
         self.combo_disperser.addItem("all")
         self.combo_slit = QtWidgets.QComboBox()

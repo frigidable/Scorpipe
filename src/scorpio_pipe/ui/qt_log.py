@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 
+from scorpio_pipe.ui.log_highlighter import LogHighlighter
+
 from PySide6 import QtCore
 
 
@@ -43,8 +45,15 @@ def install(
     def _append(msg: str) -> None:
         # keep UI responsive
         text_edit.appendPlainText(msg)
+        text_edit.ensureCursorVisible()
 
     emitter.message.connect(_append)
+
+    # Colorize log levels (line-based)
+    try:
+        text_edit._scorpipe_log_highlighter = LogHighlighter(text_edit.document())
+    except Exception:
+        pass
 
     h = QtLogHandler(emitter)
     # Mark the handler so we can de-duplicate cleanly on re-install.

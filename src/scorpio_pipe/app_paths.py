@@ -40,3 +40,33 @@ def user_cache_root(app_name: str = "Scorpipe") -> Path:
 def ensure_dir(p: Path) -> Path:
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+
+def pick_workspace_root(pipeline_root: Path | None = None) -> Path:
+    """Pick a writable workspace root.
+
+    Strategy ("C-2 safe"):
+      1) try <install_dir>/workspace (nice when portable/unpacked)
+      2) fallback to <LocalAppData>/Scorpipe/workspace (always writable)
+
+    The function creates the directory if possible.
+    """
+
+    # 1) prefer installation directory when it's writable
+    if pipeline_root is not None:
+        cand = (Path(pipeline_root) / 'workspace').resolve()
+        try:
+            cand.mkdir(parents=True, exist_ok=True)
+            # write-test (Program Files is typically not writable)
+            t = cand / '.write_test'
+            t.write_text('ok', encoding='utf-8')
+            t.unlink(missing_ok=True)
+            return cand
+        except Exception:
+            pass
+
+    # 2) safe fallback
+    fb = (user_data_root('Scorpipe') / 'workspace').resolve()
+    ensure_dir(fb)
+    return fb

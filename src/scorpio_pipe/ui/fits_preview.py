@@ -1,155 +1,220 @@
 from __future__ import annotations
 
-"""Small FITS preview utilities for the UI.
-
-The Launcher uses these helpers to show a quicklook image and a compact header
-view without pulling the whole pipeline machinery.
-"""
-
-from pathlib import Path
+from dataclasses import dataclass
 
 import numpy as np
 from astropy.io import fits
 from PySide6 import QtCore, QtGui, QtWidgets
 
 
-def _safe_read_fits_data(path: Path) -> np.ndarray:
-    """Read FITS data robustly for preview.
-
-    For preview we prefer resilience over speed. We also downsample very large
-    frames to keep the UI responsive.
-    """
-
-    try:
-        data = fits.getdata(path, memmap=True)
-    except Exception:
-        # tolerate "tired" FITS
-        with fits.open(path, memmap=False, ignore_missing_end=True, ignore_missing_simple=True) as hdul:
-            data = hdul[0].data
-
-    if data is None:
-        return np.zeros((1, 1), dtype=float)
-    data = np.asarray(data, dtype=float)
-
-    # downsample if huge (keep aspect)
-    ny, nx = data.shape[:2]
-    max_n = 1200
-    step = max(1, int(max(ny, nx) / max_n))
-    if step > 1:
-        data = data[::step, ::step]
-
-    return data
+@dataclass
+class StretchParams:
+    cmap: str = "gray"  # gray, viridis, magma
+    p_lo: float = 1.0
+    p_hi: float = 99.0
+    gamma: float = 1.0
 
 
-def fits_to_qpixmap(path: Path, *, w: int = 900, h: int = 520) -> QtGui.QPixmap:
-    data = _safe_read_fits_data(path)
-    data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
-
-    # percentile stretch
-    try:
-        lo, hi = np.percentile(data, [1.0, 99.7])
-    except Exception:
-        lo, hi = float(np.min(data)), float(np.max(data))
-    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
-        lo, hi = float(np.min(data)), float(np.max(data) if np.max(data) != np.min(data) else np.min(data) + 1.0)
-    norm = np.clip((data - lo) / (hi - lo), 0.0, 1.0)
-    img8 = (norm * 255.0).astype(np.uint8)
-
-    qimg = QtGui.QImage(img8.data, img8.shape[1], img8.shape[0], img8.strides[0], QtGui.QImage.Format_Grayscale8)
-    qimg = qimg.copy()  # detach from numpy memory
-    pm = QtGui.QPixmap.fromImage(qimg)
-    return pm.scaled(w, h, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+def _as_float(a: np.ndarray) -> np.ndarray:
+    if a is None:
+        return np.zeros((10, 10), dtype=np.float32)
+    if a.ndim > 2:
+        # a common pattern for some FITS is (1, ny, nx)
+        a = np.squeeze(a)
+    return np.array(a, dtype=np.float32, copy=False)
 
 
-def fits_header_text(path: Path, *, key_whitelist: list[str] | None = None, max_lines: int = 250) -> str:
-    try:
-        hdr = fits.getheader(path)
-    except Exception:
-        with fits.open(path, memmap=False, ignore_missing_end=True, ignore_missing_simple=True) as hdul:
-            hdr = hdul[0].header
+def _safe_percentiles(x: np.ndarray, p_lo: float, p_hi: float) -> tuple[float, float]:
+    x = x[np.isfinite(x)]
+    if x.size == 0:
+        return 0.0, 1.0
+    p_lo = float(np.clip(p_lo, 0.0, 100.0))
+    p_hi = float(np.clip(p_hi, 0.0, 100.0))
+    if p_hi < p_lo:
+        p_lo, p_hi = p_hi, p_lo
+    lo = float(np.percentile(x, p_lo))
+    hi = float(np.percentile(x, p_hi))
+    if not np.isfinite(lo):
+        lo = float(np.nanmin(x))
+    if not np.isfinite(hi):
+        hi = float(np.nanmax(x))
+    if hi <= lo:
+        hi = lo + 1e-6
+    return lo, hi
 
-    if key_whitelist:
-        lines: list[str] = []
-        for k in key_whitelist:
-            if k in hdr:
-                lines.append(f"{k:>10s} = {hdr.get(k)}")
-        # add short tail
-        rest = [k for k in hdr.keys() if k not in set(key_whitelist)]
-        for k in rest[: max(0, max_lines - len(lines))]:
-            try:
-                lines.append(f"{k:>10s} = {hdr.get(k)}")
-            except Exception:
-                pass
-        return "\n".join(lines[:max_lines])
 
-    # compact full header
-    txt = hdr.tostring(sep="\n", endcard=False, padding=False)
-    lines = txt.splitlines()
-    if len(lines) > max_lines:
-        lines = lines[:max_lines] + ["… (truncated) …"]
-    return "\n".join(lines)
+def _apply_stretch(img: np.ndarray, params: StretchParams) -> np.ndarray:
+    img = _as_float(img)
+    lo, hi = _safe_percentiles(img, params.p_lo, params.p_hi)
+    x = (img - lo) / (hi - lo)
+    x = np.clip(x, 0.0, 1.0)
+
+    gamma = float(params.gamma)
+    if gamma <= 0:
+        gamma = 1.0
+    # display gamma: gamma>1 makes it brighter (as user expects)
+    x = np.power(x, 1.0 / gamma)
+    return x
+
+
+def _to_qimage_gray(x01: np.ndarray) -> QtGui.QImage:
+    u8 = (x01 * 255.0).astype(np.uint8)
+    h, w = u8.shape
+    # QImage needs bytes that live as long as image; keep a copy
+    buf = u8.tobytes()
+    qimg = QtGui.QImage(buf, w, h, w, QtGui.QImage.Format_Grayscale8)
+    return qimg.copy()
+
+
+def _to_qimage_cmap(x01: np.ndarray, cmap_name: str) -> QtGui.QImage:
+    # Lazy import: matplotlib is heavy, avoid importing unless needed
+    import matplotlib.cm as cm
+
+    cmap = cm.get_cmap(cmap_name)
+    rgba = cmap(x01)  # float64 0..1, shape (h,w,4)
+    rgb = (rgba[..., :3] * 255.0).astype(np.uint8)
+    h, w, _ = rgb.shape
+    buf = rgb.tobytes()
+    qimg = QtGui.QImage(buf, w, h, w * 3, QtGui.QImage.Format_RGB888)
+    return qimg.copy()
 
 
 class FitsPreviewWidget(QtWidgets.QWidget):
-    """A quicklook preview (image + header) for a FITS file."""
+    """Simple FITS viewer with colormap + exposure controls.
 
-    def __init__(self, parent: QtWidgets.QWidget | None = None):
+    - Colormap: gray, viridis, magma
+    - Exposure: low/high percentiles
+    - Gamma: display gamma
+
+    Designed to be lightweight and safe for large files.
+    """
+
+    def __init__(self, parent=None):
         super().__init__(parent)
+        self._path: str | None = None
+        self._data: np.ndarray | None = None
+        self._params = StretchParams()
+
+        # Controls
+        self.cmb_cmap = QtWidgets.QComboBox()
+        self.cmb_cmap.addItems(["gray", "viridis", "magma"])
+        self.cmb_cmap.setCurrentText(self._params.cmap)
+
+        self.sp_lo = QtWidgets.QDoubleSpinBox()
+        self.sp_lo.setRange(0.0, 100.0)
+        self.sp_lo.setDecimals(1)
+        self.sp_lo.setSingleStep(0.5)
+        self.sp_lo.setValue(self._params.p_lo)
+        self.sp_lo.setSuffix(" %")
+
+        self.sp_hi = QtWidgets.QDoubleSpinBox()
+        self.sp_hi.setRange(0.0, 100.0)
+        self.sp_hi.setDecimals(1)
+        self.sp_hi.setSingleStep(0.5)
+        self.sp_hi.setValue(self._params.p_hi)
+        self.sp_hi.setSuffix(" %")
+
+        self.sp_gamma = QtWidgets.QDoubleSpinBox()
+        self.sp_gamma.setRange(0.1, 10.0)
+        self.sp_gamma.setDecimals(2)
+        self.sp_gamma.setSingleStep(0.1)
+        self.sp_gamma.setValue(self._params.gamma)
+
+        self.btn_auto = QtWidgets.QPushButton("Auto")
+        self.btn_auto.setToolTip("Reset exposure to 1–99% and gamma=1")
+
+        self.lbl_path = QtWidgets.QLabel("No file")
+        self.lbl_path.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+
+        self._img_label = QtWidgets.QLabel("No image")
+        self._img_label.setAlignment(QtCore.Qt.AlignCenter)
+        self._img_label.setMinimumSize(200, 200)
+        self._img_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+
+        top = QtWidgets.QHBoxLayout()
+        top.addWidget(QtWidgets.QLabel("Cmap:"))
+        top.addWidget(self.cmb_cmap)
+        top.addSpacing(12)
+        top.addWidget(QtWidgets.QLabel("Low:"))
+        top.addWidget(self.sp_lo)
+        top.addWidget(QtWidgets.QLabel("High:"))
+        top.addWidget(self.sp_hi)
+        top.addSpacing(12)
+        top.addWidget(QtWidgets.QLabel("Gamma:"))
+        top.addWidget(self.sp_gamma)
+        top.addWidget(self.btn_auto)
+        top.addStretch(1)
+
         lay = QtWidgets.QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(8)
+        lay.addLayout(top)
+        lay.addWidget(self.lbl_path)
+        lay.addWidget(self._img_label, 1)
 
-        self.lbl_title = QtWidgets.QLabel("—")
-        self.lbl_title.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        self.lbl_title.setStyleSheet("font-weight: 600;")
-        lay.addWidget(self.lbl_title)
+        self.cmb_cmap.currentTextChanged.connect(self._on_controls)
+        self.sp_lo.valueChanged.connect(self._on_controls)
+        self.sp_hi.valueChanged.connect(self._on_controls)
+        self.sp_gamma.valueChanged.connect(self._on_controls)
+        self.btn_auto.clicked.connect(self._on_auto)
 
-        self.lbl_img = QtWidgets.QLabel()
-        self.lbl_img.setAlignment(QtCore.Qt.AlignCenter)
-        self.lbl_img.setMinimumHeight(260)
-        self.lbl_img.setStyleSheet("background: #111; border-radius: 10px;")
-        lay.addWidget(self.lbl_img, 1)
+    def load_fits(self, path: str):
+        self._path = path
+        self.lbl_path.setText(path)
 
-        self.txt_hdr = QtWidgets.QPlainTextEdit()
-        self.txt_hdr.setReadOnly(True)
-        mono = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
-        self.txt_hdr.setFont(mono)
-        self.txt_hdr.setMaximumBlockCount(4000)
-        self.txt_hdr.setMinimumHeight(180)
-        lay.addWidget(self.txt_hdr)
+        try:
+            with fits.open(path, memmap=True) as hdul:
+                self._data = _as_float(hdul[0].data)
+        except Exception as e:
+            self._data = None
+            self._img_label.setText(f"Failed to load FITS:\n{e}")
+            return
 
-        self._path: Path | None = None
+        self._render()
 
-    def clear(self) -> None:
+    def clear(self):
         self._path = None
-        self.lbl_title.setText("—")
-        self.lbl_img.clear()
-        self.txt_hdr.setPlainText("")
+        self._data = None
+        self.lbl_path.setText("No file")
+        self._img_label.setText("No image")
+        self._img_label.setPixmap(QtGui.QPixmap())
 
-    def set_path(self, path: Path) -> None:
-        self._path = Path(path)
-        self.lbl_title.setText(str(self._path))
+    def _on_auto(self):
+        self.sp_lo.setValue(1.0)
+        self.sp_hi.setValue(99.0)
+        self.sp_gamma.setValue(1.0)
+
+    def _on_controls(self, *_):
+        if self._data is None:
+            return
+        self._render()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._data is not None:
+            self._render()
+
+    def _render(self):
+        if self._data is None:
+            return
+
+        self._params.cmap = self.cmb_cmap.currentText()
+        self._params.p_lo = float(self.sp_lo.value())
+        self._params.p_hi = float(self.sp_hi.value())
+        self._params.gamma = float(self.sp_gamma.value())
+
+        x01 = _apply_stretch(self._data, self._params)
+
         try:
-            self.lbl_img.setPixmap(fits_to_qpixmap(self._path))
-        except Exception:
-            self.lbl_img.setText("(preview failed)")
-        try:
-            keys = [
-                "OBJECT",
-                "IMAGETYP",
-                "OBSTYPE",
-                "EXPTIME",
-                "DATE-OBS",
-                "INSTRUME",
-                "GRISM",
-                "GRATING",
-                "DISPERSER",
-                "SLIT",
-                "CCDSUM",
-                "BINNING",
-                "NAXIS1",
-                "NAXIS2",
-            ]
-            self.txt_hdr.setPlainText(fits_header_text(self._path, key_whitelist=keys))
-        except Exception:
-            self.txt_hdr.setPlainText("(header read failed)")
+            if self._params.cmap == "gray":
+                qimg = _to_qimage_gray(x01)
+            else:
+                qimg = _to_qimage_cmap(x01, self._params.cmap)
+            pix = QtGui.QPixmap.fromImage(qimg)
+        except Exception as e:
+            self._img_label.setText(f"Render error:\n{e}")
+            return
+
+        # Scale to fit
+        target = self._img_label.size()
+        pix = pix.scaled(target, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+        self._img_label.setPixmap(pix)
+        self._img_label.setText("")

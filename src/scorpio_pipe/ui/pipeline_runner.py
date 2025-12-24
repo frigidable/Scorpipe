@@ -92,6 +92,13 @@ def run_cosmics(ctx: RunContext) -> Path:
     return clean_cosmics(ctx.cfg, out_dir=out.parent)
 
 
+
+def run_flatfield(ctx: RunContext) -> Path:
+    from scorpio_pipe.stages.flatfield import run_flatfield as _run_flatfield
+
+    out_dir = ctx.work_dir / "flatfield"
+    log.info("Flat-fielding → %s", out_dir)
+    return _run_flatfield(ctx.cfg, out_dir=out_dir)
 def run_lineid_prepare(ctx: RunContext) -> Path:
     """Open the interactive LineID GUI and write hand_pairs.txt."""
 
@@ -155,6 +162,7 @@ TASKS: dict[str, callable] = {
     "qc_report": run_qc_report,
     "superbias": run_superbias,
     "cosmics": run_cosmics,
+    "flatfield": run_flatfield,
     "superneon": run_superneon,
     "lineid_prepare": run_lineid_prepare,
     "wavesolution": run_wavesolution,
@@ -192,6 +200,17 @@ def run_sequence(
         fn = TASKS.get(name)
         if fn is None:
             raise ValueError(f"Unknown task: {name}")
+
+        # optional stages
+        if name == "flatfield" and not ctx.cfg.get("flatfield", {}).get("enabled", False):
+            append_timing(
+                work_dir=ctx.work_dir,
+                stage=name,
+                seconds=0.0,
+                ok=True,
+                extra={"skipped": True, "reason": "flatfield disabled"},
+            )
+            continue
 
         if resume and not force and task_is_complete(ctx.cfg, name):
             ps = products_for_task(ctx.cfg, name)

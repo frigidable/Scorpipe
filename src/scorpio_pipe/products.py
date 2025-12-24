@@ -61,6 +61,9 @@ def list_products(cfg: dict[str, Any]) -> list[Product]:
         Product("cosmics_coverage_png", "cosmics", cosm / "coverage.png", "png", optional=True),
         Product("cosmics_sum_png", "cosmics", cosm / "sum_excl_cosmics.png", "png", optional=True),
 
+        # flatfield
+        Product("flatfield_done", "flatfield", wd / "flatfield" / "flatfield_done.json", "json", optional=True),
+
         # wavesol (disperser-specific)
         Product("superneon_fits", "wavesol", wsol / "superneon.fits", "fits", optional=True),
         Product("superneon_png", "wavesol", wsol / "superneon.png", "png", optional=True),
