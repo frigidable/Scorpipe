@@ -30,6 +30,9 @@ def _norm_kind(k: str) -> str:
     # типы из логов бывают "object", "obj", "science" и т.п.
     if k in {"object", "obj", "science"}:
         return "obj"
+    # специальные кадры: sunsky (на некоторых ночных логах пишут как obj)
+    if k in {"sunsky", "sun_sky", "sun-sky", "sun sky"}:
+        return "sunsky"
     return k
 
 

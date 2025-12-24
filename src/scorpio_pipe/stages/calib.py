@@ -82,11 +82,9 @@ def build_superbias(cfg: Any, out_path: str | Path | None = None) -> Path:
 
 
     calib_cfg = c.get("calib", {}) or {}
-    combine = str(calib_cfg.get("bias_combine", "median")).lower()
-    # Project requirement: superbias is built with the most robust median combine.
-    # Keep backward compatibility for old configs but force the method.
-    if combine != "median":
-        log.warning("Superbias: forcing combine=median (was %s)", combine)
+    combine = str(calib_cfg.get("bias_combine", "median")).strip().lower() or "median"
+    if combine not in {"median", "mean"}:
+        log.warning("Superbias: unsupported combine=%s, using median", combine)
         combine = "median"
     sigma_clip = float(calib_cfg.get("bias_sigma_clip", 0.0) or 0.0)
 
@@ -95,7 +93,6 @@ def build_superbias(cfg: Any, out_path: str | Path | None = None) -> Path:
     bad = 0
 
     # Median: always stack frames (bias sets are typically small: ~10–50).
-    # This gives the most robust superbias and matches the "IDL-style" workflow.
     if combine == "median":
         frames = []
         for p in bias_paths:
@@ -115,9 +112,8 @@ def build_superbias(cfg: Any, out_path: str | Path | None = None) -> Path:
         superbias = np.median(arr, axis=0).astype(np.float32)
         n_used = int(arr.shape[0])
 
-    # If requested, do a simple sigma-clipped mean in a single stack
-    # (rare cosmic hits / bad pixels).
-    elif sigma_clip > 0:
+    # Mean (sigma-clipped) combine.
+    elif combine == "mean" and sigma_clip > 0:
         frames = []
         for p in bias_paths:
             try:

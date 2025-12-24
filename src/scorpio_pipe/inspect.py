@@ -87,6 +87,21 @@ def _norm_obj_tokens(s: str | None) -> str:
     return re.sub(r"[^0-9A-Z]+", " ", s.strip().upper()).strip()
 
 
+def _is_sunsky_name(s: str | None) -> bool:
+    """Detect SUNSKY frames by object/name strings.
+
+    SUNSKY frames often carry MODE=... identical to science frames,
+    so we use the name in nightlog/FITS header.
+    """
+    if not s:
+        return False
+    # Normalize: keep alnum only
+    norm = "".join(ch for ch in s.strip().upper() if ch.isalnum())
+    # Common patterns: SUNSKY, SUN_SKY, SUN-SKY, SUN SKY
+    return ("SUNSKY" in norm)
+
+
+
 def _safe_get(header, *keys, default=None):
     for k in keys:
         if k in header:
@@ -259,6 +274,14 @@ def inspect_dataset(data_dir: Path, max_files: int | None = None) -> InspectResu
                 row["disperser"] = m.disperser
             if m.slit:
                 row["slit"] = m.slit
+
+
+        # SUNSKY force: MODE may match science frames, so detect by name
+        try:
+            if _is_sunsky_name(str(row.get("object", ""))) or _is_sunsky_name(obj):
+                row["kind"] = "sunsky"
+        except Exception:
+            pass
 
         rows.append(row)
 

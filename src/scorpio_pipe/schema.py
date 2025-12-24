@@ -53,6 +53,17 @@ class QCBlock(BaseModel):
 
 
 class WavesolBlock(BaseModel):
+    """Wave-solution configuration.
+
+    This section is used by multiple stages:
+      - superneon: profile extraction, X-alignment, robust noise model, peak detection
+      - lineid GUI: amplitude thresholding controls, atlas/line-list paths
+      - wavesolution: 1D poly + 2D model (power/chebyshev) and tracing/fit params
+
+    We allow extra keys (forward compatibility) but keep common keys here to
+    avoid noisy "unknown key" warnings.
+    """
+
     model_config = ConfigDict(extra="allow")
 
     disperser: Optional[str] = None
@@ -62,14 +73,73 @@ class WavesolBlock(BaseModel):
     neon_lines_csv: str = "neon_lines.csv"
     atlas_pdf: str = "HeNeAr_atlas.pdf"
 
+    # superneon: profile extraction
+    profile_y: Optional[Any] = None  # tuple[int,int] or list[int]
     y_half: int = 20
+
+    # superneon: alignment
+    xshift_max_abs: int = 6
+
+    # superneon: robust noise/baseline model for peak detection
+    noise: Dict[str, Any] = Field(default_factory=dict)
+
+    # peak detection (in units of robust sigma)
     peak_snr: float = 5.0
     peak_prom_snr: float = 4.0
+    peak_floor_snr: float = 3.0
     peak_distance: int = 3
-    gui_min_amp_sigma_k: float = 5.0
-    poly_deg_1d: int = 4
+    gauss_half_win: int = 4
 
+    # optional explicit thresholds (ADU); if not set -> auto from sigma
+    peak_min_amp: Optional[float] = None
+    peak_prominence: Optional[float] = None
+
+    # autotune peak threshold if too few/many peaks are found
+    peak_autotune: bool = True
+    peak_target_min: int = 0
+    peak_target_max: int = 0
+    peak_snr_min: float = 2.5
+    peak_snr_max: float = 12.0
+    peak_snr_relax: float = 0.85
+    peak_snr_boost: float = 1.15
+    peak_autotune_max_tries: int = 10
+
+    # lineid GUI: amplitude cutoff controls
+    gui_min_amp_sigma_k: float = 5.0
+    gui_min_amp: Optional[float] = None
+
+    # wavesolution: hand pairs
     hand_pairs_path: Optional[str] = None
+
+    # 1D dispersion
+    poly_deg_1d: int = 4
+    blend_weight: float = 0.3
+    poly_sigma_clip: float = 3.0
+    poly_maxiter: int = 10
+
+    # 2D tracing and fit
+    model2d: str = "auto"  # auto|power|cheb
+    edge_crop_x: int = 12
+    edge_crop_y: int = 12
+
+    trace_y0: Optional[int] = None
+    trace_template_hw: int = 6
+    trace_avg_half: int = 3
+    trace_search_rad: int = 12
+    trace_y_step: int = 1
+    trace_amp_thresh: float = 20.0
+    trace_min_pts: int = 120
+
+    power_deg: int = 5
+    power_sigma_clip: float = 3.0
+    power_maxiter: int = 10
+
+    cheb_degx: int = 5
+    cheb_degy: int = 3
+    cheb_sigma_clip: float = 3.0
+    cheb_maxiter: int = 10
+
+    rejected_lines_A: List[float] = Field(default_factory=list)
 
     qc: QCBlock = Field(default_factory=QCBlock)
 
@@ -198,13 +268,51 @@ _WAVESOL_KEYS = {
     "binning",
     "neon_lines_csv",
     "atlas_pdf",
+    "profile_y",
     "y_half",
+    "xshift_max_abs",
+    "noise",
     "peak_snr",
     "peak_prom_snr",
+    "peak_floor_snr",
     "peak_distance",
+    "gauss_half_win",
+    "peak_min_amp",
+    "peak_prominence",
+    "peak_autotune",
+    "peak_target_min",
+    "peak_target_max",
+    "peak_snr_min",
+    "peak_snr_max",
+    "peak_snr_relax",
+    "peak_snr_boost",
+    "peak_autotune_max_tries",
     "gui_min_amp_sigma_k",
+    "gui_min_amp",
     "poly_deg_1d",
+    "blend_weight",
+    "poly_sigma_clip",
+    "poly_maxiter",
     "hand_pairs_path",
+    "model2d",
+    "edge_crop_x",
+    "edge_crop_y",
+    "trace_y0",
+    "trace_template_hw",
+    "trace_avg_half",
+    "trace_search_rad",
+    "trace_y_step",
+    "trace_amp_thresh",
+    "trace_min_pts",
+    "power_deg",
+    "power_sigma_clip",
+    "power_maxiter",
+    "cheb_degx",
+    "cheb_degy",
+    "cheb_sigma_clip",
+    "cheb_maxiter",
+    "rejected_lines_A",
+    "ignore_lines_A",
     "qc",
 }
 

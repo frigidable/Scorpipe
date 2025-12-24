@@ -243,9 +243,12 @@ class FrameBrowser(QtWidgets.QWidget):
         self.table.resizeColumnsToContents()
         self.lbl_counts.setText(f"Frames: {len(out)} / {len(df)}")
 
-        # auto-select first row
+        # Auto-select first row.
+        # NOTE: on some platforms selectionChanged is not emitted reliably right after a model reset,
+        # so we also schedule an explicit preview update.
         if len(out) > 0:
             self.table.selectRow(0)
+            QtCore.QTimer.singleShot(0, self._on_selection_changed)
         else:
             self.preview.clear()
             self.btn_use_setup.setEnabled(False)

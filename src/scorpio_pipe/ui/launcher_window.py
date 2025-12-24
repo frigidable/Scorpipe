@@ -24,7 +24,6 @@ from scorpio_pipe.ui.qc_viewer import QCViewer
 from scorpio_pipe.ui.pair_rejector import clean_pairs_interactively
 from scorpio_pipe.ui.frame_browser import FrameBrowser, SelectedFrame
 from scorpio_pipe.ui.outputs_panel import OutputsPanel
-from scorpio_pipe.ui.inspector_dock import InspectorDock
 from scorpio_pipe.ui.run_plan_dialog import RunPlanDialog
 from scorpio_pipe.ui.config_diff import ConfigDiffDialog
 from scorpio_pipe.wavesol_paths import slugify_disperser, wavesol_dir
@@ -80,6 +79,39 @@ def _hline() -> QtWidgets.QFrame:
     fr.setFrameShape(QtWidgets.QFrame.HLine)
     fr.setFrameShadow(QtWidgets.QFrame.Sunken)
     return fr
+
+def _collapsible(title: str, *, expanded: bool = False) -> tuple[QtWidgets.QWidget, QtWidgets.QVBoxLayout, QtWidgets.QToolButton]:
+    """Return (widget, content_layout, header_button) for a simple collapsible section."""
+    root = QtWidgets.QWidget()
+    v = QtWidgets.QVBoxLayout(root)
+    v.setContentsMargins(0, 0, 0, 0)
+    v.setSpacing(6)
+
+    btn = QtWidgets.QToolButton()
+    btn.setText(title)
+    btn.setCheckable(True)
+    btn.setChecked(bool(expanded))
+    btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+    btn.setArrowType(QtCore.Qt.DownArrow if expanded else QtCore.Qt.RightArrow)
+    btn.setCursor(QtCore.Qt.PointingHandCursor)
+    btn.setStyleSheet("QToolButton { border: none; font-weight: 600; padding: 2px 0; }")
+
+    content = QtWidgets.QWidget()
+    content.setVisible(bool(expanded))
+    content_lay = QtWidgets.QVBoxLayout(content)
+    content_lay.setContentsMargins(10, 6, 0, 0)
+    content_lay.setSpacing(8)
+
+    def _toggle(checked: bool) -> None:
+        content.setVisible(bool(checked))
+        btn.setArrowType(QtCore.Qt.DownArrow if checked else QtCore.Qt.RightArrow)
+
+    btn.toggled.connect(_toggle)
+
+    v.addWidget(btn)
+    v.addWidget(content)
+    return root, content_lay, btn
+
 
 
 def _safe_parse_yaml(text: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -155,6 +187,13 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._yaml_saved_text: str = ""
         self._qc: QCViewer | None = None
         self._yaml_saved_text: str = ""
+
+        # Stage parameters: pending (not yet applied) changes per stage.
+        # We only write into YAML/config when the user presses "Apply".
+        self._stage_pending: dict[str, dict[str, Any]] = {}
+        self._stage_dirty: dict[str, bool] = {}
+        self._stage_apply_btns: dict[str, QtWidgets.QPushButton] = {}
+        self._stage_dirty_labels: dict[str, QtWidgets.QLabel] = {}
 
         # -------------- central layout --------------
         root = QtWidgets.QWidget()
@@ -234,9 +273,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.dock_log.setMinimumHeight(160)
 
         # Dock: inspector (always visible on the right)
-        self.dock_inspector = InspectorDock(self)
-        self.dock_inspector.panel.openQCRequested.connect(self._open_qc_viewer_for)
-        self.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.dock_inspector)
 
         # Attach log handler
         # Route Python logging into the UI log panel.
@@ -319,6 +355,65 @@ class LauncherWindow(QtWidgets.QMainWindow):
         except Exception as e:
             self._log_exception(e)
 
+
+
+    # --------------------------- small UI helpers ---------------------------
+
+    def _param_label(self, title: str, help_ru: str) -> QtWidgets.QWidget:
+        # A compact label widget for QFormLayout with a help tooltip.
+        w = QtWidgets.QWidget()
+        h = QtWidgets.QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(6)
+        lbl = QtWidgets.QLabel(title)
+        hb = HelpButton(help_ru)
+        h.addWidget(lbl)
+        h.addStretch(1)
+        h.addWidget(hb)
+        return w
+
+    def _force_dot_locale(self, *widgets: QtWidgets.QWidget) -> None:
+        """Force dot as decimal separator for numeric inputs.
+
+        Even if the OS locale uses comma (e.g. de_DE), we want "1.23" everywhere
+        to avoid config/YAML confusion.
+        """
+        try:
+            loc = QtCore.QLocale.c()
+        except Exception:
+            loc = None
+        if loc is None:
+            return
+        for w in widgets:
+            try:
+                w.setLocale(loc)
+            except Exception:
+                pass
+
+    def _collapsible(self, title: str, content: QtWidgets.QWidget, checked: bool = False) -> QtWidgets.QWidget:
+        """Wrap `content` into a collapsible container.
+
+        Convenience wrapper to keep call-sites compact.
+        """
+        root, content_lay, _ = _collapsible(title, expanded=checked)
+        content_lay.addWidget(content)
+        return root
+
+    def _mk_stage_apply_row(self, stage: str) -> QtWidgets.QWidget:
+        w = QtWidgets.QWidget()
+        h = QtWidgets.QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(10)
+        state_lbl = QtWidgets.QLabel("Применено")
+        state_lbl.setStyleSheet("QLabel { font-size: 11px; opacity: 0.9; }")
+        btn = QtWidgets.QPushButton("Apply")
+        btn.setProperty("primary", True)
+        btn.clicked.connect(lambda: self._stage_apply(stage))
+        h.addStretch(1)
+        h.addWidget(state_lbl)
+        h.addWidget(btn)
+        self._register_stage_apply_controls(stage, btn, state_lbl)
+        return w
 
 
     # --------------------------- page: project ---------------------------
@@ -806,101 +901,13 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.lbl_setup_hint.setStyleSheet("color: #A0A0A0;")
         fl.addRow("Setup info", self.lbl_setup_hint)
 
-        # tabs: Parameters / YAML (right)
-        tabs = QtWidgets.QTabWidget()
-        splitter.addWidget(tabs)
+        # right: YAML editor (manual edit)
+        g_yaml = _box("Config YAML (editable)")
+        splitter.addWidget(g_yaml)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([430, 900])
 
-        # --- quick params (tab) ---
-        tab_params = QtWidgets.QWidget()
-        tabs.addTab(tab_params, "Parameters")
-        tab_params_l = QtWidgets.QVBoxLayout(tab_params)
-        tab_params_l.setContentsMargins(0, 0, 0, 0)
-
-        g_q = _box("Quick parameters")
-        tab_params_l.addWidget(g_q)
-        ql = QtWidgets.QGridLayout(g_q)
-        ql.setHorizontalSpacing(10)
-        ql.setVerticalSpacing(10)
-
-        self._param_specs: list[ParamSpec] = [
-            ParamSpec(
-                "wavesol.y_half",
-                "Profile half-height (y_half)",
-                "Полувысота окна по Y для извлечения 1D-профиля (медиана по полосе y0±y_half).",
-                "int",
-                (1, 400),
-                1,
-            ),
-            ParamSpec(
-                "wavesol.peak_snr",
-                "Peak SNR threshold",
-                "Минимальное отношение сигнал/шум для автодетекции пиков в 1D-профиле супернеона.",
-                "float",
-                (0.0, 1000.0),
-                0.5,
-            ),
-            ParamSpec(
-                "wavesol.peak_prom_snr",
-                "Peak prominence (SNR)",
-                "Минимальная prominence в единицах σ (устойчивость к плавному фону).",
-                "float",
-                (0.0, 1000.0),
-                0.5,
-            ),
-            ParamSpec(
-                "wavesol.gui_min_amp_sigma_k",
-                "Auto min amplitude (k·σ)",
-                "Коэффициент k для автоматического порога амплитуды: threshold = median(noise) + k·σ(noise).",
-                "float",
-                (0.0, 50.0),
-                0.5,
-            ),
-            ParamSpec(
-                "wavesol.poly_deg_1d",
-                "1D polynomial degree",
-                "Степень полинома для λ(x) по ручным парам.",
-                "int",
-                (2, 10),
-                1,
-            ),
-        ]
-
-        self._param_widgets: dict[str, QtWidgets.QWidget] = {}
-        for r, spec in enumerate(self._param_specs):
-            lbl = QtWidgets.QLabel(spec.label_en)
-            btn = HelpButton(spec.help_ru)
-            if spec.kind == "int":
-                w_inp = QtWidgets.QSpinBox()
-                w_inp.setRange(int(spec.rng[0]), int(spec.rng[1]))
-                w_inp.setSingleStep(int(spec.step))
-            else:
-                w_inp = QtWidgets.QDoubleSpinBox()
-                w_inp.setRange(float(spec.rng[0]), float(spec.rng[1]))
-                w_inp.setSingleStep(float(spec.step))
-                w_inp.setDecimals(3)
-            w_inp.setMinimumWidth(120)
-            self._param_widgets[spec.key] = w_inp
-            ql.addWidget(lbl, r, 0)
-            ql.addWidget(w_inp, r, 1)
-            ql.addWidget(btn, r, 2)
-
-        self.btn_apply_quick = QtWidgets.QPushButton("Apply to config")
-        self.btn_apply_quick.setProperty("primary", True)
-        ql.addWidget(self.btn_apply_quick, len(self._param_specs), 0, 1, 3)
-
-        tab_params_l.addStretch(1)
-
-        # --- YAML editor (tab) ---
-        tab_yaml = QtWidgets.QWidget()
-        tabs.addTab(tab_yaml, "YAML")
-        tab_yaml_l = QtWidgets.QVBoxLayout(tab_yaml)
-        tab_yaml_l.setContentsMargins(0, 0, 0, 0)
-
-        g_yaml = _box("Config YAML (editable)")
-        tab_yaml_l.addWidget(g_yaml, 1)
         yl = QtWidgets.QVBoxLayout(g_yaml)
 
         self.editor_yaml = QtWidgets.QPlainTextEdit()
@@ -929,7 +936,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_suggest_workdir.clicked.connect(self._suggest_work_dir)
         self.btn_make_cfg.clicked.connect(self._do_make_cfg)
         self.btn_reload_cfg.clicked.connect(self._do_reload_cfg)
-        self.btn_apply_quick.clicked.connect(self._apply_quick_params)
         self.btn_validate_yaml.clicked.connect(self._validate_yaml)
         self.btn_diff_cfg.clicked.connect(self._show_cfg_diff)
         self.btn_save_cfg.clicked.connect(self._do_save_cfg)
@@ -1323,23 +1329,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.editor_yaml.blockSignals(False)
         self._yaml_saved_text = yaml_txt
 
-        # fill quick widgets from cfg
-        for spec in self._param_specs:
-            val = self._get_cfg_value(spec.key)
-            w = self._param_widgets.get(spec.key)
-            if w is None:
-                continue
-            if isinstance(w, QtWidgets.QSpinBox):
-                try:
-                    w.setValue(int(val))
-                except Exception:
-                    pass
-            elif isinstance(w, QtWidgets.QDoubleSpinBox):
-                try:
-                    w.setValue(float(val))
-                except Exception:
-                    pass
-
         # also update object/disperser/workdir if available
         try:
             self.edit_work_dir.setText(str(Path(str(cfg.get("work_dir", ""))).expanduser()))
@@ -1359,7 +1348,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         self._update_enables()
         self._refresh_statusbar()
-        self._refresh_inspector()
 
         # refresh derived UI state
         try:
@@ -1461,7 +1449,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.lbl_cfg_state.setText(f"Saved: {self._cfg_path.name}")
         self._update_enables()
         self._refresh_statusbar()
-        self._refresh_inspector()
 
     def _get_cfg_value(self, dotted: str, default: Any | None = None) -> Any:
         cfg = self._cfg or {}
@@ -1483,26 +1470,76 @@ class LauncherWindow(QtWidgets.QMainWindow):
             cur = cur[p]
         cur[parts[-1]] = value
 
-    def _apply_quick_params(self) -> None:
-        if not self._sync_cfg_from_editor():
-            return
-        for spec in self._param_specs:
-            w = self._param_widgets.get(spec.key)
-            if w is None:
-                continue
-            if isinstance(w, QtWidgets.QSpinBox):
-                v: Any = int(w.value())
-            elif isinstance(w, QtWidgets.QDoubleSpinBox):
-                v = float(w.value())
-            else:
-                continue
-            self._set_cfg_value(spec.key, v)
 
-        # reflect into editor
-        self.editor_yaml.blockSignals(True)
-        self.editor_yaml.setPlainText(_yaml_dump(self._cfg or {}))
-        self.editor_yaml.blockSignals(False)
-        self.lbl_cfg_state.setText("Applied quick params (not saved)")
+    # --- stage parameter apply/dirty state ---
+
+    def _set_stage_dirty(self, stage: str, dirty: bool = True) -> None:
+        self._stage_dirty[stage] = bool(dirty)
+        btn = self._stage_apply_btns.get(stage)
+        if btn is not None:
+            btn.setEnabled(bool(dirty))
+        lbl = self._stage_dirty_labels.get(stage)
+        if lbl is not None:
+            lbl.setText("Не применено" if dirty else "Применено")
+
+    def _clear_stage_dirty_all(self) -> None:
+        for st in list(getattr(self, "_stage_dirty", {}).keys()):
+            self._set_stage_dirty(st, False)
+
+    def _register_stage_apply_controls(self, stage: str, apply_btn: QtWidgets.QPushButton, state_lbl: QtWidgets.QLabel) -> None:
+        self._stage_apply_btns[stage] = apply_btn
+        self._stage_dirty_labels[stage] = state_lbl
+        apply_btn.setEnabled(False)
+        state_lbl.setText("Применено")
+        self._stage_dirty.setdefault(stage, False)
+        self._stage_pending.setdefault(stage, {})
+
+    def _stage_set_pending(self, stage: str, dotted: str, value: Any) -> None:
+        self._stage_pending.setdefault(stage, {})[dotted] = value
+        self._set_stage_dirty(stage, True)
+
+    def _stage_apply(self, stage: str) -> None:
+        pending = dict(self._stage_pending.get(stage, {}) or {})
+        if not pending:
+            self._set_stage_dirty(stage, False)
+            return
+        # Apply all changes into YAML/config.
+        # Use per-key setters so that existing helper logic (apply_to ordering, etc.) stays consistent.
+        for dotted, val in pending.items():
+            # handle list selectors
+            if str(dotted).endswith(".apply_to"):
+                block = dotted.split(".")[0]
+                self._cfg_set_apply_to(block, list(val or []))
+            else:
+                self._cfg_set_path(dotted.split("."), val)
+        # Clear pending + mark clean
+        self._stage_pending[stage] = {}
+        self._set_stage_dirty(stage, False)
+        try:
+            self._sync_stage_controls_from_cfg()
+        except Exception:
+            pass
+
+    def _ensure_stage_applied(self, stage: str, title: str | None = None) -> bool:
+        """If the stage has pending changes, ask user to apply them before running."""
+        if title is None:
+            # Human-friendly fallback
+            title = stage
+        if not self._stage_dirty.get(stage, False):
+            return True
+        m = QtWidgets.QMessageBox(self)
+        m.setWindowTitle("Unapplied parameters")
+        m.setIcon(QtWidgets.QMessageBox.Warning)
+        m.setText(f"{title}: есть неприменённые изменения параметров.")
+        m.setInformativeText("Нажми Apply, чтобы применить параметры, и затем запусти этап.")
+        btn_apply = m.addButton("Apply", QtWidgets.QMessageBox.AcceptRole)
+        btn_cancel = m.addButton("Cancel", QtWidgets.QMessageBox.RejectRole)
+        m.setDefaultButton(btn_apply)
+        m.exec()
+        if m.clickedButton() == btn_apply:
+            self._stage_apply(stage)
+            return True
+        return False
 
     # --------------------------- page: calibrations ---------------------------
 
@@ -1538,6 +1575,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.editor_yaml.setPlainText(new_txt)
         if blocker is not None:
             del blocker
+        # Keep the config status label in sync (signals were blocked).
+        try:
+            self._on_yaml_changed()
+        except Exception:
+            pass
         # Resync internal config + validate
         self._sync_cfg_from_editor()
 
@@ -1562,8 +1604,21 @@ class LauncherWindow(QtWidgets.QMainWindow):
         if not isinstance(cfg, dict):
             return
 
+        # --- Calibrations ---
+        if hasattr(self, 'combo_bias_combine') and not self._stage_dirty.get('calib', False):
+            calib = cfg.get('calib', {}) if isinstance(cfg.get('calib'), dict) else {}
+            combine = str(calib.get('bias_combine', 'median') or 'median').lower()
+            if combine not in ('median', 'mean'):
+                combine = 'median'
+            with QtCore.QSignalBlocker(self.combo_bias_combine):
+                idx = self.combo_bias_combine.findText(combine)
+                self.combo_bias_combine.setCurrentIndex(max(0, idx))
+            if hasattr(self, 'spin_bias_sigma_clip'):
+                with QtCore.QSignalBlocker(self.spin_bias_sigma_clip):
+                    self.spin_bias_sigma_clip.setValue(float(calib.get('bias_sigma_clip', 0.0) or 0.0))
+
         # --- Cosmics ---
-        if hasattr(self, 'chk_cosmics_obj'):
+        if hasattr(self, 'chk_cosmics_obj') and not self._stage_dirty.get('cosmics', False):
             apply_to = set(self._cfg_get(cfg, ['cosmics', 'apply_to'], []) or [])
             for name, cb in [
                 ('obj', getattr(self, 'chk_cosmics_obj', None)),
@@ -1575,9 +1630,17 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     continue
                 with QtCore.QSignalBlocker(cb):
                     cb.setChecked(name in apply_to)
+            if hasattr(self, 'chk_cosmics_enabled'):
+                with QtCore.QSignalBlocker(self.chk_cosmics_enabled):
+                    self.chk_cosmics_enabled.setChecked(bool(self._cfg_get(cfg, ['cosmics', 'enabled'], True)))
+            if hasattr(self, 'combo_cosmics_method'):
+                with QtCore.QSignalBlocker(self.combo_cosmics_method):
+                    m = str(self._cfg_get(cfg, ['cosmics', 'method'], 'stack_mad') or 'stack_mad')
+                    idx = self.combo_cosmics_method.findText(m)
+                    self.combo_cosmics_method.setCurrentIndex(max(0, idx))
             if hasattr(self, 'spin_cosmics_k'):
                 with QtCore.QSignalBlocker(self.spin_cosmics_k):
-                    self.spin_cosmics_k.setValue(int(self._cfg_get(cfg, ['cosmics', 'k'], 5) or 5))
+                    self.spin_cosmics_k.setValue(int(round(float(self._cfg_get(cfg, ['cosmics', 'k'], 9.0) or 9.0))))
             if hasattr(self, 'chk_cosmics_bias'):
                 with QtCore.QSignalBlocker(self.chk_cosmics_bias):
                     self.chk_cosmics_bias.setChecked(bool(self._cfg_get(cfg, ['cosmics', 'bias_subtract'], True)))
@@ -1586,7 +1649,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     self.chk_cosmics_png.setChecked(bool(self._cfg_get(cfg, ['cosmics', 'save_png'], True)))
 
         # --- Flatfield ---
-        if hasattr(self, 'chk_flat_enabled'):
+        if hasattr(self, 'chk_flat_enabled') and not self._stage_dirty.get('flatfield', False):
             with QtCore.QSignalBlocker(self.chk_flat_enabled):
                 self.chk_flat_enabled.setChecked(bool(self._cfg_get(cfg, ['flatfield', 'enabled'], False)))
             apply_to = set(self._cfg_get(cfg, ['flatfield', 'apply_to'], []) or [])
@@ -1607,6 +1670,111 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 with QtCore.QSignalBlocker(self.chk_flat_png):
                     self.chk_flat_png.setChecked(bool(self._cfg_get(cfg, ['flatfield', 'save_png'], True)))
 
+        # --- SuperNeon ---
+        if hasattr(self, 'spin_sn_y_half') and not self._stage_dirty.get('superneon', False):
+            with QtCore.QSignalBlocker(self.spin_sn_y_half):
+                self.spin_sn_y_half.setValue(int(self._cfg_get(cfg, ['wavesol', 'y_half'], 20) or 20))
+            if hasattr(self, 'spin_sn_xshift'):
+                with QtCore.QSignalBlocker(self.spin_sn_xshift):
+                    self.spin_sn_xshift.setValue(int(self._cfg_get(cfg, ['wavesol', 'xshift_max_abs'], 2) or 2))
+            if hasattr(self, 'chk_sn_bias_sub'):
+                with QtCore.QSignalBlocker(self.chk_sn_bias_sub):
+                    self.chk_sn_bias_sub.setChecked(bool(self._cfg_get(cfg, ['superneon', 'bias_sub'], True)))
+            # noise
+            noise = self._cfg_get(cfg, ['wavesol', 'noise'], {}) or {}
+            if hasattr(self, 'spin_sn_bl_bin'):
+                with QtCore.QSignalBlocker(self.spin_sn_bl_bin):
+                    self.spin_sn_bl_bin.setValue(int(noise.get('baseline_bin_size', 32) or 32))
+            if hasattr(self, 'dspin_sn_bl_q'):
+                with QtCore.QSignalBlocker(self.dspin_sn_bl_q):
+                    self.dspin_sn_bl_q.setValue(float(noise.get('baseline_quantile', 0.2) or 0.2))
+            if hasattr(self, 'spin_sn_bl_smooth'):
+                with QtCore.QSignalBlocker(self.spin_sn_bl_smooth):
+                    self.spin_sn_bl_smooth.setValue(int(noise.get('baseline_smooth_bins', 5) or 5))
+            if hasattr(self, 'dspin_sn_empty_q'):
+                with QtCore.QSignalBlocker(self.dspin_sn_empty_q):
+                    self.dspin_sn_empty_q.setValue(float(noise.get('empty_quantile', 0.7) or 0.7))
+            if hasattr(self, 'dspin_sn_clip'):
+                with QtCore.QSignalBlocker(self.dspin_sn_clip):
+                    self.dspin_sn_clip.setValue(float(noise.get('clip', 3.5) or 3.5))
+            if hasattr(self, 'spin_sn_niter'):
+                with QtCore.QSignalBlocker(self.spin_sn_niter):
+                    self.spin_sn_niter.setValue(int(noise.get('n_iter', 3) or 3))
+            # peaks
+            for key, attr, default in [
+                ('peak_snr', 'dspin_sn_peak_snr', 4.5),
+                ('peak_prom_snr', 'dspin_sn_peak_prom', 3.5),
+                ('peak_floor_snr', 'dspin_sn_peak_floor', 3.0),
+            ]:
+                if hasattr(self, attr):
+                    w = getattr(self, attr)
+                    with QtCore.QSignalBlocker(w):
+                        w.setValue(float(self._cfg_get(cfg, ['wavesol', key], default) or default))
+            if hasattr(self, 'spin_sn_peak_dist'):
+                with QtCore.QSignalBlocker(self.spin_sn_peak_dist):
+                    self.spin_sn_peak_dist.setValue(int(self._cfg_get(cfg, ['wavesol', 'peak_distance'], 3) or 3))
+            if hasattr(self, 'chk_sn_autotune'):
+                with QtCore.QSignalBlocker(self.chk_sn_autotune):
+                    self.chk_sn_autotune.setChecked(bool(self._cfg_get(cfg, ['wavesol', 'peak_autotune'], True)))
+            if hasattr(self, 'spin_sn_target_min'):
+                with QtCore.QSignalBlocker(self.spin_sn_target_min):
+                    self.spin_sn_target_min.setValue(int(self._cfg_get(cfg, ['wavesol', 'peak_target_min'], 0) or 0))
+            if hasattr(self, 'spin_sn_target_max'):
+                with QtCore.QSignalBlocker(self.spin_sn_target_max):
+                    self.spin_sn_target_max.setValue(int(self._cfg_get(cfg, ['wavesol', 'peak_target_max'], 0) or 0))
+
+        # --- LineID (GUI) ---
+        if hasattr(self, 'dspin_lineid_sigma_k') and not self._stage_dirty.get('lineid', False):
+            with QtCore.QSignalBlocker(self.dspin_lineid_sigma_k):
+                self.dspin_lineid_sigma_k.setValue(float(self._cfg_get(cfg, ['wavesol', 'gui_min_amp_sigma_k'], 5.0) or 5.0))
+            if hasattr(self, 'dspin_lineid_min_amp'):
+                v = self._cfg_get(cfg, ['wavesol', 'gui_min_amp'], None)
+                vv = float(v) if v not in (None, "") else 0.0
+                with QtCore.QSignalBlocker(self.dspin_lineid_min_amp):
+                    self.dspin_lineid_min_amp.setValue(vv)
+            if hasattr(self, 'edit_lineid_lines_csv'):
+                with QtCore.QSignalBlocker(self.edit_lineid_lines_csv):
+                    self.edit_lineid_lines_csv.setText(str(self._cfg_get(cfg, ['wavesol', 'neon_lines_csv'], "" ) or ""))
+            if hasattr(self, 'edit_lineid_atlas_pdf'):
+                with QtCore.QSignalBlocker(self.edit_lineid_atlas_pdf):
+                    self.edit_lineid_atlas_pdf.setText(str(self._cfg_get(cfg, ['wavesol', 'atlas_pdf'], "" ) or ""))
+
+        # --- Wavelength solution ---
+        if hasattr(self, 'spin_ws_poly_deg') and not self._stage_dirty.get('wavesol', False):
+            with QtCore.QSignalBlocker(self.spin_ws_poly_deg):
+                self.spin_ws_poly_deg.setValue(int(self._cfg_get(cfg, ['wavesol', 'poly_deg_1d'], 4) or 4))
+            if hasattr(self, 'dspin_ws_blend'):
+                with QtCore.QSignalBlocker(self.dspin_ws_blend):
+                    self.dspin_ws_blend.setValue(float(self._cfg_get(cfg, ['wavesol', 'blend_weight'], 0.35) or 0.35))
+            if hasattr(self, 'dspin_ws_poly_clip'):
+                with QtCore.QSignalBlocker(self.dspin_ws_poly_clip):
+                    self.dspin_ws_poly_clip.setValue(float(self._cfg_get(cfg, ['wavesol', 'poly_sigma_clip'], 3.0) or 3.0))
+            if hasattr(self, 'spin_ws_poly_iter'):
+                with QtCore.QSignalBlocker(self.spin_ws_poly_iter):
+                    self.spin_ws_poly_iter.setValue(int(self._cfg_get(cfg, ['wavesol', 'poly_maxiter'], 6) or 6))
+            if hasattr(self, 'combo_ws_model2d'):
+                with QtCore.QSignalBlocker(self.combo_ws_model2d):
+                    m = str(self._cfg_get(cfg, ['wavesol', 'model2d'], 'auto') or 'auto')
+                    idx = self.combo_ws_model2d.findText(m)
+                    self.combo_ws_model2d.setCurrentIndex(max(0, idx))
+            for key, attr, default in [
+                ('power_deg', 'spin_ws_power_deg', 3),
+                ('cheb_degx', 'spin_ws_cheb_x', 4),
+                ('cheb_degy', 'spin_ws_cheb_y', 2),
+                ('edge_crop_x', 'spin_ws_crop_x', 0),
+                ('edge_crop_y', 'spin_ws_crop_y', 0),
+            ]:
+                if hasattr(self, attr):
+                    w = getattr(self, attr)
+                    with QtCore.QSignalBlocker(w):
+                        w.setValue(int(self._cfg_get(cfg, ['wavesol', key], default) or default))
+
+
+
+
+
+
+
     def _build_page_calib(self) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(w)
@@ -1626,10 +1794,65 @@ class LauncherWindow(QtWidgets.QMainWindow):
         gl = QtWidgets.QVBoxLayout(g)
         self.lbl_calib = QtWidgets.QLabel(
             "Build report/manifest.json and calib/superbias.fits.\n"
-            "Use QC Viewer to check intermediate products at each step."
+            "Tune parameters below and press Apply before running the stage."
         )
         self.lbl_calib.setWordWrap(True)
         gl.addWidget(self.lbl_calib)
+
+        # --- parameters ---
+        pbox = _box("Parameters")
+        pl = QtWidgets.QVBoxLayout(pbox)
+        pl.setSpacing(10)
+
+        basic = _box("Basic")
+        bf = QtWidgets.QFormLayout(basic)
+        bf.setLabelAlignment(QtCore.Qt.AlignLeft)
+        bf.setHorizontalSpacing(12)
+
+        self.combo_bias_combine = QtWidgets.QComboBox()
+        self.combo_bias_combine.addItems(["median", "mean"])
+        bf.addRow(
+            self._param_label(
+                "Bias combine",
+                "Способ объединения bias-кадров.\n"
+                "median — устойчив к выбросам, mean — чуть выше S/N при чистых данных.\n"
+                "Типично: median.",
+            ),
+            self.combo_bias_combine,
+        )
+
+        self.spin_bias_sigma_clip = QtWidgets.QDoubleSpinBox()
+        self.spin_bias_sigma_clip.setRange(0.0, 10.0)
+        self.spin_bias_sigma_clip.setDecimals(2)
+        self.spin_bias_sigma_clip.setSingleStep(0.5)
+        self.spin_bias_sigma_clip.setToolTip("0 = disable")
+        bf.addRow(
+            self._param_label(
+                "Sigma-clip",
+                "Сигма-клиппинг при построении superbias.\n"
+                "0 = отключить.\n"
+                "Типично: 0–3.",
+            ),
+            self.spin_bias_sigma_clip,
+        )
+
+        pl.addWidget(basic)
+        adv_w, adv_l, _ = _collapsible("Advanced", expanded=False)
+        note = QtWidgets.QLabel("(Пока без дополнительных параметров для этого этапа.)")
+        note.setWordWrap(True)
+        adv_l.addWidget(note)
+        pl.addWidget(adv_w)
+        pl.addWidget(self._mk_stage_apply_row("calib"))
+
+        gl.addWidget(pbox)
+
+        # wire (pending → Apply)
+        self.combo_bias_combine.currentTextChanged.connect(
+            lambda t: self._stage_set_pending("calib", "calib.bias_combine", str(t))
+        )
+        self.spin_bias_sigma_clip.valueChanged.connect(
+            lambda v: self._stage_set_pending("calib", "calib.bias_sigma_clip", float(v))
+        )
 
         row = QtWidgets.QHBoxLayout()
         self.btn_run_calib = QtWidgets.QPushButton("Run: Manifest + Superbias")
@@ -1665,9 +1888,13 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_qc_calib.clicked.connect(self._open_qc_viewer)
         self.btn_frames_calib.clicked.connect(lambda: self._open_frames_window('calib'))
         self.btn_to_cosmics.clicked.connect(lambda: self.steps.setCurrentRow(3))
+
+        self._sync_stage_controls_from_cfg()
         return w
 
     def _do_run_calib(self) -> None:
+        if not self._ensure_stage_applied("calib", "Calibrations"):
+            return
         if not self._ensure_cfg_saved():
             return
         self._set_step_status(2, "running")
@@ -1711,12 +1938,42 @@ class LauncherWindow(QtWidgets.QMainWindow):
         lbl.setWordWrap(True)
         gl.addWidget(lbl)
 
-        # --- per-stage params ---
-        form = QtWidgets.QFormLayout()
-        form.setLabelAlignment(QtCore.Qt.AlignLeft)
 
-        # Apply-to
-        apply_row = QtWidgets.QHBoxLayout()
+        # --- per-stage params ---
+        pbox = _box("Parameters")
+        pl = QtWidgets.QVBoxLayout(pbox)
+        pl.setSpacing(10)
+
+        basic = _box("Basic")
+        bf = QtWidgets.QFormLayout(basic)
+        bf.setLabelAlignment(QtCore.Qt.AlignLeft)
+        bf.setHorizontalSpacing(12)
+
+        self.chk_cosmics_enabled = QtWidgets.QCheckBox("Enable")
+        bf.addRow(
+            self._param_label(
+                "Enabled",
+                "Включает/отключает этап Clean Cosmics.\n"
+                "Типично: включено для obj/sky (и sunsky при наличии).",
+            ),
+            self.chk_cosmics_enabled,
+        )
+
+        self.combo_cosmics_method = QtWidgets.QComboBox()
+        self.combo_cosmics_method.addItems(["stack_mad"])
+        bf.addRow(
+            self._param_label(
+                "Method",
+                "Алгоритм подавления космиков.\n"
+                "stack_mad — устойчивый метод по стеку кадров.\n"
+                "Типично: stack_mad (по умолчанию).",
+            ),
+            self.combo_cosmics_method,
+        )
+
+        apply_row_w = QtWidgets.QWidget()
+        apply_row = QtWidgets.QHBoxLayout(apply_row_w)
+        apply_row.setContentsMargins(0, 0, 0, 0)
         self.chk_cosmics_obj = QtWidgets.QCheckBox("obj")
         self.chk_cosmics_sky = QtWidgets.QCheckBox("sky")
         self.chk_cosmics_sunsky = QtWidgets.QCheckBox("sunsky")
@@ -1724,21 +1981,59 @@ class LauncherWindow(QtWidgets.QMainWindow):
         for cb in (self.chk_cosmics_obj, self.chk_cosmics_sky, self.chk_cosmics_sunsky, self.chk_cosmics_neon):
             apply_row.addWidget(cb)
         apply_row.addStretch(1)
-        form.addRow("Apply to", apply_row)
+        bf.addRow(
+            self._param_label(
+                "Apply to",
+                "К каким типам кадров применять очистку.\n"
+                "Типично: obj + sky; sunsky — если наблюдался; neon — обычно не нужно.",
+            ),
+            apply_row_w,
+        )
 
-        # Parameters
-        self.spin_cosmics_k = QtWidgets.QSpinBox()
-        self.spin_cosmics_k.setRange(1, 99)
-        self.spin_cosmics_k.setValue(5)
-        self.spin_cosmics_k.setToolTip("Median window size (pixels). Larger is more aggressive.")
-        form.addRow("Median window (k)", self.spin_cosmics_k)
+        self.spin_cosmics_k = QtWidgets.QDoubleSpinBox()
+        self.spin_cosmics_k.setRange(1.0, 51.0)
+        self.spin_cosmics_k.setDecimals(1)
+        self.spin_cosmics_k.setSingleStep(0.5)
+        self.spin_cosmics_k.setToolTip("Median window size (px). Larger = more aggressive.")
+        bf.addRow(
+            self._param_label(
+                "k (window)",
+                "Размер окна медианного фильтра (в пикселях).\n"
+                "Больше k → агрессивнее подавление, но выше риск размыть узкие детали.\n"
+                "Типично: 5–15.",
+            ),
+            self.spin_cosmics_k,
+        )
 
-        self.chk_cosmics_bias = QtWidgets.QCheckBox("Subtract superbias before cleaning")
-        self.chk_cosmics_png = QtWidgets.QCheckBox("Save QC PNGs (coverage/sum)")
-        form.addRow("", self.chk_cosmics_bias)
-        form.addRow("", self.chk_cosmics_png)
+        pl.addWidget(basic)
 
-        gl.addLayout(form)
+        adv_w, adv_l, _ = _collapsible("Advanced", expanded=False)
+        af = QtWidgets.QFormLayout()
+        af.setLabelAlignment(QtCore.Qt.AlignLeft)
+        af.setHorizontalSpacing(12)
+        self.chk_cosmics_bias = QtWidgets.QCheckBox("Yes")
+        af.addRow(
+            self._param_label(
+                "Bias subtract",
+                "Вычитать superbias перед поиском космиков.\n"
+                "Типично: включено.",
+            ),
+            self.chk_cosmics_bias,
+        )
+        self.chk_cosmics_png = QtWidgets.QCheckBox("Yes")
+        af.addRow(
+            self._param_label(
+                "Save PNG",
+                "Сохранять QC-картинки (coverage/sum).\n"
+                "Типично: включено для диагностики.",
+            ),
+            self.chk_cosmics_png,
+        )
+        adv_l.addLayout(af)
+        pl.addWidget(adv_w)
+        pl.addWidget(self._mk_stage_apply_row("cosmics"))
+
+        gl.addWidget(pbox)
 
         row = QtWidgets.QHBoxLayout()
         self.btn_run_cosmics = QtWidgets.QPushButton("Run: Clean cosmics")
@@ -1773,30 +2068,48 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_frames_cosmics.clicked.connect(lambda: self._open_frames_window('cosmics'))
         self.btn_to_flatfield.clicked.connect(lambda: self.steps.setCurrentRow(4))
 
-        # wire per-stage controls → YAML
+
+        # wire per-stage controls (pending → Apply)
         def _apply_to_from_ui() -> list[str]:
             out: list[str] = []
             if self.chk_cosmics_obj.isChecked():
-                out.append('obj')
+                out.append("obj")
             if self.chk_cosmics_sky.isChecked():
-                out.append('sky')
+                out.append("sky")
             if self.chk_cosmics_sunsky.isChecked():
-                out.append('sunsky')
+                out.append("sunsky")
             if self.chk_cosmics_neon.isChecked():
-                out.append('neon')
+                out.append("neon")
             return out
 
+        def _on_apply_to(*_):
+            self._stage_set_pending("cosmics", "cosmics.apply_to", _apply_to_from_ui())
+
         for cb in (self.chk_cosmics_obj, self.chk_cosmics_sky, self.chk_cosmics_sunsky, self.chk_cosmics_neon):
-            cb.toggled.connect(lambda *_: self._cfg_set_apply_to('cosmics', _apply_to_from_ui()))
-        self.spin_cosmics_k.valueChanged.connect(lambda v: self._cfg_set_path(['cosmics', 'k'], int(v)))
-        self.chk_cosmics_bias.toggled.connect(lambda v: self._cfg_set_path(['cosmics', 'bias_subtract'], bool(v)))
-        self.chk_cosmics_png.toggled.connect(lambda v: self._cfg_set_path(['cosmics', 'save_png'], bool(v)))
+            cb.toggled.connect(_on_apply_to)
+        self.chk_cosmics_enabled.toggled.connect(
+            lambda v: self._stage_set_pending("cosmics", "cosmics.enabled", bool(v))
+        )
+        self.combo_cosmics_method.currentTextChanged.connect(
+            lambda t: self._stage_set_pending("cosmics", "cosmics.method", str(t))
+        )
+        self.spin_cosmics_k.valueChanged.connect(
+            lambda v: self._stage_set_pending("cosmics", "cosmics.k", float(v))
+        )
+        self.chk_cosmics_bias.toggled.connect(
+            lambda v: self._stage_set_pending("cosmics", "cosmics.bias_subtract", bool(v))
+        )
+        self.chk_cosmics_png.toggled.connect(
+            lambda v: self._stage_set_pending("cosmics", "cosmics.save_png", bool(v))
+        )
 
         # initial sync from YAML
         self._sync_stage_controls_from_cfg()
         return w
 
     def _do_run_cosmics(self) -> None:
+        if not self._ensure_stage_applied("cosmics", "Clean Cosmics"):
+            return
         if not self._ensure_cfg_saved():
             return
         self._set_step_status(3, "running")
@@ -1833,20 +2146,29 @@ class LauncherWindow(QtWidgets.QMainWindow):
         g = _box("Flat-fielding (optional)")
         l.addWidget(g)
         gl = QtWidgets.QVBoxLayout(g)
+
         lbl = QtWidgets.QLabel(
-            "Apply flat-field correction after Cosmics.\n"
-            "For each object, only flats with matching OBJECT in the nightlog are used.\n"
-            "Superbias is subtracted before building and applying the flat."
+            "Divide frames by a superflat built from selected FLAT frames.\n"
+            "Superbias can be subtracted (recommended).\n"
+            "Tip: keep this stage disabled if you have no proper flats."
         )
         lbl.setWordWrap(True)
         gl.addWidget(lbl)
 
-        form = QtWidgets.QFormLayout()
+        gpar = _box("Parameters")
+        l.addWidget(gpar)
+        pl = QtWidgets.QVBoxLayout(gpar)
+        pl.setSpacing(8)
+
+        # ---------------- BASIC ----------------
+        basic = QtWidgets.QWidget()
+        form = QtWidgets.QFormLayout(basic)
         form.setLabelAlignment(QtCore.Qt.AlignLeft)
+        form.setFormAlignment(QtCore.Qt.AlignTop)
 
         self.chk_flat_enabled = QtWidgets.QCheckBox("Enable flat-fielding")
-        self.chk_flat_enabled.setToolTip("If disabled, the stage is skipped.")
-        form.addRow("", self.chk_flat_enabled)
+        self.chk_flat_enabled.setToolTip("Включает/выключает этап. Обычно: выключено, если нет корректных flat-кадров.")
+        form.addRow(self._param_label("Enabled", "Типично: включать только если в ночи есть корректные flat.\n\nЗначения: True/False."), self.chk_flat_enabled)
 
         apply_row = QtWidgets.QHBoxLayout()
         self.chk_flat_obj = QtWidgets.QCheckBox("obj")
@@ -1856,15 +2178,51 @@ class LauncherWindow(QtWidgets.QMainWindow):
         for cb in (self.chk_flat_obj, self.chk_flat_sky, self.chk_flat_sunsky, self.chk_flat_neon):
             apply_row.addWidget(cb)
         apply_row.addStretch(1)
-        form.addRow("Apply to", apply_row)
+        apply_w = QtWidgets.QWidget()
+        apply_w.setLayout(apply_row)
+        form.addRow(
+            self._param_label(
+                "Apply to",
+                "К каким типам кадров применять flat-fielding.\n"
+                "Типично: obj+sky (+sunsky при наличии).\n"
+                "neon — включать только если это нужно для вашей схемы обработки.",
+            ),
+            apply_w,
+        )
 
         self.chk_flat_bias = QtWidgets.QCheckBox("Subtract superbias")
-        self.chk_flat_bias.setToolTip("Recommended: keep enabled for stable flat-fielding")
-        self.chk_flat_png = QtWidgets.QCheckBox("Save QC PNGs")
-        form.addRow("", self.chk_flat_bias)
-        form.addRow("", self.chk_flat_png)
+        self.chk_flat_bias.setToolTip("Рекомендуется: True. Отключайте только если bias уже вычтен ранее.")
+        form.addRow(
+            self._param_label(
+                "Bias subtraction",
+                "Вычитать superbias при построении и применении superflat.\n"
+                "Типично: True.\n"
+                "Если вы используете продукт, где bias уже вычтен, можно выключить.",
+            ),
+            self.chk_flat_bias,
+        )
 
-        gl.addLayout(form)
+        self.chk_flat_png = QtWidgets.QCheckBox("Save QC PNGs")
+        form.addRow(
+            self._param_label(
+                "QC PNG",
+                "Сохранять диагностические PNG.\n"
+                "Типично: True (полезно для контроля качества).") ,
+            self.chk_flat_png,
+        )
+
+        adv = QtWidgets.QWidget()
+        adv_form = QtWidgets.QFormLayout(adv)
+        adv_form.setLabelAlignment(QtCore.Qt.AlignLeft)
+        adv_lbl = QtWidgets.QLabel(
+            "(Advanced reserved for future: per-kind flats, normalization, etc.)"
+        )
+        adv_lbl.setWordWrap(True)
+        adv_form.addRow("", adv_lbl)
+
+        pl.addWidget(self._collapsible("Basic", basic, checked=True))
+        pl.addWidget(self._collapsible("Advanced", adv, checked=False))
+        pl.addWidget(self._mk_stage_apply_row("flatfield"))
 
         row = QtWidgets.QHBoxLayout()
         self.btn_run_flatfield = QtWidgets.QPushButton("Run: Flat-fielding")
@@ -1901,7 +2259,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_frames_flatfield.clicked.connect(lambda: self._open_frames_window('flatfield'))
         self.btn_to_superneon.clicked.connect(lambda: self.steps.setCurrentRow(5))
 
-        # wire controls → YAML
+        # ---- pending wiring (Apply button governs persistence) ----
         def _apply_to_from_ui() -> list[str]:
             out: list[str] = []
             if self.chk_flat_obj.isChecked():
@@ -1914,16 +2272,18 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 out.append('neon')
             return out
 
-        self.chk_flat_enabled.toggled.connect(lambda v: self._cfg_set_path(['flatfield', 'enabled'], bool(v)))
+        self.chk_flat_enabled.toggled.connect(lambda v: self._stage_set_pending('flatfield', 'flatfield.enabled', bool(v)))
         for cb in (self.chk_flat_obj, self.chk_flat_sky, self.chk_flat_sunsky, self.chk_flat_neon):
-            cb.toggled.connect(lambda *_: self._cfg_set_apply_to('flatfield', _apply_to_from_ui()))
-        self.chk_flat_bias.toggled.connect(lambda v: self._cfg_set_path(['flatfield', 'bias_subtract'], bool(v)))
-        self.chk_flat_png.toggled.connect(lambda v: self._cfg_set_path(['flatfield', 'save_png'], bool(v)))
+            cb.toggled.connect(lambda *_: self._stage_set_pending('flatfield', 'flatfield.apply_to', _apply_to_from_ui()))
+        self.chk_flat_bias.toggled.connect(lambda v: self._stage_set_pending('flatfield', 'flatfield.bias_subtract', bool(v)))
+        self.chk_flat_png.toggled.connect(lambda v: self._stage_set_pending('flatfield', 'flatfield.save_png', bool(v)))
 
         self._sync_stage_controls_from_cfg()
         return w
 
     def _do_run_flatfield(self) -> None:
+        if not self._ensure_stage_applied('flatfield'):
+            return
         if not self._ensure_cfg_saved():
             return
         self._set_step_status(4, "running")
@@ -1962,10 +2322,322 @@ class LauncherWindow(QtWidgets.QMainWindow):
         gl = QtWidgets.QVBoxLayout(g)
         lbl = QtWidgets.QLabel(
             "Stack all NEON frames into a single superneon image,\n"
-            "detect candidate peaks in 1D profile, and write QC PNG/CSV."
+            "build a robust 1D profile and auto-detect peaks for LineID."
         )
         lbl.setWordWrap(True)
         gl.addWidget(lbl)
+
+        gpar = _box("Parameters")
+        l.addWidget(gpar)
+        pl = QtWidgets.QVBoxLayout(gpar)
+        pl.setSpacing(8)
+
+        # ---------------- BASIC ----------------
+        basic = QtWidgets.QWidget()
+        bform = QtWidgets.QFormLayout(basic)
+        bform.setLabelAlignment(QtCore.Qt.AlignLeft)
+        bform.setFormAlignment(QtCore.Qt.AlignTop)
+
+        self.chk_sn_bias_sub = QtWidgets.QCheckBox("Subtract superbias")
+        bform.addRow(
+            self._param_label(
+                "Bias subtraction",
+                "Вычитать superbias из NEON перед суммированием.\n"
+                "Типично: True.\n\n"
+                "Если у вас уже bias-вычтенные кадры — можно выключить.",
+            ),
+            self.chk_sn_bias_sub,
+        )
+
+        self.spin_sn_y_half = QtWidgets.QSpinBox()
+        self.spin_sn_y_half.setRange(5, 300)
+        self.spin_sn_y_half.setSingleStep(1)
+        bform.addRow(
+            self._param_label(
+                "Profile half-height (px)",
+                "Полувысота окна по Y для построения 1D профиля (суммирование по щели).\n"
+                "Типично: 10–40 px (зависит от binning и ширины LSF).\n"
+                "Слишком мало → шумно; слишком много → смешивание фоновых градиентов.",
+            ),
+            self.spin_sn_y_half,
+        )
+
+        self.spin_sn_xshift = QtWidgets.QSpinBox()
+        self.spin_sn_xshift.setRange(0, 50)
+        self.spin_sn_xshift.setSingleStep(1)
+        bform.addRow(
+            self._param_label(
+                "Max |x-shift| (px)",
+                "Ограничение на модуль сдвига по X при выравнивании NEON кадров.\n"
+                "Типично: 2–8 px (если стабильная механика).\n"
+                "Если кадры гуляют сильнее — увеличьте.",
+            ),
+            self.spin_sn_xshift,
+        )
+
+        # peak thresholds
+        self.dspin_sn_peak_snr = QtWidgets.QDoubleSpinBox()
+        self.dspin_sn_peak_snr.setRange(0.5, 50.0)
+        self.dspin_sn_peak_snr.setDecimals(2)
+        self.dspin_sn_peak_snr.setSingleStep(0.25)
+        bform.addRow(
+            self._param_label(
+                "Peak SNR (sigma)",
+                "Порог детекции пиков в единицах робастной сигмы.\n"
+                "Типично: 4–8.\n"
+                "Меньше → больше ложных линий; больше → можно потерять слабые линии.",
+            ),
+            self.dspin_sn_peak_snr,
+        )
+
+        self.dspin_sn_peak_prom = QtWidgets.QDoubleSpinBox()
+        self.dspin_sn_peak_prom.setRange(0.0, 50.0)
+        self.dspin_sn_peak_prom.setDecimals(2)
+        self.dspin_sn_peak_prom.setSingleStep(0.25)
+        bform.addRow(
+            self._param_label(
+                "Prominence (sigma)",
+                "Требуемая prominence для пика (в сигмах).\n"
+                "Типично: 3–7.\n"
+                "Полезно для подавления мелких шумовых бугорков.",
+            ),
+            self.dspin_sn_peak_prom,
+        )
+
+        self.dspin_sn_peak_floor = QtWidgets.QDoubleSpinBox()
+        self.dspin_sn_peak_floor.setRange(0.0, 50.0)
+        self.dspin_sn_peak_floor.setDecimals(2)
+        self.dspin_sn_peak_floor.setSingleStep(0.25)
+        bform.addRow(
+            self._param_label(
+                "Floor (sigma)",
+                "Минимальная высота над локальным фоном (в сигмах).\n"
+                "Типично: 2–5.",
+            ),
+            self.dspin_sn_peak_floor,
+        )
+
+        self.spin_sn_peak_dist = QtWidgets.QSpinBox()
+        self.spin_sn_peak_dist.setRange(1, 50)
+        self.spin_sn_peak_dist.setSingleStep(1)
+        bform.addRow(
+            self._param_label(
+                "Min distance (px)",
+                "Минимальная дистанция между пиками (в пикселях по X).\n"
+                "Типично: 2–6 (зависит от дисперсии и ширины линий).",
+            ),
+            self.spin_sn_peak_dist,
+        )
+
+        self.chk_sn_autotune = QtWidgets.QCheckBox("Auto-tune threshold")
+        bform.addRow(
+            self._param_label(
+                "Auto-tune",
+                "Автоматически подстраивать порог, если найдено слишком мало/слишком много пиков.\n"
+                "Типично: True (удобно в реальных данных).",
+            ),
+            self.chk_sn_autotune,
+        )
+
+        self.spin_sn_target_min = QtWidgets.QSpinBox()
+        self.spin_sn_target_min.setRange(0, 5000)
+        self.spin_sn_target_min.setSingleStep(10)
+        self.spin_sn_target_max = QtWidgets.QSpinBox()
+        self.spin_sn_target_max.setRange(0, 5000)
+        self.spin_sn_target_max.setSingleStep(10)
+        tgt_row = QtWidgets.QHBoxLayout()
+        tgt_row.addWidget(QtWidgets.QLabel("min"))
+        tgt_row.addWidget(self.spin_sn_target_min)
+        tgt_row.addSpacing(12)
+        tgt_row.addWidget(QtWidgets.QLabel("max"))
+        tgt_row.addWidget(self.spin_sn_target_max)
+        tgt_row.addStretch(1)
+        tgt_w = QtWidgets.QWidget()
+        tgt_w.setLayout(tgt_row)
+        bform.addRow(
+            self._param_label(
+                "Target peaks",
+                "Желаемый диапазон количества пиков для авто-подстройки.\n"
+                "0/0 = не использовать контроль по количеству.\n"
+                "Типично: (0,0) или (200,1200) в зависимости от решётки.",
+            ),
+            tgt_w,
+        )
+
+        # ---------------- ADVANCED ----------------
+        adv = QtWidgets.QWidget()
+        aform = QtWidgets.QFormLayout(adv)
+        aform.setLabelAlignment(QtCore.Qt.AlignLeft)
+
+        # noise model
+        self.spin_sn_bl_bin = QtWidgets.QSpinBox()
+        self.spin_sn_bl_bin.setRange(8, 200)
+        self.spin_sn_bl_bin.setSingleStep(4)
+        aform.addRow(
+            self._param_label(
+                "Baseline bin (px)",
+                "Размер бина по X при оценке базовой линии.\n"
+                "Типично: 20–80.",
+            ),
+            self.spin_sn_bl_bin,
+        )
+
+        self.dspin_sn_bl_q = QtWidgets.QDoubleSpinBox()
+        self.dspin_sn_bl_q.setRange(0.01, 0.99)
+        self.dspin_sn_bl_q.setDecimals(2)
+        self.dspin_sn_bl_q.setSingleStep(0.05)
+        aform.addRow(
+            self._param_label(
+                "Baseline quantile",
+                "Квантиль для базовой линии (0..1).\n"
+                "Типично: 0.2–0.5.",
+            ),
+            self.dspin_sn_bl_q,
+        )
+
+        self.spin_sn_bl_smooth = QtWidgets.QSpinBox()
+        self.spin_sn_bl_smooth.setRange(0, 50)
+        self.spin_sn_bl_smooth.setSingleStep(1)
+        aform.addRow(
+            self._param_label(
+                "Baseline smooth (bins)",
+                "Сглаживание базовой линии в бин-единицах.\n"
+                "Типично: 2–8.",
+            ),
+            self.spin_sn_bl_smooth,
+        )
+
+        self.dspin_sn_empty_q = QtWidgets.QDoubleSpinBox()
+        self.dspin_sn_empty_q.setRange(0.01, 0.99)
+        self.dspin_sn_empty_q.setDecimals(2)
+        self.dspin_sn_empty_q.setSingleStep(0.05)
+        aform.addRow(
+            self._param_label(
+                "Empty quantile",
+                "Квантиль для оценки 'пустого' уровня (0..1).\n"
+                "Типично: 0.05–0.2.",
+            ),
+            self.dspin_sn_empty_q,
+        )
+
+        self.dspin_sn_clip = QtWidgets.QDoubleSpinBox()
+        self.dspin_sn_clip.setRange(0.0, 20.0)
+        self.dspin_sn_clip.setDecimals(2)
+        self.dspin_sn_clip.setSingleStep(0.5)
+        aform.addRow(
+            self._param_label(
+                "Noise clip (sigma)",
+                "Сигма-клиппинг при оценке робастной сигмы.\n"
+                "0 = выключено. Типично: 2–5.",
+            ),
+            self.dspin_sn_clip,
+        )
+
+        self.spin_sn_niter = QtWidgets.QSpinBox()
+        self.spin_sn_niter.setRange(1, 50)
+        self.spin_sn_niter.setSingleStep(1)
+        aform.addRow(
+            self._param_label(
+                "Noise iters",
+                "Число итераций сигма-клиппинга.\n"
+                "Типично: 2–8.",
+            ),
+            self.spin_sn_niter,
+        )
+
+        self.spin_sn_gauss_hw = QtWidgets.QSpinBox()
+        self.spin_sn_gauss_hw.setRange(1, 50)
+        self.spin_sn_gauss_hw.setSingleStep(1)
+        aform.addRow(
+            self._param_label(
+                "Gaussian half-window",
+                "Полуокно (в пикселях) для гауссовой аппроксимации пика.\n"
+                "Типично: 3–8.",
+            ),
+            self.spin_sn_gauss_hw,
+        )
+
+        # autotune bounds
+        self.dspin_sn_snr_min = QtWidgets.QDoubleSpinBox()
+        self.dspin_sn_snr_min.setRange(0.1, 50.0)
+        self.dspin_sn_snr_min.setDecimals(2)
+        self.dspin_sn_snr_min.setSingleStep(0.1)
+        self.dspin_sn_snr_max = QtWidgets.QDoubleSpinBox()
+        self.dspin_sn_snr_max.setRange(0.1, 100.0)
+        self.dspin_sn_snr_max.setDecimals(2)
+        self.dspin_sn_snr_max.setSingleStep(0.1)
+        snr_row = QtWidgets.QHBoxLayout()
+        snr_row.addWidget(QtWidgets.QLabel("min"))
+        snr_row.addWidget(self.dspin_sn_snr_min)
+        snr_row.addSpacing(12)
+        snr_row.addWidget(QtWidgets.QLabel("max"))
+        snr_row.addWidget(self.dspin_sn_snr_max)
+        snr_row.addStretch(1)
+        snr_w = QtWidgets.QWidget()
+        snr_w.setLayout(snr_row)
+        aform.addRow(
+            self._param_label(
+                "Auto-tune SNR bounds",
+                "Ограничения на порог Peak SNR при авто-подстройке.\n"
+                "Типично: min=2–4, max=10–20.",
+            ),
+            snr_w,
+        )
+
+        self.dspin_sn_relax = QtWidgets.QDoubleSpinBox()
+        self.dspin_sn_relax.setRange(0.1, 0.99)
+        self.dspin_sn_relax.setDecimals(2)
+        self.dspin_sn_relax.setSingleStep(0.01)
+        self.dspin_sn_boost = QtWidgets.QDoubleSpinBox()
+        self.dspin_sn_boost.setRange(1.01, 2.0)
+        self.dspin_sn_boost.setDecimals(2)
+        self.dspin_sn_boost.setSingleStep(0.01)
+        rb_row = QtWidgets.QHBoxLayout()
+        rb_row.addWidget(QtWidgets.QLabel("relax"))
+        rb_row.addWidget(self.dspin_sn_relax)
+        rb_row.addSpacing(12)
+        rb_row.addWidget(QtWidgets.QLabel("boost"))
+        rb_row.addWidget(self.dspin_sn_boost)
+        rb_row.addStretch(1)
+        rb_w = QtWidgets.QWidget(); rb_w.setLayout(rb_row)
+        aform.addRow(
+            self._param_label(
+                "Relax/Boost",
+                "Множители для уменьшения/увеличения порога при авто-подстройке.\n"
+                "Типично: relax≈0.8–0.9, boost≈1.1–1.3.",
+            ),
+            rb_w,
+        )
+
+        self.spin_sn_max_tries = QtWidgets.QSpinBox()
+        self.spin_sn_max_tries.setRange(1, 100)
+        self.spin_sn_max_tries.setSingleStep(1)
+        aform.addRow(
+            self._param_label(
+                "Max tries",
+                "Максимум попыток авто-подстройки.\n"
+                "Типично: 6–15.",
+            ),
+            self.spin_sn_max_tries,
+        )
+
+        # dot locale everywhere
+        self._force_dot_locale(
+            self.dspin_sn_peak_snr,
+            self.dspin_sn_peak_prom,
+            self.dspin_sn_peak_floor,
+            self.dspin_sn_bl_q,
+            self.dspin_sn_empty_q,
+            self.dspin_sn_clip,
+            self.dspin_sn_snr_min,
+            self.dspin_sn_snr_max,
+            self.dspin_sn_relax,
+            self.dspin_sn_boost,
+        )
+
+        pl.addWidget(self._collapsible("Basic", basic, checked=True))
+        pl.addWidget(self._collapsible("Advanced", adv, checked=False))
+        pl.addWidget(self._mk_stage_apply_row("superneon"))
 
         row = QtWidgets.QHBoxLayout()
         self.btn_run_superneon = QtWidgets.QPushButton("Run: SuperNeon")
@@ -1978,9 +2650,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
         row.addWidget(self.btn_frames_superneon)
         row.addStretch(1)
         gl.addLayout(row)
-        l.addStretch(1)
 
+        l.addStretch(1)
         splitter.addWidget(left)
+
         self.outputs_superneon = OutputsPanel()
         self.outputs_superneon.set_context(self._cfg, stage="wavesol")
         splitter.addWidget(self.outputs_superneon)
@@ -1995,13 +2668,87 @@ class LauncherWindow(QtWidgets.QMainWindow):
         foot.addStretch(1)
         foot.addWidget(self.btn_to_lineid)
 
+        # actions
         self.btn_run_superneon.clicked.connect(self._do_run_superneon)
         self.btn_qc_superneon.clicked.connect(self._open_qc_viewer)
         self.btn_frames_superneon.clicked.connect(lambda: self._open_frames_window('superneon'))
         self.btn_to_lineid.clicked.connect(lambda: self.steps.setCurrentRow(6))
+
+        # pending wiring
+        self.chk_sn_bias_sub.toggled.connect(
+            lambda v: self._stage_set_pending('superneon', 'superneon.bias_sub', bool(v))
+        )
+        self.spin_sn_y_half.valueChanged.connect(
+            lambda v: self._stage_set_pending('superneon', 'wavesol.y_half', int(v))
+        )
+        self.spin_sn_xshift.valueChanged.connect(
+            lambda v: self._stage_set_pending('superneon', 'wavesol.xshift_max_abs', int(v))
+        )
+        self.dspin_sn_peak_snr.valueChanged.connect(
+            lambda v: self._stage_set_pending('superneon', 'wavesol.peak_snr', float(v))
+        )
+        self.dspin_sn_peak_prom.valueChanged.connect(
+            lambda v: self._stage_set_pending('superneon', 'wavesol.peak_prom_snr', float(v))
+        )
+        self.dspin_sn_peak_floor.valueChanged.connect(
+            lambda v: self._stage_set_pending('superneon', 'wavesol.peak_floor_snr', float(v))
+        )
+        self.spin_sn_peak_dist.valueChanged.connect(
+            lambda v: self._stage_set_pending('superneon', 'wavesol.peak_distance', int(v))
+        )
+        self.chk_sn_autotune.toggled.connect(
+            lambda v: self._stage_set_pending('superneon', 'wavesol.peak_autotune', bool(v))
+        )
+        self.spin_sn_target_min.valueChanged.connect(
+            lambda v: self._stage_set_pending('superneon', 'wavesol.peak_target_min', int(v))
+        )
+        self.spin_sn_target_max.valueChanged.connect(
+            lambda v: self._stage_set_pending('superneon', 'wavesol.peak_target_max', int(v))
+        )
+
+        self.spin_sn_bl_bin.valueChanged.connect(
+            lambda v: self._stage_set_pending('superneon', 'wavesol.noise.baseline_bin_size', int(v))
+        )
+        self.dspin_sn_bl_q.valueChanged.connect(
+            lambda v: self._stage_set_pending('superneon', 'wavesol.noise.baseline_quantile', float(v))
+        )
+        self.spin_sn_bl_smooth.valueChanged.connect(
+            lambda v: self._stage_set_pending('superneon', 'wavesol.noise.baseline_smooth_bins', int(v))
+        )
+        self.dspin_sn_empty_q.valueChanged.connect(
+            lambda v: self._stage_set_pending('superneon', 'wavesol.noise.empty_quantile', float(v))
+        )
+        self.dspin_sn_clip.valueChanged.connect(
+            lambda v: self._stage_set_pending('superneon', 'wavesol.noise.clip', float(v))
+        )
+        self.spin_sn_niter.valueChanged.connect(
+            lambda v: self._stage_set_pending('superneon', 'wavesol.noise.n_iter', int(v))
+        )
+        self.spin_sn_gauss_hw.valueChanged.connect(
+            lambda v: self._stage_set_pending('superneon', 'wavesol.gauss_half_win', int(v))
+        )
+        self.dspin_sn_snr_min.valueChanged.connect(
+            lambda v: self._stage_set_pending('superneon', 'wavesol.peak_snr_min', float(v))
+        )
+        self.dspin_sn_snr_max.valueChanged.connect(
+            lambda v: self._stage_set_pending('superneon', 'wavesol.peak_snr_max', float(v))
+        )
+        self.dspin_sn_relax.valueChanged.connect(
+            lambda v: self._stage_set_pending('superneon', 'wavesol.peak_snr_relax', float(v))
+        )
+        self.dspin_sn_boost.valueChanged.connect(
+            lambda v: self._stage_set_pending('superneon', 'wavesol.peak_snr_boost', float(v))
+        )
+        self.spin_sn_max_tries.valueChanged.connect(
+            lambda v: self._stage_set_pending('superneon', 'wavesol.peak_autotune_max_tries', int(v))
+        )
+
+        self._sync_stage_controls_from_cfg()
         return w
 
     def _do_run_superneon(self) -> None:
+        if not self._ensure_stage_applied('superneon'):
+            return
         if not self._ensure_cfg_saved():
             return
         self._set_step_status(5, "running")
@@ -2027,8 +2774,15 @@ class LauncherWindow(QtWidgets.QMainWindow):
         lay = QtWidgets.QVBoxLayout(w)
         lay.setSpacing(12)
 
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        lay.addWidget(splitter)
+
+        left = QtWidgets.QWidget()
+        l = QtWidgets.QVBoxLayout(left)
+        l.setSpacing(12)
+
         g = _box("LineID (manual pairs)")
-        lay.addWidget(g)
+        l.addWidget(g)
         gl = QtWidgets.QVBoxLayout(g)
 
         self.lbl_lineid = QtWidgets.QLabel(
@@ -2042,7 +2796,93 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.lbl_pairs.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         gl.addWidget(self.lbl_pairs)
 
-        # Main actions
+        # --- Parameters (Basic/Advanced) + Apply ---
+        gpar = _box("Parameters")
+        l.addWidget(gpar)
+        pl = QtWidgets.QVBoxLayout(gpar)
+        pl.setContentsMargins(10, 10, 10, 10)
+
+        basic = QtWidgets.QWidget()
+        form = QtWidgets.QFormLayout(basic)
+        form.setLabelAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+
+        self.dspin_lineid_sigma_k = QtWidgets.QDoubleSpinBox()
+        self.dspin_lineid_sigma_k.setRange(1.0, 20.0)
+        self.dspin_lineid_sigma_k.setSingleStep(0.5)
+        self.dspin_lineid_sigma_k.setDecimals(1)
+
+        self.dspin_lineid_min_amp = QtWidgets.QDoubleSpinBox()
+        self.dspin_lineid_min_amp.setRange(0.0, 1e9)
+        self.dspin_lineid_min_amp.setSingleStep(50.0)
+        self.dspin_lineid_min_amp.setDecimals(1)
+        self.dspin_lineid_min_amp.setToolTip("0 = auto threshold from sigma_k")
+
+        self.edit_lineid_lines_csv = QtWidgets.QLineEdit()
+        self.edit_lineid_atlas_pdf = QtWidgets.QLineEdit()
+        btn_browse_csv = QtWidgets.QToolButton()
+        btn_browse_csv.setText("…")
+        btn_browse_pdf = QtWidgets.QToolButton()
+        btn_browse_pdf.setText("…")
+
+        form.addRow(
+            self._param_label(
+                "Min amplitude (σ_k)",
+                "Автопорог по шуму для показа/подбора линий.\n"
+                "Типичный диапазон: 3–8. Больше — меньше ложных пиков, но можно пропустить слабые.",
+            ),
+            self.dspin_lineid_sigma_k,
+        )
+        form.addRow(
+            self._param_label(
+                "Min amplitude (abs)",
+                "Абсолютный порог амплитуды (ADU) для GUI. 0 = отключено (используется σ_k).\n"
+                "Ориентир: 0, либо ~500–5000 (зависит от экспозиции/усиления).",
+            ),
+            self.dspin_lineid_min_amp,
+        )
+
+        row_csv = QtWidgets.QHBoxLayout()
+        row_csv.addWidget(self.edit_lineid_lines_csv, 1)
+        row_csv.addWidget(btn_browse_csv)
+        form.addRow(
+            self._param_label(
+                "Line list (CSV)",
+                "CSV со справочными длинами волн неона (и др.).\n"
+                "Обычно: neon_lines.csv. Можно указать абсолютный путь.",
+            ),
+            row_csv,
+        )
+
+        row_pdf = QtWidgets.QHBoxLayout()
+        row_pdf.addWidget(self.edit_lineid_atlas_pdf, 1)
+        row_pdf.addWidget(btn_browse_pdf)
+        form.addRow(
+            self._param_label(
+                "Atlas (PDF)",
+                "PDF-атлас линий для справки в GUI.\n"
+                "Обычно: HeNeAr_atlas.pdf. Можно указать абсолютный путь.",
+            ),
+            row_pdf,
+        )
+
+        self._force_dot_locale(self.dspin_lineid_sigma_k, self.dspin_lineid_min_amp)
+
+        # Advanced (reserved)
+        adv = QtWidgets.QWidget()
+        adv_l = QtWidgets.QVBoxLayout(adv)
+        adv_l.setContentsMargins(0, 0, 0, 0)
+        adv_l.addWidget(
+            QtWidgets.QLabel(
+                "Advanced: (пока пусто)\n"
+                "Сюда можно будет добавить тонкие параметры GUI/подбора линий."
+            )
+        )
+
+        pl.addWidget(self._collapsible("Basic", basic, checked=True))
+        pl.addWidget(self._collapsible("Advanced", adv, checked=False))
+        pl.addWidget(self._mk_stage_apply_row("lineid"))
+
+        # --- Actions ---
         row1 = QtWidgets.QHBoxLayout()
         self.btn_open_lineid = QtWidgets.QPushButton("Open LineID GUI")
         self.btn_open_lineid.setProperty("primary", True)
@@ -2084,21 +2924,24 @@ class LauncherWindow(QtWidgets.QMainWindow):
         row2.addStretch(1)
         gl.addLayout(row2)
 
-        g_out = _box("Outputs")
-        lay.addWidget(g_out)
-        ol = QtWidgets.QVBoxLayout(g_out)
+        l.addStretch(1)
+        splitter.addWidget(left)
+
         self.outputs_lineid = OutputsPanel()
         self.outputs_lineid.set_context(self._cfg, stage="wavesol")
-        ol.addWidget(self.outputs_lineid)
+        splitter.addWidget(self.outputs_lineid)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([650, 480])
 
-
-        lay.addStretch(1)
+        lay.addWidget(_hline())
         foot = QtWidgets.QHBoxLayout()
         lay.addLayout(foot)
         self.btn_to_wavesol = QtWidgets.QPushButton("Go to Wavelength solution →")
         foot.addStretch(1)
         foot.addWidget(self.btn_to_wavesol)
 
+        # --- Actions wiring ---
         self.btn_open_lineid.clicked.connect(self._do_open_lineid)
         self.btn_qc_lineid.clicked.connect(self._open_qc_viewer)
         self.btn_frames_lineid.clicked.connect(lambda: self._open_frames_window('lineid'))
@@ -2110,24 +2953,47 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.act_export_current_pairs.triggered.connect(self._do_export_current_pairs)
         self.act_export_user_library_zip.triggered.connect(self._do_export_user_library_zip)
         self.btn_to_wavesol.clicked.connect(lambda: self.steps.setCurrentRow(7))
+
+        def _browse_csv() -> None:
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self, "Select line list CSV", "", "CSV (*.csv);;All files (*.*)"
+            )
+            if path:
+                self.edit_lineid_lines_csv.setText(path)
+
+        def _browse_pdf() -> None:
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self, "Select atlas PDF", "", "PDF (*.pdf);;All files (*.*)"
+            )
+            if path:
+                self.edit_lineid_atlas_pdf.setText(path)
+
+        btn_browse_csv.clicked.connect(_browse_csv)
+        btn_browse_pdf.clicked.connect(_browse_pdf)
+
+        # --- Pending wiring ---
+        self.dspin_lineid_sigma_k.valueChanged.connect(
+            lambda v: self._stage_set_pending('lineid', 'wavesol.gui_min_amp_sigma_k', float(v))
+        )
+
+        def _set_min_amp(v: float) -> None:
+            vv = None if float(v) <= 0.0 else float(v)
+            self._stage_set_pending('lineid', 'wavesol.gui_min_amp', vv)
+
+        self.dspin_lineid_min_amp.valueChanged.connect(_set_min_amp)
+        self.edit_lineid_lines_csv.textChanged.connect(
+            lambda t: self._stage_set_pending('lineid', 'wavesol.neon_lines_csv', str(t))
+        )
+        self.edit_lineid_atlas_pdf.textChanged.connect(
+            lambda t: self._stage_set_pending('lineid', 'wavesol.atlas_pdf', str(t))
+        )
+
+        self._sync_stage_controls_from_cfg()
         return w
 
-    def _current_pairs_path(self) -> Path | None:
-        if not self._cfg:
-            return None
-        wd = Path(str(self._cfg.get("work_dir", ""))).expanduser()
-        if not wd.is_absolute() and self._cfg_path:
-            wd = (self._cfg_path.parent / wd).resolve()
-
-        outdir = wavesol_dir(self._cfg)
-        wcfg = self._cfg.get("wavesol", {}) if isinstance(self._cfg.get("wavesol"), dict) else {}
-        hp_raw = str(wcfg.get("hand_pairs_path", "") or "").strip()
-        if hp_raw:
-            hp = Path(hp_raw)
-            return hp if hp.is_absolute() else (wd / hp).resolve()
-        return (outdir / "hand_pairs.txt")
-
     def _do_open_lineid(self) -> None:
+        if not self._ensure_stage_applied('lineid'):
+            return
         if not self._ensure_cfg_saved():
             return
         try:
@@ -2146,276 +3012,17 @@ class LauncherWindow(QtWidgets.QMainWindow):
             out = run_lineid_prepare(ctx)
             self._log_info(f"LineID wrote: {out}")
             self._refresh_pairs_label()
+            try:
+                if hasattr(self, "outputs_lineid"):
+                    self.outputs_lineid.set_context(self._cfg, stage="wavesol")
+            except Exception:
+                pass
             self._maybe_auto_qc()
         except Exception as e:
             self._log_exception(e)
 
-    def _do_use_builtin_pairs(self) -> None:
-        if not self._cfg:
-            self._log_error("Load or create config first")
-            return
-        disp = ""
-        try:
-            setup = (self._cfg.get("frames", {}) or {}).get("__setup__", {})
-            if isinstance(setup, dict):
-                disp = str(setup.get("disperser", "") or "")
-        except Exception:
-            disp = ""
-        it = find_builtin_pairs_for_disperser(disp)
-        if it is None:
-            self._log_info("No built-in pairs for this disperser yet")
-            return
-
-        # point config to builtin (absolute path) — read-only mode
-        self._set_cfg_value("wavesol.hand_pairs_path", str(it))
-        self.editor_yaml.blockSignals(True)
-        self.editor_yaml.setPlainText(_yaml_dump(self._cfg or {}))
-        self.editor_yaml.blockSignals(False)
-        self._log_info(f"Using built-in pairs: {it}")
-        self._refresh_pairs_label()
-
-    def _do_copy_builtin_pairs(self) -> None:
-        if not self._ensure_cfg_saved():
-            return
-        if not self._cfg:
-            return
-        disp = ""
-        setup = (self._cfg.get("frames", {}) or {}).get("__setup__", {})
-        if isinstance(setup, dict):
-            disp = str(setup.get("disperser", "") or "")
-        it = find_builtin_pairs_for_disperser(disp)
-        if it is None:
-            self._log_info("No built-in pairs for this disperser yet")
-            return
-        dst = self._current_pairs_path()
-        if dst is None:
-            return
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.write_text(Path(it).read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
-        # switch to default workdir path
-        self._set_cfg_value("wavesol.hand_pairs_path", "")
-        self.editor_yaml.blockSignals(True)
-        self.editor_yaml.setPlainText(_yaml_dump(self._cfg or {}))
-        self.editor_yaml.blockSignals(False)
-        self._do_save_cfg()
-        self._log_info(f"Copied built-in pairs → {dst}")
-        self._refresh_pairs_label()
-
-    def _refresh_pairs_label(self) -> None:
-        p = self._current_pairs_path()
-        self.lbl_pairs.setText(f"Pairs: {p}" if p else "Pairs: —")
-        self._refresh_pair_sets_combo()
-        try:
-            if hasattr(self, "outputs_lineid"):
-                self.outputs_lineid.set_context(self._cfg, stage="wavesol")
-        except Exception:
-            pass
-
-
-    def _current_disperser(self) -> str:
-        disp = ""
-        if self._cfg:
-            setup = (self._cfg.get("frames", {}) or {}).get("__setup__", {})
-            if isinstance(setup, dict):
-                disp = str(setup.get("disperser", "") or "").strip()
-        return disp
-
-    def _refresh_pair_sets_combo(self) -> None:
-        if not hasattr(self, "combo_pair_sets"):
-            return
-        try:
-            disp = self._current_disperser()
-            hp_raw = ""
-            if self._cfg and isinstance(self._cfg.get("wavesol"), dict):
-                hp_raw = str((self._cfg.get("wavesol") or {}).get("hand_pairs_path", "") or "").strip()
-
-            self.combo_pair_sets.blockSignals(True)
-            self.combo_pair_sets.clear()
-            self.combo_pair_sets.addItem("Workdir: hand_pairs.txt (default)", {"origin": "workdir", "path": ""})
-
-            items = []
-            if disp:
-                for ps in list_pair_sets(disp):
-                    prefix = "Built-in" if ps.origin == "builtin" else "Library"
-                    self.combo_pair_sets.addItem(f"{prefix}: {ps.label}", {"origin": ps.origin, "path": str(ps.path)})
-                    items.append(str(ps.path))
-
-            # preselect current
-            if hp_raw:
-                want = str(Path(hp_raw).expanduser())
-                for i in range(1, self.combo_pair_sets.count()):
-                    d = self.combo_pair_sets.itemData(i) or {}
-                    if str(d.get("path", "")) == want:
-                        self.combo_pair_sets.setCurrentIndex(i)
-                        break
-            else:
-                self.combo_pair_sets.setCurrentIndex(0)
-        finally:
-            self.combo_pair_sets.blockSignals(False)
-
-    def _selected_pair_set(self) -> tuple[str, str]:
-        if not hasattr(self, "combo_pair_sets"):
-            return "workdir", ""
-        data = self.combo_pair_sets.currentData() or {}
-        origin = str(data.get("origin", "workdir"))
-        path = str(data.get("path", ""))
-        return origin, path
-
-    def _do_use_pair_set(self) -> None:
-        if not self._cfg:
-            self._log_error("Load or create config first")
-            return
-        origin, path = self._selected_pair_set()
-        if origin == "workdir" or not path:
-            self._set_cfg_value("wavesol.hand_pairs_path", "")
-            self.editor_yaml.blockSignals(True)
-            self.editor_yaml.setPlainText(_yaml_dump(self._cfg or {}))
-            self.editor_yaml.blockSignals(False)
-            self._do_save_cfg()
-            self._log_info("Using workdir hand_pairs.txt")
-            self._refresh_pairs_label()
-            return
-
-        self._set_cfg_value("wavesol.hand_pairs_path", path)
-        self.editor_yaml.blockSignals(True)
-        self.editor_yaml.setPlainText(_yaml_dump(self._cfg or {}))
-        self.editor_yaml.blockSignals(False)
-        self._do_save_cfg()
-        self._log_info(f"Using pair set: {path}")
-        self._refresh_pairs_label()
-
-    def _do_copy_pair_set(self) -> None:
-        if not self._cfg:
-            self._log_error("Load or create config first")
-            return
-        origin, path = self._selected_pair_set()
-        if origin == "workdir" or not path:
-            self._log_error("Select a built-in or library pair set first")
-            return
-        disp = self._current_disperser()
-        if not disp:
-            self._log_error("Config has no disperser in frames.__setup__")
-            return
-        # workdir must be resolved against cfg_path
-        wd = Path(str(self._cfg.get("work_dir", ""))).expanduser()
-        if not wd.is_absolute() and self._cfg_path:
-            wd = (self._cfg_path.parent / wd).resolve()
-
-        try:
-            dst = copy_pair_set_to_workdir(disp, wd, Path(path))
-        except Exception as e:
-            self._log_exception(e)
-            return
-
-        self._set_cfg_value("wavesol.hand_pairs_path", "")
-        self.editor_yaml.blockSignals(True)
-        self.editor_yaml.setPlainText(_yaml_dump(self._cfg or {}))
-        self.editor_yaml.blockSignals(False)
-        self._do_save_cfg()
-        self._log_info(f"Copied pair set → {dst}")
-        self._refresh_pairs_label()
-
-    def _do_save_workdir_pairs(self) -> None:
-        if not self._cfg:
-            self._log_error("Load or create config first")
-            return
-        disp = self._current_disperser()
-        if not disp:
-            self._log_error("Config has no disperser in frames.__setup__")
-            return
-        # always save the workdir hand_pairs.txt (not an absolute built-in path)
-        pairs_path = wavesol_dir(self._cfg) / "hand_pairs.txt"
-        if not pairs_path.exists():
-            self._log_error(f"No workdir pairs file: {pairs_path}")
-            return
-
-        default_label = f"{slugify_disperser(disp)}_pairs"
-        label, ok = QtWidgets.QInputDialog.getText(self, "Save pairs", "Name for this pair set:", text=default_label)
-        if not ok:
-            return
-        try:
-            dest = save_user_pair_set(disp, pairs_path, label=label)
-            self._log_info(f"Saved to library: {dest}")
-            self._refresh_pair_sets_combo()
-        except Exception as e:
-            self._log_exception(e)
-
-    def _do_open_pairs_library(self) -> None:
-        disp = self._current_disperser()
-        root = user_pairs_root()
-        if disp:
-            root = root / slugify_disperser(disp)
-        root.mkdir(parents=True, exist_ok=True)
-        self._open_in_explorer(root)
-
-    def _do_export_selected_pair_set(self) -> None:
-        disp = self._current_disperser()
-        if not disp:
-            self._log_error("Config has no disperser in frames.__setup__")
-            return
-        origin, path = self._selected_pair_set()
-        if not path:
-            self._log_error("No external pair set selected (choose 'Built-in: …' or 'Library: …')")
-            return
-
-        src = Path(path).expanduser()
-        default_name = src.name if src.suffix else (src.name + ".txt")
-        fn, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self,
-            "Export pair set",
-            str(Path.home() / default_name),
-            "Text files (*.txt);;All files (*)",
-        )
-        if not fn:
-            return
-        try:
-            export_pair_set(src, Path(fn))
-            self._log_info(f"Exported pair set -> {fn}")
-        except Exception as e:
-            self._log_exception(e)
-
-    def _do_export_current_pairs(self) -> None:
-        if not self._cfg:
-            self._log_error("Load or create config first")
-            return
-        pairs_path = wavesol_dir(self._cfg) / "hand_pairs.txt"
-        if not pairs_path.exists():
-            self._log_error(f"No workdir pairs file: {pairs_path}")
-            return
-
-        fn, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self,
-            "Export current pairs",
-            str(Path.home() / pairs_path.name),
-            "Text files (*.txt);;All files (*)",
-        )
-        if not fn:
-            return
-        try:
-            export_pair_set(pairs_path, Path(fn))
-            self._log_info(f"Exported current pairs -> {fn}")
-        except Exception as e:
-            self._log_exception(e)
-
-    def _do_export_user_library_zip(self) -> None:
-        root = user_pairs_root()
-        root.mkdir(parents=True, exist_ok=True)
-
-        default = f"scorpio_pairs_library_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
-        fn, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self,
-            "Export pair library (zip)",
-            str(Path.home() / default),
-            "Zip archive (*.zip);;All files (*)",
-        )
-        if not fn:
-            return
-        try:
-            export_user_library_zip(Path(fn), include_builtin=False)
-            self._log_info(f"Exported pair library -> {fn}")
-        except Exception as e:
-            self._log_exception(e)
     # --------------------------- page: wavesolution ---------------------------
+
 
     def _build_page_wavesol(self) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
@@ -2435,8 +3042,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
         gl = QtWidgets.QVBoxLayout(g)
 
         lbl = QtWidgets.QLabel(
-            "Build 1D λ(x) from hand pairs and a 2D λ(x,y) map from traced lines.\n"
-            "You can clean (1) the pair list and (2) the 2D lamp lines used for the surface fit."
+            "Build 1D λ(x) from hand pairs and a 2D λ(x,y) map from traced lines."
+            "Настройки ниже влияют на точность (RMS) и устойчивость решения."
+            "Изменения применяются только после кнопки Apply."
         )
         lbl.setWordWrap(True)
         gl.addWidget(lbl)
@@ -2445,6 +3053,317 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.lbl_wavesol_dir.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         gl.addWidget(self.lbl_wavesol_dir)
 
+        # ---------------- parameters ----------------
+        gpar = _box("Parameters")
+        l.addWidget(gpar)
+        pl = QtWidgets.QVBoxLayout(gpar)
+        pl.setSpacing(8)
+
+        # Basic
+        basic = QtWidgets.QWidget()
+        bf = QtWidgets.QFormLayout(basic)
+        bf.setLabelAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+
+        self.spin_ws_poly_deg = QtWidgets.QSpinBox()
+        self.spin_ws_poly_deg.setRange(1, 12)
+        bf.addRow(
+            self._param_label(
+                "1D poly degree",
+                "Степень полинома для 1D λ(x) по парам."
+                "Типичные значения: 3–6 (чем больше, тем гибче, но риск переобучения).",
+            ),
+            self.spin_ws_poly_deg,
+        )
+
+        self.dspin_ws_blend = QtWidgets.QDoubleSpinBox()
+        self.dspin_ws_blend.setRange(0.0, 1.0)
+        self.dspin_ws_blend.setSingleStep(0.05)
+        self.dspin_ws_blend.setDecimals(2)
+        bf.addRow(
+            self._param_label(
+                "Blend weight",
+                "Вес бленд-линий (если они есть) при 1D решении."
+                "0 — игнорировать, 0.2–0.5 — обычно разумно.",
+            ),
+            self.dspin_ws_blend,
+        )
+
+        self.dspin_ws_poly_clip = QtWidgets.QDoubleSpinBox()
+        self.dspin_ws_poly_clip.setRange(0.0, 20.0)
+        self.dspin_ws_poly_clip.setSingleStep(0.2)
+        self.dspin_ws_poly_clip.setDecimals(2)
+        bf.addRow(
+            self._param_label(
+                "1D σ-clip",
+                "Сигма-клиппинг (σ) при робастной подгонке 1D полинома."
+                "0 — без клиппинга. Типично: 2.5–4.",
+            ),
+            self.dspin_ws_poly_clip,
+        )
+
+        self.spin_ws_poly_iter = QtWidgets.QSpinBox()
+        self.spin_ws_poly_iter.setRange(1, 100)
+        bf.addRow(
+            self._param_label(
+                "1D maxiter",
+                "Максимум итераций клиппинга для 1D. Типично: 5–20.",
+            ),
+            self.spin_ws_poly_iter,
+        )
+
+        self.combo_ws_model2d = QtWidgets.QComboBox()
+        self.combo_ws_model2d.addItem("auto", "auto")
+        self.combo_ws_model2d.addItem("power", "power")
+        self.combo_ws_model2d.addItem("cheb", "cheb")
+        bf.addRow(
+            self._param_label(
+                "2D model",
+                "Модель поверхности λ(x,y)."
+                "auto — выберет лучшее между power/cheb по качеству,"
+                "power — полином по (x,y), cheb — 2D Chebyshev.",
+            ),
+            self.combo_ws_model2d,
+        )
+
+        self.spin_ws_crop_x = QtWidgets.QSpinBox()
+        self.spin_ws_crop_x.setRange(0, 200)
+        bf.addRow(
+            self._param_label(
+                "Edge crop X (px)",
+                "Обрезка краёв по X (пикс) перед 2D подгонкой."
+                "Типично: 6–20.",
+            ),
+            self.spin_ws_crop_x,
+        )
+
+        self.spin_ws_crop_y = QtWidgets.QSpinBox()
+        self.spin_ws_crop_y.setRange(0, 200)
+        bf.addRow(
+            self._param_label(
+                "Edge crop Y (px)",
+                "Обрезка краёв по Y (пикс) перед 2D подгонкой."
+                "Типично: 6–20.",
+            ),
+            self.spin_ws_crop_y,
+        )
+
+        self.spin_ws_power_deg = QtWidgets.QSpinBox()
+        self.spin_ws_power_deg.setRange(1, 12)
+        bf.addRow(
+            self._param_label(
+                "Power degree",
+                "Степень полинома для модели power (используется если 2D model=power)."
+                "Типично: 3–6.",
+            ),
+            self.spin_ws_power_deg,
+        )
+
+        self.spin_ws_cheb_x = QtWidgets.QSpinBox()
+        self.spin_ws_cheb_x.setRange(1, 12)
+        self.spin_ws_cheb_y = QtWidgets.QSpinBox()
+        self.spin_ws_cheb_y.setRange(1, 12)
+        cheb_row = QtWidgets.QHBoxLayout()
+        cheb_row.setContentsMargins(0, 0, 0, 0)
+        cheb_row.addWidget(QtWidgets.QLabel("degX"))
+        cheb_row.addWidget(self.spin_ws_cheb_x)
+        cheb_row.addSpacing(12)
+        cheb_row.addWidget(QtWidgets.QLabel("degY"))
+        cheb_row.addWidget(self.spin_ws_cheb_y)
+        cheb_w = QtWidgets.QWidget()
+        cheb_w.setLayout(cheb_row)
+        bf.addRow(
+            self._param_label(
+                "Chebyshev degrees",
+                "Степени 2D Chebyshev (используется если 2D model=cheb)."
+                "Типично: degX 4–7, degY 2–4.",
+            ),
+            cheb_w,
+        )
+
+        # Advanced
+        adv = QtWidgets.QWidget()
+        af = QtWidgets.QFormLayout(adv)
+        af.setLabelAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+
+        self.spin_ws_trace_template_hw = QtWidgets.QSpinBox()
+        self.spin_ws_trace_template_hw.setRange(1, 64)
+        af.addRow(
+            self._param_label(
+                "Trace template HW",
+                "Половина окна (пикс) для шаблона линии при трассировке."
+                "Типично: 4–10.",
+            ),
+            self.spin_ws_trace_template_hw,
+        )
+
+        self.spin_ws_trace_avg_half = QtWidgets.QSpinBox()
+        self.spin_ws_trace_avg_half.setRange(0, 64)
+        af.addRow(
+            self._param_label(
+                "Trace avg HW",
+                "Половина окна (пикс) для усреднения вдоль Y при шаблоне."
+                "Типично: 2–6.",
+            ),
+            self.spin_ws_trace_avg_half,
+        )
+
+        self.spin_ws_trace_search_rad = QtWidgets.QSpinBox()
+        self.spin_ws_trace_search_rad.setRange(1, 128)
+        af.addRow(
+            self._param_label(
+                "Trace search (px)",
+                "Радиус поиска центра линии между шагами по Y."
+                "Типично: 6–20.",
+            ),
+            self.spin_ws_trace_search_rad,
+        )
+
+        self.spin_ws_trace_y_step = QtWidgets.QSpinBox()
+        self.spin_ws_trace_y_step.setRange(1, 20)
+        af.addRow(
+            self._param_label(
+                "Trace Y step",
+                "Шаг по Y при трассировке линий."
+                "1 — максимум точности (обычно), 2–3 — быстрее.",
+            ),
+            self.spin_ws_trace_y_step,
+        )
+
+        self.dspin_ws_trace_amp_thresh = QtWidgets.QDoubleSpinBox()
+        self.dspin_ws_trace_amp_thresh.setRange(0.0, 1e9)
+        self.dspin_ws_trace_amp_thresh.setSingleStep(10.0)
+        self.dspin_ws_trace_amp_thresh.setDecimals(1)
+        af.addRow(
+            self._param_label(
+                "Trace amp thresh",
+                "Порог амплитуды (в σ шума профиля) для включения линии в 2D подгонку."
+                "Типично: 10–50.",
+            ),
+            self.dspin_ws_trace_amp_thresh,
+        )
+
+        self.spin_ws_trace_min_pts = QtWidgets.QSpinBox()
+        self.spin_ws_trace_min_pts.setRange(10, 10000)
+        af.addRow(
+            self._param_label(
+                "Trace min points",
+                "Минимум точек (Y-сэмплов) у линии, чтобы она пошла в 2D fit."
+                "Типично: 80–200.",
+            ),
+            self.spin_ws_trace_min_pts,
+        )
+
+        self.spin_ws_trace_y0 = QtWidgets.QSpinBox()
+        self.spin_ws_trace_y0.setRange(-1, 100000)
+        self.spin_ws_trace_y0.setSpecialValueText("auto")
+        af.addRow(
+            self._param_label(
+                "Trace y0",
+                "Стартовая строка Y для трассировки. auto — середина щели.",
+            ),
+            self.spin_ws_trace_y0,
+        )
+
+        self.dspin_ws_power_clip = QtWidgets.QDoubleSpinBox()
+        self.dspin_ws_power_clip.setRange(0.0, 20.0)
+        self.dspin_ws_power_clip.setSingleStep(0.2)
+        self.dspin_ws_power_clip.setDecimals(2)
+        af.addRow(
+            self._param_label(
+                "2D σ-clip (power)",
+                "Сигма-клиппинг для 2D подгонки power. 0 — без клиппинга."
+                "Типично: 2.5–4.",
+            ),
+            self.dspin_ws_power_clip,
+        )
+
+        self.spin_ws_power_iter = QtWidgets.QSpinBox()
+        self.spin_ws_power_iter.setRange(1, 100)
+        af.addRow(
+            self._param_label(
+                "2D maxiter (power)",
+                "Максимум итераций клиппинга для power. Типично: 5–20.",
+            ),
+            self.spin_ws_power_iter,
+        )
+
+        self.dspin_ws_cheb_clip = QtWidgets.QDoubleSpinBox()
+        self.dspin_ws_cheb_clip.setRange(0.0, 20.0)
+        self.dspin_ws_cheb_clip.setSingleStep(0.2)
+        self.dspin_ws_cheb_clip.setDecimals(2)
+        af.addRow(
+            self._param_label(
+                "2D σ-clip (cheb)",
+                "Сигма-клиппинг для 2D подгонки Chebyshev. 0 — без клиппинга."
+                "Типично: 2.5–4.",
+            ),
+            self.dspin_ws_cheb_clip,
+        )
+
+        self.spin_ws_cheb_iter = QtWidgets.QSpinBox()
+        self.spin_ws_cheb_iter.setRange(1, 100)
+        af.addRow(
+            self._param_label(
+                "2D maxiter (cheb)",
+                "Максимум итераций клиппинга для Chebyshev. Типично: 5–20.",
+            ),
+            self.spin_ws_cheb_iter,
+        )
+
+        # locale for doubles
+        self._force_dot_locale(
+            self.dspin_ws_blend,
+            self.dspin_ws_poly_clip,
+            self.dspin_ws_trace_amp_thresh,
+            self.dspin_ws_power_clip,
+            self.dspin_ws_cheb_clip,
+        )
+
+        pl.addWidget(self._collapsible("Basic", basic, checked=True))
+        pl.addWidget(self._collapsible("Advanced", adv, checked=False))
+        pl.addWidget(self._mk_stage_apply_row("wavesol"))
+
+        # wiring (pending)
+        self.spin_ws_poly_deg.valueChanged.connect(lambda v: self._stage_set_pending("wavesol", "wavesol.poly_deg_1d", int(v)))
+        self.dspin_ws_blend.valueChanged.connect(lambda v: self._stage_set_pending("wavesol", "wavesol.blend_weight", float(v)))
+        self.dspin_ws_poly_clip.valueChanged.connect(lambda v: self._stage_set_pending("wavesol", "wavesol.poly_sigma_clip", float(v)))
+        self.spin_ws_poly_iter.valueChanged.connect(lambda v: self._stage_set_pending("wavesol", "wavesol.poly_maxiter", int(v)))
+
+        def _model_changed(*_):
+            v = self.combo_ws_model2d.currentData()
+            if v is None:
+                v = self.combo_ws_model2d.currentText()
+            self._stage_set_pending("wavesol", "wavesol.model2d", str(v))
+            try:
+                self.spin_ws_power_deg.setEnabled(str(v) in {"power", "auto"})
+                self.spin_ws_cheb_x.setEnabled(str(v) in {"cheb", "auto"})
+                self.spin_ws_cheb_y.setEnabled(str(v) in {"cheb", "auto"})
+            except Exception:
+                pass
+
+        self.combo_ws_model2d.currentIndexChanged.connect(_model_changed)
+
+        self.spin_ws_crop_x.valueChanged.connect(lambda v: self._stage_set_pending("wavesol", "wavesol.edge_crop_x", int(v)))
+        self.spin_ws_crop_y.valueChanged.connect(lambda v: self._stage_set_pending("wavesol", "wavesol.edge_crop_y", int(v)))
+
+        self.spin_ws_power_deg.valueChanged.connect(lambda v: self._stage_set_pending("wavesol", "wavesol.power_deg", int(v)))
+        self.spin_ws_cheb_x.valueChanged.connect(lambda v: self._stage_set_pending("wavesol", "wavesol.cheb_degx", int(v)))
+        self.spin_ws_cheb_y.valueChanged.connect(lambda v: self._stage_set_pending("wavesol", "wavesol.cheb_degy", int(v)))
+
+        self.spin_ws_trace_template_hw.valueChanged.connect(lambda v: self._stage_set_pending("wavesol", "wavesol.trace_template_hw", int(v)))
+        self.spin_ws_trace_avg_half.valueChanged.connect(lambda v: self._stage_set_pending("wavesol", "wavesol.trace_avg_half", int(v)))
+        self.spin_ws_trace_search_rad.valueChanged.connect(lambda v: self._stage_set_pending("wavesol", "wavesol.trace_search_rad", int(v)))
+        self.spin_ws_trace_y_step.valueChanged.connect(lambda v: self._stage_set_pending("wavesol", "wavesol.trace_y_step", int(v)))
+        self.dspin_ws_trace_amp_thresh.valueChanged.connect(lambda v: self._stage_set_pending("wavesol", "wavesol.trace_amp_thresh", float(v)))
+        self.spin_ws_trace_min_pts.valueChanged.connect(lambda v: self._stage_set_pending("wavesol", "wavesol.trace_min_pts", int(v)))
+        self.spin_ws_trace_y0.valueChanged.connect(lambda v: self._stage_set_pending("wavesol", "wavesol.trace_y0", None if int(v) == -1 else int(v)))
+
+        self.dspin_ws_power_clip.valueChanged.connect(lambda v: self._stage_set_pending("wavesol", "wavesol.power_sigma_clip", float(v)))
+        self.spin_ws_power_iter.valueChanged.connect(lambda v: self._stage_set_pending("wavesol", "wavesol.power_maxiter", int(v)))
+        self.dspin_ws_cheb_clip.valueChanged.connect(lambda v: self._stage_set_pending("wavesol", "wavesol.cheb_sigma_clip", float(v)))
+        self.spin_ws_cheb_iter.valueChanged.connect(lambda v: self._stage_set_pending("wavesol", "wavesol.cheb_maxiter", int(v)))
+
+        # --------------- actions row ---------------
         row = QtWidgets.QHBoxLayout()
         self.btn_clean_pairs = QtWidgets.QPushButton("Clean pairs…")
         self.btn_clean_wavesol2d = QtWidgets.QPushButton("Clean 2D lines…")
@@ -2460,6 +3379,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         row.addWidget(self.btn_frames_wavesol)
         row.addStretch(1)
         gl.addLayout(row)
+
         l.addStretch(1)
 
         splitter.addWidget(left)
@@ -2475,6 +3395,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_run_wavesol.clicked.connect(self._do_wavesolution)
         self.btn_qc_wavesol.clicked.connect(self._open_qc_viewer)
         self.btn_frames_wavesol.clicked.connect(lambda: self._open_frames_window('wavesol'))
+
+        # initial sync
+        self._sync_stage_controls_from_cfg()
+        _model_changed()
         return w
 
     def _do_clean_pairs(self) -> None:
@@ -2583,6 +3507,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._log_exception(e)
 
     def _do_wavesolution(self) -> None:
+        if not self._ensure_stage_applied("wavesol", "Wavelength solution"):
+            return
         if not self._ensure_cfg_saved():
             return
         self._set_step_status(7, "running")
@@ -2681,31 +3607,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.stack.setCurrentIndex(int(idx))
         except Exception:
             pass
-        self._refresh_inspector()
         self._refresh_statusbar()
-
-    def _refresh_inspector(self) -> None:
-        try:
-            stage = self._current_stage_for_step(self.steps.currentRow())
-        except Exception:
-            stage = None
-        wd = self._current_work_dir_resolved()
-        try:
-            if hasattr(self, 'dock_inspector') and self.dock_inspector is not None:
-                self.dock_inspector.panel.set_context(self._cfg, stage=stage, work_dir=wd)
-        except Exception:
-            pass
-
-    def _open_qc_viewer_for(self, work_dir: Path) -> None:
-        """Open QC viewer and point it to the given work directory."""
-        wd = Path(work_dir).expanduser().resolve()
-        if self._qc is None:
-            self._qc = QCViewer(wd)
-        else:
-            self._qc.set_work_dir(wd)
-        self._qc.show()
-        self._qc.raise_()
-        self._qc.activateWindow()
 
     # --------------------------- statusbar / shortcuts ---------------------------
 

@@ -120,6 +120,15 @@ class FitsPreviewWidget(QtWidgets.QWidget):
         self.sp_gamma.setSingleStep(0.1)
         self.sp_gamma.setValue(self._params.gamma)
 
+        # Force dot as decimal separator regardless of system locale
+        try:
+            loc = QtCore.QLocale.c()
+            self.sp_lo.setLocale(loc)
+            self.sp_hi.setLocale(loc)
+            self.sp_gamma.setLocale(loc)
+        except Exception:
+            pass
+
         self.btn_auto = QtWidgets.QPushButton("Auto")
         self.btn_auto.setToolTip("Reset exposure to 1–99% and gamma=1")
 
@@ -156,12 +165,19 @@ class FitsPreviewWidget(QtWidgets.QWidget):
         self.sp_gamma.valueChanged.connect(self._on_controls)
         self.btn_auto.clicked.connect(self._on_auto)
 
+    def set_path(self, path):
+        """Set current FITS file path (str or Path)."""
+        if not path:
+            self.clear()
+            return
+        self.load_fits(str(path))
+
     def load_fits(self, path: str):
         self._path = path
         self.lbl_path.setText(path)
 
         try:
-            with fits.open(path, memmap=True) as hdul:
+            with fits.open(path, memmap=True, ignore_missing_end=True) as hdul:
                 self._data = _as_float(hdul[0].data)
         except Exception as e:
             self._data = None

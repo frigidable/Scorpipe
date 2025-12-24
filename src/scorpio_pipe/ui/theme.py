@@ -102,14 +102,19 @@ def apply_theme(app: QtWidgets.QApplication, *, mode: str = "dark") -> None:
         background: {input_bg};
         selection-background-color: {accent.name()};
     }}
-    QComboBox::drop-down {{ border: 0px; width: 26px; }}
-    QComboBox::down-arrow {{ image: none; }}
+    QComboBox::drop-down {{ border: 0px; width: 28px; }}
+    QComboBox::down-arrow {{
+        width: 10px;
+        height: 10px;
+        image: url(data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path d='M2 3l3 3 3-3' fill='none' stroke='%23{('ECECEC' if mode=="dark" else '666666')}' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/></svg>);
+    }}
 
     QPushButton, QToolButton {{
         padding: 7px 12px;
         border-radius: 10px;
         border: 1px solid {border};
         background: {btn_bg};
+        color: {text};
     }}
     QPushButton:hover, QToolButton:hover {{ background: {btn_hover}; }}
     QPushButton:pressed, QToolButton:pressed {{ background: {btn_pressed}; }}

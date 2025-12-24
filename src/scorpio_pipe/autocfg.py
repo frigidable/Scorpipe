@@ -82,19 +82,46 @@ class AutoConfig:
                 # alignment: how far frames can be shifted (pixels)
                 "xshift_max_abs": 6,
 
-                # peak detection: thresholds are based on robust sigma
+                # --- robust background/noise estimation (for peak detection) ---
+                "noise": {
+                    "baseline_bin_size": 32,
+                    "baseline_quantile": 0.2,
+                    "baseline_smooth_bins": 5,
+                    "empty_quantile": 0.7,
+                    "clip": 3.5,
+                    "n_iter": 3,
+                },
+
+                # peak detection (thresholds are in units of robust sigma)
                 "peak_snr": 5.0,
                 "peak_prom_snr": 4.0,
+                "peak_floor_snr": 3.0,
                 "peak_distance": 3,
+                "gauss_half_win": 4,
+
+                # Autotune threshold if too few/many lines were found (helps across gratings)
+                "peak_autotune": True,
+                "peak_target_min": 0,
+                "peak_target_max": 0,
+                "peak_snr_min": 2.5,
+                "peak_snr_max": 12.0,
+                "peak_snr_relax": 0.85,
+                "peak_snr_boost": 1.15,
+                "peak_autotune_max_tries": 10,
 
                 # GUI: auto min amplitude = median(noise peaks) + k*MAD
                 "gui_min_amp_sigma_k": 5.0,
+                # Optional manual override (ADU). If None/empty/0 -> auto mode
+                "gui_min_amp": None,
 
                 # 1D polynomial degree for lambda(x) from hand pairs
                 "poly_deg_1d": 4,
+                "blend_weight": 0.3,
+                "poly_sigma_clip": 3.0,
+                "poly_maxiter": 10,
 
                 # Optional override for hand pairs file. If empty, the pipeline uses
-                # wavesol/<disperser>/hand_pairs.txt
+                # wavesol/<setup>/hand_pairs.txt
                 "hand_pairs_path": "",
 
                 # list of laboratory wavelengths
@@ -102,6 +129,34 @@ class AutoConfig:
 
                 # HeNeAr atlas (optional, used by GUI button "Атлас")
                 "atlas_pdf": "HeNeAr_atlas.pdf",
+
+                # 2D fit / tracing defaults (can be fine-tuned in the GUI)
+                "model2d": "auto",  # auto|power|cheb
+                "edge_crop_x": 12,
+                "edge_crop_y": 12,
+
+                "trace_template_hw": 6,
+                "trace_avg_half": 3,
+                "trace_search_rad": 12,
+                "trace_y_step": 1,
+                "trace_amp_thresh": 20.0,
+                "trace_min_pts": 120,
+                "trace_y0": None,
+
+                "power_deg": 5,
+                "power_sigma_clip": 3.0,
+                "power_maxiter": 10,
+
+                "cheb_degx": 5,
+                "cheb_degy": 3,
+                "cheb_sigma_clip": 3.0,
+                "cheb_maxiter": 10,
+
+                # optional manual rejection list (in Angstrom)
+                "rejected_lines_A": [],
+            },
+            superneon={
+                "bias_sub": True,
             },
             frames=self.frames,
         )
