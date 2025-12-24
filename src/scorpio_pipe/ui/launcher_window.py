@@ -365,7 +365,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         row_ins.addWidget(self.btn_inspect)
         row_ins.addWidget(self.btn_frames_project)
         row_ins.addStretch(1)
-        gl.addRow(row_ins, self.lbl_inspect)
+        gl.addRow(row_ins)
+        gl.addRow(self.lbl_inspect)
 
         # Overview (filled after Inspect)
         self.g_overview = _box("Dataset overview")
