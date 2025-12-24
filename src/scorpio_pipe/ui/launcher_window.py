@@ -365,6 +365,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         row_ins.addWidget(self.btn_inspect)
         row_ins.addWidget(self.btn_frames_project)
         row_ins.addStretch(1)
+        # QFormLayout.addRow() does not accept (QLayout, QWidget).
+        # Put the action buttons on their own full-width row, then the status line below.
         gl.addRow(row_ins)
         gl.addRow(self.lbl_inspect)
 

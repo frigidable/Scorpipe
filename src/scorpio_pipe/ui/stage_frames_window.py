@@ -146,7 +146,9 @@ class StageFramesWindow(QtWidgets.QMainWindow):
             self.tabs.addTab(lab, "Info")
             return
         fb = FrameBrowser(self)
-        fb.set_frames(self._inspect_df, base_dir=self._data_dir)
+        # FrameBrowser expects the inspection table with absolute paths.
+        # The inspect step already provides absolute `path`, so no base_dir is needed.
+        fb.set_frames_df(self._inspect_df)
         fb.useSetupRequested.connect(lambda sel: self.useSetupRequested.emit(sel))
         self.tabs.addTab(fb, 'Night frames')
 

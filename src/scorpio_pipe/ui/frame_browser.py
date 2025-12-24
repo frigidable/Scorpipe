@@ -138,6 +138,14 @@ class FrameBrowser(QtWidgets.QWidget):
         self._populate_filter_values()
         self._reset_filters()
 
+    # Backward-compatible alias used by some older UI components.
+    def set_frames(self, df: pd.DataFrame, base_dir: Path | None = None) -> None:  # noqa: ARG002
+        """Alias for :meth:`set_frames_df`.
+
+        The inspection table already stores absolute paths, so *base_dir* is ignored.
+        """
+        self.set_frames_df(df)
+
     # ---------------------------- internals ----------------------------
 
     def _populate_filter_values(self) -> None:

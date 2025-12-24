@@ -4,7 +4,7 @@
 #define AppName "Scorpipe"
 #define AppExeName "scorpipe.exe"
 #ifndef AppVersion
-#define AppVersion "4.13"
+#define AppVersion "4.13.2"
 #endif
 #define AppPublisher "Scorpipe"
 

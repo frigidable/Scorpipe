@@ -1,5 +1,10 @@
 # Changelog
 
+## v4.13.1
+
+### UI hotfix
+- Fixed a startup crash in Project & Data page: incorrect QFormLayout.addRow() signature (was passing QHBoxLayout as the label).
+
 ## v4.9
 
 ### Windows build fixes (critical)
