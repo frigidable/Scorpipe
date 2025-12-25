@@ -154,9 +154,8 @@ def _task_wavesolution(cfg: dict[str, Any], out_dir: Path, *, cancel_token: Canc
 def _task_linearize(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
     from scorpio_pipe.stages.linearize import run_linearize
 
-    res = run_linearize(cfg, out_dir=out_dir, cancel_token=cancel_token)
-    # payload contains products.sum_fits
-    return Path(res.get("products", {}).get("sum_fits", out_dir / "obj_sum_lin.fits"))
+    res = run_linearize(cfg, out_dir=Path(out_dir) / "products" / "lin", cancel_token=cancel_token)
+    return Path(res.get("products", {}).get("preview_fits", Path(out_dir) / "products" / "lin" / "lin_preview.fits"))
 
 
 def _task_sky(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
@@ -164,22 +163,32 @@ def _task_sky(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken |
 
     _ = cancel_token
     # v5.12+: canonical output lives in products/sky (legacy is mirrored).
-    res = run_sky_sub(cfg, out_dir=Path(out_dir) / "products" / "sky")
-    # try multiple keys for backward compatibility
-    if isinstance(res, dict):
-        if res.get("combined_sky_sub"):
-            return Path(res["combined_sky_sub"])
-        if isinstance(res.get("result"), dict) and res["result"].get("sky_sub"):
-            return Path(res["result"]["sky_sub"])
-    return Path(out_dir) / "sky" / "obj_sky_sub.fits"
+    run_sky_sub(cfg, out_dir=Path(out_dir) / "products" / "sky")
+    return Path(out_dir) / "products" / "sky" / "sky_sub_done.json"
+
+
+def _task_stack2d(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
+    from scorpio_pipe.stages.stack2d import run_stack2d
+
+    _ = cancel_token
+    wd = resolve_work_dir(cfg)
+    per_dir = wd / "products" / "sky" / "per_exp"
+    if not per_dir.exists():
+        per_dir = wd / "sky" / "per_exp"
+    inputs = sorted(per_dir.glob("*_sky_sub.fits"))
+    if not inputs:
+        raise FileNotFoundError(f"No per-exposure sky-subtracted frames found in {per_dir}")
+    out_p = Path(out_dir) / "products" / "stack"
+    res = run_stack2d(cfg, inputs=inputs, out_dir=out_p)
+    return Path(res.get("stacked2d", out_p / "stacked2d.fits"))
 
 
 def _task_extract1d(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
-    from scorpio_pipe.stages.extract1d import extract_1d
+    from scorpio_pipe.stages.extract1d import run_extract1d
 
     _ = cancel_token
-    res = extract_1d(cfg, out_dir=Path(out_dir) / "products" / "spec")
-    return Path(res.get("spectrum_1d", Path(out_dir) / "products" / "spec" / "spectrum_1d.fits"))
+    res = run_extract1d(cfg, out_dir=Path(out_dir) / "products" / "spec")
+    return Path(res.get("spec1d", Path(out_dir) / "products" / "spec" / "spec1d.fits"))
 
 
 TASKS: dict[str, TaskFn] = {
@@ -194,11 +203,13 @@ TASKS: dict[str, TaskFn] = {
     "wavesolution": _task_wavesolution,
     "linearize": _task_linearize,
     "sky": _task_sky,
+    "stack2d": _task_stack2d,
     "extract1d": _task_extract1d,
     # aliases (backward compatibility)
     "wavesol": _task_wavesolution,
     "wavesolution2d": _task_wavesolution,
     "sky_sub": _task_sky,
+    "stack": _task_stack2d,
 }
 
 
@@ -228,6 +239,8 @@ def _stage_cfg_for_hash(cfg: dict[str, Any], task: str) -> dict[str, Any]:
         "linearize": cfg.get("linearize", {}),
         "sky": cfg.get("sky", {}),
         "sky_sub": cfg.get("sky", {}),
+        "stack2d": cfg.get("stack2d", {}),
+        "stack": cfg.get("stack2d", {}),
         "extract1d": cfg.get("extract1d", {}),
     }
     sec = sec_map.get(task, cfg.get(task, {}))
@@ -267,9 +280,13 @@ def _input_paths_for_hash(cfg: dict[str, Any], task: str, out_dir: Path) -> list
     if task == "linearize":
         return _frame_list("obj") + [out_dir / "wavesol" / "lambda_map.fits"]
     if task in ("sky", "sky_sub"):
-        return [out_dir / "lin" / "obj_sum_lin.fits"]
+        p = out_dir / "products" / "lin" / "lin_preview.fits"
+        return [p if p.exists() else (out_dir / "lin" / "obj_sum_lin.fits")]
+    if task in ("stack2d", "stack"):
+        return [out_dir / "products" / "sky" / "sky_sub_done.json", out_dir / "products" / "sky" / "per_exp"]
     if task == "extract1d":
-        return [out_dir / "sky" / "obj_sky_sub.fits"]
+        p = out_dir / "products" / "stack" / "stacked2d.fits"
+        return [p]
 
     return []
 

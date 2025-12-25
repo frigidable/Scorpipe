@@ -13,6 +13,15 @@ Run:
 from __future__ import annotations
 
 import argparse
+import sys
+from pathlib import Path
+
+
+# Allow running directly from a source checkout without `pip install -e .`.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC = REPO_ROOT / "src"
+if SRC.exists() and str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
 
 def main() -> None:

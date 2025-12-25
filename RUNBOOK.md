@@ -1,4 +1,4 @@
-# RUNBOOK — Scorpio Pipe v5.12
+# RUNBOOK — Scorpio Pipe v5.13
 
 Этот файл — короткая шпаргалка «как прогнать пайплайн» и где искать продукты.
 
@@ -30,34 +30,32 @@ python -m pip install -e .[science,gui,dev]
 python -m doit -f workflow/dodo.py inspect
 python -m doit -f workflow/dodo.py wavesolution
 python -m doit -f workflow/dodo.py linearize
-python -m doit -f workflow/dodo.py sky
+python -m doit -f workflow/dodo.py sky_sub
+python -m doit -f workflow/dodo.py stack2d
 python -m doit -f workflow/dodo.py extract1d
 ```
 
 ## 4) Структура выходных данных
 
-Канонические продукты (v5.12+) пишутся в `work_dir/products/...`, но для обратной совместимости также копируются в старые папки.
+Канонические продукты (v5.13+) пишутся в `work_dir/products/...`. Часть стадий дополнительно создаёт legacy mirror в старых папках, чтобы не ломать привычные пути.
 
 Типично:
 
 ```
 work/<run>/
   products/
+    lin/
+      lin_preview.fits
+      per_exp/              # per-exposure rectified SCI/VAR/MASK
     sky/
-      obj_sky_sub.fits
-      sky_sub_done.json
-      per_exp/
-        <exp>_sky_sub.fits
-        <exp>_sky_spectrum.csv
+      per_exp/              # per-exposure sky-subtracted frames
     stack/
-      stacked2d.fits
-      stacked2d_cov.fits
+      stacked2d.fits         # final stacked 2D (SCI/VAR/MASK/COV)
+      coverage.png
     spec/
-      spectrum_1d.fits
-      extract1d_done.json
-
-  sky/   (legacy mirror)
-  spec/  (legacy mirror)
+      spec1d.fits            # final 1D (FLUX/VAR/MASK)
+      spec1d.png
+      trace.json
 ```
 
 ## 5) Smoke-check

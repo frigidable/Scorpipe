@@ -228,15 +228,19 @@ def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel
       - lambda_map: from wavesolution stage
       - cleaned object frames (prefer cosmics outputs if present)
 
-    Outputs:
-      - work_dir/lin/obj_sum_lin.fits  (MEF: SCI [+VAR,+MASK,+COV])
-      - work_dir/lin/linearize_done.json
-      - optional per-exposure rectified frames under work_dir/lin/per_exp/
+    Outputs (v5.13+):
+      - products/lin/lin_preview.fits (MEF: SCI [+VAR,+MASK,+COV])  # quick-look stack for ROI/QC
+      - products/lin/linearize_done.json
+      - per-exposure rectified frames under products/lin/per_exp/
+
+    Backward compatibility:
+      - mirrors preview to work_dir/lin/obj_sum_lin.fits and work_dir/lin/obj_sum_lin.png
     """
     cfg = dict(cfg)
     work_dir = resolve_work_dir(cfg)
     if out_dir is None:
-        out_dir = work_dir / "lin"
+        out_dir = work_dir / "products" / "lin"
+    out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     lcfg = cfg.get("linearize", {}) if isinstance(cfg.get("linearize"), dict) else {}
@@ -247,7 +251,13 @@ def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel
     dw = float(lcfg.get("dlambda_A", lcfg.get("dw", 1.0)))
     y_crop_top = int(lcfg.get("y_crop_top", 0))
     y_crop_bottom = int(lcfg.get("y_crop_bottom", 0))
-    save_per_exp = bool(lcfg.get("per_exposure", lcfg.get("save_per_exposure", True)))
+    save_per_exp = bool(
+        lcfg.get(
+            "per_exposure",
+            lcfg.get("save_per_frame", lcfg.get("save_per_exposure", True)),
+        )
+    )
+    stack_preview = bool(lcfg.get("stack_preview", lcfg.get("stack_preview", True)))
 
     # Locate lambda_map
     wavesol_dir = work_dir / "wavesol"
@@ -273,12 +283,25 @@ def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel
     if not obj_frames:
         raise ValueError("No object frames configured (frames.obj is empty)")
 
-    # Prefer cosmics products if present
+    # Prefer cosmics products if present.
+    # NOTE: cosmics stage historically used different layouts. Try a few.
     cosm_cfg = cfg.get("cosmics", {}) if isinstance(cfg.get("cosmics"), dict) else {}
     method = str(cosm_cfg.get("method", "stack_mad"))
-    cosm_dir = work_dir / "cosmics" / method
-    clean_dir = cosm_dir / "clean"
-    mask_dir = cosm_dir / "mask_fits"
+    kind = "obj"
+    cosm_root = work_dir / "cosmics"
+    cand_clean = [
+        cosm_root / kind / "clean",                  # current
+        cosm_root / method / kind / "clean",         # legacy (method/kind)
+        cosm_root / method / "clean",                # legacy (method)
+    ]
+    cand_mask = [
+        cosm_root / kind / "masks_fits",
+        cosm_root / method / kind / "masks_fits",
+        cosm_root / method / "masks_fits",
+        cosm_root / kind / "mask_fits",              # very old typo
+    ]
+    clean_dir = next((p for p in cand_clean if p.exists()), cand_clean[0])
+    mask_dir = next((p for p in cand_mask if p.exists()), cand_mask[0])
 
     resolved = []
     for fp in obj_frames:
@@ -387,7 +410,7 @@ def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel
         if per_exp_dir is not None:
             ohdr = _set_linear_wcs(hdr, wave0, dw)
             ohdr = add_provenance(ohdr, cfg, stage="linearize")
-            _write_mef(per_exp_dir / f"{p.stem}_lin.fits", rect, ohdr, rect_var, rect_mask)
+            _write_mef(per_exp_dir / f"{base_for_mask}_lin.fits", rect, ohdr, rect_var, rect_mask)
 
         # Stack: inverse-variance weighted mean
         w = np.zeros_like(rect_var, dtype=np.float64)
@@ -409,13 +432,35 @@ def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel
     out_mask[~ok] |= MASK_NO_COVERAGE
 
     # Output products
-    sum_fits = out_dir / "obj_sum_lin.fits"
-    sum_json = out_dir / "linearize_done.json"
+    preview_fits = out_dir / "lin_preview.fits"
+    done_json = out_dir / "linearize_done.json"
 
     hdr0 = _set_linear_wcs(lam_hdr, wave0, dw)
     hdr0["BUNIT"] = ("ADU", "Data unit")
     hdr0 = add_provenance(hdr0, cfg, stage="linearize")
-    _write_mef(sum_fits, out_sci, hdr0, out_var, out_mask, coverage)
+    _write_mef(preview_fits, out_sci, hdr0, out_var, out_mask, coverage)
+
+    # Quicklook PNG
+    preview_png = out_dir / "lin_preview.png"
+    if bool(lcfg.get("save_png", True)):
+        try:
+            import matplotlib.pyplot as plt
+
+            from scorpio_pipe.plot_style import mpl_style
+
+            with mpl_style():
+                fig = plt.figure(figsize=(8.0, 3.6))
+                ax = fig.add_subplot(111)
+                im = ax.imshow(out_sci, origin="lower", aspect="auto")
+                ax.set_xlabel("λ pixel")
+                ax.set_ylabel("y")
+                ax.set_title("Linearized preview (stacked)")
+                fig.colorbar(im, ax=ax, pad=0.01, fraction=0.05)
+                fig.tight_layout()
+                fig.savefig(preview_png)
+                plt.close(fig)
+        except Exception:
+            pass
 
     payload = {
         "stage": "linearize",
@@ -426,9 +471,25 @@ def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel
         "nlam": nlam,
         "per_exposure": str(per_exp_dir) if per_exp_dir is not None else None,
         "products": {
-            "sum_fits": str(sum_fits),
+            "preview_fits": str(preview_fits),
+            "preview_png": str(preview_png) if preview_png.exists() else None,
         },
     }
-    sum_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    log.info("Linearize done: %s", sum_fits)
+    done_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    # Legacy mirroring (UI / older workflows expect work_dir/lin/obj_sum_lin.*)
+    try:
+        legacy_dir = work_dir / "lin"
+        if legacy_dir.resolve() != out_dir.resolve():
+            legacy_dir.mkdir(parents=True, exist_ok=True)
+            import shutil
+
+            shutil.copy2(preview_fits, legacy_dir / "obj_sum_lin.fits")
+            if preview_png.exists():
+                shutil.copy2(preview_png, legacy_dir / "obj_sum_lin.png")
+            shutil.copy2(done_json, legacy_dir / "linearize_done.json")
+    except Exception:
+        pass
+
+    log.info("Linearize done: %s", preview_fits)
     return payload

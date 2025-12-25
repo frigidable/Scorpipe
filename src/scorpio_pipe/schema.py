@@ -195,9 +195,16 @@ class LinearizeBlock(BaseModel):
     y_crop_top: int = 0
     y_crop_bottom: int = 0
 
-    save_per_frame: bool = False
+    # Real long-slit workflow needs per-exposure rectification products.
+    # ``per_exposure`` is the canonical key; ``save_per_frame`` is kept for
+    # older configs/UI and treated as an alias by the implementation.
+    per_exposure: bool = True
+    save_per_frame: bool = False  # deprecated alias (kept for compatibility)
     save_png: bool = True
     fill_value: float = float("nan")
+    # Produce a quick-look stacked linearized frame (for ROI selection / QC).
+    # This is NOT used for the final scientific stacking (stack2d does that).
+    stack_preview: bool = True
 
 
 class SkyBlock(BaseModel):
@@ -207,7 +214,7 @@ class SkyBlock(BaseModel):
     method: str = "kelson"
 
     # Advanced (v5.12+): per-exposure sky subtraction and optional stacking.
-    per_exposure: bool = False
+    per_exposure: bool = True
     # Stack rectified per-exposure sky-subtracted frames into a combined product.
     # In the GUI this is presented as a checkbox near "Run Sky".
     stack_after: bool = True
@@ -247,7 +254,16 @@ class Extract1DBlock(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     enabled: bool = True
-    method: str = "sum"  # sum|mean
+    # boxcar = aperture sum around trace; optimal = Horne-style (advanced).
+    method: str = "boxcar"  # boxcar|optimal|sum|mean (sum/mean kept for compat)
+    # Aperture half-width in pixels around the trace.
+    aperture_half_width: int = 6
+    # Trace estimation (centroid in bins along λ)
+    trace_bin_A: float = 60.0
+    trace_smooth_deg: int = 3
+    # For optimal extraction: build a single profile template from a λ-range.
+    optimal_profile_half_width: int = 12
+    optimal_sigma_clip: float = 5.0
     save_png: bool = True
 
 
@@ -326,7 +342,9 @@ _TOP_KEYS = {
     "superneon",
     "linearize",
     "sky",
+    "stack2d",
     "extract1d",
+    "qc",
     "profiles",
     "config_path",
     "config_dir",

@@ -228,8 +228,11 @@ def run_sky_sub(cfg: dict[str, Any], *, lin_fits: Path | None = None, out_dir: P
     out_dir = Path(out_dir) if out_dir is not None else (products_root / "sky")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    per_exposure = bool(sky_cfg.get("per_exposure", False))
-    stack_after = bool(sky_cfg.get("stack_after", False))
+    per_exposure = bool(sky_cfg.get("per_exposure", True))
+    # NOTE (v5.13): stacking is a dedicated stage (stack2d). We keep the
+    # ``stack_after`` flag for UI/backward compatibility, but this stage does
+    # not perform stacking anymore.
+    stack_after = bool(sky_cfg.get("stack_after", True))
     save_per_exp_model = bool(sky_cfg.get("save_per_exp_model", False))
     save_spectrum_1d = bool(sky_cfg.get("save_spectrum_1d", False))
 
@@ -390,7 +393,12 @@ def run_sky_sub(cfg: dict[str, Any], *, lin_fits: Path | None = None, out_dir: P
     # Determine inputs
     if not per_exposure:
         if lin_fits is None:
-            lin_fits = wd / "lin" / "obj_sum_lin.fits"
+            # Prefer canonical products/... then legacy.
+            cand = [
+                wd / "products" / "lin" / "lin_preview.fits",
+                wd / "lin" / "obj_sum_lin.fits",
+            ]
+            lin_fits = next((p for p in cand if p.exists()), cand[-1])
         lin_fits = Path(lin_fits)
         if not lin_fits.exists():
             raise FileNotFoundError(f"Missing linearized sum: {lin_fits} (run linearize first)")
@@ -407,9 +415,16 @@ def run_sky_sub(cfg: dict[str, Any], *, lin_fits: Path | None = None, out_dir: P
             _mirror_legacy(Path(one["sky_model"]), "sky_model.fits")
         payload = {"mode": "stack", "out_dir": str(out_dir), "result": one}
     else:
-        per_dir = wd / "lin" / "per_exp"
+        per_dir_cand = [
+            wd / "products" / "lin" / "per_exp",
+            wd / "lin" / "per_exp",
+        ]
+        per_dir = next((p for p in per_dir_cand if p.exists()), per_dir_cand[0])
         if not per_dir.exists():
-            raise FileNotFoundError(f"Missing per-exposure linearized frames: {per_dir}")
+            raise FileNotFoundError(
+                "Missing per-exposure linearized frames. Expected one of: "
+                + ", ".join(str(p) for p in per_dir_cand)
+            )
         out_per = out_dir / "per_exp"
         out_per.mkdir(parents=True, exist_ok=True)
         files = sorted(per_dir.glob("*.fits"))
@@ -418,6 +433,8 @@ def run_sky_sub(cfg: dict[str, Any], *, lin_fits: Path | None = None, out_dir: P
         results: list[dict[str, Any]] = []
         for f in files:
             tag = f.stem
+            if tag.endswith("_lin"):
+                tag = tag[:-4]
             res = _process_one(
                 f,
                 tag=tag,
@@ -425,30 +442,12 @@ def run_sky_sub(cfg: dict[str, Any], *, lin_fits: Path | None = None, out_dir: P
                 write_model=bool(sky_cfg.get("save_sky_model", True)) and save_per_exp_model,
             )
             results.append(res)
-        payload = {"mode": "per_exposure", "out_dir": str(out_dir), "per_exp": results, "stack_after": stack_after}
-
-        # Run stacking as part of Sky, if requested.
-        if stack_after:
-            try:
-                from .stack2d import run_stack2d
-
-                sky_sub_files = [Path(r["sky_sub"]) for r in results if r.get("sky_sub")]
-                stk = run_stack2d(cfg, inputs=sky_sub_files, out_dir=products_root / "stack")
-                payload["stack2d"] = stk
-
-                # For downstream stages (extract1d) and backward compatibility:
-                # publish a combined product under the legacy and products/sky names.
-                try:
-                    src = Path(stk.get("output_fits", ""))
-                    if src.exists():
-                        comb = out_dir / "obj_sky_sub.fits"
-                        shutil.copy2(src, comb)
-                        _mirror_legacy(comb, "obj_sky_sub.fits")
-                        payload["combined_sky_sub"] = str(comb)
-                except Exception:
-                    pass
-            except Exception as e:
-                payload["stack2d_error"] = str(e)
+        payload = {
+            "mode": "per_exposure",
+            "out_dir": str(out_dir),
+            "per_exp": results,
+            "stack_after_requested": stack_after,
+        }
 
     done = out_dir / "sky_sub_done.json"
     done.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")

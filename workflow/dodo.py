@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import json
 import time
+from typing import Any
 
 import os
 
@@ -11,6 +12,7 @@ from doit import get_var
 from scorpio_pipe.config import load_config
 from scorpio_pipe.manifest import write_manifest
 from scorpio_pipe.log import setup_logging
+from scorpio_pipe.wavesol_paths import resolve_work_dir
 
 setup_logging(os.environ.get("SCORPIO_LOG_LEVEL"))
 
@@ -304,10 +306,10 @@ def task_wavesol():
 
 
 def task_sky_sub():
-    """Kelson-style 2D sky subtraction on the stacked, linearized frame."""
+    """Kelson-style sky subtraction (per exposure by default)."""
     cfg = _load_cfg()
     work_dir = resolve_work_dir(cfg)
-    out_dir = work_dir / "sky"
+    out_dir = work_dir / "products" / "sky"
     done = out_dir / "sky_sub_done.json"
 
     def _action():
@@ -317,13 +319,9 @@ def task_sky_sub():
 
     return {
         "actions": [_action],
-        "file_dep": [_cfg_path(), work_dir / "lin" / "obj_sum_lin.fits"],
-        "targets": [
-            done,
-            out_dir / "obj_sky_sub.fits",
-            out_dir / "sky_model.fits",
-            out_dir / "sky_diagnostics.png",
-        ],
+        # Depends on linearize preview and/or per-exposure products
+        "file_dep": [_cfg_path(), work_dir / "products" / "lin" / "linearize_done.json"],
+        "targets": [done],
         "task_dep": ["linearize"],
         "clean": True,
     }
@@ -335,10 +333,10 @@ def task_wavelength_solution():
 
 
 def task_linearize():
-    """Rectify per-pixel spectra to a linear wavelength grid and stack exposures."""
+    """Rectify per-pixel spectra to a common linear wavelength grid (per exposure)."""
     cfg = _load_cfg()
     work_dir = resolve_work_dir(cfg)
-    out_dir = work_dir / "lin"
+    out_dir = work_dir / "products" / "lin"
     done = out_dir / "linearize_done.json"
 
     def _action():
@@ -352,56 +350,73 @@ def task_linearize():
     return {
         "actions": [_action],
         "file_dep": [_cfg_path(), wavesol_dir(cfg) / "lambda_map.fits"],
-        "targets": [done, out_dir / "obj_sum_lin.fits", out_dir / "obj_sum_lin.png"],
+        "targets": [done, out_dir / "lin_preview.fits", out_dir / "lin_preview.png"],
         "task_dep": ["wavesol", "cosmics"],
         "clean": True,
     }
 
 
-def task_stack():
-    """Compatibility alias: linearize already outputs a stacked frame."""
+def _collect_sky_sub_frames(cfg: dict[str, Any]) -> list[Path]:
+    wd = resolve_work_dir(cfg)
+    cand_dirs = [
+        wd / "products" / "sky" / "per_exp",
+        wd / "sky" / "per_exp",
+    ]
+    for d in cand_dirs:
+        if d.exists():
+            frames = sorted(d.glob("*_sky_sub.fits"))
+            if frames:
+                return frames
+    return []
+
+
+def task_stack2d():
+    """Stack per-exposure sky-subtracted rectified frames into a single 2D product."""
     cfg = _load_cfg()
     work_dir = resolve_work_dir(cfg)
-    out_dir = work_dir / "stack"
-    done = out_dir / "stack_done.json"
+    out_dir = work_dir / "products" / "stack"
+    done = out_dir / "stack2d_done.json"
 
     def _action():
-        out_dir.mkdir(parents=True, exist_ok=True)
-        # Mirror the main products for legacy scripts
-        src = work_dir / "lin" / "obj_sum_lin.fits"
-        dst = out_dir / "obj_sum_lin.fits"
-        if src.exists():
-            import shutil
+        from scorpio_pipe.stages.stack2d import run_stack2d
 
-            shutil.copy2(src, dst)
-        _touch(done, {"stage": "stack", "note": "linearize already produces a stacked frame"})
+        def _run():
+            inputs = _collect_sky_sub_frames(cfg)
+            return run_stack2d(cfg, inputs=inputs, out_dir=out_dir)
+
+        _timed("stack2d", work_dir, _run)
 
     return {
         "actions": [_action],
-        "file_dep": [work_dir / "lin" / "linearize_done.json"],
-        "targets": [done, out_dir / "obj_sum_lin.fits"],
-        "task_dep": ["linearize"],
+        "file_dep": [_cfg_path(), work_dir / "products" / "sky" / "sky_sub_done.json"],
+        "targets": [done, out_dir / "stacked2d.fits", out_dir / "coverage.png"],
+        "task_dep": ["sky_sub"],
         "clean": True,
     }
 
 
+def task_stack():
+    """Legacy alias for stack2d."""
+    return {"actions": None, "task_dep": ["stack2d"]}
+
+
 def task_extract1d():
-    """1D extraction from the sky-subtracted linearized frame."""
+    """1D extraction (boxcar/optimal) from the stacked 2D product."""
     cfg = _load_cfg()
     work_dir = resolve_work_dir(cfg)
-    out_dir = work_dir / "spec"
+    out_dir = work_dir / "products" / "spec"
     done = out_dir / "extract1d_done.json"
 
     def _action():
-        from scorpio_pipe.stages.extract1d import extract_1d
+        from scorpio_pipe.stages.extract1d import run_extract1d
 
-        _timed("extract1d", work_dir, lambda: extract_1d(cfg, out_dir=out_dir))
+        _timed("extract1d", work_dir, lambda: run_extract1d(cfg, out_dir=out_dir))
 
     return {
         "actions": [_action],
-        "file_dep": [_cfg_path(), work_dir / "sky" / "obj_sky_sub.fits"],
-        "targets": [done, out_dir / "spectrum_1d.fits", out_dir / "spectrum_1d.png"],
-        "task_dep": ["sky_sub"],
+        "file_dep": [_cfg_path(), work_dir / "products" / "stack" / "stacked2d.fits"],
+        "targets": [done, out_dir / "spec1d.fits", out_dir / "spec1d.png"],
+        "task_dep": ["stack2d"],
         "clean": True,
     }
 

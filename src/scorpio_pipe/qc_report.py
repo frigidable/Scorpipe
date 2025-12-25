@@ -146,6 +146,78 @@ def _metrics_timings(work_dir: Path) -> dict[str, Any]:
     return {"stages": agg, "total_last_s": total_last}
 
 
+def _metrics_sky(products: list[Product]) -> dict[str, Any]:
+    """Sky-subtraction QC, aggregated from sky_sub_done.json."""
+
+    p = next((p.path for p in products if p.key == "sky_done" and p.path.exists()), None)
+    if not p:
+        return {}
+    js = _read_json(p) or {}
+    per = js.get("per_exposure") or []
+    rms = []
+    for r in per:
+        try:
+            m = r.get("metrics") or {}
+            v = float(m.get("rms_sky"))
+            if np.isfinite(v):
+                rms.append(v)
+        except Exception:
+            continue
+    out: dict[str, Any] = {
+        "n_frames": int(js.get("n_frames", len(per))) if js.get("n_frames") is not None else len(per),
+    }
+    if rms:
+        out.update({
+            "rms_sky_median": float(np.median(rms)),
+            "rms_sky_p90": float(np.percentile(rms, 90)),
+        })
+    return out
+
+
+def _metrics_stack(products: list[Product]) -> dict[str, Any]:
+    p = next((p.path for p in products if p.key == "stack2d_done" and p.path.exists()), None)
+    if not p:
+        return {}
+    js = _read_json(p) or {}
+    return {
+        "n_inputs": js.get("n_inputs"),
+        "shape": js.get("shape"),
+        "method": js.get("method"),
+    }
+
+
+def _metrics_spec(products: list[Product]) -> dict[str, Any]:
+    """Compute rough S/N from spec1d (median of |flux|/sqrt(var) in good pixels)."""
+
+    p = next((p.path for p in products if p.key == "spec1d_fits" and p.path.exists()), None)
+    if not p:
+        return {}
+    try:
+        from astropy.io import fits
+
+        with fits.open(p) as hdul:
+            flux = np.asarray(hdul[0].data, float)
+            var = np.asarray(hdul["VAR"].data, float) if "VAR" in hdul else None
+            msk = np.asarray(hdul["MASK"].data, int) if "MASK" in hdul else None
+        if var is None:
+            return {}
+        good = np.isfinite(flux) & np.isfinite(var) & (var > 0)
+        if msk is not None:
+            good &= (msk == 0)
+        if not np.any(good):
+            return {}
+        snr = np.abs(flux[good]) / np.sqrt(var[good])
+        snr = snr[np.isfinite(snr)]
+        if snr.size == 0:
+            return {}
+        return {
+            "snr_median": float(np.median(snr)),
+            "snr_p90": float(np.percentile(snr, 90)),
+        }
+    except Exception:
+        return {}
+
+
 def _html_escape(s: str) -> str:
     return (
         s.replace("&", "&amp;")
@@ -203,12 +275,15 @@ def _render_stage_summary(products: list[Product]) -> str:
 
 def _render_gallery(work_dir: Path, products: list[Product]) -> str:
     wanted = [
+        "lin_preview_png",
         "cosmics_coverage_png",
         "cosmics_sum_png",
         "superneon_png",
         "wavesol_1d_png",
         "wavelength_matrix",
         "residuals_2d_png",
+        "coverage_png",
+        "spec1d_png",
     ]
     items = []
     for key in wanted:
@@ -291,6 +366,18 @@ def build_qc_report(cfg: dict[str, Any], *, out_dir: str | Path | None = None, c
     t = _metrics_timings(work_dir)
     if t:
         metrics["timings"] = t
+
+    s = _metrics_sky(products)
+    if s:
+        metrics["sky"] = s
+
+    st = _metrics_stack(products)
+    if st:
+        metrics["stack"] = st
+
+    sp = _metrics_spec(products)
+    if sp:
+        metrics["spec"] = sp
 
     thresholds, thresholds_meta = compute_thresholds(cfg)
     alerts = build_alerts(metrics, products=products, thresholds=thresholds)
@@ -412,6 +499,9 @@ def build_qc_report(cfg: dict[str, Any], *, out_dir: str | Path | None = None, c
           <div class='k'>2D model</div><div>{_html_escape(str(metrics.get('wavesol_2d', {}).get('kind', '—')))}</div>
           <div class='k'>Cosmics replaced</div><div>{_html_escape(str(metrics.get('cosmics', {}).get('replaced_fraction', '—')))}</div>
           <div class='k'>Residuals p95 |Δλ|</div><div>{_html_escape(str(metrics.get('residuals_2d', {}).get('p95_abs_A', '—')))} Å</div>
+          <div class='k'>Sky RMS (median)</div><div>{_html_escape(str(metrics.get('sky', {}).get('rms_sky_median', '—')))}</div>
+          <div class='k'>Stack N inputs</div><div>{_html_escape(str(metrics.get('stack', {}).get('n_inputs', '—')))}</div>
+          <div class='k'>Spec S/N (median)</div><div>{_html_escape(str(metrics.get('spec', {}).get('snr_median', '—')))}</div>
         </div>
         <details>
           <summary>Show full metrics (JSON)</summary>

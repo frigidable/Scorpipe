@@ -381,6 +381,16 @@ class LauncherWindow(QtWidgets.QMainWindow):
         h.addWidget(hb)
         return w
 
+    def _small_note(self, text: str) -> QtWidgets.QWidget:
+        """A small muted note used in parameter panels."""
+        lbl = QtWidgets.QLabel(text)
+        lbl.setWordWrap(True)
+        # Keep it visually secondary but readable.
+        lbl.setStyleSheet(
+            "QLabel { font-size: 11px; color: rgba(0,0,0,160); }"
+        )
+        return lbl
+
     def _force_dot_locale(self, *widgets: QtWidgets.QWidget) -> None:
         """Force dot as decimal separator for numeric inputs.
 
@@ -1814,6 +1824,15 @@ class LauncherWindow(QtWidgets.QMainWindow):
             sky = cfg.get('sky', {}) if isinstance(cfg.get('sky'), dict) else {}
             with QtCore.QSignalBlocker(self.chk_sky_enabled):
                 self.chk_sky_enabled.setChecked(bool(sky.get('enabled', True)))
+            if hasattr(self, 'chk_sky_per_exp'):
+                with QtCore.QSignalBlocker(self.chk_sky_per_exp):
+                    self.chk_sky_per_exp.setChecked(bool(sky.get('per_exposure', True)))
+            if hasattr(self, 'chk_sky_stack_after'):
+                with QtCore.QSignalBlocker(self.chk_sky_stack_after):
+                    self.chk_sky_stack_after.setChecked(bool(sky.get('stack_after', True)))
+            if hasattr(self, 'chk_sky_save_models'):
+                with QtCore.QSignalBlocker(self.chk_sky_save_models):
+                    self.chk_sky_save_models.setChecked(bool(sky.get('save_per_exp_model', False)))
             if hasattr(self, 'dspin_sky_step'):
                 with QtCore.QSignalBlocker(self.dspin_sky_step):
                     self.dspin_sky_step.setValue(float(sky.get('bsp_step_A', 2.0) or 2.0))
@@ -1823,21 +1842,23 @@ class LauncherWindow(QtWidgets.QMainWindow):
             if hasattr(self, 'dspin_sky_clip'):
                 with QtCore.QSignalBlocker(self.dspin_sky_clip):
                     self.dspin_sky_clip.setValue(float(sky.get('sigma_clip', 3.0) or 3.0))
-            if hasattr(self, 'spin_sky_iter'):
-                with QtCore.QSignalBlocker(self.spin_sky_iter):
-                    self.spin_sky_iter.setValue(int(sky.get('maxiter', 5) or 5))
+            if hasattr(self, 'spin_sky_maxiter'):
+                with QtCore.QSignalBlocker(self.spin_sky_maxiter):
+                    self.spin_sky_maxiter.setValue(int(sky.get('maxiter', 6) or 6))
             if hasattr(self, 'chk_sky_spatial'):
                 with QtCore.QSignalBlocker(self.chk_sky_spatial):
-                    self.chk_sky_spatial.setChecked(bool(sky.get('use_spatial_poly', True)))
-            if hasattr(self, 'spin_sky_polydeg'):
-                with QtCore.QSignalBlocker(self.spin_sky_polydeg):
-                    self.spin_sky_polydeg.setValue(int(sky.get('spatial_poly_deg', 1) or 1))
+                    self.chk_sky_spatial.setChecked(bool(sky.get('use_spatial_scale', True)))
+            if hasattr(self, 'spin_sky_poly'):
+                with QtCore.QSignalBlocker(self.spin_sky_poly):
+                    self.spin_sky_poly.setValue(int(sky.get('spatial_poly_deg', 0) or 0))
             # ROI label
             if hasattr(self, 'lbl_sky_roi'):
                 roi = sky.get('roi', {}) if isinstance(sky.get('roi'), dict) else {}
+
                 def _f(k: str) -> str:
                     v = roi.get(k, None)
                     return str(int(v)) if v not in (None, '') else '—'
+
                 self.lbl_sky_roi.setText(
                     f"Object: [{_f('obj_y0')}..{_f('obj_y1')}],  "
                     f"Sky(top): [{_f('sky_top_y0')}..{_f('sky_top_y1')}],  "
@@ -1851,9 +1872,24 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 self.chk_ex1d_enabled.setChecked(bool(ex.get('enabled', True)))
             if hasattr(self, 'combo_ex1d_method'):
                 with QtCore.QSignalBlocker(self.combo_ex1d_method):
-                    m = str(ex.get('method', 'sum') or 'sum')
+                    m = str(ex.get('method', 'boxcar') or 'boxcar')
                     idx = self.combo_ex1d_method.findText(m)
                     self.combo_ex1d_method.setCurrentIndex(max(0, idx))
+            if hasattr(self, 'spin_ex1d_ap_hw'):
+                with QtCore.QSignalBlocker(self.spin_ex1d_ap_hw):
+                    self.spin_ex1d_ap_hw.setValue(int(ex.get('aperture_half_width', 6) or 6))
+            if hasattr(self, 'dspin_ex1d_trace_bin'):
+                with QtCore.QSignalBlocker(self.dspin_ex1d_trace_bin):
+                    self.dspin_ex1d_trace_bin.setValue(float(ex.get('trace_bin_A', 50.0) or 50.0))
+            if hasattr(self, 'spin_ex1d_trace_deg'):
+                with QtCore.QSignalBlocker(self.spin_ex1d_trace_deg):
+                    self.spin_ex1d_trace_deg.setValue(int(ex.get('trace_smooth_deg', 3) or 3))
+            if hasattr(self, 'spin_ex1d_prof_hw'):
+                with QtCore.QSignalBlocker(self.spin_ex1d_prof_hw):
+                    self.spin_ex1d_prof_hw.setValue(int(ex.get('optimal_profile_half_width', 15) or 15))
+            if hasattr(self, 'dspin_ex1d_opt_clip'):
+                with QtCore.QSignalBlocker(self.dspin_ex1d_opt_clip):
+                    self.dspin_ex1d_opt_clip.setValue(float(ex.get('optimal_sigma_clip', 5.0) or 5.0))
             if hasattr(self, 'chk_ex1d_png'):
                 with QtCore.QSignalBlocker(self.chk_ex1d_png):
                     self.chk_ex1d_png.setChecked(bool(ex.get('save_png', True)))
@@ -3922,7 +3958,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         lbl = QtWidgets.QLabel(
             "Resample COSMICS-cleaned OBJ frames onto a linear wavelength grid using lambda_map(y,x).\n"
-            "Output: lin/obj_sum_lin.fits (stacked linearized frame).\n"
+            "Output: products/lin/lin_preview.fits (legacy mirror: lin/obj_sum_lin.fits).\n"
             "Tip: keep dlambda/lambda_min/lambda_max = 0 for auto."
         )
         lbl.setWordWrap(True)
@@ -4019,7 +4055,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         bf.addRow(
             self._param_label(
                 "PNG",
-                "Сохранить диагностическую картинку lin/obj_sum_lin.png.\n"
+                "Сохранить диагностическую картинку products/lin/lin_preview.png (legacy mirror: lin/obj_sum_lin.png).\n"
                 "Типично: включено.",
             ),
             self.chk_lin_png,
@@ -4057,7 +4093,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         splitter.addWidget(left)
 
         self.outputs_linearize = OutputsPanel()
-        self.outputs_linearize.set_context(self._cfg, stage="linearize")
+        # Products for the linearization stage are registered under stage name "lin".
+        self.outputs_linearize.set_context(self._cfg, stage="lin")
         splitter.addWidget(self.outputs_linearize)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
@@ -4124,7 +4161,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._log_info("Linearize done")
             try:
                 if hasattr(self, "outputs_linearize"):
-                    self.outputs_linearize.set_context(self._cfg, stage="linearize")
+                    self.outputs_linearize.set_context(self._cfg, stage="lin")
             except Exception:
                 pass
             self._set_step_status(8, "ok")
@@ -4151,8 +4188,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
         gl = QtWidgets.QVBoxLayout(g)
 
         lbl = QtWidgets.QLabel(
-            "Subtract night sky from the linearized stacked OBJ frame.\n"
-            "Workflow: select object/sky regions on lin/obj_sum_lin.fits → run Kelson." 
+            "Kelson-style sky subtraction on rectified frames (λ, y).\n"
+            "Workflow: select OBJ/SKY regions on a preview stack (products/lin/lin_preview.fits) → run per exposure.\n"
+            "Optionally: stack the sky-subtracted frames into products/stack/stacked2d.fits."
         )
         lbl.setWordWrap(True)
         gl.addWidget(lbl)
@@ -4188,6 +4226,38 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Типично: включено.",
             ),
             self.chk_sky_enabled,
+        )
+
+        self.chk_sky_per_exp = QtWidgets.QCheckBox("Per exposure (recommended)")
+        bf.addRow(
+            self._param_label(
+                "Per exposure",
+                "Вычитать небо для каждого экспозиционного кадра отдельно (best practice).\n"
+                "Типично: включено.",
+            ),
+            self.chk_sky_per_exp,
+        )
+
+        self.chk_sky_stack_after = QtWidgets.QCheckBox("Stack after sky")
+        bf.addRow(
+            self._param_label(
+                "Stack after",
+                "После вычитания неба автоматически выполнить stacking (2D) в (λ, y).\n"
+                "Полезно для получения итогового 2D-кадра и последующей 1D-экстракции.\n"
+                "Типично: включено.",
+            ),
+            self.chk_sky_stack_after,
+        )
+
+        self.chk_sky_save_models = QtWidgets.QCheckBox("Save per-exp sky model")
+        bf.addRow(
+            self._param_label(
+                "Save models",
+                "Сохранять модель неба для каждой экспозиции (FITS).\n"
+                "Полезно для отладки и QC, но занимает место.\n"
+                "Типично: выключено.",
+            ),
+            self.chk_sky_save_models,
         )
 
         self.dspin_sky_step = QtWidgets.QDoubleSpinBox()
@@ -4314,10 +4384,20 @@ class LauncherWindow(QtWidgets.QMainWindow):
             lambda v: self._stage_set_pending("sky", "sky.maxiter", int(v))
         )
         self.chk_sky_spatial.stateChanged.connect(
-            lambda _: self._stage_set_pending("sky", "sky.use_spatial_poly", bool(self.chk_sky_spatial.isChecked()))
+            lambda _: self._stage_set_pending("sky", "sky.use_spatial_scale", bool(self.chk_sky_spatial.isChecked()))
         )
         self.spin_sky_poly.valueChanged.connect(
             lambda v: self._stage_set_pending("sky", "sky.spatial_poly_deg", int(v))
+        )
+
+        self.chk_sky_per_exp.stateChanged.connect(
+            lambda _: self._stage_set_pending("sky", "sky.per_exposure", bool(self.chk_sky_per_exp.isChecked()))
+        )
+        self.chk_sky_stack_after.stateChanged.connect(
+            lambda _: self._stage_set_pending("sky", "sky.stack_after", bool(self.chk_sky_stack_after.isChecked()))
+        )
+        self.chk_sky_save_models.stateChanged.connect(
+            lambda _: self._stage_set_pending("sky", "sky.save_per_exp_model", bool(self.chk_sky_save_models.isChecked()))
         )
 
         self.btn_sky_select_roi.clicked.connect(self._do_select_sky_rois)
@@ -4338,7 +4418,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
         try:
             ctx = load_context(self._cfg_path)
             work = resolve_work_dir(ctx.cfg)
-            fits_path = work / "lin" / "obj_sum_lin.fits"
+            fits_path = work / "products" / "lin" / "lin_preview.fits"
+            if not fits_path.exists():
+                # backward compatibility (older layouts)
+                fits_path = work / "lin" / "obj_sum_lin.fits"
             if not fits_path.exists():
                 self._log_warn("Linearized sum not found. Run Linearize first.")
                 return
@@ -4366,8 +4449,13 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._set_step_status(9, "running")
         try:
             ctx = load_context(self._cfg_path)
-            run_sequence(ctx, ["sky"])
-            self._log_info("Sky subtraction done")
+            sky_cfg = (ctx.cfg.get("sky") or {}) if isinstance(ctx.cfg.get("sky"), dict) else {}
+            do_stack = bool(sky_cfg.get("stack_after", True))
+            tasks = ["sky"]
+            if do_stack:
+                tasks.append("stack2d")
+            run_sequence(ctx, tasks)
+            self._log_info("Sky subtraction done" + (" + Stack2D" if do_stack else ""))
             try:
                 if hasattr(self, "outputs_sky"):
                     self.outputs_sky.set_context(self._cfg, stage="sky")
@@ -4397,8 +4485,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
         gl = QtWidgets.QVBoxLayout(g)
 
         lbl = QtWidgets.QLabel(
-            "Build a 1D spectrum F(λ) by summing rows within the user-selected object region.\n"
-            "Input: sky/obj_sky_sub.fits. Output: spec/spectrum_1d.fits (+ PNG)."
+            "Extract a 1D spectrum F(λ) from the stacked 2D product in (λ, y).\n"
+            "Input: products/stack/stacked2d.fits (fallback: products/sky/*).\n"
+            "Output: products/spec/spec1d.fits (+ trace.json and PNG quicklook)."
         )
         lbl.setWordWrap(True)
         gl.addWidget(lbl)
@@ -4421,26 +4510,104 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.chk_ex1d_enabled,
         )
 
-        self.cmb_ex1d_method = QtWidgets.QComboBox()
-        self.cmb_ex1d_method.addItems(["sum", "mean", "median"])
+        self.combo_ex1d_method = QtWidgets.QComboBox()
+        # Keep legacy options for compatibility, but surface best-practice choices.
+        self.combo_ex1d_method.addItems(["boxcar", "optimal", "mean", "sum"])
         bf.addRow(
             self._param_label(
                 "Method",
-                "Метод агрегации по Y внутри области объекта.\nТипично: sum.",
+                "Метод извлечения 1D-спектра.\n"
+                "boxcar = суммирование в апертуре вокруг trace (Basic).\n"
+                "optimal = Horne-style optimal extraction (Advanced).\n"
+                "Типично: boxcar.",
             ),
-            self.cmb_ex1d_method,
+            self.combo_ex1d_method,
+        )
+
+        self.spin_ex1d_ap_hw = QtWidgets.QSpinBox()
+        self.spin_ex1d_ap_hw.setRange(1, 10_000)
+        self.spin_ex1d_ap_hw.setSingleStep(1)
+        bf.addRow(
+            self._param_label(
+                "Aperture half-width [px]",
+                "Половина ширины апертуры вокруг trace (в пикселях по Y).\n"
+                "Типично: 4–10 px (зависит от seeing и биннинга).",
+            ),
+            self.spin_ex1d_ap_hw,
+        )
+
+        self.dspin_ex1d_trace_bin = QtWidgets.QDoubleSpinBox()
+        self.dspin_ex1d_trace_bin.setRange(5.0, 5_000.0)
+        self.dspin_ex1d_trace_bin.setDecimals(1)
+        self.dspin_ex1d_trace_bin.setSingleStep(5.0)
+        bf.addRow(
+            self._param_label(
+                "Trace bin [Å]",
+                "Ширина бина по λ для оценки центроидов trace y(λ).\n"
+                "Больше → стабильнее в шуме, меньше → точнее локальные изгибы.\n"
+                "Типично: 30–100 Å.",
+            ),
+            self.dspin_ex1d_trace_bin,
         )
 
         self.chk_ex1d_png = QtWidgets.QCheckBox("Save plot PNG")
         bf.addRow(
             self._param_label(
                 "PNG",
-                "Сохранить график spec/spectrum_1d.png.\nТипично: включено.",
+                "Сохранить quicklook график products/spec/spec1d.png.\nТипично: включено.",
             ),
             self.chk_ex1d_png,
         )
 
         pl.addWidget(basic)
+
+        adv_w, adv_l, _ = _collapsible("Advanced", expanded=False)
+        adv = QtWidgets.QWidget()
+        af = QtWidgets.QFormLayout(adv)
+        af.setLabelAlignment(QtCore.Qt.AlignLeft)
+        af.setHorizontalSpacing(12)
+
+        self.spin_ex1d_trace_deg = QtWidgets.QSpinBox()
+        self.spin_ex1d_trace_deg.setRange(0, 8)
+        self.spin_ex1d_trace_deg.setSingleStep(1)
+        af.addRow(
+            self._param_label(
+                "Trace smooth deg",
+                "Степень полинома для сглаживания trace y(λ).\n"
+                "0 = константа, 1 = линейно, 2–4 обычно достаточно.\n"
+                "Типично: 3.",
+            ),
+            self.spin_ex1d_trace_deg,
+        )
+
+        self.spin_ex1d_prof_hw = QtWidgets.QSpinBox()
+        self.spin_ex1d_prof_hw.setRange(2, 10_000)
+        self.spin_ex1d_prof_hw.setSingleStep(1)
+        af.addRow(
+            self._param_label(
+                "Optimal profile half-width [px]",
+                "Для optimal extraction: половина окна по Y для построения профиля.\n"
+                "Типично: 10–20 px.",
+            ),
+            self.spin_ex1d_prof_hw,
+        )
+
+        self.dspin_ex1d_opt_clip = QtWidgets.QDoubleSpinBox()
+        self.dspin_ex1d_opt_clip.setRange(1.0, 20.0)
+        self.dspin_ex1d_opt_clip.setDecimals(1)
+        self.dspin_ex1d_opt_clip.setSingleStep(0.5)
+        af.addRow(
+            self._param_label(
+                "Optimal sigma clip",
+                "Sigma-clip при построении профиля (optimal).\n"
+                "Типично: 4–6.",
+            ),
+            self.dspin_ex1d_opt_clip,
+        )
+
+        adv_l.addWidget(adv)
+        pl.addWidget(adv_w)
+
         pl.addWidget(self._mk_stage_apply_row("extract1d"))
         gl.addWidget(gpar)
 
@@ -4459,7 +4626,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         splitter.addWidget(left)
 
         self.outputs_extract1d = OutputsPanel()
-        self.outputs_extract1d.set_context(self._cfg, stage="extract1d")
+        # Products for 1D extraction are registered under stage name "spec".
+        self.outputs_extract1d.set_context(self._cfg, stage="spec")
         splitter.addWidget(self.outputs_extract1d)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
@@ -4477,8 +4645,23 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "extract1d", "extract1d.enabled", bool(self.chk_ex1d_enabled.isChecked())
             )
         )
-        self.cmb_ex1d_method.currentTextChanged.connect(
+        self.combo_ex1d_method.currentTextChanged.connect(
             lambda t: self._stage_set_pending("extract1d", "extract1d.method", str(t))
+        )
+        self.spin_ex1d_ap_hw.valueChanged.connect(
+            lambda v: self._stage_set_pending("extract1d", "extract1d.aperture_half_width", int(v))
+        )
+        self.dspin_ex1d_trace_bin.valueChanged.connect(
+            lambda v: self._stage_set_pending("extract1d", "extract1d.trace_bin_A", float(v))
+        )
+        self.spin_ex1d_trace_deg.valueChanged.connect(
+            lambda v: self._stage_set_pending("extract1d", "extract1d.trace_smooth_deg", int(v))
+        )
+        self.spin_ex1d_prof_hw.valueChanged.connect(
+            lambda v: self._stage_set_pending("extract1d", "extract1d.optimal_profile_half_width", int(v))
+        )
+        self.dspin_ex1d_opt_clip.valueChanged.connect(
+            lambda v: self._stage_set_pending("extract1d", "extract1d.optimal_sigma_clip", float(v))
         )
         self.chk_ex1d_png.stateChanged.connect(
             lambda _: self._stage_set_pending(
@@ -4506,7 +4689,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._log_info("Extract 1D done")
             try:
                 if hasattr(self, "outputs_extract1d"):
-                    self.outputs_extract1d.set_context(self._cfg, stage="extract1d")
+                    self.outputs_extract1d.set_context(self._cfg, stage="spec")
             except Exception:
                 pass
             self._set_step_status(10, "ok")

@@ -44,9 +44,13 @@ def list_products(cfg: dict[str, Any]) -> list[Product]:
     rep = wd / "report"
     calib = wd / "calib"
     cosm = wd / "cosmics"
-    lin = wd / "lin"
-    sky = wd / "sky"
-    spec = wd / "spec"
+
+    # Canonical v5.13+ product tree
+    prod = wd / "products"
+    lin = prod / "lin"
+    sky = prod / "sky"
+    stack = prod / "stack"
+    spec = prod / "spec"
 
     out: list[Product] = [
         # report
@@ -82,21 +86,29 @@ def list_products(cfg: dict[str, Any]) -> list[Product]:
         Product("wavelength_matrix", "wavesol", wsol / "wavelength_matrix.png", "png", optional=True),
         Product("residuals_2d_png", "wavesol", wsol / "residuals_2d.png", "png", optional=True),
 
-        # v5+ linearize
+        # v5.13+ linearize / rectification (λ,y)
         Product("linearize_done", "lin", lin / "linearize_done.json", "json", optional=True),
-        Product("lin_sum_fits", "lin", lin / "obj_sum_lin.fits", "fits", optional=False, description="Linearized stacked 2D spectrum"),
-        Product("lin_sum_png", "lin", lin / "obj_sum_lin.png", "png", optional=True),
+        Product("lin_preview_fits", "lin", lin / "lin_preview.fits", "fits", optional=False, description="Rectified preview stack for ROI/QC"),
+        Product("lin_preview_png", "lin", lin / "lin_preview.png", "png", optional=True),
+        Product("lin_per_exp_dir", "lin", lin / "per_exp", "dir", optional=False, description="Per-exposure rectified frames (SCI/VAR/MASK)"),
 
-        # v5+ sky subtraction
+        # v5.13+ sky subtraction (Kelson-style) per exposure
         Product("sky_done", "sky", sky / "sky_sub_done.json", "json", optional=True),
-        Product("sky_model_fits", "sky", sky / "sky_model.fits", "fits", optional=True, description="Kelson-like sky model in (y,λ)"),
-        Product("sky_sub_fits", "sky", sky / "obj_sky_sub.fits", "fits", optional=False, description="Sky-subtracted linearized 2D spectrum"),
-        Product("sky_diag_png", "sky", sky / "sky_diagnostics.png", "png", optional=True),
+        Product("sky_per_exp_dir", "sky", sky / "per_exp", "dir", optional=False, description="Per-exposure sky-subtracted frames"),
+        # Optional combined products (if running sky in single-frame mode)
+        Product("sky_sub_fits", "sky", sky / "obj_sky_sub.fits", "fits", optional=True, description="Sky-subtracted combined 2D (legacy/quick)"),
+        Product("sky_model_fits", "sky", sky / "sky_model.fits", "fits", optional=True, description="Sky model (legacy/quick)"),
 
-        # v5+ extraction
+        # v5.13+ stacking in (λ,y)
+        Product("stack2d_done", "stack", stack / "stack2d_done.json", "json", optional=True),
+        Product("stacked2d_fits", "stack", stack / "stacked2d.fits", "fits", optional=False, description="Final stacked 2D (SCI/VAR/MASK/COV)"),
+        Product("coverage_png", "stack", stack / "coverage.png", "png", optional=True),
+
+        # v5.13+ extraction
         Product("extract1d_done", "spec", spec / "extract1d_done.json", "json", optional=True),
-        Product("spectrum_1d", "spec", spec / "spectrum_1d.fits", "fits", optional=False, description="1D spectrum (flux vs λ)"),
-        Product("spectrum_1d_png", "spec", spec / "spectrum_1d.png", "png", optional=True),
+        Product("spec1d_fits", "spec", spec / "spec1d.fits", "fits", optional=False, description="1D spectrum (FLUX/VAR/MASK)"),
+        Product("spec1d_png", "spec", spec / "spec1d.png", "png", optional=True),
+        Product("trace_json", "spec", spec / "trace.json", "json", optional=True),
     ]
 
     return out
@@ -124,9 +136,10 @@ TASK_PRODUCT_KEYS: dict[str, list[str]] = {
     "superneon": ["superneon_fits", "peaks_candidates"],
     "lineid_prepare": ["hand_pairs"],
     "wavesolution": ["wavesol_2d_json", "lambda_map", "wavesol_1d_json", "wavesol_1d_png", "residuals_1d"],
-    "linearize": ["linearize_done", "lin_sum_fits"],
-    "sky": ["sky_done", "sky_sub_fits"],
-    "extract1d": ["extract1d_done", "spectrum_1d"],
+    "linearize": ["linearize_done", "lin_preview_fits", "lin_per_exp_dir"],
+    "sky": ["sky_done", "sky_per_exp_dir"],
+    "stack2d": ["stack2d_done", "stacked2d_fits"],
+    "extract1d": ["extract1d_done", "spec1d_fits"],
 }
 
 

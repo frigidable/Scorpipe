@@ -198,7 +198,7 @@ def run_stack2d(cfg: dict[str, Any], *, inputs: Iterable[Path], out_dir: Path | 
 
     out_fits = out_dir / "stacked2d.fits"
     hdr = hdr0.copy()
-    hdr["HISTORY"] = "Scorpio Pipe v5.12: stack2d"
+    hdr["HISTORY"] = "Scorpio Pipe v5.13: stack2d"
     _write_mef(out_fits, out_sci, hdr, var=out_var, mask=out_mask, cov=out_cov)
 
     # quick QC plot: coverage histogram

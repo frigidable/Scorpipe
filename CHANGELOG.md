@@ -1,5 +1,27 @@
 # Changelog
 
+## v5.13.0
+
+Цель релиза: **стабильный GUI + согласование UI ↔ научные стадии (v5.x P0)** без ломания совместимости.
+
+### Critical / GUI
+- Исправлен крэш при старте GUI: добавлен недостающий helper `_small_note()` в `LauncherWindow` (ошибка `AttributeError: ... _small_note`).
+- `ui/__init__.py`: теперь **не валится в headless/CI** без PySide6 (lazy/try-import). Это позволяет запускать smoke-check и импортировать пайплайн как библиотеку.
+
+### Sky subtraction (Kelson, per exposure) — GUI wiring
+- Убраны дублирующиеся чекбоксы на странице Sky (они приводили к «двойным» виджетам и потере сигналов).
+- Исправлена привязка параметра `maxiter` (раньше писалось в несуществующий ключ конфигурации).
+- Кнопка **Run: Sky subtraction** теперь, при включённом `Stack after sky`, автоматически запускает `stack2d` (как ты просил: `sky_sub + stack2d`).
+
+### Extract 1D — GUI ↔ stage alignment
+- Переработана страница **Extract 1D** под реальную стадию `extract1d`:
+  - режимы `boxcar` (Basic) и `optimal` (Advanced) + сохранены legacy `sum/mean` ради обратной совместимости;
+  - добавлены основные параметры апертуры и trace;
+  - исправлено отображение outputs: продукты Extraction теперь показываются как `products/spec/...`.
+
+### Outputs / Products
+- OutputsPanel на страницах Linearize/Extract теперь смотрит на правильные группы продуктов (`lin` и `spec`), чтобы UI реально показывал наличие FITS/PNG/JSON.
+
 ## v5.12.0 (intermediate)
 
 Фиксируем прогресс, чтобы его не потерять, и закрываем критические «бомбы», из-за которых GUI мог не запускаться.
