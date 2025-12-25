@@ -1,3 +1,11 @@
+## v5.25.0
+
+### Hotfixes: runner stability + FITS viewer + window behavior
+- **Cosmics**: fixed crash `NameError: _load_cfg_any is not defined` (stage now normalizes config input like other stages).
+- **LineID GUI**: fixed crash `NameError: resolve_work_dir is not defined` and corrected wavesolution directory resolution.
+- **FITS preview**: fixed a common SCORPIO case where scaled images (BZERO/BSCALE/BLANK) failed with memmap=True but were incorrectly reported as “No image HDU…”; viewer now retries reliably with `memmap=False`.
+- **Windows**: main window and major dialogs now open **maximized** by default.
+
 ## v5.24.0
 
 ### GUI: Basic/Advanced tabs + scrolling for all stages

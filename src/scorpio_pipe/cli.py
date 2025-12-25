@@ -26,7 +26,7 @@ def _comma_list(raw: str | None) -> list[str]:
 
 
 def cmd_version(_args: argparse.Namespace) -> int:
-    print(f"[bold]scorpio-pipe[/bold] pipeline v{PIPELINE_VERSION} (package {__version__})")
+    print(f"[bold]scorpio-pipe[/bold] pipeline {PIPELINE_VERSION} (package {__version__})")
     return 0
 
 
@@ -204,7 +204,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
 def cmd_doctor(args: argparse.Namespace) -> int:
     from scorpio_pipe.doctor import run_doctor
 
-    print(f"[bold]scorpio-pipe[/bold] pipeline v{PIPELINE_VERSION} (package {__version__})")
+    print(f"[bold]scorpio-pipe[/bold] pipeline {PIPELINE_VERSION} (package {__version__})")
     rep = run_doctor(config_path=getattr(args, "config", None), fix=bool(getattr(args, "fix", False)))
 
     gui = rep.get("gui", {})

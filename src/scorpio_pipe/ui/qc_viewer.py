@@ -117,6 +117,11 @@ class QCViewer(QtWidgets.QMainWindow):
         super().__init__(parent)
         self.setWindowTitle("Scorpio Pipe — QC Viewer")
         self.resize(1200, 720)
+        # User preference: open windows maximized by default.
+        try:
+            self.setWindowState(self.windowState() | QtCore.Qt.WindowMaximized)
+        except Exception:
+            pass
 
         self._work_dir = Path(work_dir)
 

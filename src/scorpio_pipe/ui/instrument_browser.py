@@ -12,6 +12,11 @@ class InstrumentBrowserDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("Instrument database")
         self.resize(980, 670)
+        # User preference: open windows maximized by default.
+        try:
+            self.setWindowState(self.windowState() | QtCore.Qt.WindowMaximized)
+        except Exception:
+            pass
 
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(12, 12, 12, 12)

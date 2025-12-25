@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import difflib
 
-from PySide6 import QtGui, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 
 class ConfigDiffDialog(QtWidgets.QDialog):
@@ -10,6 +10,11 @@ class ConfigDiffDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.resize(980, 640)
+        # User preference: open windows maximized by default.
+        try:
+            self.setWindowState(self.windowState() | QtCore.Qt.WindowMaximized)
+        except Exception:
+            pass
 
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(10, 10, 10, 10)

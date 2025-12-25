@@ -89,6 +89,11 @@ class LambdaWindowsDialog(QDialog):
     ):
         super().__init__(parent)
         self.setWindowTitle("Select λ windows (cross-correlation)")
+        # User preference: open windows maximized by default.
+        try:
+            self.setWindowState(self.windowState() | Qt.WindowMaximized)
+        except Exception:
+            pass
         self._fits_path = Path(fits_path)
         self._roi = roi or {}
         self.windows = LambdaWindows(unit="auto")

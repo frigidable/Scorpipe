@@ -8,6 +8,11 @@ class TextViewerDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.resize(900, 650)
+        # User preference: open windows maximized by default.
+        try:
+            self.setWindowState(self.windowState() | QtCore.Qt.WindowMaximized)
+        except Exception:
+            pass
 
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(12, 12, 12, 12)

@@ -59,6 +59,11 @@ class SkyRoiDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Select regions: object (green) and sky (red)")
         self.setModal(True)
+        # User preference: open windows maximized by default.
+        try:
+            self.setWindowState(self.windowState() | Qt.WindowMaximized)
+        except Exception:
+            pass
 
         self.fits_path = Path(fits_path)
         if not self.fits_path.exists():

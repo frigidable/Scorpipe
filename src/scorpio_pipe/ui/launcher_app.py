@@ -25,7 +25,11 @@ def main() -> None:
     apply_theme(app, mode=str(theme_mode))
 
     w = LauncherWindow()
-    w.show()
+    # User preference: open maximized by default.
+    try:
+        w.showMaximized()
+    except Exception:
+        w.show()
     raise SystemExit(app.exec())
 
 

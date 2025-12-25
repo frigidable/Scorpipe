@@ -82,6 +82,11 @@ class StageFramesWindow(QtWidgets.QMainWindow):
         self.stage_key = stage_key
         self.setWindowTitle(f"Frames — {stage_key}")
         self.resize(1100, 720)
+        # User preference: always open windows maximized by default.
+        try:
+            self.setWindowState(self.windowState() | QtCore.Qt.WindowMaximized)
+        except Exception:
+            pass
 
         self._cfg: dict | None = None
         self._inspect_df = None
@@ -118,9 +123,18 @@ class StageFramesWindow(QtWidgets.QMainWindow):
         self._last_work_dir = work_dir
 
         if self.stage_key == "calib":
-            self._add_files_tab("Superbias", [work_dir / "calib" / "superbias.fits"])
-            self._add_files_tab("Superflat", [work_dir / "calib" / "superflat.fits"])
-            self._add_scan_tab("All calib", work_dir / "calib")
+            # Prefer new layout (calibs/), keep legacy (calib/) fallback.
+            sb_new = work_dir / "calibs" / "superbias.fits"
+            sb_old = work_dir / "calib" / "superbias.fits"
+            sf_new = work_dir / "calibs" / "superflat.fits"
+            sf_old = work_dir / "calib" / "superflat.fits"
+            self._add_files_tab("Superbias", [sb_new if sb_new.exists() else sb_old])
+            self._add_files_tab("Superflat", [sf_new if sf_new.exists() else sf_old])
+
+            calib_dir = work_dir / "calibs"
+            if not calib_dir.exists():
+                calib_dir = work_dir / "calib"
+            self._add_scan_tab("All calib", calib_dir)
         elif self.stage_key == "cosmics":
             self._add_cosmics_tabs(work_dir)
         elif self.stage_key == "flatfield":

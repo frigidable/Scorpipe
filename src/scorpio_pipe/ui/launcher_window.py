@@ -26,7 +26,7 @@ from scorpio_pipe.ui.frame_browser import FrameBrowser, SelectedFrame
 from scorpio_pipe.ui.outputs_panel import OutputsPanel
 from scorpio_pipe.ui.run_plan_dialog import RunPlanDialog
 from scorpio_pipe.ui.config_diff import ConfigDiffDialog
-from scorpio_pipe.wavesol_paths import slugify_disperser, wavesol_dir
+from scorpio_pipe.wavesol_paths import slugify_disperser, wavesol_dir, resolve_work_dir
 from scorpio_pipe.pairs_library import (
     list_pair_sets,
     find_builtin_pairs_for_disperser,
@@ -200,7 +200,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         super().__init__()
         try:
             from scorpio_pipe.version import PIPELINE_VERSION
-            self.setWindowTitle(f"Scorpio Pipe v{PIPELINE_VERSION}")
+            self.setWindowTitle(f"Scorpio Pipe {PIPELINE_VERSION}")
         except Exception:
             self.setWindowTitle("Scorpio Pipe")
         self.resize(1240, 780)
@@ -325,7 +325,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             import logging as _logging
             from scorpio_pipe.version import PIPELINE_VERSION
 
-            _logging.getLogger("scorpio_pipe").info("Scorpio Pipe v%s", PIPELINE_VERSION)
+            _logging.getLogger("scorpio_pipe").info("Scorpio Pipe %s", PIPELINE_VERSION)
         except Exception:
             pass
 
@@ -897,7 +897,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
             else:
                 win.set_context(getattr(self, '_cfg', None))
 
-            win.show()
+            try:
+                win.showMaximized()
+            except Exception:
+                win.show()
             win.raise_()
             win.activateWindow()
         except Exception as e:
@@ -3485,14 +3488,16 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
     def _current_pairs_path(self):
         """Resolve current hand pairs path from config (may be empty)."""
-        from pathlib import Path
-        cfg = self._cfg or {}
+        cfg = dict(self._cfg or {})
+        if self._cfg_path:
+            # ensure relative work_dir is resolved against config folder
+            cfg.setdefault("config_dir", str(self._cfg_path.parent))
         hp = str(self._get_cfg_value("wavesol.hand_pairs_path", "") or "").strip()
         if hp:
             p = Path(hp).expanduser()
             if not p.is_absolute() and self._cfg_path:
                 # hand_pairs_path is relative to work_dir or config_dir; prefer work_dir
-                wd = resolve_work_dir(cfg, self._cfg_path)
+                wd = resolve_work_dir(cfg)
                 cand = (wd / p)
                 if cand.exists():
                     return cand
@@ -3501,11 +3506,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         if not self._cfg_path:
             return None
-        wd = resolve_work_dir(cfg, self._cfg_path)
+        wd = resolve_work_dir(cfg)
         # default location (disperser-specific)
         try:
-            from scorpio_pipe.wavesol_paths import wavesol_dir
-            return wavesol_dir(wd, cfg.get("setup", {}).get("disperser", "")) / "hand_pairs.txt"
+            return wavesol_dir(cfg) / "hand_pairs.txt"
         except Exception:
             return wd / "wavesol" / "hand_pairs.txt"
 
@@ -3534,7 +3538,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
             return
         try:
             from pathlib import Path
-            wd = resolve_work_dir(cfg, self._cfg_path)
+            cfg2 = dict(cfg)
+            cfg2.setdefault("config_dir", str(self._cfg_path.parent))
+            wd = resolve_work_dir(cfg2)
             disperser = str(cfg.get("setup", {}).get("disperser", "") or "")
             src = Path(ps["path"]).expanduser()
             dst = copy_pair_set_to_workdir(disperser, wd, src)
@@ -3578,7 +3584,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
         new_name = str(new_name).strip()
         try:
             from pathlib import Path
-            wd = resolve_work_dir(cfg, self._cfg_path)
+            cfg2 = dict(cfg)
+            cfg2.setdefault("config_dir", str(self._cfg_path.parent))
+            wd = resolve_work_dir(cfg2)
             disperser = str(cfg.get("setup", {}).get("disperser", "") or "")
             src = Path(ps["path"]).expanduser()
             dst = copy_pair_set_to_workdir(disperser, wd, src, filename=new_name)

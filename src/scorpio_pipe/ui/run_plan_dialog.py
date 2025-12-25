@@ -30,6 +30,11 @@ class RunPlanDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("Scorpio Pipe — Run plan")
         self.resize(980, 560)
+        # User preference: open windows maximized by default.
+        try:
+            self.setWindowState(self.windowState() | QtCore.Qt.WindowMaximized)
+        except Exception:
+            pass
         self._cfg = cfg
 
         lay = QtWidgets.QVBoxLayout(self)

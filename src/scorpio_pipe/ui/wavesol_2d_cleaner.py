@@ -43,6 +43,11 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
         self.setWindowTitle("2D Wavesolution — reject bad lines")
         self.setModal(True)
         self.resize(1100, 720)
+        # User preference: open windows maximized by default.
+        try:
+            self.setWindowState(self.windowState() | QtCore.Qt.WindowMaximized)
+        except Exception:
+            pass
 
         self._cfg = cfg or Wave2DCleanConfig()
         self._rejected0 = sorted(set(float(x) for x in (rejected_lines_A or [])))

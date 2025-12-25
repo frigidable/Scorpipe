@@ -43,12 +43,23 @@ def _choose_image_hdu(hdul: fits.HDUList) -> tuple[int, np.ndarray]:
     """Pick the first HDU that looks like an image."""
     for i, hdu in enumerate(hdul):
         try:
-            if getattr(hdu, "data", None) is None:
+            data = getattr(hdu, "data", None)
+            if data is None:
                 continue
-            a = np.asarray(hdu.data)
+            a = np.asarray(data)
             if a.ndim >= 2:
-                return i, hdu.data
-        except Exception:
+                return i, data
+        except Exception as e:
+            # IMPORTANT: do not swallow Astropy's "Cannot load a memory-mapped image"
+            # errors here, otherwise the caller cannot retry with memmap=False.
+            msg = str(e)
+            if (
+                "memory-mapped" in msg
+                or "BZERO" in msg
+                or "BSCALE" in msg
+                or "BLANK" in msg
+            ):
+                raise
             continue
     raise ValueError("No image HDU with data found")
 
@@ -425,7 +436,7 @@ class FitsPreviewWidget(QtWidgets.QWidget):
         """
 
         def _open(memmap: bool) -> tuple[int, np.ndarray]:
-            with fits.open(path, memmap=memmap, ignore_missing_end=True) as hdul:
+            with fits.open(path, memmap=memmap, ignore_missing_end=True, ignore_missing_simple=True) as hdul:
                 idx, data = _choose_image_hdu(hdul)
                 return idx, data
 
@@ -436,7 +447,21 @@ class FitsPreviewWidget(QtWidgets.QWidget):
             if "memory-mapped" in msg or "BZERO" in msg or "BSCALE" in msg or "BLANK" in msg:
                 idx, data = _open(memmap=False)
             else:
-                raise
+                # As a last resort, try astropy.io.fits.getdata on each extension.
+                # Some non-standard FITS variants can confuse HDU.data discovery.
+                for ext in range(0, 16):
+                    try:
+                        d = fits.getdata(path, ext=ext, memmap=False)
+                        if d is None:
+                            continue
+                        a = np.asarray(d)
+                        if a.ndim >= 2:
+                            idx, data = ext, d
+                            break
+                    except Exception:
+                        continue
+                else:
+                    raise
 
         self._hdu_index = idx
         return data

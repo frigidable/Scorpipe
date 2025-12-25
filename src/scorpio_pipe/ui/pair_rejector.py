@@ -56,6 +56,11 @@ class PairRejectorDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("Clean LineID pairs")
         self.resize(1100, 720)
+        # User preference: open windows maximized by default.
+        try:
+            self.setWindowState(self.windowState() | QtCore.Qt.WindowMaximized)
+        except Exception:
+            pass
 
         self.pairs_path = Path(pairs_path)
         self.poly_deg = int(poly_deg)

@@ -24,6 +24,13 @@ def _as_path(x: Any) -> Path:
     return x if isinstance(x, Path) else Path(str(x))
 
 
+def _load_cfg_any(cfg: Any) -> dict[str, Any]:
+    """Normalize config input (path/dict/RunContext) into a config dict."""
+    from scorpio_pipe.config import load_config_any
+
+    return load_config_any(cfg)
+
+
 def _resolve_path(p: Path, *, data_dir: Path, work_dir: Path, base_dir: Path) -> Path:
     """Resolve a possibly-relative path.
 
@@ -43,13 +50,16 @@ def _resolve_path(p: Path, *, data_dir: Path, work_dir: Path, base_dir: Path) ->
 
 
 def _load_superbias(work_dir: Path) -> np.ndarray | None:
-    p = work_dir / "calib" / "superbias.fits"
-    if not p.is_file():
-        return None
-    try:
-        return fits.getdata(p).astype(np.float32)
-    except Exception:
-        return None
+    # New layout (v5+): work_dir/calibs/*.fits, but keep legacy fallback too.
+    for rel in (Path("calibs") / "superbias.fits", Path("calib") / "superbias.fits"):
+        p = (work_dir / rel)
+        if not p.is_file():
+            continue
+        try:
+            return fits.getdata(p, memmap=False).astype(np.float32)
+        except Exception:
+            continue
+    return None
 
 
 def _robust_mad(x: np.ndarray, axis: int = 0) -> np.ndarray:
