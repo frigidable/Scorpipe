@@ -90,12 +90,27 @@ TaskFn = Callable[..., Any]
 
 
 def _call_maybe_with_cancel(fn: TaskFn, *, cancel_token: CancelToken | None = None, **kwargs: Any) -> Any:
+    """Call a task function, passing only supported keyword arguments.
+
+    The GUI runner tends to call tasks with a superset of kwargs
+    (e.g. ``config_path``), but not every task needs/accepts them.
+    Filtering prevents hard failures like:
+    ``TypeError: ... got an unexpected keyword argument 'config_path'``.
+    """
     try:
         sig = inspect.signature(fn)
-        if cancel_token is not None and "cancel_token" in sig.parameters:
+        params = sig.parameters
+
+        # Cooperative cancellation is optional per-task.
+        if cancel_token is not None and "cancel_token" in params:
             kwargs["cancel_token"] = cancel_token
+
+        # If the function does NOT accept **kwargs, filter extras.
+        accepts_varkw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+        if not accepts_varkw:
+            kwargs = {k: v for k, v in kwargs.items() if k in params}
     except Exception:
-        # ultra-defensive; never block execution due to introspection issues
+        # Ultra-defensive; never block execution due to introspection issues.
         pass
     return fn(**kwargs)
 

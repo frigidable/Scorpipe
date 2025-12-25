@@ -477,6 +477,21 @@ class LauncherWindow(QtWidgets.QMainWindow):
         tabs.addTab(_wrap_scroll(advanced), "Advanced")
         return tabs
 
+    def _mk_scroll_panel(self, inner: QtWidgets.QWidget) -> QtWidgets.QScrollArea:
+        """Wrap an arbitrary panel in a vertical scroll area.
+
+        We already scroll *inside* Basic/Advanced tabs, but many stages have
+        extra controls (buttons, notes, ROI widgets). Wrapping the whole left
+        column makes the UI robust on small screens and matches DS9-like
+        "always reachable" controls philosophy.
+        """
+        sa = QtWidgets.QScrollArea()
+        sa.setWidgetResizable(True)
+        sa.setFrameShape(QtWidgets.QFrame.NoFrame)
+        sa.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        sa.setWidget(inner)
+        return sa
+
     def _mk_stage_apply_row(self, stage: str) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
         h = QtWidgets.QHBoxLayout(w)
@@ -1758,18 +1773,65 @@ class LauncherWindow(QtWidgets.QMainWindow):
         if not isinstance(cfg, dict):
             return
 
+        # NOTE: On Windows (and especially after rebuilding UI pages or switching
+        # datasets) Qt widgets referenced as ``self.xxx`` may become stale.
+        # Accessing them raises: "Internal C++ object ... already deleted".
+        # This sync path must therefore be ultra-defensive.
+
+        def _safe_block_call(w: Any, fn) -> None:
+            """Run ``fn(widget)`` with signals blocked; ignore deleted widgets."""
+            if w is None:
+                return
+            try:
+                blocker = QtCore.QSignalBlocker(w)
+            except RuntimeError:
+                return
+            try:
+                fn(w)
+            except RuntimeError:
+                # Widget may get deleted between checks.
+                return
+            finally:
+                try:
+                    del blocker
+                except Exception:
+                    pass
+
+        def _set_checked(w: Any, v: Any) -> None:
+            _safe_block_call(w, lambda ww: ww.setChecked(bool(v)))
+
+        def _set_value(w: Any, v: Any) -> None:
+            _safe_block_call(w, lambda ww: ww.setValue(v))
+
+        def _set_text(w: Any, s: str) -> None:
+            _safe_block_call(w, lambda ww: ww.setText(s))
+
+        def _set_combo_text(w: Any, text: str) -> None:
+            def _fn(ww):
+                idx = ww.findText(text)
+                ww.setCurrentIndex(max(0, idx))
+
+            _safe_block_call(w, _fn)
+
+        def _set_label(w: Any, s: str) -> None:
+            try:
+                if w is not None:
+                    w.setText(s)
+            except RuntimeError:
+                return
+
         # --- Calibrations ---
         if hasattr(self, 'combo_bias_combine') and not self._stage_dirty.get('calib', False):
             calib = cfg.get('calib', {}) if isinstance(cfg.get('calib'), dict) else {}
             combine = str(calib.get('bias_combine', 'median') or 'median').lower()
             if combine not in ('median', 'mean'):
                 combine = 'median'
-            with QtCore.QSignalBlocker(self.combo_bias_combine):
-                idx = self.combo_bias_combine.findText(combine)
-                self.combo_bias_combine.setCurrentIndex(max(0, idx))
+            _set_combo_text(getattr(self, 'combo_bias_combine', None), combine)
             if hasattr(self, 'spin_bias_sigma_clip'):
-                with QtCore.QSignalBlocker(self.spin_bias_sigma_clip):
-                    self.spin_bias_sigma_clip.setValue(_safe_float(calib.get('bias_sigma_clip', 0.0), 0.0))
+                _set_value(
+                    getattr(self, 'spin_bias_sigma_clip', None),
+                    _safe_float(calib.get('bias_sigma_clip', 0.0), 0.0),
+                )
 
         # --- Cosmics ---
         if hasattr(self, 'chk_cosmics_obj') and not self._stage_dirty.get('cosmics', False):
@@ -1780,32 +1842,22 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 ('sunsky', getattr(self, 'chk_cosmics_sunsky', None)),
                 ('neon', getattr(self, 'chk_cosmics_neon', None)),
             ]:
-                if cb is None:
-                    continue
-                with QtCore.QSignalBlocker(cb):
-                    cb.setChecked(name in apply_to)
+                _set_checked(cb, name in apply_to)
             if hasattr(self, 'chk_cosmics_enabled'):
-                with QtCore.QSignalBlocker(self.chk_cosmics_enabled):
-                    self.chk_cosmics_enabled.setChecked(bool(self._cfg_get(cfg, ['cosmics', 'enabled'], True)))
+                _set_checked(getattr(self, 'chk_cosmics_enabled', None), bool(self._cfg_get(cfg, ['cosmics', 'enabled'], True)))
             if hasattr(self, 'combo_cosmics_method'):
-                with QtCore.QSignalBlocker(self.combo_cosmics_method):
-                    m = str(self._cfg_get(cfg, ['cosmics', 'method'], 'stack_mad') or 'stack_mad')
-                    idx = self.combo_cosmics_method.findText(m)
-                    self.combo_cosmics_method.setCurrentIndex(max(0, idx))
+                m = str(self._cfg_get(cfg, ['cosmics', 'method'], 'stack_mad') or 'stack_mad')
+                _set_combo_text(getattr(self, 'combo_cosmics_method', None), m)
             if hasattr(self, 'spin_cosmics_k'):
-                with QtCore.QSignalBlocker(self.spin_cosmics_k):
-                    self.spin_cosmics_k.setValue(_safe_float(self._cfg_get(cfg, ['cosmics', 'k'], 9.0), 9.0))
+                _set_value(getattr(self, 'spin_cosmics_k', None), _safe_float(self._cfg_get(cfg, ['cosmics', 'k'], 9.0), 9.0))
             if hasattr(self, 'chk_cosmics_bias'):
-                with QtCore.QSignalBlocker(self.chk_cosmics_bias):
-                    self.chk_cosmics_bias.setChecked(bool(self._cfg_get(cfg, ['cosmics', 'bias_subtract'], True)))
+                _set_checked(getattr(self, 'chk_cosmics_bias', None), bool(self._cfg_get(cfg, ['cosmics', 'bias_subtract'], True)))
             if hasattr(self, 'chk_cosmics_png'):
-                with QtCore.QSignalBlocker(self.chk_cosmics_png):
-                    self.chk_cosmics_png.setChecked(bool(self._cfg_get(cfg, ['cosmics', 'save_png'], True)))
+                _set_checked(getattr(self, 'chk_cosmics_png', None), bool(self._cfg_get(cfg, ['cosmics', 'save_png'], True)))
 
         # --- Flatfield ---
         if hasattr(self, 'chk_flat_enabled') and not self._stage_dirty.get('flatfield', False):
-            with QtCore.QSignalBlocker(self.chk_flat_enabled):
-                self.chk_flat_enabled.setChecked(bool(self._cfg_get(cfg, ['flatfield', 'enabled'], False)))
+            _set_checked(getattr(self, 'chk_flat_enabled', None), bool(self._cfg_get(cfg, ['flatfield', 'enabled'], False)))
             apply_to = set(self._cfg_get(cfg, ['flatfield', 'apply_to'], []) or [])
             for name, cb in [
                 ('obj', getattr(self, 'chk_flat_obj', None)),
@@ -1813,47 +1865,33 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 ('sunsky', getattr(self, 'chk_flat_sunsky', None)),
                 ('neon', getattr(self, 'chk_flat_neon', None)),
             ]:
-                if cb is None:
-                    continue
-                with QtCore.QSignalBlocker(cb):
-                    cb.setChecked(name in apply_to)
+                _set_checked(cb, name in apply_to)
             if hasattr(self, 'chk_flat_bias'):
-                with QtCore.QSignalBlocker(self.chk_flat_bias):
-                    self.chk_flat_bias.setChecked(bool(self._cfg_get(cfg, ['flatfield', 'bias_subtract'], True)))
+                _set_checked(getattr(self, 'chk_flat_bias', None), bool(self._cfg_get(cfg, ['flatfield', 'bias_subtract'], True)))
             if hasattr(self, 'chk_flat_png'):
-                with QtCore.QSignalBlocker(self.chk_flat_png):
-                    self.chk_flat_png.setChecked(bool(self._cfg_get(cfg, ['flatfield', 'save_png'], True)))
+                _set_checked(getattr(self, 'chk_flat_png', None), bool(self._cfg_get(cfg, ['flatfield', 'save_png'], True)))
 
         # --- SuperNeon ---
         if hasattr(self, 'spin_sn_y_half') and not self._stage_dirty.get('superneon', False):
-            with QtCore.QSignalBlocker(self.spin_sn_y_half):
-                self.spin_sn_y_half.setValue(_safe_int(self._cfg_get(cfg, ['wavesol', 'y_half'], 20), 20))
+            _set_value(getattr(self, 'spin_sn_y_half', None), _safe_int(self._cfg_get(cfg, ['wavesol', 'y_half'], 20), 20))
             if hasattr(self, 'spin_sn_xshift'):
-                with QtCore.QSignalBlocker(self.spin_sn_xshift):
-                    self.spin_sn_xshift.setValue(_safe_int(self._cfg_get(cfg, ['wavesol', 'xshift_max_abs'], 2), 2))
+                _set_value(getattr(self, 'spin_sn_xshift', None), _safe_int(self._cfg_get(cfg, ['wavesol', 'xshift_max_abs'], 2), 2))
             if hasattr(self, 'chk_sn_bias_sub'):
-                with QtCore.QSignalBlocker(self.chk_sn_bias_sub):
-                    self.chk_sn_bias_sub.setChecked(bool(self._cfg_get(cfg, ['superneon', 'bias_sub'], True)))
+                _set_checked(getattr(self, 'chk_sn_bias_sub', None), bool(self._cfg_get(cfg, ['superneon', 'bias_sub'], True)))
             # noise
             noise = self._cfg_get(cfg, ['wavesol', 'noise'], {}) or {}
             if hasattr(self, 'spin_sn_bl_bin'):
-                with QtCore.QSignalBlocker(self.spin_sn_bl_bin):
-                    self.spin_sn_bl_bin.setValue(_safe_int(noise.get('baseline_bin_size', 32), 32))
+                _set_value(getattr(self, 'spin_sn_bl_bin', None), _safe_int(noise.get('baseline_bin_size', 32), 32))
             if hasattr(self, 'dspin_sn_bl_q'):
-                with QtCore.QSignalBlocker(self.dspin_sn_bl_q):
-                    self.dspin_sn_bl_q.setValue(_safe_float(noise.get('baseline_quantile', 0.2), 0.2))
+                _set_value(getattr(self, 'dspin_sn_bl_q', None), _safe_float(noise.get('baseline_quantile', 0.2), 0.2))
             if hasattr(self, 'spin_sn_bl_smooth'):
-                with QtCore.QSignalBlocker(self.spin_sn_bl_smooth):
-                    self.spin_sn_bl_smooth.setValue(_safe_int(noise.get('baseline_smooth_bins', 5), 5))
+                _set_value(getattr(self, 'spin_sn_bl_smooth', None), _safe_int(noise.get('baseline_smooth_bins', 5), 5))
             if hasattr(self, 'dspin_sn_empty_q'):
-                with QtCore.QSignalBlocker(self.dspin_sn_empty_q):
-                    self.dspin_sn_empty_q.setValue(_safe_float(noise.get('empty_quantile', 0.7), 0.7))
+                _set_value(getattr(self, 'dspin_sn_empty_q', None), _safe_float(noise.get('empty_quantile', 0.7), 0.7))
             if hasattr(self, 'dspin_sn_clip'):
-                with QtCore.QSignalBlocker(self.dspin_sn_clip):
-                    self.dspin_sn_clip.setValue(_safe_float(noise.get('clip', 3.5), 3.5))
+                _set_value(getattr(self, 'dspin_sn_clip', None), _safe_float(noise.get('clip', 3.5), 3.5))
             if hasattr(self, 'spin_sn_niter'):
-                with QtCore.QSignalBlocker(self.spin_sn_niter):
-                    self.spin_sn_niter.setValue(_safe_int(noise.get('n_iter', 3), 3))
+                _set_value(getattr(self, 'spin_sn_niter', None), _safe_int(noise.get('n_iter', 3), 3))
             # peaks
             for key, attr, default in [
                 ('peak_snr', 'dspin_sn_peak_snr', 4.5),
@@ -1861,56 +1899,41 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 ('peak_floor_snr', 'dspin_sn_peak_floor', 3.0),
             ]:
                 if hasattr(self, attr):
-                    w = getattr(self, attr)
-                    with QtCore.QSignalBlocker(w):
-                        w.setValue(_safe_float(self._cfg_get(cfg, ['wavesol', key], default), float(default)))
+                    w = getattr(self, attr, None)
+                    _set_value(w, _safe_float(self._cfg_get(cfg, ['wavesol', key], default), float(default)))
             if hasattr(self, 'spin_sn_peak_dist'):
-                with QtCore.QSignalBlocker(self.spin_sn_peak_dist):
-                    self.spin_sn_peak_dist.setValue(_safe_int(self._cfg_get(cfg, ['wavesol', 'peak_distance'], 3), 3))
+                _set_value(getattr(self, 'spin_sn_peak_dist', None), _safe_int(self._cfg_get(cfg, ['wavesol', 'peak_distance'], 3), 3))
             if hasattr(self, 'chk_sn_autotune'):
-                with QtCore.QSignalBlocker(self.chk_sn_autotune):
-                    self.chk_sn_autotune.setChecked(bool(self._cfg_get(cfg, ['wavesol', 'peak_autotune'], True)))
+                _set_checked(getattr(self, 'chk_sn_autotune', None), bool(self._cfg_get(cfg, ['wavesol', 'peak_autotune'], True)))
             if hasattr(self, 'spin_sn_target_min'):
-                with QtCore.QSignalBlocker(self.spin_sn_target_min):
-                    self.spin_sn_target_min.setValue(_safe_int(self._cfg_get(cfg, ['wavesol', 'peak_target_min'], 0), 0))
+                _set_value(getattr(self, 'spin_sn_target_min', None), _safe_int(self._cfg_get(cfg, ['wavesol', 'peak_target_min'], 0), 0))
             if hasattr(self, 'spin_sn_target_max'):
-                with QtCore.QSignalBlocker(self.spin_sn_target_max):
-                    self.spin_sn_target_max.setValue(_safe_int(self._cfg_get(cfg, ['wavesol', 'peak_target_max'], 0), 0))
+                _set_value(getattr(self, 'spin_sn_target_max', None), _safe_int(self._cfg_get(cfg, ['wavesol', 'peak_target_max'], 0), 0))
 
         # --- LineID (GUI) ---
         if hasattr(self, 'dspin_lineid_sigma_k') and not self._stage_dirty.get('lineid', False):
-            with QtCore.QSignalBlocker(self.dspin_lineid_sigma_k):
-                self.dspin_lineid_sigma_k.setValue(_safe_float(self._cfg_get(cfg, ['wavesol', 'gui_min_amp_sigma_k'], 5.0), 5.0))
+            _set_value(getattr(self, 'dspin_lineid_sigma_k', None), _safe_float(self._cfg_get(cfg, ['wavesol', 'gui_min_amp_sigma_k'], 5.0), 5.0))
             if hasattr(self, 'dspin_lineid_min_amp'):
                 v = self._cfg_get(cfg, ['wavesol', 'gui_min_amp'], None)
                 vv = _safe_float(v, 0.0) if v not in (None, "") else 0.0
-                with QtCore.QSignalBlocker(self.dspin_lineid_min_amp):
-                    self.dspin_lineid_min_amp.setValue(vv)
+                _set_value(getattr(self, 'dspin_lineid_min_amp', None), vv)
             if hasattr(self, 'edit_lineid_lines_csv'):
-                with QtCore.QSignalBlocker(self.edit_lineid_lines_csv):
-                    self.edit_lineid_lines_csv.setText(str(self._cfg_get(cfg, ['wavesol', 'neon_lines_csv'], "" ) or ""))
+                _set_text(getattr(self, 'edit_lineid_lines_csv', None), str(self._cfg_get(cfg, ['wavesol', 'neon_lines_csv'], "") or ""))
             if hasattr(self, 'edit_lineid_atlas_pdf'):
-                with QtCore.QSignalBlocker(self.edit_lineid_atlas_pdf):
-                    self.edit_lineid_atlas_pdf.setText(str(self._cfg_get(cfg, ['wavesol', 'atlas_pdf'], "" ) or ""))
+                _set_text(getattr(self, 'edit_lineid_atlas_pdf', None), str(self._cfg_get(cfg, ['wavesol', 'atlas_pdf'], "") or ""))
 
         # --- Wavelength solution ---
         if hasattr(self, 'spin_ws_poly_deg') and not self._stage_dirty.get('wavesol', False):
-            with QtCore.QSignalBlocker(self.spin_ws_poly_deg):
-                self.spin_ws_poly_deg.setValue(_safe_int(self._cfg_get(cfg, ['wavesol', 'poly_deg_1d'], 4), 4))
+            _set_value(getattr(self, 'spin_ws_poly_deg', None), _safe_int(self._cfg_get(cfg, ['wavesol', 'poly_deg_1d'], 4), 4))
             if hasattr(self, 'dspin_ws_blend'):
-                with QtCore.QSignalBlocker(self.dspin_ws_blend):
-                    self.dspin_ws_blend.setValue(_safe_float(self._cfg_get(cfg, ['wavesol', 'blend_weight'], 0.35), 0.35))
+                _set_value(getattr(self, 'dspin_ws_blend', None), _safe_float(self._cfg_get(cfg, ['wavesol', 'blend_weight'], 0.35), 0.35))
             if hasattr(self, 'dspin_ws_poly_clip'):
-                with QtCore.QSignalBlocker(self.dspin_ws_poly_clip):
-                    self.dspin_ws_poly_clip.setValue(_safe_float(self._cfg_get(cfg, ['wavesol', 'poly_sigma_clip'], 3.0), 3.0))
+                _set_value(getattr(self, 'dspin_ws_poly_clip', None), _safe_float(self._cfg_get(cfg, ['wavesol', 'poly_sigma_clip'], 3.0), 3.0))
             if hasattr(self, 'spin_ws_poly_iter'):
-                with QtCore.QSignalBlocker(self.spin_ws_poly_iter):
-                    self.spin_ws_poly_iter.setValue(_safe_int(self._cfg_get(cfg, ['wavesol', 'poly_maxiter'], 6), 6))
+                _set_value(getattr(self, 'spin_ws_poly_iter', None), _safe_int(self._cfg_get(cfg, ['wavesol', 'poly_maxiter'], 6), 6))
             if hasattr(self, 'combo_ws_model2d'):
-                with QtCore.QSignalBlocker(self.combo_ws_model2d):
-                    m = str(self._cfg_get(cfg, ['wavesol', 'model2d'], 'auto') or 'auto')
-                    idx = self.combo_ws_model2d.findText(m)
-                    self.combo_ws_model2d.setCurrentIndex(max(0, idx))
+                m = str(self._cfg_get(cfg, ['wavesol', 'model2d'], 'auto') or 'auto')
+                _set_combo_text(getattr(self, 'combo_ws_model2d', None), m)
             for key, attr, default in [
                 ('power_deg', 'spin_ws_power_deg', 3),
                 ('cheb_degx', 'spin_ws_cheb_x', 4),
@@ -1919,73 +1942,57 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 ('edge_crop_y', 'spin_ws_crop_y', 0),
             ]:
                 if hasattr(self, attr):
-                    w = getattr(self, attr)
-                    with QtCore.QSignalBlocker(w):
-                        w.setValue(_safe_int(self._cfg_get(cfg, ['wavesol', key], default), default))
+                    w = getattr(self, attr, None)
+                    _set_value(w, _safe_int(self._cfg_get(cfg, ['wavesol', key], default), default))
 
         # --- Linearize ---
         if hasattr(self, 'chk_lin_enabled') and not self._stage_dirty.get('linearize', False):
             lin = cfg.get('linearize', {}) if isinstance(cfg.get('linearize'), dict) else {}
-            with QtCore.QSignalBlocker(self.chk_lin_enabled):
-                self.chk_lin_enabled.setChecked(bool(lin.get('enabled', True)))
+            _set_checked(getattr(self, 'chk_lin_enabled', None), bool(lin.get('enabled', True)))
             for attr, key, default in [
                 ('dspin_lin_dlambda', 'dlambda_A', 0.0),
                 ('dspin_lin_lmin', 'lambda_min_A', 0.0),
                 ('dspin_lin_lmax', 'lambda_max_A', 0.0),
             ]:
                 if hasattr(self, attr):
-                    w = getattr(self, attr)
+                    w = getattr(self, attr, None)
                     v = lin.get(key, None)
                     vv = _safe_float(v, 0.0) if v not in (None, '') else 0.0
-                    with QtCore.QSignalBlocker(w):
-                        w.setValue(vv)
+                    _set_value(w, vv)
             for attr, key, default in [
                 ('spin_lin_crop_top', 'y_crop_top', 0),
                 ('spin_lin_crop_bot', 'y_crop_bottom', 0),
             ]:
                 if hasattr(self, attr):
-                    w = getattr(self, attr)
-                    with QtCore.QSignalBlocker(w):
-                        w.setValue(_safe_int(lin.get(key, default), default))
+                    w = getattr(self, attr, None)
+                    _set_value(w, _safe_int(lin.get(key, default), default))
             if hasattr(self, 'chk_lin_png'):
-                with QtCore.QSignalBlocker(self.chk_lin_png):
-                    self.chk_lin_png.setChecked(bool(lin.get('save_png', True)))
+                _set_checked(getattr(self, 'chk_lin_png', None), bool(lin.get('save_png', True)))
             if hasattr(self, 'chk_lin_per_frame'):
-                with QtCore.QSignalBlocker(self.chk_lin_per_frame):
-                    self.chk_lin_per_frame.setChecked(bool(lin.get('save_per_frame', False)))
+                _set_checked(getattr(self, 'chk_lin_per_frame', None), bool(lin.get('save_per_frame', False)))
 
         # --- Sky subtraction ---
         if hasattr(self, 'chk_sky_enabled') and not self._stage_dirty.get('sky', False):
             sky = cfg.get('sky', {}) if isinstance(cfg.get('sky'), dict) else {}
-            with QtCore.QSignalBlocker(self.chk_sky_enabled):
-                self.chk_sky_enabled.setChecked(bool(sky.get('enabled', True)))
+            _set_checked(getattr(self, 'chk_sky_enabled', None), bool(sky.get('enabled', True)))
             if hasattr(self, 'chk_sky_per_exp'):
-                with QtCore.QSignalBlocker(self.chk_sky_per_exp):
-                    self.chk_sky_per_exp.setChecked(bool(sky.get('per_exposure', True)))
+                _set_checked(getattr(self, 'chk_sky_per_exp', None), bool(sky.get('per_exposure', True)))
             if hasattr(self, 'chk_sky_stack_after'):
-                with QtCore.QSignalBlocker(self.chk_sky_stack_after):
-                    self.chk_sky_stack_after.setChecked(bool(sky.get('stack_after', True)))
+                _set_checked(getattr(self, 'chk_sky_stack_after', None), bool(sky.get('stack_after', True)))
             if hasattr(self, 'chk_sky_save_models'):
-                with QtCore.QSignalBlocker(self.chk_sky_save_models):
-                    self.chk_sky_save_models.setChecked(bool(sky.get('save_per_exp_model', False)))
+                _set_checked(getattr(self, 'chk_sky_save_models', None), bool(sky.get('save_per_exp_model', False)))
             if hasattr(self, 'dspin_sky_step'):
-                with QtCore.QSignalBlocker(self.dspin_sky_step):
-                    self.dspin_sky_step.setValue(_safe_float(sky.get('bsp_step_A', 2.0), 2.0))
+                _set_value(getattr(self, 'dspin_sky_step', None), _safe_float(sky.get('bsp_step_A', 2.0), 2.0))
             if hasattr(self, 'spin_sky_deg'):
-                with QtCore.QSignalBlocker(self.spin_sky_deg):
-                    self.spin_sky_deg.setValue(_safe_int(sky.get('bsp_degree', 3), 3))
+                _set_value(getattr(self, 'spin_sky_deg', None), _safe_int(sky.get('bsp_degree', 3), 3))
             if hasattr(self, 'dspin_sky_clip'):
-                with QtCore.QSignalBlocker(self.dspin_sky_clip):
-                    self.dspin_sky_clip.setValue(_safe_float(sky.get('sigma_clip', 3.0), 3.0))
+                _set_value(getattr(self, 'dspin_sky_clip', None), _safe_float(sky.get('sigma_clip', 3.0), 3.0))
             if hasattr(self, 'spin_sky_maxiter'):
-                with QtCore.QSignalBlocker(self.spin_sky_maxiter):
-                    self.spin_sky_maxiter.setValue(_safe_int(sky.get('maxiter', 6), 6))
+                _set_value(getattr(self, 'spin_sky_maxiter', None), _safe_int(sky.get('maxiter', 6), 6))
             if hasattr(self, 'chk_sky_spatial'):
-                with QtCore.QSignalBlocker(self.chk_sky_spatial):
-                    self.chk_sky_spatial.setChecked(bool(sky.get('use_spatial_scale', True)))
+                _set_checked(getattr(self, 'chk_sky_spatial', None), bool(sky.get('use_spatial_scale', True)))
             if hasattr(self, 'spin_sky_poly'):
-                with QtCore.QSignalBlocker(self.spin_sky_poly):
-                    self.spin_sky_poly.setValue(_safe_int(sky.get('spatial_poly_deg', 0), 0))
+                _set_value(getattr(self, 'spin_sky_poly', None), _safe_int(sky.get('spatial_poly_deg', 0), 0))
             # ROI label
             if hasattr(self, 'lbl_sky_roi'):
                 roi = sky.get('roi', {}) if isinstance(sky.get('roi'), dict) else {}
@@ -1994,10 +2001,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     v = roi.get(k, None)
                     return str(_safe_int(v, 0)) if v not in (None, '') else '—'
 
-                self.lbl_sky_roi.setText(
+                _set_label(
+                    getattr(self, 'lbl_sky_roi', None),
                     f"Object: [{_f('obj_y0')}..{_f('obj_y1')}],  "
                     f"Sky(top): [{_f('sky_top_y0')}..{_f('sky_top_y1')}],  "
-                    f"Sky(bot): [{_f('sky_bot_y0')}..{_f('sky_bot_y1')}]"
+                    f"Sky(bot): [{_f('sky_bot_y0')}..{_f('sky_bot_y1')}]",
                 )
 
             # Flexure UI (optional)
@@ -2021,102 +2029,74 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 return '<no windows>'
 
             if hasattr(self, 'chk_sky_flex_enabled'):
-                with QtCore.QSignalBlocker(self.chk_sky_flex_enabled):
-                    self.chk_sky_flex_enabled.setChecked(bool(flex.get('enabled', False)))
+                _set_checked(getattr(self, 'chk_sky_flex_enabled', None), bool(flex.get('enabled', False)))
             if hasattr(self, 'combo_sky_flex_mode'):
-                with QtCore.QSignalBlocker(self.combo_sky_flex_mode):
-                    m = str(flex.get('mode', 'full') or 'full')
-                    idx = self.combo_sky_flex_mode.findText(m)
-                    self.combo_sky_flex_mode.setCurrentIndex(max(0, idx))
+                m = str(flex.get('mode', 'full') or 'full')
+                _set_combo_text(getattr(self, 'combo_sky_flex_mode', None), m)
             if hasattr(self, 'spin_sky_flex_max'):
-                with QtCore.QSignalBlocker(self.spin_sky_flex_max):
-                    self.spin_sky_flex_max.setValue(_safe_int(flex.get('max_shift_pix', 6), 6))
+                _set_value(getattr(self, 'spin_sky_flex_max', None), _safe_int(flex.get('max_shift_pix', 6), 6))
             if hasattr(self, 'combo_sky_flex_windows_unit'):
-                with QtCore.QSignalBlocker(self.combo_sky_flex_windows_unit):
-                    u = str(flex.get('windows_unit', 'auto') or 'auto')
-                    idx = self.combo_sky_flex_windows_unit.findText(u)
-                    self.combo_sky_flex_windows_unit.setCurrentIndex(max(0, idx))
+                u = str(flex.get('windows_unit', 'auto') or 'auto')
+                _set_combo_text(getattr(self, 'combo_sky_flex_windows_unit', None), u)
             if hasattr(self, 'chk_sky_flex_ydep'):
-                with QtCore.QSignalBlocker(self.chk_sky_flex_ydep):
-                    self.chk_sky_flex_ydep.setChecked(bool(flex.get('y_dependent', False)))
+                _set_checked(getattr(self, 'chk_sky_flex_ydep', None), bool(flex.get('y_dependent', False)))
             if hasattr(self, 'spin_sky_flex_y_poly'):
-                with QtCore.QSignalBlocker(self.spin_sky_flex_y_poly):
-                    self.spin_sky_flex_y_poly.setValue(_safe_int(flex.get('y_poly_deg', 1), 1))
+                _set_value(getattr(self, 'spin_sky_flex_y_poly', None), _safe_int(flex.get('y_poly_deg', 1), 1))
             if hasattr(self, 'spin_sky_flex_y_smooth'):
-                with QtCore.QSignalBlocker(self.spin_sky_flex_y_smooth):
-                    self.spin_sky_flex_y_smooth.setValue(_safe_int(flex.get('y_smooth_bins', 5), 5))
+                _set_value(getattr(self, 'spin_sky_flex_y_smooth', None), _safe_int(flex.get('y_smooth_bins', 5), 5))
             if hasattr(self, 'dspin_sky_flex_min_score'):
-                with QtCore.QSignalBlocker(self.dspin_sky_flex_min_score):
-                    self.dspin_sky_flex_min_score.setValue(_safe_float(flex.get('min_score', 0.06), 0.06))
+                _set_value(getattr(self, 'dspin_sky_flex_min_score', None), _safe_float(flex.get('min_score', 0.06), 0.06))
             if hasattr(self, 'lbl_sky_flex_windows'):
                 u = str(flex.get('windows_unit', 'auto') or 'auto')
                 winA = flex.get('windows_A') or flex.get('windows') or flex.get('windows_angstrom') or []
                 winP = flex.get('windows_pix') or flex.get('windows_pixels') or []
-                self.lbl_sky_flex_windows.setText(_fmt_windows(u, winA, winP))
+                _set_label(getattr(self, 'lbl_sky_flex_windows', None), _fmt_windows(u, winA, winP))
 
             # Stack2D UI (optional)
             st = cfg.get('stack2d', {}) if isinstance(cfg.get('stack2d'), dict) else {}
             ya = st.get('y_align', {}) if isinstance(st.get('y_align'), dict) else {}
 
             if hasattr(self, 'dspin_stack_sigma'):
-                with QtCore.QSignalBlocker(self.dspin_stack_sigma):
-                    self.dspin_stack_sigma.setValue(_safe_float(st.get('sigma_clip', 3.0), 3.0))
+                _set_value(getattr(self, 'dspin_stack_sigma', None), _safe_float(st.get('sigma_clip', 3.0), 3.0))
             if hasattr(self, 'spin_stack_maxiter'):
-                with QtCore.QSignalBlocker(self.spin_stack_maxiter):
-                    self.spin_stack_maxiter.setValue(_safe_int(st.get('maxiter', 6), 6))
+                _set_value(getattr(self, 'spin_stack_maxiter', None), _safe_int(st.get('maxiter', 6), 6))
             if hasattr(self, 'chk_stack_y_align'):
-                with QtCore.QSignalBlocker(self.chk_stack_y_align):
-                    self.chk_stack_y_align.setChecked(bool(ya.get('enabled', False)))
+                _set_checked(getattr(self, 'chk_stack_y_align', None), bool(ya.get('enabled', False)))
             if hasattr(self, 'spin_stack_y_align_max'):
-                with QtCore.QSignalBlocker(self.spin_stack_y_align_max):
-                    self.spin_stack_y_align_max.setValue(_safe_int(ya.get('max_shift_pix', 8), 8))
+                _set_value(getattr(self, 'spin_stack_y_align_max', None), _safe_int(ya.get('max_shift_pix', 8), 8))
             if hasattr(self, 'combo_stack_y_align_mode'):
-                with QtCore.QSignalBlocker(self.combo_stack_y_align_mode):
-                    m = str(ya.get('mode', 'full') or 'full')
-                    idx = self.combo_stack_y_align_mode.findText(m)
-                    self.combo_stack_y_align_mode.setCurrentIndex(max(0, idx))
+                m = str(ya.get('mode', 'full') or 'full')
+                _set_combo_text(getattr(self, 'combo_stack_y_align_mode', None), m)
             if hasattr(self, 'combo_stack_y_align_windows_unit'):
-                with QtCore.QSignalBlocker(self.combo_stack_y_align_windows_unit):
-                    u = str(ya.get('windows_unit', 'auto') or 'auto')
-                    idx = self.combo_stack_y_align_windows_unit.findText(u)
-                    self.combo_stack_y_align_windows_unit.setCurrentIndex(max(0, idx))
+                u = str(ya.get('windows_unit', 'auto') or 'auto')
+                _set_combo_text(getattr(self, 'combo_stack_y_align_windows_unit', None), u)
             if hasattr(self, 'chk_stack_y_align_pos'):
-                with QtCore.QSignalBlocker(self.chk_stack_y_align_pos):
-                    self.chk_stack_y_align_pos.setChecked(bool(ya.get('use_positive_flux', True)))
+                _set_checked(getattr(self, 'chk_stack_y_align_pos', None), bool(ya.get('use_positive_flux', True)))
             if hasattr(self, 'lbl_stack_y_align_windows'):
                 u = str(ya.get('windows_unit', 'auto') or 'auto')
                 winA = ya.get('windows_A') or ya.get('windows') or ya.get('windows_angstrom') or []
                 winP = ya.get('windows_pix') or ya.get('windows_pixels') or []
-                self.lbl_stack_y_align_windows.setText(_fmt_windows(u, winA, winP))
+                _set_label(getattr(self, 'lbl_stack_y_align_windows', None), _fmt_windows(u, winA, winP))
 
         # --- Extract 1D ---
         if hasattr(self, 'chk_ex1d_enabled') and not self._stage_dirty.get('extract1d', False):
             ex = cfg.get('extract1d', {}) if isinstance(cfg.get('extract1d'), dict) else {}
-            with QtCore.QSignalBlocker(self.chk_ex1d_enabled):
-                self.chk_ex1d_enabled.setChecked(bool(ex.get('enabled', True)))
+            _set_checked(getattr(self, 'chk_ex1d_enabled', None), bool(ex.get('enabled', True)))
             if hasattr(self, 'combo_ex1d_method'):
-                with QtCore.QSignalBlocker(self.combo_ex1d_method):
-                    m = str(ex.get('method', 'boxcar') or 'boxcar')
-                    idx = self.combo_ex1d_method.findText(m)
-                    self.combo_ex1d_method.setCurrentIndex(max(0, idx))
+                m = str(ex.get('method', 'boxcar') or 'boxcar')
+                _set_combo_text(getattr(self, 'combo_ex1d_method', None), m)
             if hasattr(self, 'spin_ex1d_ap_hw'):
-                with QtCore.QSignalBlocker(self.spin_ex1d_ap_hw):
-                    self.spin_ex1d_ap_hw.setValue(_safe_int(ex.get('aperture_half_width', 6), 6))
+                _set_value(getattr(self, 'spin_ex1d_ap_hw', None), _safe_int(ex.get('aperture_half_width', 6), 6))
             if hasattr(self, 'dspin_ex1d_trace_bin'):
-                with QtCore.QSignalBlocker(self.dspin_ex1d_trace_bin):
-                    self.dspin_ex1d_trace_bin.setValue(_safe_float(ex.get('trace_bin_A', 50.0), 50.0))
+                _set_value(getattr(self, 'dspin_ex1d_trace_bin', None), _safe_float(ex.get('trace_bin_A', 50.0), 50.0))
             if hasattr(self, 'spin_ex1d_trace_deg'):
-                with QtCore.QSignalBlocker(self.spin_ex1d_trace_deg):
-                    self.spin_ex1d_trace_deg.setValue(_safe_int(ex.get('trace_smooth_deg', 3), 3))
+                _set_value(getattr(self, 'spin_ex1d_trace_deg', None), _safe_int(ex.get('trace_smooth_deg', 3), 3))
             if hasattr(self, 'spin_ex1d_prof_hw'):
-                with QtCore.QSignalBlocker(self.spin_ex1d_prof_hw):
-                    self.spin_ex1d_prof_hw.setValue(_safe_int(ex.get('optimal_profile_half_width', 15), 15))
+                _set_value(getattr(self, 'spin_ex1d_prof_hw', None), _safe_int(ex.get('optimal_profile_half_width', 15), 15))
             if hasattr(self, 'dspin_ex1d_opt_clip'):
-                with QtCore.QSignalBlocker(self.dspin_ex1d_opt_clip):
-                    self.dspin_ex1d_opt_clip.setValue(_safe_float(ex.get('optimal_sigma_clip', 5.0), 5.0))
+                _set_value(getattr(self, 'dspin_ex1d_opt_clip', None), _safe_float(ex.get('optimal_sigma_clip', 5.0), 5.0))
             if hasattr(self, 'chk_ex1d_png'):
-                with QtCore.QSignalBlocker(self.chk_ex1d_png):
-                    self.chk_ex1d_png.setChecked(bool(ex.get('save_png', True)))
+                _set_checked(getattr(self, 'chk_ex1d_png', None), bool(ex.get('save_png', True)))
 
 
     def _build_page_calib(self) -> QtWidgets.QWidget:
@@ -2148,7 +2128,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         pl = QtWidgets.QVBoxLayout(pbox)
         pl.setSpacing(10)
 
-        basic = _box("Basic")
+        basic = QtWidgets.QWidget()
         bf = QtWidgets.QFormLayout(basic)
         bf.setLabelAlignment(QtCore.Qt.AlignLeft)
         bf.setHorizontalSpacing(12)
@@ -2180,12 +2160,18 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.spin_bias_sigma_clip,
         )
 
-        pl.addWidget(basic)
-        adv_w, adv_l, _ = _collapsible("Advanced", expanded=False)
+        adv = QtWidgets.QWidget()
+        adv_lay = QtWidgets.QVBoxLayout(adv)
+        adv_lay.setContentsMargins(0, 0, 0, 0)
+        adv_lay.setSpacing(8)
         note = QtWidgets.QLabel("(Пока без дополнительных параметров для этого этапа.)")
         note.setWordWrap(True)
-        adv_l.addWidget(note)
-        pl.addWidget(adv_w)
+        adv_lay.addWidget(note)
+
+        # locale for doubles
+        self._force_dot_locale(self.spin_bias_sigma_clip)
+
+        pl.addWidget(self._mk_basic_advanced_tabs(basic, adv))
         pl.addWidget(self._mk_stage_apply_row("calib"))
 
         gl.addWidget(pbox)
@@ -2211,7 +2197,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         gl.addLayout(row)
         l.addStretch(1)
 
-        splitter.addWidget(left)
+        splitter.addWidget(self._mk_scroll_panel(left))
 
         # right: outputs
         self.outputs_calib = OutputsPanel()
@@ -2292,7 +2278,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         pl = QtWidgets.QVBoxLayout(pbox)
         pl.setSpacing(10)
 
-        basic = _box("Basic")
+        basic = QtWidgets.QWidget()
         bf = QtWidgets.QFormLayout(basic)
         bf.setLabelAlignment(QtCore.Qt.AlignLeft)
         bf.setHorizontalSpacing(12)
@@ -2357,12 +2343,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
             ),
             self.spin_cosmics_k,
         )
-
-
-        adv_w, adv_l, _ = _collapsible("Advanced", expanded=False)
-        af = QtWidgets.QFormLayout()
+        adv = QtWidgets.QWidget()
+        af = QtWidgets.QFormLayout(adv)
         af.setLabelAlignment(QtCore.Qt.AlignLeft)
         af.setHorizontalSpacing(12)
+
         self.chk_cosmics_bias = QtWidgets.QCheckBox("Yes")
         af.addRow(
             self._param_label(
@@ -2372,6 +2357,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             ),
             self.chk_cosmics_bias,
         )
+
         self.chk_cosmics_png = QtWidgets.QCheckBox("Yes")
         af.addRow(
             self._param_label(
@@ -2381,8 +2367,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
             ),
             self.chk_cosmics_png,
         )
-        adv_l.addLayout(af)
-        pl.addWidget(adv_w)
+
+        # locale for doubles
+        self._force_dot_locale(self.spin_cosmics_k)
+
+        pl.addWidget(self._mk_basic_advanced_tabs(basic, adv))
         pl.addWidget(self._mk_stage_apply_row("cosmics"))
 
         gl.addWidget(pbox)
@@ -2400,7 +2389,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         gl.addLayout(row)
         l.addStretch(1)
 
-        splitter.addWidget(left)
+        splitter.addWidget(self._mk_scroll_panel(left))
         self.outputs_cosmics = OutputsPanel()
         self.outputs_cosmics.set_context(self._cfg, stage="cosmics")
         splitter.addWidget(self.outputs_cosmics)
@@ -2588,7 +2577,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         gl.addLayout(row)
 
         l.addStretch(1)
-        splitter.addWidget(left)
+        splitter.addWidget(self._mk_scroll_panel(left))
 
         self.outputs_flatfield = OutputsPanel()
         self.outputs_flatfield.set_context(self._cfg, stage="flatfield")
@@ -3002,7 +2991,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         gl.addLayout(row)
 
         l.addStretch(1)
-        splitter.addWidget(left)
+        splitter.addWidget(self._mk_scroll_panel(left))
 
         self.outputs_superneon = OutputsPanel()
         self.outputs_superneon.set_context(self._cfg, stage="wavesol")
@@ -3274,7 +3263,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         gl.addLayout(row2)
 
         l.addStretch(1)
-        splitter.addWidget(left)
+        splitter.addWidget(self._mk_scroll_panel(left))
 
         self.outputs_lineid = OutputsPanel()
         self.outputs_lineid.set_context(self._cfg, stage="wavesol")
@@ -4039,7 +4028,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         l.addStretch(1)
 
-        splitter.addWidget(left)
+        splitter.addWidget(self._mk_scroll_panel(left))
         self.outputs_wavesol = OutputsPanel()
         self.outputs_wavesol.set_context(self._cfg, stage="wavesol")
         splitter.addWidget(self.outputs_wavesol)
@@ -4218,7 +4207,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         pl = QtWidgets.QVBoxLayout(gpar)
         pl.setSpacing(10)
 
-        basic = _box("Basic")
+        basic = QtWidgets.QWidget()
         bf = QtWidgets.QFormLayout(basic)
         bf.setLabelAlignment(QtCore.Qt.AlignLeft)
         bf.setHorizontalSpacing(12)
@@ -4311,20 +4300,24 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.chk_lin_png,
         )
 
-        pl.addWidget(basic)
-
-        adv_w, adv_l, _ = _collapsible("Advanced", expanded=False)
+        adv = QtWidgets.QWidget()
+        adv_lay = QtWidgets.QVBoxLayout(adv)
+        adv_lay.setContentsMargins(0, 0, 0, 0)
+        adv_lay.setSpacing(8)
         self.chk_lin_per_frame = QtWidgets.QCheckBox("Save per-frame linearized")
-        adv_l.addWidget(
+        adv_lay.addWidget(
             self._small_note(
                 "Сохранять линейризованные отдельные кадры в lin/frames/*.fits.\n"
                 "Полезно для отладки, но занимает место.\n"
                 "Типично: выключено."
             )
         )
-        adv_l.addWidget(self.chk_lin_per_frame)
-        pl.addWidget(adv_w)
+        adv_lay.addWidget(self.chk_lin_per_frame)
 
+        # locale for doubles
+        self._force_dot_locale(self.dspin_lin_dlambda, self.dspin_lin_lmin, self.dspin_lin_lmax)
+
+        pl.addWidget(self._mk_basic_advanced_tabs(basic, adv))
         pl.addWidget(self._mk_stage_apply_row("linearize"))
         gl.addWidget(gpar)
 
@@ -4340,7 +4333,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         gl.addLayout(row)
 
         l.addStretch(1)
-        splitter.addWidget(left)
+        splitter.addWidget(self._mk_scroll_panel(left))
 
         self.outputs_linearize = OutputsPanel()
         # Products for the linearization stage are registered under stage name "lin".
@@ -4463,7 +4456,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         pl = QtWidgets.QVBoxLayout(gpar)
         pl.setSpacing(10)
 
-        basic = _box("Basic")
+        basic = QtWidgets.QWidget()
         bf = QtWidgets.QFormLayout(basic)
         bf.setLabelAlignment(QtCore.Qt.AlignLeft)
         bf.setHorizontalSpacing(12)
@@ -4584,9 +4577,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.spin_sky_poly,
         )
 
-        pl.addWidget(basic)
-
-        adv_w, adv_l, _ = _collapsible("Advanced", expanded=False)
+        adv = QtWidgets.QWidget()
+        adv_l = QtWidgets.QVBoxLayout(adv)
+        adv_l.setContentsMargins(0, 0, 0, 0)
+        adv_l.setSpacing(10)
 
         # Flexure correction (Δλ)
         gflex = _box("Flexure correction (Δλ)")
@@ -4816,7 +4810,15 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         adv_l.addWidget(gstack)
 
-        pl.addWidget(adv_w)
+        # locale for doubles
+        self._force_dot_locale(
+            self.dspin_sky_step,
+            self.dspin_sky_clip,
+            self.dspin_sky_flex_min_score,
+            self.dspin_stack_sigma,
+        )
+
+        pl.addWidget(self._mk_basic_advanced_tabs(basic, adv))
 
         pl.addWidget(self._mk_stage_apply_row("sky"))
         gl.addWidget(gpar)
@@ -4833,7 +4835,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         gl.addLayout(row)
 
         l.addStretch(1)
-        splitter.addWidget(left)
+        splitter.addWidget(self._mk_scroll_panel(left))
 
         self.outputs_sky = OutputsPanel()
         self.outputs_sky.set_context(self._cfg, stage="sky")
@@ -5071,7 +5073,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         pl = QtWidgets.QVBoxLayout(gpar)
         pl.setSpacing(10)
 
-        basic = _box("Basic")
+        basic = QtWidgets.QWidget()
         bf = QtWidgets.QFormLayout(basic)
         bf.setLabelAlignment(QtCore.Qt.AlignLeft)
         bf.setHorizontalSpacing(12)
@@ -5134,9 +5136,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.chk_ex1d_png,
         )
 
-        pl.addWidget(basic)
-
-        adv_w, adv_l, _ = _collapsible("Advanced", expanded=False)
         adv = QtWidgets.QWidget()
         af = QtWidgets.QFormLayout(adv)
         af.setLabelAlignment(QtCore.Qt.AlignLeft)
@@ -5180,8 +5179,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.dspin_ex1d_opt_clip,
         )
 
-        adv_l.addWidget(adv)
-        pl.addWidget(adv_w)
+        # locale for doubles
+        self._force_dot_locale(self.dspin_ex1d_trace_bin, self.dspin_ex1d_opt_clip)
+
+        pl.addWidget(self._mk_basic_advanced_tabs(basic, adv))
 
         pl.addWidget(self._mk_stage_apply_row("extract1d"))
         gl.addWidget(gpar)
@@ -5198,7 +5199,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         gl.addLayout(row)
 
         l.addStretch(1)
-        splitter.addWidget(left)
+        splitter.addWidget(self._mk_scroll_panel(left))
 
         self.outputs_extract1d = OutputsPanel()
         # Products for 1D extraction are registered under stage name "spec".

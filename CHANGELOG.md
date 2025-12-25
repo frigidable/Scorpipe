@@ -1,3 +1,11 @@
+## v5.24.0
+
+### GUI: Basic/Advanced tabs + scrolling for all stages
+- Unified all stage parameter panels to the same UX as *Wavelength solution*:
+  - **Basic / Advanced** tabs everywhere (Calib, Cosmics, Linearize, Sky, Extract 1D).
+  - Each tab content is **scrollable**, so long parameter lists never get cut off.
+- Fixed a serious UI bug where the **Cosmics Basic** box was created but not added to the layout (parameters could be missing).
+
 ## v5.23.0
 
 ### GUI: fixed "Save/Apply/Run does nothing" regressions

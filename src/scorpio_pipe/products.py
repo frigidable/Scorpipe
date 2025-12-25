@@ -6,11 +6,15 @@ This module provides a small, explicit product registry used by QC/UI.
 It intentionally does NOT try to be exhaustive for every intermediate file;
 instead it lists stable, canonical artifacts users can expect.
 
-v5.23 notes
+v5.24 notes
 ----------
 - QC outputs live in work/qc/ (legacy mirror in work/report/)
 - Calibrations live in work/calibs/ (legacy mirror/compat in work/calib/)
 - Wavesolution products live in work/wavesol/<disperser_slug>/ (legacy flat layout supported)
+
+UI
+--
+- All stages now expose Parameters as Basic/Advanced tabs with scrollable content.
 """
 
 from dataclasses import dataclass
