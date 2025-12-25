@@ -20,7 +20,8 @@ from typing import Any, Callable, Iterable
 from scorpio_pipe.config import load_config_any
 from scorpio_pipe.products import products_for_task, task_is_complete
 from scorpio_pipe.stage_state import compute_stage_hash, is_stage_up_to_date, load_stage_state, record_stage_result
-from scorpio_pipe.wavesol_paths import resolve_work_dir
+from scorpio_pipe.wavesol_paths import resolve_work_dir, wavesol_dir
+from scorpio_pipe.work_layout import ensure_work_layout
 
 log = logging.getLogger(__name__)
 
@@ -102,44 +103,56 @@ def _call_maybe_with_cancel(fn: TaskFn, *, cancel_token: CancelToken | None = No
 def _task_manifest(cfg: dict[str, Any], out_dir: Path, *, config_path: Path | None = None, cancel_token: CancelToken | None = None) -> Path:
     from scorpio_pipe.manifest import write_manifest
 
-    return write_manifest(out_path=out_dir / "report" / "manifest.json", cfg=cfg, cfg_path=config_path)
+    layout = ensure_work_layout(out_dir)
+    # Canonical location (work/qc). Keep a legacy mirror for older tooling.
+    p = write_manifest(out_path=layout.qc / "manifest.json", cfg=cfg, cfg_path=config_path)
+    try:
+        write_manifest(out_path=layout.report_legacy / "manifest.json", cfg=cfg, cfg_path=config_path)
+    except Exception:
+        # Legacy mirror should never break science.
+        pass
+    return p
 
 
 def _task_superbias(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
     from scorpio_pipe.stages.calib import build_superbias
 
-    return build_superbias(cfg, out_dir)
+    _ = out_dir
+    return build_superbias(cfg)
 
 
 def _task_superflat(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
-    # One source of truth: stages.flatfield.build_superflat
-    from scorpio_pipe.stages.flatfield import build_superflat
+    from scorpio_pipe.stages.calib import build_superflat
 
-    return build_superflat(cfg=cfg, out_dir=out_dir)
+    _ = out_dir
+    return build_superflat(cfg)
 
 
 def _task_flatfield(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
     from scorpio_pipe.stages.flatfield import run_flatfield
 
-    return run_flatfield(cfg=cfg, out_dir=out_dir)
+    return run_flatfield(cfg=cfg, out_dir=Path(out_dir) / "flatfield")
 
 
 def _task_cosmics(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
     from scorpio_pipe.stages.cosmics import clean_cosmics
 
-    return clean_cosmics(cfg, out_dir)
+    return clean_cosmics(cfg, out_dir=Path(out_dir) / "cosmics")
 
 
 def _task_superneon(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
     from scorpio_pipe.stages.superneon import build_superneon
 
-    return build_superneon(cfg, out_dir)
+    _ = out_dir
+    res = build_superneon(cfg)
+    return Path(res.superneon_fits)
 
 
 def _task_lineid_prepare(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> None:
     from scorpio_pipe.stages.lineid_auto_backup import prepare_lineid
 
-    prepare_lineid(cfg, out_dir)
+    _ = out_dir
+    prepare_lineid(cfg)
 
 
 def _task_wavesolution(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> None:
@@ -149,6 +162,16 @@ def _task_wavesolution(cfg: dict[str, Any], out_dir: Path, *, cancel_token: Canc
 
     _ = cancel_token  # currently unused inside wavesolution
     build_wavesolution(cfg)
+
+
+def _task_qc_report(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
+    from scorpio_pipe.qc_report import build_qc_report
+
+    _ = cancel_token
+    layout = ensure_work_layout(out_dir)
+    res = build_qc_report(cfg, out_dir=layout.qc)
+    # Prefer canonical html output
+    return Path(res.get("qc_html", layout.qc / "index.html"))
 
 
 def _task_linearize(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
@@ -205,11 +228,13 @@ TASKS: dict[str, TaskFn] = {
     "sky": _task_sky,
     "stack2d": _task_stack2d,
     "extract1d": _task_extract1d,
+    "qc_report": _task_qc_report,
     # aliases (backward compatibility)
     "wavesol": _task_wavesolution,
     "wavesolution2d": _task_wavesolution,
     "sky_sub": _task_sky,
     "stack": _task_stack2d,
+    "qc": _task_qc_report,
 }
 
 
@@ -221,6 +246,7 @@ def canonical_task_name(name: str) -> str:
         "wavesol2d": "wavesolution",
         "wavelength_solution": "wavesolution",
         "lineid": "lineid_prepare",
+        "qc": "qc_report",
     }
     return aliases.get(n, n)
 
@@ -233,9 +259,18 @@ def _stage_cfg_for_hash(cfg: dict[str, Any], task: str) -> dict[str, Any]:
         "superflat": cfg.get("calib", {}),
         "flatfield": cfg.get("flatfield", {}),
         "cosmics": cfg.get("cosmics", {}),
-        "superneon": cfg.get("calib", {}),
-        "lineid_prepare": cfg.get("wavesol", {}),
+        # superneon depends on a few config sections; keep only numeric-ish values anyway
+        "superneon": {
+            "calib": cfg.get("calib", {}),
+            "wavesol": cfg.get("wavesol", {}),
+            "superneon": cfg.get("superneon", {}),
+        },
+        "lineid_prepare": {
+            "wavesol": cfg.get("wavesol", {}),
+            "superneon": cfg.get("superneon", {}),
+        },
         "wavesolution": cfg.get("wavesol", {}),
+        "qc_report": cfg.get("qc", {}),
         "linearize": cfg.get("linearize", {}),
         "sky": cfg.get("sky", {}),
         "sky_sub": cfg.get("sky", {}),
@@ -249,16 +284,44 @@ def _stage_cfg_for_hash(cfg: dict[str, Any], task: str) -> dict[str, Any]:
 
 def _input_paths_for_hash(cfg: dict[str, Any], task: str, out_dir: Path) -> list[Path]:
     frames = cfg.get("frames") if isinstance(cfg.get("frames"), dict) else {}
+
     def _frame_list(key: str) -> list[Path]:
         v = frames.get(key, []) if isinstance(frames, dict) else []
         return [Path(str(x)) for x in v] if isinstance(v, list) else []
 
-    # products from previous stages
-    prod_by_key = {p.key: p.path for p in products_for_task(cfg, task)}
+    wd = Path(out_dir)
+    layout = ensure_work_layout(wd)
+    wsol = wavesol_dir(cfg)
+
+    def _first_existing(*cands: Path) -> Path:
+        for c in cands:
+            try:
+                if c and Path(c).exists():
+                    return Path(c)
+            except Exception:
+                pass
+        return Path(cands[0])
+
+    # Key calibration paths (prefer config override, then canonical, then legacy).
+    calib_cfg = cfg.get("calib", {}) if isinstance(cfg.get("calib"), dict) else {}
+
+    def _resolve_cfg_path(v: Any) -> Path | None:
+        if not v:
+            return None
+        p = Path(str(v))
+        if p.is_absolute():
+            return p
+        # relative to work_dir by convention
+        return (wd / p).resolve()
+
+    sb_cfg = _resolve_cfg_path(calib_cfg.get("superbias_path"))
+    sf_cfg = _resolve_cfg_path(calib_cfg.get("superflat_path"))
+    sb = sb_cfg or _first_existing(layout.calibs / "superbias.fits", layout.calib_legacy / "superbias.fits")
+    sf = sf_cfg or _first_existing(layout.calibs / "superflat.fits", layout.calib_legacy / "superflat.fits")
 
     if task == "manifest":
         paths: list[Path] = []
-        for k, v in frames.items() if isinstance(frames, dict) else []:
+        for _k, v in frames.items() if isinstance(frames, dict) else []:
             if isinstance(v, list):
                 paths.extend(Path(str(x)) for x in v)
         return paths
@@ -266,27 +329,37 @@ def _input_paths_for_hash(cfg: dict[str, Any], task: str, out_dir: Path) -> list
     if task == "superbias":
         return _frame_list("bias")
     if task == "superflat":
-        return _frame_list("flat") + [prod_by_key.get("superbias", out_dir / "calib" / "superbias.fits")]
+        return _frame_list("flat")
     if task == "flatfield":
-        return _frame_list("obj") + [out_dir / "calib" / "superflat.fits"]
+        return _frame_list("obj") + [sf, sb]
     if task == "cosmics":
-        return _frame_list("obj") + [out_dir / "calib" / "superbias.fits", out_dir / "calib" / "superflat.fits"]
+        return _frame_list("obj") + [sb]
     if task == "superneon":
-        return _frame_list("neon")
+        return _frame_list("neon") + ([sb] if sb else [])
     if task == "lineid_prepare":
-        return [out_dir / "calib" / "superneon.fits"]
+        return [wsol / "superneon.fits"]
     if task == "wavesolution":
-        return [out_dir / "wavesol" / "peaks_candidates.json", out_dir / "wavesol" / "hand_pairs.yaml"]
+        return [wsol / "peaks_candidates.csv", wsol / "hand_pairs.txt"]
     if task == "linearize":
-        return _frame_list("obj") + [out_dir / "wavesol" / "lambda_map.fits"]
+        return _frame_list("obj") + [wsol / "lambda_map.fits"]
     if task in ("sky", "sky_sub"):
-        p = out_dir / "products" / "lin" / "lin_preview.fits"
-        return [p if p.exists() else (out_dir / "lin" / "obj_sum_lin.fits")]
+        p = layout.products / "lin" / "lin_preview.fits"
+        legacy = wd / "lin" / "obj_sum_lin.fits"
+        return [_first_existing(p, legacy)]
     if task in ("stack2d", "stack"):
-        return [out_dir / "products" / "sky" / "sky_sub_done.json", out_dir / "products" / "sky" / "per_exp"]
+        per_exp = layout.products / "sky" / "per_exp"
+        inputs = [layout.products / "sky" / "sky_sub_done.json"]
+        # include per-exp FITS signatures if directory exists
+        if per_exp.is_dir():
+            inputs.extend(sorted(per_exp.glob("*.fits")))
+        else:
+            inputs.append(per_exp)
+        return inputs
     if task == "extract1d":
-        p = out_dir / "products" / "stack" / "stacked2d.fits"
-        return [p]
+        return [layout.products / "stack" / "stacked2d.fits"]
+    if task in ("qc_report", "qc"):
+        # QC report should refresh when the stage state changes (proxy for upstream outputs).
+        return [wd / "manifest" / "stage_state.json"]
 
     return []
 

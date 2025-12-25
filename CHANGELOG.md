@@ -1,14 +1,21 @@
-## v5.20.0
+## v5.21.0
 
-### GUI fixes: Pair-sets + parameters layout
-- **Fixed crash on "Create New Config" / pair-sets refresh** when binning is stored as a string like ``"1x2"`` (no more ``ValueError: invalid literal for int()``).
-- Pair-sets combobox now correctly uses the current pairs library API (``label/origin/path``), so:
-  - built-in vs user sets are listed correctly,
-  - "Use selected" copies the chosen set into workdir and updates ``wavesol.hand_pairs_path``,
-  - "Copy selected → workdir" copies without changing config,
-  - "Save workdir → library" really saves into the user library,
-  - exports/open-library actions work under **PySide6** (no PyQt5 dependency).
-- **Parameters panel**: switched **Basic/Advanced** from collapsible sections to **two tabs** (each scrollable) so long parameter lists no longer get clipped.
+### Critical fixes (runner + products/QC)
+- **GUI runner**: fixed multiple hard crashes caused by outdated task wrappers and path handling:
+  - removed wrong positional arguments and keyword-only violations,
+  - aligned calls with current stage APIs (superbias/superflat/superneon/lineid_prepare/etc.),
+  - made stage input hashing use the canonical work layout and disperser-aware wavesol directory,
+  - added a missing `qc_report` task to the task registry.
+- **Products registry**: restored missing helpers and products required by runner/QC/tests:
+  - reintroduced `group_by_stage()`, `products_for_task()`, `task_is_complete()`,
+  - added missing products (superneon PNG/FITS, peaks candidates CSV, lineid outputs, cosmics summary, flatfield done, etc.),
+  - added `Product.size()` used by QC report.
+- **QC paths**: timings + QC alerts now prefer canonical `work/qc/*` with fallback to legacy `work/report/*`.
+- **Calibrations**: superbias/superflat now write to canonical `work/calibs/*` and mirror to legacy `work/calib/*`.
+- **LineID prepare** now writes outputs into `work/wavesol/<disperser_slug>/` (legacy flat layout still supported).
+- Tests: synthetic smoke test is skipped cleanly when `astropy` is not installed.
+
+## v5.20.0
 
 ## v5.19.0
 

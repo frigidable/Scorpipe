@@ -149,8 +149,10 @@ def _suggest_linear_pairs(
 
 
 def prepare_lineid(cfg: dict[str, Any]) -> dict[str, Path]:
-    work_dir = Path(cfg["work_dir"]).resolve()
-    outdir = work_dir / "wavesol"
+    from scorpio_pipe.wavesol_paths import resolve_work_dir, wavesol_dir
+
+    work_dir = resolve_work_dir(cfg)
+    outdir = wavesol_dir(cfg)
     outdir.mkdir(parents=True, exist_ok=True)
 
     superneon_fits = outdir / "superneon.fits"

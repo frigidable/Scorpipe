@@ -4,6 +4,9 @@ from pathlib import Path
 import tempfile
 
 import numpy as np
+import pytest
+
+pytest.importorskip("astropy")
 from astropy.io import fits
 
 from scorpio_pipe.work_layout import ensure_work_layout

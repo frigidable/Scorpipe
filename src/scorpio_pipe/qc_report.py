@@ -118,7 +118,10 @@ def _metrics_cosmics(products: list[Product]) -> dict[str, Any]:
 
 
 def _metrics_timings(work_dir: Path) -> dict[str, Any]:
-    p = work_dir / "report" / "timings.json"
+    # prefer canonical QC location, fallback to legacy mirror
+    p = work_dir / "qc" / "timings.json"
+    if not p.exists():
+        p = work_dir / "report" / "timings.json"
     if not p.exists():
         return {}
     rows = _read_json(p)

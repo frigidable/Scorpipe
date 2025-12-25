@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 from typing import Any, Dict, Tuple
 
 import numpy as np
@@ -9,6 +10,16 @@ from astropy.io import fits
 import logging
 
 log = logging.getLogger(__name__)
+
+
+def _resolve_work_dir(c: Dict) -> Path:
+    """Resolve work_dir robustly and ensure canonical layout exists."""
+    from scorpio_pipe.wavesol_paths import resolve_work_dir
+    from scorpio_pipe.work_layout import ensure_work_layout
+
+    wd = resolve_work_dir(c)
+    ensure_work_layout(wd)
+    return wd
 
 
 def _load_cfg_any(cfg: Any) -> Dict:
@@ -26,11 +37,12 @@ def _read_fits_data(path: Path) -> Tuple[np.ndarray, fits.Header]:
 def build_superbias(cfg: Any, out_path: str | Path | None = None) -> Path:
     """
     Строит superbias (по умолчанию — медианой) по bias-кадрам.
-    Пишет FITS в work_dir/calib/superbias.fits (или out_path).
+    По умолчанию пишет FITS в work_dir/calibs/superbias.fits и зеркалит в legacy
+    work_dir/calib/superbias.fits для обратной совместимости.
     """
     c = _load_cfg_any(cfg)
 
-    work_dir = Path(c["work_dir"])
+    work_dir = _resolve_work_dir(c)
     bias_paths = [Path(p) for p in c["frames"]["bias"]]
 
     if not bias_paths:
@@ -162,12 +174,20 @@ def build_superbias(cfg: Any, out_path: str | Path | None = None) -> Path:
 
         superbias = (acc / n_used).astype(np.float32)
 
+    # output paths
     if out_path is None:
-        out_dir = work_dir / "calib"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / "superbias.fits"
+        from scorpio_pipe.work_layout import ensure_work_layout
+
+        layout = ensure_work_layout(work_dir)
+        out_path = layout.calibs / "superbias.fits"
+        legacy_path = layout.calib_legacy / "superbias.fits"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        legacy_path.parent.mkdir(parents=True, exist_ok=True)
     else:
+        legacy_path = None
         out_path = Path(out_path)
+        if not out_path.is_absolute():
+            out_path = (work_dir / out_path).resolve()
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # header
@@ -181,17 +201,25 @@ def build_superbias(cfg: Any, out_path: str | Path | None = None) -> Path:
 
     fits.writeto(out_path, superbias, hdr, overwrite=True)
     log.info("Wrote superbias: %s", out_path)
+    if legacy_path is not None:
+        try:
+            if legacy_path.resolve() != out_path.resolve():
+                shutil.copy2(out_path, legacy_path)
+        except Exception:
+            # non-fatal: legacy mirror is best-effort
+            pass
     return out_path
 
 
 def build_superflat(cfg: Any, out_path: str | Path | None = None) -> Path:
     """
     Строит superflat как среднее/медиану по flat-кадрам с последующей нормировкой.
-    Пишет FITS в work_dir/calib/superflat.fits (или out_path).
+    По умолчанию пишет FITS в work_dir/calibs/superflat.fits и зеркалит в legacy
+    work_dir/calib/superflat.fits для обратной совместимости.
     """
     c = _load_cfg_any(cfg)
 
-    work_dir = Path(c["work_dir"])
+    work_dir = _resolve_work_dir(c)
     flat_paths = [Path(p) for p in c["frames"]["flat"]]
 
     if not flat_paths:
@@ -319,11 +347,18 @@ def build_superflat(cfg: Any, out_path: str | Path | None = None) -> Path:
     superflat = (superflat / norm).astype(np.float32)
 
     if out_path is None:
-        out_dir = work_dir / "calib"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / "superflat.fits"
+        from scorpio_pipe.work_layout import ensure_work_layout
+
+        layout = ensure_work_layout(work_dir)
+        out_path = layout.calibs / "superflat.fits"
+        legacy_path = layout.calib_legacy / "superflat.fits"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        legacy_path.parent.mkdir(parents=True, exist_ok=True)
     else:
+        legacy_path = None
         out_path = Path(out_path)
+        if not out_path.is_absolute():
+            out_path = (work_dir / out_path).resolve()
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # header
@@ -338,4 +373,10 @@ def build_superflat(cfg: Any, out_path: str | Path | None = None) -> Path:
 
     fits.writeto(out_path, superflat, hdr, overwrite=True)
     log.info("Wrote superflat: %s", out_path)
+    if legacy_path is not None:
+        try:
+            if legacy_path.resolve() != out_path.resolve():
+                shutil.copy2(out_path, legacy_path)
+        except Exception:
+            pass
     return out_path

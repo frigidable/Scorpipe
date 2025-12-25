@@ -6,10 +6,11 @@ This module provides a small, explicit product registry used by QC/UI.
 It intentionally does NOT try to be exhaustive for every intermediate file;
 instead it lists stable, canonical artifacts users can expect.
 
-v5.17 notes
+v5.21 notes
 ----------
 - QC outputs live in work/qc/ (legacy mirror in work/report/)
 - Calibrations live in work/calibs/ (legacy mirror/compat in work/calib/)
+- Wavesolution products live in work/wavesol/<disperser_slug>/ (legacy flat layout supported)
 """
 
 from dataclasses import dataclass
@@ -31,6 +32,13 @@ class Product:
 
     def exists(self) -> bool:
         return self.path.exists()
+
+    def size(self) -> int | None:
+        """File size in bytes (None if missing/unstatable)."""
+        try:
+            return int(self.path.stat().st_size) if self.path.exists() else None
+        except Exception:
+            return None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -54,11 +62,15 @@ def list_products(cfg: dict[str, Any]) -> list[Product]:
     calibs = layout.calibs
     calib_legacy = layout.calib_legacy
 
-    # v5.x products
+    # v5.x canonical products
     lin = products_root / "lin"
     sky = products_root / "sky"
     stack = products_root / "stack"
     spec = products_root / "spec"
+
+    # classic stage dirs
+    cosm = wd / "cosmics"
+    flatfield = wd / "flatfield"
 
     # wavesolution: needs disperser subdir (important for tests and real data)
     wsol = wavesol_dir(cfg)
@@ -87,9 +99,29 @@ def list_products(cfg: dict[str, Any]) -> list[Product]:
         Product("superbias_fits_legacy", "superbias", calib_legacy / "superbias.fits", "fits", optional=True),
         Product("superflat_fits_legacy", "superflat", calib_legacy / "superflat.fits", "fits", optional=True),
 
+        # Flatfield stage (done marker)
+        Product("flatfield_done", "flatfield", flatfield / "flatfield_done.json", "json", optional=True),
+
+        # Cosmics stage
+        Product("cosmics_summary", "cosmics", cosm / "summary.json", "json", optional=True),
+
+        # SuperNeon + LineID preparation (wavesol dir)
+        Product("superneon_fits", "superneon", wsol / "superneon.fits", "fits", optional=True),
+        Product("superneon_png", "superneon", wsol / "superneon.png", "png", optional=True),
+        Product("peaks_candidates_csv", "superneon", wsol / "peaks_candidates.csv", "csv", optional=True),
+
+        Product("lineid_template_csv", "lineid_prepare", wsol / "manual_pairs_template.csv", "csv", optional=True),
+        Product("lineid_auto_csv", "lineid_prepare", wsol / "manual_pairs_auto.csv", "csv", optional=True),
+        Product("lineid_report_txt", "lineid_prepare", wsol / "lineid_report.txt", "txt", optional=True),
+        Product("hand_pairs_txt", "lineid", wsol / "hand_pairs.txt", "txt", optional=True, description="Manual line pairs (x_pix, lambda)"),
+
         # Wavesolution key artifacts
+        Product("wavesolution_1d_png", "wavesol", wsol / "wavesolution_1d.png", "png", optional=True),
+        Product("wavesolution_1d_json", "wavesol", wsol / "wavesolution_1d.json", "json", optional=True),
+        Product("wavesolution_2d_json", "wavesol", wsol / "wavesolution_2d.json", "json", optional=True),
         Product("lambda_map", "wavesol", wsol / "lambda_map.fits", "fits", optional=True),
-        Product("wavesol_solution", "wavesol", wsol / "solution.json", "json", optional=True),
+        Product("wavelength_matrix_png", "wavesol", wsol / "wavelength_matrix.png", "png", optional=True),
+        Product("residuals_2d_png", "wavesol", wsol / "residuals_2d.png", "png", optional=True),
 
         # Core science (quicklook + canonical endpoints)
         Product("lin_preview_fits", "linearize", lin / "lin_preview.fits", "fits", optional=True),
@@ -122,3 +154,61 @@ def products_by_stage(products: Iterable[Product]) -> dict[str, list[Product]]:
     for p in products:
         out.setdefault(p.stage, []).append(p)
     return out
+
+
+# Compatibility alias used by qc_report.py (older name).
+def group_by_stage(products: Iterable[Product]) -> dict[str, list[Product]]:
+    return products_by_stage(products)
+
+
+_TASK_COMPLETION: dict[str, list[list[str]]] = {
+    # Each inner list is an OR-group (any existing product from the group satisfies that requirement).
+    "manifest": [["manifest", "manifest_legacy"]],
+    "superbias": [["superbias_fits", "superbias_fits_legacy"]],
+    "superflat": [["superflat_fits", "superflat_fits_legacy"]],
+    "flatfield": [["flatfield_done"]],
+    "cosmics": [["cosmics_summary"]],
+    "superneon": [["superneon_fits", "superneon_png"]],
+    "lineid_prepare": [["lineid_template_csv"], ["lineid_auto_csv"]],
+    "lineid": [["hand_pairs_txt"]],
+    "wavesolution": [["lambda_map"], ["wavesolution_2d_json"]],
+    "linearize": [["lin_preview_fits"]],
+    "sky": [["sky_done"]],
+    "stack2d": [["stacked2d_fits"]],
+    "extract1d": [["spec1d_fits"]],
+    "qc_report": [["qc_json", "qc_json_legacy"], ["qc_html", "qc_html_legacy"]],
+}
+
+
+def products_for_task(cfg: dict[str, Any], task: str) -> list[Product]:
+    """Return products that represent completion of a task.
+
+    Used by the GUI runner for skip logic and hashing.
+    """
+
+    t = (task or "").strip().lower()
+    rules = _TASK_COMPLETION.get(t)
+    if not rules:
+        return []
+    all_products = {p.key: p for p in list_products(cfg)}
+    keys: set[str] = set(k for group in rules for k in group)
+    return [all_products[k] for k in keys if k in all_products]
+
+
+def task_is_complete(cfg: dict[str, Any], task: str) -> bool:
+    """Return True if task outputs exist on disk."""
+    t = (task or "").strip().lower()
+    rules = _TASK_COMPLETION.get(t)
+    if not rules:
+        return False
+    prods = {p.key: p for p in list_products(cfg)}
+    for group in rules:
+        ok = False
+        for k in group:
+            p = prods.get(k)
+            if p is not None and p.exists():
+                ok = True
+                break
+        if not ok:
+            return False
+    return True
