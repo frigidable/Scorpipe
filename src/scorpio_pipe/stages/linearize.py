@@ -37,6 +37,7 @@ log = get_logger(__name__)
 MASK_NO_COVERAGE = np.uint16(1 << 0)
 MASK_BAD = np.uint16(1 << 1)
 MASK_COSMIC = np.uint16(1 << 2)
+MASK_SAT = np.uint16(1 << 3)
 
 
 @dataclass
@@ -111,6 +112,63 @@ def _estimate_variance_adu(data_adu: np.ndarray, hdr: fits.Header) -> np.ndarray
     var_e = data_e + rn * rn
     var_adu = var_e / (g * g)
     return var_adu.astype(np.float32)
+
+
+
+def _guess_saturation_level_adu(hdr: fits.Header, lcfg: Dict[str, Any]) -> Optional[float]:
+    """Estimate detector saturation level in ADU.
+
+    Order of preference:
+      - config override: linearize.saturation_adu (or saturation_adu, sat_adu)
+      - header keywords: SATURATE, SATLEVEL, SAT_...
+      - common unsigned-16bit convention (BITPIX=16 with BZERO=32768 and BSCALE=1): 65535
+
+    Returns None if nothing sensible can be inferred.
+    """
+
+    # config override
+    for ck in ("saturation_adu", "sat_adu", "saturation_level_adu"):
+        if ck in lcfg and lcfg.get(ck) is not None:
+            try:
+                v = float(lcfg.get(ck))
+                if math.isfinite(v) and v > 0:
+                    return v
+            except Exception:
+                pass
+
+    # header keywords
+    for k in ("SATURATE", "SATLEVEL", "SATUR", "SATLEVEL", "SATURATION"):
+        if k in hdr:
+            try:
+                v = float(hdr[k])
+                if math.isfinite(v) and v > 0:
+                    return v
+            except Exception:
+                pass
+
+    # heuristic: unsigned 16-bit storage
+    try:
+        bitpix = int(hdr.get("BITPIX")) if hdr.get("BITPIX") is not None else None
+    except Exception:
+        bitpix = None
+    if bitpix == 16:
+        try:
+            bscale = float(hdr.get("BSCALE", 1.0))
+            bzero = float(hdr.get("BZERO", 0.0))
+        except Exception:
+            bscale, bzero = 1.0, 0.0
+        if abs(bscale - 1.0) < 1e-9 and (abs(bzero - 32768.0) < 1e-3 or abs(bzero) < 1e-3):
+            return 65535.0
+
+    # fallback: sometimes DATAMAX is close to saturation
+    try:
+        dmax = float(hdr.get("DATAMAX")) if hdr.get("DATAMAX") is not None else None
+        if dmax is not None and math.isfinite(dmax) and dmax > 60000:
+            return 65535.0
+    except Exception:
+        pass
+
+    return None
 
 
 def _lambda_edges(lam: np.ndarray) -> np.ndarray:
@@ -228,7 +286,7 @@ def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel
       - lambda_map: from wavesolution stage
       - cleaned object frames (prefer cosmics outputs if present)
 
-    Outputs (v5.13+):
+    Outputs (v5.14+):
       - products/lin/lin_preview.fits (MEF: SCI [+VAR,+MASK,+COV])  # quick-look stack for ROI/QC
       - products/lin/linearize_done.json
       - per-exposure rectified frames under products/lin/per_exp/
@@ -349,6 +407,10 @@ def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel
     coverage = np.zeros((ny, nlam), dtype=np.int16)
     mask_sum = np.zeros((ny, nlam), dtype=np.uint16)
 
+    sat_levels_adu: list[float] = []
+
+    mask_sum = np.zeros((ny, nlam), dtype=np.uint16)
+
     for i, p in enumerate(sci_paths, 1):
         if cancel_token is not None and getattr(cancel_token, "cancelled", False):
             raise RuntimeError("Cancelled")
@@ -361,8 +423,26 @@ def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel
             raise ValueError(
                 f"Science shape {data.shape} != lambda_map shape {lam_map.shape} for {p.name}"
             )
-
         var = _estimate_variance_adu(data, hdr)
+
+        # Saturation masking (optional): flag detector pixels near/above full well
+        mask_saturation = bool(lcfg.get('mask_saturation', True))
+        sat_level = _guess_saturation_level_adu(hdr, lcfg) if mask_saturation else None
+        if sat_level is not None:
+            try:
+                sat_levels_adu.append(float(sat_level))
+            except Exception:
+                pass
+        sat_margin = float(lcfg.get('saturation_margin_adu', 0.0) or 0.0)
+        satmask = None
+        if sat_level is not None and mask_saturation:
+            try:
+                thr = float(sat_level) - float(sat_margin)
+                if np.isfinite(thr):
+                    satmask = np.isfinite(data) & (data >= thr)
+            except Exception:
+                satmask = None
+
         mask = None
         base_for_mask = Path(p).stem
         if base_for_mask.endswith("_clean"):
@@ -406,9 +486,23 @@ def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel
                 )
                 rect_mask[yy, m_row > 0] |= MASK_COSMIC
 
+            if satmask is not None:
+                # propagate saturation flags through the same rebin operator
+                sm_row, _ = _rebin_row_cumulative(
+                    satmask[yy, finite].astype(np.float64), lam_row[finite], wave_edges
+                )
+                rect_mask[yy, sm_row > 0] |= MASK_SAT
+
         # Per-exposure output
         if per_exp_dir is not None:
             ohdr = _set_linear_wcs(hdr, wave0, dw)
+            # Saturation metadata (if used)
+            if sat_level is not None and mask_saturation:
+                try:
+                    ohdr["SATLEV"] = (float(sat_level), "Saturation level (ADU) used to flag MASK")
+                    ohdr["SATMARG"] = (float(sat_margin), "Saturation margin (ADU)")
+                except Exception:
+                    pass
             ohdr = add_provenance(ohdr, cfg, stage="linearize")
             _write_mef(per_exp_dir / f"{base_for_mask}_lin.fits", rect, ohdr, rect_var, rect_mask)
 
@@ -470,6 +564,13 @@ def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel
         "dw": dw,
         "nlam": nlam,
         "per_exposure": str(per_exp_dir) if per_exp_dir is not None else None,
+        "saturation": {
+            "mask_saturation": bool(lcfg.get("mask_saturation", True)),
+            "saturation_margin_adu": float(lcfg.get("saturation_margin_adu", 0.0) or 0.0),
+            "saturation_level_adu": float(np.nanmedian(sat_levels_adu)) if sat_levels_adu else None,
+            "saturation_level_min_adu": float(np.nanmin(sat_levels_adu)) if sat_levels_adu else None,
+            "saturation_level_max_adu": float(np.nanmax(sat_levels_adu)) if sat_levels_adu else None,
+        },
         "products": {
             "preview_fits": str(preview_fits),
             "preview_png": str(preview_png) if preview_png.exists() else None,

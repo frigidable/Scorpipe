@@ -45,7 +45,7 @@ def list_products(cfg: dict[str, Any]) -> list[Product]:
     calib = wd / "calib"
     cosm = wd / "cosmics"
 
-    # Canonical v5.13+ product tree
+    # Canonical v5.14+ product tree
     prod = wd / "products"
     lin = prod / "lin"
     sky = prod / "sky"
@@ -86,25 +86,25 @@ def list_products(cfg: dict[str, Any]) -> list[Product]:
         Product("wavelength_matrix", "wavesol", wsol / "wavelength_matrix.png", "png", optional=True),
         Product("residuals_2d_png", "wavesol", wsol / "residuals_2d.png", "png", optional=True),
 
-        # v5.13+ linearize / rectification (λ,y)
+        # v5.14+ linearize / rectification (λ,y)
         Product("linearize_done", "lin", lin / "linearize_done.json", "json", optional=True),
         Product("lin_preview_fits", "lin", lin / "lin_preview.fits", "fits", optional=False, description="Rectified preview stack for ROI/QC"),
         Product("lin_preview_png", "lin", lin / "lin_preview.png", "png", optional=True),
         Product("lin_per_exp_dir", "lin", lin / "per_exp", "dir", optional=False, description="Per-exposure rectified frames (SCI/VAR/MASK)"),
 
-        # v5.13+ sky subtraction (Kelson-style) per exposure
+        # v5.14+ sky subtraction (Kelson-style) per exposure
         Product("sky_done", "sky", sky / "sky_sub_done.json", "json", optional=True),
         Product("sky_per_exp_dir", "sky", sky / "per_exp", "dir", optional=False, description="Per-exposure sky-subtracted frames"),
         # Optional combined products (if running sky in single-frame mode)
         Product("sky_sub_fits", "sky", sky / "obj_sky_sub.fits", "fits", optional=True, description="Sky-subtracted combined 2D (legacy/quick)"),
         Product("sky_model_fits", "sky", sky / "sky_model.fits", "fits", optional=True, description="Sky model (legacy/quick)"),
 
-        # v5.13+ stacking in (λ,y)
+        # v5.14+ stacking in (λ,y)
         Product("stack2d_done", "stack", stack / "stack2d_done.json", "json", optional=True),
         Product("stacked2d_fits", "stack", stack / "stacked2d.fits", "fits", optional=False, description="Final stacked 2D (SCI/VAR/MASK/COV)"),
         Product("coverage_png", "stack", stack / "coverage.png", "png", optional=True),
 
-        # v5.13+ extraction
+        # v5.14+ extraction
         Product("extract1d_done", "spec", spec / "extract1d_done.json", "json", optional=True),
         Product("spec1d_fits", "spec", spec / "spec1d.fits", "fits", optional=False, description="1D spectrum (FLUX/VAR/MASK)"),
         Product("spec1d_png", "spec", spec / "spec1d.png", "png", optional=True),

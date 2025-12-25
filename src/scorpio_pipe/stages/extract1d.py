@@ -1,6 +1,6 @@
 """1D extraction for long-slit products in (λ, y).
 
-v5.13: this stage is no longer a placeholder. It supports:
+v5.14: this stage is no longer a placeholder. It supports:
   - boxcar extraction around an estimated spatial trace
   - (basic) Horne-style optimal extraction using a single profile template
 

@@ -1,5 +1,86 @@
 # Changelog
 
+## v5.16.0
+
+Цель релиза: **довести P1-фичи до “production”** — удобный выбор λ-окон в GUI, автоматический выбор единиц (Å/px) и максимально гладкая Δλ(y).
+
+### GUI: интерактивный выбор λ-окон
+- `ui/lambda_windows_dialog.py`: новый диалог **Pick λ-windows** (SpanSelector по спектру), возвращает окна в **Å** (если есть линейный WCS) или в **pix**.
+- `ui/launcher_window.py`: на странице **Sky → Advanced** добавлены:
+  - блок **Flexure correction (Δλ)**: включение, `mode full|windows`, `windows_unit auto|A|pix`, кнопка **Pick…**, параметры Δλ(y).
+  - блок **Stack2D options**: sigma-clip/maxiter и **y-alignment** с тем же механизмом λ-окон.
+
+### Flexure / Δλ(y): максимальная гладкость и стабильность
+- `stages/sky_sub.py`:
+  - `y_poly_deg` по умолчанию **1** (самый стабильный тренд),
+  - добавлено сглаживание измеренных точек `y_smooth_bins` + робастный fit с sigma-clipping (`y_sigma_clip`, `y_fit_maxiter`).
+  - режим **windows** теперь поддерживает **Å и pix** (через `windows_unit`, `windows_A`, `windows_pix`).
+
+### Bugfix: mask shifting API
+- `shift_utils.py`: `shift2d_subpix_x_mask()` теперь принимает алиас `no_coverage_bit` (GUI/sky_sub больше не падают при Δλ(y)).
+
+### Metadata
+- Обновлены `HISTORY` cards в продуктах стадий до `v5.16`.
+
+
+## v5.15.0
+
+Цель релиза: **научное качество P1** — «дотянуть до результата» на серии long-slit: гибкая коррекция дрейфа, более стабильное выравнивание по y, корректная маска насыщения.
+
+### Flexure / Δλ correction: y-dependent + windows
+- `stages/sky_sub.py`: расширена опциональная коррекция flexure:
+  - добавлен режим **Δλ(y)**: измерение сдвига по λ в нескольких y-бинах по sky-регионам и аппроксимация **полиномом** по y;
+  - добавлен режим **windows** для кросс-корреляции (использовать только заданные диапазоны λ, чтобы максимизировать S/N по линиям);
+  - сохраняются продукты QC: `*_flexure_ycurve.csv` + `*_flexure_ycurve.png` (если включено).
+- Новые параметры (Advanced) в `sky.flexure`:
+  - `y_dependent` (bool), `y_step`, `y_bin`, `y_poly_deg`, `min_score`,
+  - `mode: full|windows`, `windows_A`,
+  - `save_curve`, `save_curve_png`.
+
+### Y-alignment before stacking: full-range or windows
+- `stages/stack2d.py`: y-выравнивание теперь может строить пространственный профиль:
+  - по **всему** диапазону λ (как раньше),
+  - либо по выбранным **окнам λ** (`mode: windows`), чтобы выравнивание держалось за линии/полосы с максимальным S/N.
+
+### Saturation mask propagation
+- `stages/linearize.py`: добавлена **маска насыщения** (опционально):
+  - уровень насыщения берётся из конфига или оценивается из FITS header (эвристики для 16-bit unsigned),
+  - маска распространяется в `rect_mask` как отдельный бит (`MASK_SAT`).
+
+### Mask bits
+- Устранён конфликт битов: `stack2d` перенес `MASK_CLIPPED` на следующий бит (не пересекается с `MASK_SAT`).
+
+### Tests
+- `tests/test_subpixel_alignment.py`: добавлены тесты для новых 2D subpixel шифтеров (`shift2d_subpix_x*`).
+
+## v5.14.0
+
+Цель релиза: **научное качество P1** — аккуратные поправки на дрейф и выравнивание серии с *минимальным* доп. ресемплингом + расширение QC.
+
+### Flexure / Δλ correction (optional)
+- `stages/sky_sub.py`: добавлена **опциональная** коррекция глобального сдвига по λ *per exposure* по кросс-корреляции 1D спектра неба в sky-регионах:
+  - ищется **субпиксельный** сдвиг (parabola refinement вокруг лучшего целочисленного лага) в пределах `max_shift_pix` (по умолчанию 5), 
+  - применяется **до** построения Kelson-модели (чтобы модель работала стабильнее на серии),
+  - края, появившиеся из-за сдвига, маскируются как `MASK_NO_COVERAGE`.
+- Параметры:
+  - `sky.flexure_enabled` (Basic) / либо `sky.flexure: {enabled, max_shift_pix}` (Advanced).
+
+### Y-alignment before stacking (optional)
+- `stages/stack2d.py`: добавлено **опциональное** выравнивание кадров по y *перед* stacking:
+  - оценивается **субпиксельный** сдвиг по пространственному профилю (коллапс по λ с акцентом на положительный поток),
+  - применяется при чтении чанков через **линейную интерполяцию по y** (без повторной линеаризации по λ),
+  - формируется список `y_offsets` для QC.
+- Параметры:
+  - `stack2d.y_align_enabled` / либо `stack2d.y_align: {enabled, max_shift_pix}`.
+
+### QC improvements
+- `qc_report.py`: агрегируются новые метрики:
+  - статистики по `flexure_shift_pix/A` (median, p90_abs),
+  - статистики по `y_shift_pix` (median, p90_abs).
+
+### Schema
+- `schema.py`: добавлены ключи по умолчанию для flexure и y-align (обратная совместимость сохранена, `extra="allow"` остаётся).
+
 ## v5.13.0
 
 Цель релиза: **стабильный GUI + согласование UI ↔ научные стадии (v5.x P0)** без ломания совместимости.

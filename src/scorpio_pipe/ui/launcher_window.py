@@ -1865,6 +1865,95 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     f"Sky(bot): [{_f('sky_bot_y0')}..{_f('sky_bot_y1')}]"
                 )
 
+            # Flexure UI (optional)
+            flex = sky.get('flexure', {}) if isinstance(sky.get('flexure'), dict) else {}
+
+            def _fmt_windows(unit: str, winA, winP) -> str:
+                unit = str(unit or 'auto')
+                if unit.lower() in ('a', 'angstrom', 'å'):
+                    if not winA:
+                        return '<no windows>'
+                    return '; '.join([f"{float(a):.1f}–{float(b):.1f}" for a, b in winA]) + ' Å'
+                if unit.lower() in ('pix', 'pixel', 'pixels'):
+                    if not winP:
+                        return '<no windows>'
+                    return '; '.join([f"{int(a)}–{int(b)}" for a, b in winP]) + ' pix'
+                # auto: prefer A if present
+                if winA:
+                    return '; '.join([f"{float(a):.1f}–{float(b):.1f}" for a, b in winA]) + ' Å'
+                if winP:
+                    return '; '.join([f"{int(a)}–{int(b)}" for a, b in winP]) + ' pix'
+                return '<no windows>'
+
+            if hasattr(self, 'chk_sky_flex_enabled'):
+                with QtCore.QSignalBlocker(self.chk_sky_flex_enabled):
+                    self.chk_sky_flex_enabled.setChecked(bool(flex.get('enabled', False)))
+            if hasattr(self, 'combo_sky_flex_mode'):
+                with QtCore.QSignalBlocker(self.combo_sky_flex_mode):
+                    m = str(flex.get('mode', 'full') or 'full')
+                    idx = self.combo_sky_flex_mode.findText(m)
+                    self.combo_sky_flex_mode.setCurrentIndex(max(0, idx))
+            if hasattr(self, 'spin_sky_flex_max'):
+                with QtCore.QSignalBlocker(self.spin_sky_flex_max):
+                    self.spin_sky_flex_max.setValue(int(flex.get('max_shift_pix', 6) or 6))
+            if hasattr(self, 'combo_sky_flex_windows_unit'):
+                with QtCore.QSignalBlocker(self.combo_sky_flex_windows_unit):
+                    u = str(flex.get('windows_unit', 'auto') or 'auto')
+                    idx = self.combo_sky_flex_windows_unit.findText(u)
+                    self.combo_sky_flex_windows_unit.setCurrentIndex(max(0, idx))
+            if hasattr(self, 'chk_sky_flex_ydep'):
+                with QtCore.QSignalBlocker(self.chk_sky_flex_ydep):
+                    self.chk_sky_flex_ydep.setChecked(bool(flex.get('y_dependent', False)))
+            if hasattr(self, 'spin_sky_flex_y_poly'):
+                with QtCore.QSignalBlocker(self.spin_sky_flex_y_poly):
+                    self.spin_sky_flex_y_poly.setValue(int(flex.get('y_poly_deg', 1) or 1))
+            if hasattr(self, 'spin_sky_flex_y_smooth'):
+                with QtCore.QSignalBlocker(self.spin_sky_flex_y_smooth):
+                    self.spin_sky_flex_y_smooth.setValue(int(flex.get('y_smooth_bins', 5) or 5))
+            if hasattr(self, 'dspin_sky_flex_min_score'):
+                with QtCore.QSignalBlocker(self.dspin_sky_flex_min_score):
+                    self.dspin_sky_flex_min_score.setValue(float(flex.get('min_score', 0.06) or 0.06))
+            if hasattr(self, 'lbl_sky_flex_windows'):
+                u = str(flex.get('windows_unit', 'auto') or 'auto')
+                winA = flex.get('windows_A') or flex.get('windows') or flex.get('windows_angstrom') or []
+                winP = flex.get('windows_pix') or flex.get('windows_pixels') or []
+                self.lbl_sky_flex_windows.setText(_fmt_windows(u, winA, winP))
+
+            # Stack2D UI (optional)
+            st = cfg.get('stack2d', {}) if isinstance(cfg.get('stack2d'), dict) else {}
+            ya = st.get('y_align', {}) if isinstance(st.get('y_align'), dict) else {}
+
+            if hasattr(self, 'dspin_stack_sigma'):
+                with QtCore.QSignalBlocker(self.dspin_stack_sigma):
+                    self.dspin_stack_sigma.setValue(float(st.get('sigma_clip', 3.0) or 3.0))
+            if hasattr(self, 'spin_stack_maxiter'):
+                with QtCore.QSignalBlocker(self.spin_stack_maxiter):
+                    self.spin_stack_maxiter.setValue(int(st.get('maxiter', 6) or 6))
+            if hasattr(self, 'chk_stack_y_align'):
+                with QtCore.QSignalBlocker(self.chk_stack_y_align):
+                    self.chk_stack_y_align.setChecked(bool(ya.get('enabled', False)))
+            if hasattr(self, 'spin_stack_y_align_max'):
+                with QtCore.QSignalBlocker(self.spin_stack_y_align_max):
+                    self.spin_stack_y_align_max.setValue(int(ya.get('max_shift_pix', 8) or 8))
+            if hasattr(self, 'combo_stack_y_align_mode'):
+                with QtCore.QSignalBlocker(self.combo_stack_y_align_mode):
+                    m = str(ya.get('mode', 'full') or 'full')
+                    idx = self.combo_stack_y_align_mode.findText(m)
+                    self.combo_stack_y_align_mode.setCurrentIndex(max(0, idx))
+            if hasattr(self, 'combo_stack_y_align_windows_unit'):
+                with QtCore.QSignalBlocker(self.combo_stack_y_align_windows_unit):
+                    u = str(ya.get('windows_unit', 'auto') or 'auto')
+                    idx = self.combo_stack_y_align_windows_unit.findText(u)
+                    self.combo_stack_y_align_windows_unit.setCurrentIndex(max(0, idx))
+            if hasattr(self, 'chk_stack_y_align_pos'):
+                with QtCore.QSignalBlocker(self.chk_stack_y_align_pos):
+                    self.chk_stack_y_align_pos.setChecked(bool(ya.get('use_positive_flux', True)))
+            if hasattr(self, 'lbl_stack_y_align_windows'):
+                u = str(ya.get('windows_unit', 'auto') or 'auto')
+                winA = ya.get('windows_A') or ya.get('windows') or ya.get('windows_angstrom') or []
+                winP = ya.get('windows_pix') or ya.get('windows_pixels') or []
+                self.lbl_stack_y_align_windows.setText(_fmt_windows(u, winA, winP))
+
         # --- Extract 1D ---
         if hasattr(self, 'chk_ex1d_enabled') and not self._stage_dirty.get('extract1d', False):
             ex = cfg.get('extract1d', {}) if isinstance(cfg.get('extract1d'), dict) else {}
@@ -4336,6 +4425,238 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         pl.addWidget(basic)
 
+        adv_w, adv_l, _ = _collapsible("Advanced", expanded=False)
+
+        # Flexure correction (Δλ)
+        gflex = _box("Flexure correction (Δλ)")
+        fl = QtWidgets.QFormLayout(gflex)
+        fl.setLabelAlignment(QtCore.Qt.AlignLeft)
+        fl.setHorizontalSpacing(12)
+
+        self.chk_sky_flex_enabled = QtWidgets.QCheckBox("Enable")
+        fl.addRow(
+            self._param_label(
+                "Flexure",
+                "Коррекция сдвига Δλ по sky-линиям (кросс-корреляция).\n"
+                "Рекомендовано, если есть флексия/дрейф.\n"
+                "Типично: включено.\n",
+            ),
+            self.chk_sky_flex_enabled,
+        )
+
+        self.combo_sky_flex_mode = QtWidgets.QComboBox()
+        self.combo_sky_flex_mode.addItems(["full", "windows"])
+        fl.addRow(
+            self._param_label(
+                "Mode",
+                "full: использовать весь спектр.\n"
+                "windows: только выбранные окна (макс. S/N) — стабильнее.\n"
+                "Типично: windows.\n",
+            ),
+            self.combo_sky_flex_mode,
+        )
+
+        self.spin_sky_flex_max = QtWidgets.QSpinBox()
+        self.spin_sky_flex_max.setRange(0, 50)
+        self.spin_sky_flex_max.setSingleStep(1)
+        fl.addRow(
+            self._param_label(
+                "Max shift [pix]",
+                "Максимальный допустимый сдвиг в пикселях по λ (субпиксельно внутри).\n"
+                "Типично: 2–10 pix.\n",
+            ),
+            self.spin_sky_flex_max,
+        )
+
+        self.combo_sky_flex_windows_unit = QtWidgets.QComboBox()
+        self.combo_sky_flex_windows_unit.addItems(["auto", "A", "pix"])
+        fl.addRow(
+            self._param_label(
+                "Windows units",
+                "Единицы окон: auto = Å если кадр уже в длинах волн, иначе пиксели.\n"
+                "Типично: auto.\n",
+            ),
+            self.combo_sky_flex_windows_unit,
+        )
+
+        row_w = QtWidgets.QWidget()
+        row_w_l = QtWidgets.QHBoxLayout(row_w)
+        row_w_l.setContentsMargins(0, 0, 0, 0)
+        self.lbl_sky_flex_windows = QtWidgets.QLabel("<no windows>")
+        self.lbl_sky_flex_windows.setWordWrap(True)
+        self.btn_sky_flex_pick_windows = QtWidgets.QPushButton("Pick…")
+        row_w_l.addWidget(self.lbl_sky_flex_windows, 1)
+        row_w_l.addWidget(self.btn_sky_flex_pick_windows)
+        fl.addRow(
+            self._param_label(
+                "λ windows",
+                "Диапазоны по X для кросс-корреляции.\n"
+                "Выбирайте окна с яркими и узкими линиями (макс. S/N).\n"
+                "Типично: 2–6 окон.\n",
+            ),
+            row_w,
+        )
+
+        self.chk_sky_flex_ydep = QtWidgets.QCheckBox("Δλ(y)")
+        fl.addRow(
+            self._param_label(
+                "y-dependent",
+                "Разрешить зависимость сдвига от y вдоль щели.\n"
+                "Сглаженный низкий порядок полинома (макс. стабильность).\n"
+                "Типично: выключено (включать при явном градиенте).\n",
+            ),
+            self.chk_sky_flex_ydep,
+        )
+
+        self.spin_sky_flex_y_poly = QtWidgets.QSpinBox()
+        self.spin_sky_flex_y_poly.setRange(0, 3)
+        self.spin_sky_flex_y_poly.setSingleStep(1)
+        fl.addRow(
+            self._param_label(
+                "Poly deg",
+                "Порядок полинома для Δλ(y).\n"
+                "0 = константа, 1 = линейно.\n"
+                "Типично: 1.\n",
+            ),
+            self.spin_sky_flex_y_poly,
+        )
+
+        self.spin_sky_flex_y_smooth = QtWidgets.QSpinBox()
+        self.spin_sky_flex_y_smooth.setRange(1, 21)
+        self.spin_sky_flex_y_smooth.setSingleStep(2)
+        fl.addRow(
+            self._param_label(
+                "Smooth bins",
+                "Медианная гладкость для измеренных точек Δλ(y) перед фиттом.\n"
+                "1 = без сглаживания.\n"
+                "Типично: 3–7.\n",
+            ),
+            self.spin_sky_flex_y_smooth,
+        )
+
+        self.dspin_sky_flex_min_score = QtWidgets.QDoubleSpinBox()
+        self.dspin_sky_flex_min_score.setRange(0.0, 1.0)
+        self.dspin_sky_flex_min_score.setDecimals(3)
+        self.dspin_sky_flex_min_score.setSingleStep(0.05)
+        fl.addRow(
+            self._param_label(
+                "Min score",
+                "Минимальный score кросс-корреляции; ниже — сдвиг игнорируется.\n"
+                "Типично: 0.02–0.2.\n",
+            ),
+            self.dspin_sky_flex_min_score,
+        )
+
+        adv_l.addWidget(gflex)
+
+        # Stack2D tuning (runs after sky if enabled)
+        gstack = _box("Stack2D (after sky)")
+        sl = QtWidgets.QFormLayout(gstack)
+        sl.setLabelAlignment(QtCore.Qt.AlignLeft)
+        sl.setHorizontalSpacing(12)
+
+        self.dspin_stack_sigma = QtWidgets.QDoubleSpinBox()
+        self.dspin_stack_sigma.setRange(0.0, 10.0)
+        self.dspin_stack_sigma.setDecimals(2)
+        self.dspin_stack_sigma.setSingleStep(0.25)
+        self.dspin_stack_sigma.setToolTip("0 = disable")
+        sl.addRow(
+            self._param_label(
+                "Sigma clip",
+                "Сигма-клиппинг при объединении (stack2d). 0 = отключить.\n"
+                "Типично: 2–4.\n",
+            ),
+            self.dspin_stack_sigma,
+        )
+
+        self.spin_stack_maxiter = QtWidgets.QSpinBox()
+        self.spin_stack_maxiter.setRange(1, 20)
+        self.spin_stack_maxiter.setSingleStep(1)
+        sl.addRow(
+            self._param_label(
+                "Max iters",
+                "Итерации клиппинга.\n"
+                "Типично: 3–8.\n",
+            ),
+            self.spin_stack_maxiter,
+        )
+
+        self.chk_stack_y_align = QtWidgets.QCheckBox("Enable")
+        sl.addRow(
+            self._param_label(
+                "y-align",
+                "Выравнивание по y перед stacking (субпиксельно).\n"
+                "Полезно при дрейфе/дизеринге.\n"
+                "Типично: выключено, включать если заметен сдвиг.\n",
+            ),
+            self.chk_stack_y_align,
+        )
+
+        self.spin_stack_y_align_max = QtWidgets.QSpinBox()
+        self.spin_stack_y_align_max.setRange(0, 50)
+        self.spin_stack_y_align_max.setSingleStep(1)
+        sl.addRow(
+            self._param_label(
+                "Max y-shift [pix]",
+                "Ограничение для y-shift.\n"
+                "Типично: 2–15.\n",
+            ),
+            self.spin_stack_y_align_max,
+        )
+
+        self.combo_stack_y_align_mode = QtWidgets.QComboBox()
+        self.combo_stack_y_align_mode.addItems(["full", "windows"])
+        sl.addRow(
+            self._param_label(
+                "Mode",
+                "full: весь спектр. windows: только выбранные окна (макс. S/N).\n"
+                "Типично: windows.\n",
+            ),
+            self.combo_stack_y_align_mode,
+        )
+
+        self.combo_stack_y_align_windows_unit = QtWidgets.QComboBox()
+        self.combo_stack_y_align_windows_unit.addItems(["auto", "A", "pix"])
+        sl.addRow(
+            self._param_label(
+                "Windows units",
+                "auto = Å если есть WCS по λ, иначе пиксели.\n"
+                "Типично: auto.\n",
+            ),
+            self.combo_stack_y_align_windows_unit,
+        )
+
+        row_sw = QtWidgets.QWidget()
+        row_sw_l = QtWidgets.QHBoxLayout(row_sw)
+        row_sw_l.setContentsMargins(0, 0, 0, 0)
+        self.lbl_stack_y_align_windows = QtWidgets.QLabel("<no windows>")
+        self.lbl_stack_y_align_windows.setWordWrap(True)
+        self.btn_stack_pick_windows = QtWidgets.QPushButton("Pick…")
+        row_sw_l.addWidget(self.lbl_stack_y_align_windows, 1)
+        row_sw_l.addWidget(self.btn_stack_pick_windows)
+        sl.addRow(
+            self._param_label(
+                "λ windows",
+                "Окна по X для построения профиля и y-xcorr.\n"
+                "Типично: те же, что и для flexure.\n",
+            ),
+            row_sw,
+        )
+
+        self.chk_stack_y_align_pos = QtWidgets.QCheckBox("Use positive flux")
+        sl.addRow(
+            self._param_label(
+                "Positive only",
+                "В профиле учитывать только положительный поток (стабильнее при шуме).\n"
+                "Типично: включено.\n",
+            ),
+            self.chk_stack_y_align_pos,
+        )
+
+        adv_l.addWidget(gstack)
+
+        pl.addWidget(adv_w)
+
         pl.addWidget(self._mk_stage_apply_row("sky"))
         gl.addWidget(gpar)
 
@@ -4400,6 +4721,57 @@ class LauncherWindow(QtWidgets.QMainWindow):
             lambda _: self._stage_set_pending("sky", "sky.save_per_exp_model", bool(self.chk_sky_save_models.isChecked()))
         )
 
+        # --- Advanced: flexure (Δλ) ---
+        self.chk_sky_flex_enabled.stateChanged.connect(
+            lambda _: self._stage_set_pending("sky", "sky.flexure.enabled", bool(self.chk_sky_flex_enabled.isChecked()))
+        )
+        self.combo_sky_flex_mode.currentTextChanged.connect(
+            lambda t: self._stage_set_pending("sky", "sky.flexure.mode", str(t))
+        )
+        self.spin_sky_flex_max.valueChanged.connect(
+            lambda v: self._stage_set_pending("sky", "sky.flexure.max_shift_pix", int(v))
+        )
+        self.combo_sky_flex_windows_unit.currentTextChanged.connect(
+            lambda t: self._stage_set_pending("sky", "sky.flexure.windows_unit", str(t))
+        )
+        self.chk_sky_flex_ydep.stateChanged.connect(
+            lambda _: self._stage_set_pending("sky", "sky.flexure.y_dependent", bool(self.chk_sky_flex_ydep.isChecked()))
+        )
+        self.spin_sky_flex_y_poly.valueChanged.connect(
+            lambda v: self._stage_set_pending("sky", "sky.flexure.y_poly_deg", int(v))
+        )
+        self.spin_sky_flex_y_smooth.valueChanged.connect(
+            lambda v: self._stage_set_pending("sky", "sky.flexure.y_smooth_bins", int(v))
+        )
+        self.dspin_sky_flex_min_score.valueChanged.connect(
+            lambda v: self._stage_set_pending("sky", "sky.flexure.min_score", float(v))
+        )
+        self.btn_sky_flex_pick_windows.clicked.connect(lambda: self._do_pick_lambda_windows(cfg_prefix="sky.flexure"))
+
+        # --- Advanced: stack2d tuning / y-align ---
+        self.dspin_stack_sigma.valueChanged.connect(
+            lambda v: self._stage_set_pending("sky", "stack2d.sigma_clip", float(v))
+        )
+        self.spin_stack_maxiter.valueChanged.connect(
+            lambda v: self._stage_set_pending("sky", "stack2d.maxiter", int(v))
+        )
+        self.chk_stack_y_align.stateChanged.connect(
+            lambda _: self._stage_set_pending("sky", "stack2d.y_align.enabled", bool(self.chk_stack_y_align.isChecked()))
+        )
+        self.spin_stack_y_align_max.valueChanged.connect(
+            lambda v: self._stage_set_pending("sky", "stack2d.y_align.max_shift_pix", int(v))
+        )
+        self.combo_stack_y_align_mode.currentTextChanged.connect(
+            lambda t: self._stage_set_pending("sky", "stack2d.y_align.mode", str(t))
+        )
+        self.combo_stack_y_align_windows_unit.currentTextChanged.connect(
+            lambda t: self._stage_set_pending("sky", "stack2d.y_align.windows_unit", str(t))
+        )
+        self.chk_stack_y_align_pos.stateChanged.connect(
+            lambda _: self._stage_set_pending("sky", "stack2d.y_align.use_positive_flux", bool(self.chk_stack_y_align_pos.isChecked()))
+        )
+        self.btn_stack_pick_windows.clicked.connect(lambda: self._do_pick_lambda_windows(cfg_prefix="stack2d.y_align"))
+
         self.btn_sky_select_roi.clicked.connect(self._do_select_sky_rois)
         self.btn_run_sky.clicked.connect(self._do_run_sky)
         self.btn_qc_sky.clicked.connect(self._open_qc_viewer)
@@ -4431,6 +4803,48 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 r = dlg.roi.to_dict()
                 for k, v in r.items():
                     self._stage_set_pending("sky", f"sky.roi.{k}", int(v))
+                self._sync_stage_controls_from_cfg()
+        except Exception as e:
+            self._log_exception(e)
+
+
+    def _do_pick_lambda_windows(self, *, cfg_prefix: str) -> None:
+        """Interactive selection of λ/pixel windows and store into config.
+
+        cfg_prefix examples:
+        - "sky.flexure"
+        - "stack2d.y_align"
+        """
+        from scorpio_pipe.ui.lambda_windows_dialog import LambdaWindowsDialog
+
+        # We select on a linearized preview if possible; otherwise on the first available rectified frame.
+        if not self._ensure_cfg_saved():
+            return
+        try:
+            ctx = load_context(self._cfg_path)
+            work = resolve_work_dir(ctx.cfg)
+            fits_path = work / "products" / "lin" / "lin_preview.fits"
+            if not fits_path.exists():
+                fits_path = work / "lin" / "obj_sum_lin.fits"
+            if not fits_path.exists():
+                # try any per-exp sky frame
+                cand = list((work / "products" / "sky" / "per_exp").glob('*.fits'))
+                if cand:
+                    fits_path = cand[0]
+            if not fits_path.exists():
+                self._log_warn("No rectified frame found. Run Linearize first.")
+                return
+
+            roi = (self._cfg.get("sky", {}) or {}).get("roi", {}) or {}
+            dlg = LambdaWindowsDialog(fits_path, roi, parent=self)
+            if dlg.exec() == QtWidgets.QDialog.Accepted:
+                d = dlg.windows.to_dict()
+                unit = str(d.get("unit", "auto")).strip()
+                winA = d.get("windows_A", []) or []
+                winP = d.get("windows_pix", []) or []
+                self._stage_set_pending("sky", f"{cfg_prefix}.windows_unit", unit)
+                self._stage_set_pending("sky", f"{cfg_prefix}.windows_A", winA)
+                self._stage_set_pending("sky", f"{cfg_prefix}.windows_pix", winP)
                 self._sync_stage_controls_from_cfg()
         except Exception as e:
             self._log_exception(e)

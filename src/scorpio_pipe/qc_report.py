@@ -153,24 +153,47 @@ def _metrics_sky(products: list[Product]) -> dict[str, Any]:
     if not p:
         return {}
     js = _read_json(p) or {}
-    per = js.get("per_exposure") or []
+    per = js.get("per_exposure") or js.get("per_exp") or []
     rms = []
+    sh_pix = []
+    sh_A = []
     for r in per:
         try:
-            m = r.get("metrics") or {}
+            m = r.get("metrics") or r.get("qc") or {}
             v = float(m.get("rms_sky"))
             if np.isfinite(v):
                 rms.append(v)
+                try:
+                    sp = m.get("flexure_shift_pix")
+                    if sp is not None:
+                        spv = float(sp)
+                        if np.isfinite(spv):
+                            sh_pix.append(spv)
+                    sa = m.get("flexure_shift_A")
+                    if sa is not None:
+                        sav = float(sa)
+                        if np.isfinite(sav):
+                            sh_A.append(sav)
+                except Exception:
+                    pass
         except Exception:
             continue
-    out: dict[str, Any] = {
-        "n_frames": int(js.get("n_frames", len(per))) if js.get("n_frames") is not None else len(per),
-    }
+    out: dict[str, Any] = {"n_frames": int(len(per))}
     if rms:
         out.update({
             "rms_sky_median": float(np.median(rms)),
             "rms_sky_p90": float(np.percentile(rms, 90)),
         })
+        if sh_pix:
+            out.update({
+                "flexure_shift_pix_median": float(np.median(sh_pix)),
+                "flexure_shift_pix_p90_abs": float(np.percentile(np.abs(sh_pix), 90)),
+            })
+        if sh_A:
+            out.update({
+                "flexure_shift_A_median": float(np.median(sh_A)),
+                "flexure_shift_A_p90_abs": float(np.percentile(np.abs(sh_A), 90)),
+            })
     return out
 
 
@@ -179,11 +202,24 @@ def _metrics_stack(products: list[Product]) -> dict[str, Any]:
     if not p:
         return {}
     js = _read_json(p) or {}
-    return {
+    out: dict[str, Any] = {
         "n_inputs": js.get("n_inputs"),
         "shape": js.get("shape"),
         "method": js.get("method"),
+        "y_align_enabled": js.get("y_align_enabled"),
     }
+    offs = js.get("y_offsets") or []
+    try:
+        vals = [float(o.get("y_shift_pix")) for o in offs if o and (o.get("y_shift_pix") is not None)]
+        vals = [v for v in vals if np.isfinite(v)]
+        if vals:
+            out.update({
+                "y_shift_pix_median": float(np.median(vals)),
+                "y_shift_pix_p90_abs": float(np.percentile(np.abs(vals), 90)),
+            })
+    except Exception:
+        pass
+    return out
 
 
 def _metrics_spec(products: list[Product]) -> dict[str, Any]:

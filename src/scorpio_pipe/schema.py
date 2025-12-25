@@ -222,6 +222,11 @@ class SkyBlock(BaseModel):
     # Save a quick-look 1D sky spectrum (mean over sky rows). Useful for QC.
     save_spectrum_1d: bool = True
 
+    # P1: optional flexure (global Δλ) correction per exposure using sky lines (subpixel shift on λ-grid).
+    flexure_enabled: bool = False
+    flexure_max_shift_pix: int = 5
+    flexure: Optional[Dict[str, Any]] = None  # advanced options container
+
     # Region of interest (pixel indices in the *linearized* frame)
     roi: Dict[str, Any] = Field(default_factory=dict)
 
@@ -247,6 +252,12 @@ class Stack2DBlock(BaseModel):
     sigma_clip: float = 4.0
     maxiter: int = 3
     chunk_rows: int = 128
+
+    # P1: optional y-alignment before stacking (subpixel shift on y-grid).
+    y_align_enabled: bool = False
+    y_align_max_shift_pix: int = 10
+    y_align: Optional[Dict[str, Any]] = None  # advanced options container
+
     save_png: bool = True
 
 
