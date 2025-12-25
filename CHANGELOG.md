@@ -1,3 +1,14 @@
+## v5.23.0
+
+### GUI: fixed "Save/Apply/Run does nothing" regressions
+- **Hardened YAML sync and stage control syncing**: the GUI no longer crashes silently if the user edits YAML values as strings or leaves a numeric field half-typed.
+- **Config save** now uses a reliable target path:
+  - prefers the path from the *Project* page (if set),
+  - falls back to *work dir* when available,
+  - otherwise asks for a file via **Save As…**.
+- **Better feedback**: errors are shown via message boxes + log panel; successful Save/Apply shows a short status-bar message.
+- **Apply now force-commits active spinbox edits** (interprets text before applying) to avoid the common Qt pitfall where the value is not yet converted.
+
 ## v5.22.0
 
 ### Frames: FITS preview now works for SCORPIO headers + DS9-like basics

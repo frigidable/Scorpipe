@@ -128,6 +128,40 @@ def _yaml_dump(cfg: dict[str, Any]) -> str:
     return yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True)
 
 
+def _safe_int(v: Any, default: int) -> int:
+    """Best-effort int conversion for UI sync.
+
+    The YAML editor is user-editable, so values can be stored as strings.
+    This helper prevents GUI callbacks from crashing on non-numeric input.
+    """
+
+    if v is None:
+        return default
+    if isinstance(v, bool):
+        return int(v)
+    if isinstance(v, (int,)):
+        return int(v)
+    try:
+        # tolerate "3", "3.0", "  3  "
+        return int(float(str(v).strip()))
+    except Exception:
+        return default
+
+
+def _safe_float(v: Any, default: float) -> float:
+    """Best-effort float conversion for UI sync."""
+    if v is None:
+        return default
+    if isinstance(v, bool):
+        return float(v)
+    if isinstance(v, (int, float)):
+        return float(v)
+    try:
+        return float(str(v).strip())
+    except Exception:
+        return default
+
+
 def _rel_to_workdir(work_dir: Path, p: Path) -> str:
     try:
         return str(p.resolve().relative_to(work_dir.resolve()))
@@ -1451,9 +1485,18 @@ class LauncherWindow(QtWidgets.QMainWindow):
         if err:
             self._log_error(f"YAML invalid: {err}")
             return False
+        # Parsing succeeded; keep internal cfg even if UI sync fails.
         self._cfg = cfg
-        self._refresh_outputs_panels()
-        self._sync_stage_controls_from_cfg()
+        try:
+            self._refresh_outputs_panels()
+        except Exception as e:
+            # UI-only; must not block saving/running.
+            self._log_exception(e)
+        try:
+            self._sync_stage_controls_from_cfg()
+        except Exception as e:
+            # UI-only; must not block saving/running.
+            self._log_exception(e)
         return True
 
     def _refresh_outputs_panels(self) -> None:
@@ -1475,22 +1518,69 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 pass
 
     def _do_save_cfg(self) -> None:
+        # Resolve target path.
+        if not self._cfg_path:
+            # prefer the explicit field on the Project page (users often edit it manually)
+            ptxt = getattr(self, "edit_cfg_path", None).text().strip() if hasattr(self, "edit_cfg_path") else ""
+            if ptxt:
+                try:
+                    self._cfg_path = Path(ptxt).expanduser().resolve()
+                except Exception:
+                    self._cfg_path = None
+
         if not self._cfg_path:
             # infer from work_dir
-            wd = Path(self.edit_work_dir.text()).expanduser()
-            if wd:
-                wd.mkdir(parents=True, exist_ok=True)
-                self._cfg_path = (wd / "config.yaml").resolve()
+            wd_txt = (self.edit_work_dir.text() or "").strip() if hasattr(self, "edit_work_dir") else ""
+            if wd_txt:
+                wd = Path(wd_txt).expanduser()
+                try:
+                    wd.mkdir(parents=True, exist_ok=True)
+                    self._cfg_path = (wd / "config.yaml").resolve()
+                except Exception:
+                    self._cfg_path = None
+
+        if not self._cfg_path:
+            # last resort: ask user
+            try:
+                fn, _ = QtWidgets.QFileDialog.getSaveFileName(
+                    self,
+                    "Save config.yaml",
+                    str(Path.home() / "config.yaml"),
+                    "YAML (*.yaml *.yml)",
+                )
+                if fn:
+                    self._cfg_path = Path(fn).expanduser().resolve()
+            except Exception:
+                self._cfg_path = None
+
         if not self._cfg_path:
             self._log_error("No config path")
             return
+
         if not self._sync_cfg_from_editor():
             return
+
         txt = self.editor_yaml.toPlainText()
-        self._cfg_path.write_text(txt, encoding="utf-8")
+        try:
+            self._cfg_path.parent.mkdir(parents=True, exist_ok=True)
+            self._cfg_path.write_text(txt, encoding="utf-8")
+        except Exception as e:
+            self._log_exception(e)
+            self._show_msg("Save failed", [f"Cannot write: {self._cfg_path}", str(e)], icon="error")
+            return
+
         self._yaml_saved_text = txt
+        try:
+            if hasattr(self, "edit_cfg_path"):
+                self.edit_cfg_path.setText(str(self._cfg_path))
+        except Exception:
+            pass
         self._log_info(f"Saved: {self._cfg_path}")
         self.lbl_cfg_state.setText(f"Saved: {self._cfg_path.name}")
+        try:
+            self.statusBar().showMessage("Saved", 2000)
+        except Exception:
+            pass
         self._update_enables()
         self._refresh_statusbar()
 
@@ -1543,6 +1633,17 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._set_stage_dirty(stage, True)
 
     def _stage_apply(self, stage: str) -> None:
+        # If a user is typing in a spinbox and immediately clicks Apply,
+        # Qt might not have interpreted the text into the numeric value yet.
+        # Force-commit the current editor widget to avoid "Apply does nothing".
+        try:
+            fw = QtWidgets.QApplication.focusWidget()
+            if isinstance(fw, QtWidgets.QAbstractSpinBox):
+                fw.interpretText()
+            QtWidgets.QApplication.processEvents()
+        except Exception:
+            pass
+
         pending = dict(self._stage_pending.get(stage, {}) or {})
         if not pending:
             self._set_stage_dirty(stage, False)
@@ -1561,6 +1662,15 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._set_stage_dirty(stage, False)
         try:
             self._sync_stage_controls_from_cfg()
+        except Exception as e:
+            # Do not block applying: this is UI-only.
+            self._log_exception(e)
+        try:
+            self.statusBar().showMessage("Применено", 1500)
+        except Exception:
+            pass
+        try:
+            self._log_info(f"Applied: {stage}")
         except Exception:
             pass
 
@@ -1659,7 +1769,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 self.combo_bias_combine.setCurrentIndex(max(0, idx))
             if hasattr(self, 'spin_bias_sigma_clip'):
                 with QtCore.QSignalBlocker(self.spin_bias_sigma_clip):
-                    self.spin_bias_sigma_clip.setValue(float(calib.get('bias_sigma_clip', 0.0) or 0.0))
+                    self.spin_bias_sigma_clip.setValue(_safe_float(calib.get('bias_sigma_clip', 0.0), 0.0))
 
         # --- Cosmics ---
         if hasattr(self, 'chk_cosmics_obj') and not self._stage_dirty.get('cosmics', False):
@@ -1684,7 +1794,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     self.combo_cosmics_method.setCurrentIndex(max(0, idx))
             if hasattr(self, 'spin_cosmics_k'):
                 with QtCore.QSignalBlocker(self.spin_cosmics_k):
-                    self.spin_cosmics_k.setValue(float(self._cfg_get(cfg, ['cosmics', 'k'], 9.0) or 9.0))
+                    self.spin_cosmics_k.setValue(_safe_float(self._cfg_get(cfg, ['cosmics', 'k'], 9.0), 9.0))
             if hasattr(self, 'chk_cosmics_bias'):
                 with QtCore.QSignalBlocker(self.chk_cosmics_bias):
                     self.chk_cosmics_bias.setChecked(bool(self._cfg_get(cfg, ['cosmics', 'bias_subtract'], True)))
@@ -1717,10 +1827,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
         # --- SuperNeon ---
         if hasattr(self, 'spin_sn_y_half') and not self._stage_dirty.get('superneon', False):
             with QtCore.QSignalBlocker(self.spin_sn_y_half):
-                self.spin_sn_y_half.setValue(int(self._cfg_get(cfg, ['wavesol', 'y_half'], 20) or 20))
+                self.spin_sn_y_half.setValue(_safe_int(self._cfg_get(cfg, ['wavesol', 'y_half'], 20), 20))
             if hasattr(self, 'spin_sn_xshift'):
                 with QtCore.QSignalBlocker(self.spin_sn_xshift):
-                    self.spin_sn_xshift.setValue(int(self._cfg_get(cfg, ['wavesol', 'xshift_max_abs'], 2) or 2))
+                    self.spin_sn_xshift.setValue(_safe_int(self._cfg_get(cfg, ['wavesol', 'xshift_max_abs'], 2), 2))
             if hasattr(self, 'chk_sn_bias_sub'):
                 with QtCore.QSignalBlocker(self.chk_sn_bias_sub):
                     self.chk_sn_bias_sub.setChecked(bool(self._cfg_get(cfg, ['superneon', 'bias_sub'], True)))
@@ -1728,22 +1838,22 @@ class LauncherWindow(QtWidgets.QMainWindow):
             noise = self._cfg_get(cfg, ['wavesol', 'noise'], {}) or {}
             if hasattr(self, 'spin_sn_bl_bin'):
                 with QtCore.QSignalBlocker(self.spin_sn_bl_bin):
-                    self.spin_sn_bl_bin.setValue(int(noise.get('baseline_bin_size', 32) or 32))
+                    self.spin_sn_bl_bin.setValue(_safe_int(noise.get('baseline_bin_size', 32), 32))
             if hasattr(self, 'dspin_sn_bl_q'):
                 with QtCore.QSignalBlocker(self.dspin_sn_bl_q):
-                    self.dspin_sn_bl_q.setValue(float(noise.get('baseline_quantile', 0.2) or 0.2))
+                    self.dspin_sn_bl_q.setValue(_safe_float(noise.get('baseline_quantile', 0.2), 0.2))
             if hasattr(self, 'spin_sn_bl_smooth'):
                 with QtCore.QSignalBlocker(self.spin_sn_bl_smooth):
-                    self.spin_sn_bl_smooth.setValue(int(noise.get('baseline_smooth_bins', 5) or 5))
+                    self.spin_sn_bl_smooth.setValue(_safe_int(noise.get('baseline_smooth_bins', 5), 5))
             if hasattr(self, 'dspin_sn_empty_q'):
                 with QtCore.QSignalBlocker(self.dspin_sn_empty_q):
-                    self.dspin_sn_empty_q.setValue(float(noise.get('empty_quantile', 0.7) or 0.7))
+                    self.dspin_sn_empty_q.setValue(_safe_float(noise.get('empty_quantile', 0.7), 0.7))
             if hasattr(self, 'dspin_sn_clip'):
                 with QtCore.QSignalBlocker(self.dspin_sn_clip):
-                    self.dspin_sn_clip.setValue(float(noise.get('clip', 3.5) or 3.5))
+                    self.dspin_sn_clip.setValue(_safe_float(noise.get('clip', 3.5), 3.5))
             if hasattr(self, 'spin_sn_niter'):
                 with QtCore.QSignalBlocker(self.spin_sn_niter):
-                    self.spin_sn_niter.setValue(int(noise.get('n_iter', 3) or 3))
+                    self.spin_sn_niter.setValue(_safe_int(noise.get('n_iter', 3), 3))
             # peaks
             for key, attr, default in [
                 ('peak_snr', 'dspin_sn_peak_snr', 4.5),
@@ -1753,27 +1863,27 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 if hasattr(self, attr):
                     w = getattr(self, attr)
                     with QtCore.QSignalBlocker(w):
-                        w.setValue(float(self._cfg_get(cfg, ['wavesol', key], default) or default))
+                        w.setValue(_safe_float(self._cfg_get(cfg, ['wavesol', key], default), float(default)))
             if hasattr(self, 'spin_sn_peak_dist'):
                 with QtCore.QSignalBlocker(self.spin_sn_peak_dist):
-                    self.spin_sn_peak_dist.setValue(int(self._cfg_get(cfg, ['wavesol', 'peak_distance'], 3) or 3))
+                    self.spin_sn_peak_dist.setValue(_safe_int(self._cfg_get(cfg, ['wavesol', 'peak_distance'], 3), 3))
             if hasattr(self, 'chk_sn_autotune'):
                 with QtCore.QSignalBlocker(self.chk_sn_autotune):
                     self.chk_sn_autotune.setChecked(bool(self._cfg_get(cfg, ['wavesol', 'peak_autotune'], True)))
             if hasattr(self, 'spin_sn_target_min'):
                 with QtCore.QSignalBlocker(self.spin_sn_target_min):
-                    self.spin_sn_target_min.setValue(int(self._cfg_get(cfg, ['wavesol', 'peak_target_min'], 0) or 0))
+                    self.spin_sn_target_min.setValue(_safe_int(self._cfg_get(cfg, ['wavesol', 'peak_target_min'], 0), 0))
             if hasattr(self, 'spin_sn_target_max'):
                 with QtCore.QSignalBlocker(self.spin_sn_target_max):
-                    self.spin_sn_target_max.setValue(int(self._cfg_get(cfg, ['wavesol', 'peak_target_max'], 0) or 0))
+                    self.spin_sn_target_max.setValue(_safe_int(self._cfg_get(cfg, ['wavesol', 'peak_target_max'], 0), 0))
 
         # --- LineID (GUI) ---
         if hasattr(self, 'dspin_lineid_sigma_k') and not self._stage_dirty.get('lineid', False):
             with QtCore.QSignalBlocker(self.dspin_lineid_sigma_k):
-                self.dspin_lineid_sigma_k.setValue(float(self._cfg_get(cfg, ['wavesol', 'gui_min_amp_sigma_k'], 5.0) or 5.0))
+                self.dspin_lineid_sigma_k.setValue(_safe_float(self._cfg_get(cfg, ['wavesol', 'gui_min_amp_sigma_k'], 5.0), 5.0))
             if hasattr(self, 'dspin_lineid_min_amp'):
                 v = self._cfg_get(cfg, ['wavesol', 'gui_min_amp'], None)
-                vv = float(v) if v not in (None, "") else 0.0
+                vv = _safe_float(v, 0.0) if v not in (None, "") else 0.0
                 with QtCore.QSignalBlocker(self.dspin_lineid_min_amp):
                     self.dspin_lineid_min_amp.setValue(vv)
             if hasattr(self, 'edit_lineid_lines_csv'):
@@ -1786,16 +1896,16 @@ class LauncherWindow(QtWidgets.QMainWindow):
         # --- Wavelength solution ---
         if hasattr(self, 'spin_ws_poly_deg') and not self._stage_dirty.get('wavesol', False):
             with QtCore.QSignalBlocker(self.spin_ws_poly_deg):
-                self.spin_ws_poly_deg.setValue(int(self._cfg_get(cfg, ['wavesol', 'poly_deg_1d'], 4) or 4))
+                self.spin_ws_poly_deg.setValue(_safe_int(self._cfg_get(cfg, ['wavesol', 'poly_deg_1d'], 4), 4))
             if hasattr(self, 'dspin_ws_blend'):
                 with QtCore.QSignalBlocker(self.dspin_ws_blend):
-                    self.dspin_ws_blend.setValue(float(self._cfg_get(cfg, ['wavesol', 'blend_weight'], 0.35) or 0.35))
+                    self.dspin_ws_blend.setValue(_safe_float(self._cfg_get(cfg, ['wavesol', 'blend_weight'], 0.35), 0.35))
             if hasattr(self, 'dspin_ws_poly_clip'):
                 with QtCore.QSignalBlocker(self.dspin_ws_poly_clip):
-                    self.dspin_ws_poly_clip.setValue(float(self._cfg_get(cfg, ['wavesol', 'poly_sigma_clip'], 3.0) or 3.0))
+                    self.dspin_ws_poly_clip.setValue(_safe_float(self._cfg_get(cfg, ['wavesol', 'poly_sigma_clip'], 3.0), 3.0))
             if hasattr(self, 'spin_ws_poly_iter'):
                 with QtCore.QSignalBlocker(self.spin_ws_poly_iter):
-                    self.spin_ws_poly_iter.setValue(int(self._cfg_get(cfg, ['wavesol', 'poly_maxiter'], 6) or 6))
+                    self.spin_ws_poly_iter.setValue(_safe_int(self._cfg_get(cfg, ['wavesol', 'poly_maxiter'], 6), 6))
             if hasattr(self, 'combo_ws_model2d'):
                 with QtCore.QSignalBlocker(self.combo_ws_model2d):
                     m = str(self._cfg_get(cfg, ['wavesol', 'model2d'], 'auto') or 'auto')
@@ -1811,7 +1921,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 if hasattr(self, attr):
                     w = getattr(self, attr)
                     with QtCore.QSignalBlocker(w):
-                        w.setValue(int(self._cfg_get(cfg, ['wavesol', key], default) or default))
+                        w.setValue(_safe_int(self._cfg_get(cfg, ['wavesol', key], default), default))
 
         # --- Linearize ---
         if hasattr(self, 'chk_lin_enabled') and not self._stage_dirty.get('linearize', False):
@@ -1826,7 +1936,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 if hasattr(self, attr):
                     w = getattr(self, attr)
                     v = lin.get(key, None)
-                    vv = float(v) if v not in (None, '') else 0.0
+                    vv = _safe_float(v, 0.0) if v not in (None, '') else 0.0
                     with QtCore.QSignalBlocker(w):
                         w.setValue(vv)
             for attr, key, default in [
@@ -1836,7 +1946,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 if hasattr(self, attr):
                     w = getattr(self, attr)
                     with QtCore.QSignalBlocker(w):
-                        w.setValue(int(lin.get(key, default) or default))
+                        w.setValue(_safe_int(lin.get(key, default), default))
             if hasattr(self, 'chk_lin_png'):
                 with QtCore.QSignalBlocker(self.chk_lin_png):
                     self.chk_lin_png.setChecked(bool(lin.get('save_png', True)))
@@ -1860,29 +1970,29 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     self.chk_sky_save_models.setChecked(bool(sky.get('save_per_exp_model', False)))
             if hasattr(self, 'dspin_sky_step'):
                 with QtCore.QSignalBlocker(self.dspin_sky_step):
-                    self.dspin_sky_step.setValue(float(sky.get('bsp_step_A', 2.0) or 2.0))
+                    self.dspin_sky_step.setValue(_safe_float(sky.get('bsp_step_A', 2.0), 2.0))
             if hasattr(self, 'spin_sky_deg'):
                 with QtCore.QSignalBlocker(self.spin_sky_deg):
-                    self.spin_sky_deg.setValue(int(sky.get('bsp_degree', 3) or 3))
+                    self.spin_sky_deg.setValue(_safe_int(sky.get('bsp_degree', 3), 3))
             if hasattr(self, 'dspin_sky_clip'):
                 with QtCore.QSignalBlocker(self.dspin_sky_clip):
-                    self.dspin_sky_clip.setValue(float(sky.get('sigma_clip', 3.0) or 3.0))
+                    self.dspin_sky_clip.setValue(_safe_float(sky.get('sigma_clip', 3.0), 3.0))
             if hasattr(self, 'spin_sky_maxiter'):
                 with QtCore.QSignalBlocker(self.spin_sky_maxiter):
-                    self.spin_sky_maxiter.setValue(int(sky.get('maxiter', 6) or 6))
+                    self.spin_sky_maxiter.setValue(_safe_int(sky.get('maxiter', 6), 6))
             if hasattr(self, 'chk_sky_spatial'):
                 with QtCore.QSignalBlocker(self.chk_sky_spatial):
                     self.chk_sky_spatial.setChecked(bool(sky.get('use_spatial_scale', True)))
             if hasattr(self, 'spin_sky_poly'):
                 with QtCore.QSignalBlocker(self.spin_sky_poly):
-                    self.spin_sky_poly.setValue(int(sky.get('spatial_poly_deg', 0) or 0))
+                    self.spin_sky_poly.setValue(_safe_int(sky.get('spatial_poly_deg', 0), 0))
             # ROI label
             if hasattr(self, 'lbl_sky_roi'):
                 roi = sky.get('roi', {}) if isinstance(sky.get('roi'), dict) else {}
 
                 def _f(k: str) -> str:
                     v = roi.get(k, None)
-                    return str(int(v)) if v not in (None, '') else '—'
+                    return str(_safe_int(v, 0)) if v not in (None, '') else '—'
 
                 self.lbl_sky_roi.setText(
                     f"Object: [{_f('obj_y0')}..{_f('obj_y1')}],  "
@@ -1898,16 +2008,16 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 if unit.lower() in ('a', 'angstrom', 'å'):
                     if not winA:
                         return '<no windows>'
-                    return '; '.join([f"{float(a):.1f}–{float(b):.1f}" for a, b in winA]) + ' Å'
+                    return '; '.join([f"{_safe_float(a, 0.0):.1f}–{_safe_float(b, 0.0):.1f}" for a, b in winA]) + ' Å'
                 if unit.lower() in ('pix', 'pixel', 'pixels'):
                     if not winP:
                         return '<no windows>'
-                    return '; '.join([f"{int(a)}–{int(b)}" for a, b in winP]) + ' pix'
+                    return '; '.join([f"{_safe_int(a, 0)}–{_safe_int(b, 0)}" for a, b in winP]) + ' pix'
                 # auto: prefer A if present
                 if winA:
-                    return '; '.join([f"{float(a):.1f}–{float(b):.1f}" for a, b in winA]) + ' Å'
+                    return '; '.join([f"{_safe_float(a, 0.0):.1f}–{_safe_float(b, 0.0):.1f}" for a, b in winA]) + ' Å'
                 if winP:
-                    return '; '.join([f"{int(a)}–{int(b)}" for a, b in winP]) + ' pix'
+                    return '; '.join([f"{_safe_int(a, 0)}–{_safe_int(b, 0)}" for a, b in winP]) + ' pix'
                 return '<no windows>'
 
             if hasattr(self, 'chk_sky_flex_enabled'):
@@ -1920,7 +2030,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     self.combo_sky_flex_mode.setCurrentIndex(max(0, idx))
             if hasattr(self, 'spin_sky_flex_max'):
                 with QtCore.QSignalBlocker(self.spin_sky_flex_max):
-                    self.spin_sky_flex_max.setValue(int(flex.get('max_shift_pix', 6) or 6))
+                    self.spin_sky_flex_max.setValue(_safe_int(flex.get('max_shift_pix', 6), 6))
             if hasattr(self, 'combo_sky_flex_windows_unit'):
                 with QtCore.QSignalBlocker(self.combo_sky_flex_windows_unit):
                     u = str(flex.get('windows_unit', 'auto') or 'auto')
@@ -1931,13 +2041,13 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     self.chk_sky_flex_ydep.setChecked(bool(flex.get('y_dependent', False)))
             if hasattr(self, 'spin_sky_flex_y_poly'):
                 with QtCore.QSignalBlocker(self.spin_sky_flex_y_poly):
-                    self.spin_sky_flex_y_poly.setValue(int(flex.get('y_poly_deg', 1) or 1))
+                    self.spin_sky_flex_y_poly.setValue(_safe_int(flex.get('y_poly_deg', 1), 1))
             if hasattr(self, 'spin_sky_flex_y_smooth'):
                 with QtCore.QSignalBlocker(self.spin_sky_flex_y_smooth):
-                    self.spin_sky_flex_y_smooth.setValue(int(flex.get('y_smooth_bins', 5) or 5))
+                    self.spin_sky_flex_y_smooth.setValue(_safe_int(flex.get('y_smooth_bins', 5), 5))
             if hasattr(self, 'dspin_sky_flex_min_score'):
                 with QtCore.QSignalBlocker(self.dspin_sky_flex_min_score):
-                    self.dspin_sky_flex_min_score.setValue(float(flex.get('min_score', 0.06) or 0.06))
+                    self.dspin_sky_flex_min_score.setValue(_safe_float(flex.get('min_score', 0.06), 0.06))
             if hasattr(self, 'lbl_sky_flex_windows'):
                 u = str(flex.get('windows_unit', 'auto') or 'auto')
                 winA = flex.get('windows_A') or flex.get('windows') or flex.get('windows_angstrom') or []
@@ -1950,16 +2060,16 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
             if hasattr(self, 'dspin_stack_sigma'):
                 with QtCore.QSignalBlocker(self.dspin_stack_sigma):
-                    self.dspin_stack_sigma.setValue(float(st.get('sigma_clip', 3.0) or 3.0))
+                    self.dspin_stack_sigma.setValue(_safe_float(st.get('sigma_clip', 3.0), 3.0))
             if hasattr(self, 'spin_stack_maxiter'):
                 with QtCore.QSignalBlocker(self.spin_stack_maxiter):
-                    self.spin_stack_maxiter.setValue(int(st.get('maxiter', 6) or 6))
+                    self.spin_stack_maxiter.setValue(_safe_int(st.get('maxiter', 6), 6))
             if hasattr(self, 'chk_stack_y_align'):
                 with QtCore.QSignalBlocker(self.chk_stack_y_align):
                     self.chk_stack_y_align.setChecked(bool(ya.get('enabled', False)))
             if hasattr(self, 'spin_stack_y_align_max'):
                 with QtCore.QSignalBlocker(self.spin_stack_y_align_max):
-                    self.spin_stack_y_align_max.setValue(int(ya.get('max_shift_pix', 8) or 8))
+                    self.spin_stack_y_align_max.setValue(_safe_int(ya.get('max_shift_pix', 8), 8))
             if hasattr(self, 'combo_stack_y_align_mode'):
                 with QtCore.QSignalBlocker(self.combo_stack_y_align_mode):
                     m = str(ya.get('mode', 'full') or 'full')
@@ -1991,19 +2101,19 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     self.combo_ex1d_method.setCurrentIndex(max(0, idx))
             if hasattr(self, 'spin_ex1d_ap_hw'):
                 with QtCore.QSignalBlocker(self.spin_ex1d_ap_hw):
-                    self.spin_ex1d_ap_hw.setValue(int(ex.get('aperture_half_width', 6) or 6))
+                    self.spin_ex1d_ap_hw.setValue(_safe_int(ex.get('aperture_half_width', 6), 6))
             if hasattr(self, 'dspin_ex1d_trace_bin'):
                 with QtCore.QSignalBlocker(self.dspin_ex1d_trace_bin):
-                    self.dspin_ex1d_trace_bin.setValue(float(ex.get('trace_bin_A', 50.0) or 50.0))
+                    self.dspin_ex1d_trace_bin.setValue(_safe_float(ex.get('trace_bin_A', 50.0), 50.0))
             if hasattr(self, 'spin_ex1d_trace_deg'):
                 with QtCore.QSignalBlocker(self.spin_ex1d_trace_deg):
-                    self.spin_ex1d_trace_deg.setValue(int(ex.get('trace_smooth_deg', 3) or 3))
+                    self.spin_ex1d_trace_deg.setValue(_safe_int(ex.get('trace_smooth_deg', 3), 3))
             if hasattr(self, 'spin_ex1d_prof_hw'):
                 with QtCore.QSignalBlocker(self.spin_ex1d_prof_hw):
-                    self.spin_ex1d_prof_hw.setValue(int(ex.get('optimal_profile_half_width', 15) or 15))
+                    self.spin_ex1d_prof_hw.setValue(_safe_int(ex.get('optimal_profile_half_width', 15), 15))
             if hasattr(self, 'dspin_ex1d_opt_clip'):
                 with QtCore.QSignalBlocker(self.dspin_ex1d_opt_clip):
-                    self.dspin_ex1d_opt_clip.setValue(float(ex.get('optimal_sigma_clip', 5.0) or 5.0))
+                    self.dspin_ex1d_opt_clip.setValue(_safe_float(ex.get('optimal_sigma_clip', 5.0), 5.0))
             if hasattr(self, 'chk_ex1d_png'):
                 with QtCore.QSignalBlocker(self.chk_ex1d_png):
                     self.chk_ex1d_png.setChecked(bool(ex.get('save_png', True)))
@@ -5172,8 +5282,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 self._cfg_path = Path(s).expanduser().resolve()
         if not self._cfg_path:
             self._log_error("No config file. Create or open config first.")
+            self._show_msg("Config is missing", ["Create (Create new config) or open a config.yaml first."], icon="warn")
             return False
         if not self._sync_cfg_from_editor():
+            self._show_msg("Config YAML invalid", ["Fix YAML (Validate) and try again."], icon="warn")
             return False
         # ensure cfg is on disk for runner
         try:
@@ -5181,6 +5293,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._cfg_path.write_text(self.editor_yaml.toPlainText(), encoding="utf-8")
         except Exception as e:
             self._log_exception(e)
+            self._show_msg("Cannot save config", [f"Path: {self._cfg_path}", str(e)], icon="error")
             return False
         # keep internal cfg in sync
         try:
