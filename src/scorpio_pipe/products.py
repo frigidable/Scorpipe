@@ -6,7 +6,7 @@ This module provides a small, explicit product registry used by QC/UI.
 It intentionally does NOT try to be exhaustive for every intermediate file;
 instead it lists stable, canonical artifacts users can expect.
 
-v5.21 notes
+v5.22 notes
 ----------
 - QC outputs live in work/qc/ (legacy mirror in work/report/)
 - Calibrations live in work/calibs/ (legacy mirror/compat in work/calib/)

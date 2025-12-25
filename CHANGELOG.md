@@ -1,3 +1,15 @@
+## v5.22.0
+
+### Frames: FITS preview now works for SCORPIO headers + DS9-like basics
+- **Fixed a hard FITS preview failure** in *Frames* for files containing scaling keywords
+  (BZERO/BSCALE/BLANK): the viewer now auto-falls back to `memmap=False` when Astropy
+  cannot memory-map scaled images.
+- Upgraded the preview widget to a more DS9-like baseline:
+  - **Zoom** (mouse wheel) and **pan** (drag with left mouse button)
+  - **Value under cursor** readout (x, y, value)
+  - Stretch controls: colormap, percentile cut, gamma, **scale** (linear/log/sqrt/asinh), **invert**
+  - Optional **downsample** for very large frames to keep GUI responsive
+
 ## v5.21.0
 
 ### Critical fixes (runner + products/QC)
