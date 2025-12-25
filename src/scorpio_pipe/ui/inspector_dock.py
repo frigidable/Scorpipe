@@ -117,7 +117,7 @@ class RunPlanWidget(QtWidgets.QWidget):
 
 
 class QCAlertsWidget(QtWidgets.QWidget):
-    """Compact QC alerts viewer (reads report/qc_report.json)."""
+    """Compact QC alerts viewer (reads qc/qc_report.json)."""
 
     openRequested = QtCore.Signal(Path)  # should open QC viewer/report
 

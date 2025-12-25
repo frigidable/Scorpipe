@@ -353,10 +353,9 @@ def _optimal_extract(
 
 
 def _write_mef_1d(path: Path, flux: np.ndarray, hdr0: fits.Header, var: np.ndarray, mask: np.ndarray) -> None:
-    ph = fits.PrimaryHDU(np.asarray(flux, dtype=np.float32), header=hdr0)
-    vh = fits.ImageHDU(np.asarray(var, dtype=np.float32), name="VAR")
-    mh = fits.ImageHDU(np.asarray(mask, dtype=np.uint16), name="MASK")
-    fits.HDUList([ph, vh, mh]).writeto(path, overwrite=True)
+    """Write 1D spectrum as MEF (Primary holds flux for legacy; SCI/VAR/MASK extensions are canonical)."""
+    grid = try_read_grid(hdr0)
+    write_sci_var_mask(path, flux, var=var, mask=mask, header=hdr0, grid=grid, primary_data=flux)
 
 
 def run_extract1d(cfg: Dict[str, Any], *, in_fits: Optional[Path] = None, out_dir: Optional[Path] = None) -> Dict[str, Any]:

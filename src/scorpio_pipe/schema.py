@@ -191,6 +191,18 @@ class LinearizeBlock(BaseModel):
     lambda_min_A: Optional[float] = None
     lambda_max_A: Optional[float] = None
 
+    # How to build the common wavelength grid when min/max are not given:
+    #   - "intersection": robust intersection across Y (recommended default)
+    #   - "percentile": robust global min/max percentiles
+    #   - "union": robust union (wider; may create large no-coverage zones)
+    grid_mode: str = "intersection"
+    # Robust percentiles used by grid_mode (in percent, 0..100)
+    grid_lo_pct: float = 1.0
+    grid_hi_pct: float = 99.0
+    # For intersection mode: use high percentile of per-row minima and low percentile of per-row maxima.
+    grid_intersection_min_pct: float = 95.0
+    grid_intersection_max_pct: float = 5.0
+
     # Optional crop in Y before producing outputs (pixels).
     y_crop_top: int = 0
     y_crop_bottom: int = 0
@@ -206,6 +218,9 @@ class LinearizeBlock(BaseModel):
     # This is NOT used for the final scientific stacking (stack2d does that).
     stack_preview: bool = True
 
+    # Mask propagation policy (uint16 bitmask). "or" is recommended.
+    mask_combine: str = "or"  # or|nearest
+
 
 class SkyBlock(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -218,7 +233,8 @@ class SkyBlock(BaseModel):
     # Stack rectified per-exposure sky-subtracted frames into a combined product.
     # In the GUI this is presented as a checkbox near "Run Sky".
     stack_after: bool = True
-    save_per_exp_model: bool = False
+    # Persist per-exposure sky model by default (needed for reproducibility & QC).
+    save_per_exp_model: bool = True
     # Save a quick-look 1D sky spectrum (mean over sky rows). Useful for QC.
     save_spectrum_1d: bool = True
 
@@ -229,6 +245,11 @@ class SkyBlock(BaseModel):
 
     # Region of interest (pixel indices in the *linearized* frame)
     roi: Dict[str, Any] = Field(default_factory=dict)
+    # If ROI is not provided in config and GUI is available, allow interactive ROI selection.
+    roi_interactive: bool = False
+
+    # QC: wavelength zones where residuals are reported separately (Angstrom on linear WCS).
+    critical_windows_A: List[List[float]] = Field(default_factory=lambda: [[6800.0, 6900.0]])
 
     # Kelson-like 1D B-spline fit to sky spectrum (in Angstrom)
     bsp_degree: int = 3

@@ -32,10 +32,20 @@ from astropy.io import fits
 from scorpio_pipe.wavesol_paths import resolve_work_dir
 from scorpio_pipe.plot_style import mpl_style
 from scorpio_pipe.shift_utils import xcorr_shift_subpix, shift2d_subpix_x, shift2d_subpix_x_var, shift2d_subpix_x_mask
+from scorpio_pipe.io.mef import read_sci_var_mask, write_sci_var_mask, try_read_grid
+from scorpio_pipe.maskbits import (
+    NO_COVERAGE,
+    EDGE,
+    BADPIX,
+    COSMIC,
+    SATURATED,
+    USER,
+    REJECTED,
+    header_cards as mask_header_cards,
+)
 
 
-# Mask bits (keep consistent with linearize/stack2d).
-MASK_NO_COVERAGE = np.uint16(1 << 0)
+_FATAL_BITS = np.uint16(NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED)
 
 
 
@@ -300,7 +310,7 @@ def _shift_subpix_mask(mask: np.ndarray, shift: float, *, axis: int) -> np.ndarr
     """Subpixel shift for uint16 mask.
 
     Conservative rule: output mask is OR of contributing input pixels.
-    Pixels outside the input domain are marked as MASK_NO_COVERAGE.
+    Pixels outside the input domain are marked as NO_COVERAGE.
     """
 
     mask = np.asarray(mask, dtype=np.uint16)
@@ -312,7 +322,7 @@ def _shift_subpix_mask(mask: np.ndarray, shift: float, *, axis: int) -> np.ndarr
         raise ValueError("expected 2D mask and axis 0/1")
 
     ny, nx = mask.shape
-    out = np.full((ny, nx), MASK_NO_COVERAGE, dtype=np.uint16)
+    out = np.full((ny, nx), NO_COVERAGE, dtype=np.uint16)
     if axis == 1:
         n = nx
         x = np.arange(n, dtype=float)
@@ -374,12 +384,12 @@ def _shift_int_fill_float(arr: np.ndarray, shift: int, *, axis: int, fill: float
 
 
 def _shift_int_fill_mask(mask: np.ndarray, shift: int, *, axis: int) -> np.ndarray:
-    """Shift uint16 mask; introduced pixels get MASK_NO_COVERAGE."""
+    """Shift uint16 mask; introduced pixels get NO_COVERAGE."""
     mask = np.asarray(mask, dtype=np.uint16)
     shift = int(shift)
     if shift == 0:
         return mask.copy()
-    out = np.full(mask.shape, MASK_NO_COVERAGE, dtype=np.uint16)
+    out = np.full(mask.shape, NO_COVERAGE, dtype=np.uint16)
     n = mask.shape[axis]
     s = abs(shift)
     if s >= n:
@@ -404,29 +414,29 @@ def _write_mef(
     var: np.ndarray | None = None,
     mask: np.ndarray | None = None,
 ) -> None:
-    """Write a simple MEF: PRIMARY=SCI, optional VAR/MASK extensions."""
+    """Write MEF product with canonical SCI/VAR/MASK.
 
-    hdus: list[fits.HDUBase] = [fits.PrimaryHDU(np.asarray(sci), header=hdr)]
-    if var is not None:
-        hdus.append(fits.ImageHDU(np.asarray(var), name="VAR"))
+    Primary stores SCI for legacy; SCI extension is canonical.
+    """
+    hdr2 = hdr.copy()
     if mask is not None:
-        hdus.append(fits.ImageHDU(np.asarray(mask), name="MASK"))
-    fits.HDUList(hdus).writeto(path, overwrite=True)
-
-
-@dataclass(frozen=True)
-class ROI:
-    obj_y0: int
-    obj_y1: int
-    sky_top_y0: int
-    sky_top_y1: int
-    sky_bot_y0: int
-    sky_bot_y1: int
-
+        try:
+            for k, v, c in mask_header_cards():
+                hdr2[k] = (v, c)
+        except Exception:
+            pass
+    grid = try_read_grid(hdr2)
+    write_sci_var_mask(path, sci, var=var, mask=mask, header=hdr2, grid=grid, primary_data=sci)
 
 def _roi_from_cfg(cfg: dict[str, Any]) -> ROI:
+    # Canonical v5.x location: cfg['sky']['roi'].
+    # Backward compatibility:
+    #  - cfg['roi'] (older smoke tests)
+    #  - alternative key spellings (obj_y1/obj_y2, etc.)
     sky = (cfg.get("sky") or {}) if isinstance(cfg.get("sky"), dict) else {}
     roi = (sky.get("roi") or {}) if isinstance(sky.get("roi"), dict) else {}
+    if not roi and isinstance(cfg.get("roi"), dict):
+        roi = cfg.get("roi") or {}
 
     def _g(*keys: str, default: int | None = None) -> int:
         for k in keys:
@@ -438,7 +448,7 @@ def _roi_from_cfg(cfg: dict[str, Any]) -> ROI:
 
     return ROI(
         obj_y0=_g("obj_y0", "obj_ymin"),
-        obj_y1=_g("obj_y1", "obj_ymax"),
+        obj_y1=_g("obj_y1", "obj_y2", "obj_ymax"),
         sky_top_y0=_g("sky_top_y0", "sky_up_y0", "sky1_y0"),
         sky_top_y1=_g("sky_top_y1", "sky_up_y1", "sky1_y1"),
         sky_bot_y0=_g("sky_bot_y0", "sky_down_y0", "sky2_y0"),
@@ -586,7 +596,47 @@ def run_sky_sub(cfg: dict[str, Any], *, lin_fits: Path | None = None, out_dir: P
         done.write_text(json.dumps({"skipped": True, "reason": "sky.enabled=false"}, indent=2, ensure_ascii=False), encoding="utf-8")
         return {"skipped": True, "reason": "sky.enabled=false", "out_dir": str(out_dir)}
 
-    roi = _roi_from_cfg(cfg)
+    # ROI selection: headless from config, or interactive (Qt) if requested and available.
+    def _try_pick_roi_interactive(preview_fits: Path) -> dict[str, int] | None:
+        try:
+            sky = (cfg.get("sky") or {}) if isinstance(cfg.get("sky"), dict) else {}
+            if not bool(sky.get("roi_interactive", False)):
+                return None
+            from PySide6 import QtWidgets
+            from scorpio_pipe.ui.sky_roi_dialog import SkyRoiDialog
+
+            app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+            dlg = SkyRoiDialog(str(preview_fits))
+            if dlg.exec() == QtWidgets.QDialog.Accepted:
+                return dlg.get_roi_dict()
+        except Exception:
+            return None
+        return None
+
+    # Resolve a preview frame for ROI selection (stacked linearize preview preferred).
+    roi: ROI | None = None
+    roi_dict: dict[str, int] | None = None
+    try:
+        roi = _roi_from_cfg(cfg)
+    except Exception:
+        # Try interactive mode if enabled.
+        wd = resolve_work_dir(cfg)
+        cand = [
+            wd / "products" / "lin" / "lin_preview.fits",
+            wd / "lin" / "obj_sum_lin.fits",
+        ]
+        preview = next((p for p in cand if p.exists()), None)
+        if preview is not None:
+            roi_dict = _try_pick_roi_interactive(preview)
+        if roi_dict is None:
+            raise
+        # Inject into cfg in-memory so downstream uses it.
+        cfg.setdefault("sky", {})
+        if isinstance(cfg["sky"], dict):
+            cfg["sky"].setdefault("roi", {})
+            if isinstance(cfg["sky"]["roi"], dict):
+                cfg["sky"]["roi"].update(roi_dict)
+        roi = _roi_from_cfg(cfg)
 
     out_dir = Path(out_dir) if out_dir is not None else (products_root / "sky")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -611,23 +661,59 @@ def run_sky_sub(cfg: dict[str, Any], *, lin_fits: Path | None = None, out_dir: P
     # Flexure (Δλ) reference sky spectrum for cross-correlation (set on first processed frame).
     flex_ref_spec: np.ndarray | None = None
 
+    # QC: user-defined "critical" wavelength zones (e.g. strong OH residual region).
+    crit_windows_A = sky_cfg.get("critical_windows_A") or sky_cfg.get("critical_windows") or [[6800, 6900]]
+    try:
+        crit_windows_A = [[float(a), float(b)] for a, b in crit_windows_A]
+    except Exception:
+        crit_windows_A = [[6800.0, 6900.0]]
+
+    def _read_lin_frame(p: Path) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None, fits.Header]:
+        """Read a rectified/linearized frame.
+
+        Prefer SCI/VAR/MASK extensions; fallback to primary HDU for legacy.
+        """
+        try:
+            sci, var, mask, hdr = read_sci_var_mask(p)
+            return np.asarray(sci, dtype=float), (None if var is None else np.asarray(var, dtype=float)), (
+                None if mask is None else np.asarray(mask, dtype=np.uint16)
+            ), fits.Header(hdr)
+        except Exception:
+            with fits.open(p, memmap=False) as hdul:
+                hdr = fits.Header(hdul[0].header)
+                sci = np.asarray(hdul[0].data, dtype=float)
+                var = None
+                mask = None
+                if "VAR" in hdul:
+                    try:
+                        var = np.asarray(hdul["VAR"].data, dtype=float)
+                    except Exception:
+                        var = None
+                if "MASK" in hdul:
+                    try:
+                        mask = np.asarray(hdul["MASK"].data, dtype=np.uint16)
+                    except Exception:
+                        mask = None
+                return sci, var, mask, hdr
+
+    def _qc_residual_metrics(resid: np.ndarray, wave: np.ndarray, sky_rows: np.ndarray) -> dict[str, float]:
+        rr = resid[sky_rows, :]
+        rms = float(np.sqrt(np.nanmean(rr**2))) if np.isfinite(rr).any() else float("nan")
+        mae = float(np.nanmean(np.abs(rr))) if np.isfinite(rr).any() else float("nan")
+        out: dict[str, float] = {"rms_sky": rms, "mae_sky": mae}
+        # Critical windows
+        for i, (a0, a1) in enumerate(crit_windows_A):
+            sel = (wave >= min(a0, a1)) & (wave <= max(a0, a1))
+            if not np.any(sel):
+                continue
+            r2 = rr[:, sel]
+            out[f"rms_crit_{i}"] = float(np.sqrt(np.nanmean(r2**2))) if np.isfinite(r2).any() else float("nan")
+            out[f"mae_crit_{i}"] = float(np.nanmean(np.abs(r2))) if np.isfinite(r2).any() else float("nan")
+        return out
+
     def _process_one(lin_path: Path, *, tag: str, base_dir: Path, write_model: bool) -> dict[str, Any]:
         nonlocal flex_ref_spec
-        var = None
-        mask = None
-        with fits.open(lin_path, memmap=False) as hdul:
-            data = np.array(hdul[0].data, dtype=float)
-            hdr = hdul[0].header.copy()
-            if "VAR" in hdul:
-                try:
-                    var = np.array(hdul["VAR"].data, dtype=float)
-                except Exception:
-                    var = None
-            if "MASK" in hdul:
-                try:
-                    mask = np.array(hdul["MASK"].data, dtype=np.uint16)
-                except Exception:
-                    mask = None
+        data, var, mask, hdr = _read_lin_frame(lin_path)
 
         ny, nx = data.shape
         wave = _wave_from_header(hdr, nx)
@@ -647,6 +733,11 @@ def run_sky_sub(cfg: dict[str, Any], *, lin_fits: Path | None = None, out_dir: P
             raise ValueError("Sky ROI is too small (need at least a few rows)")
 
         sky_pix = data[sky_rows, :]
+        if mask is not None:
+            bad = (mask[sky_rows, :] & _FATAL_BITS) != 0
+            sky_pix = np.where(bad, np.nan, sky_pix)
+        if var is not None:
+            sky_pix = np.where(~np.isfinite(var[sky_rows, :]) | (var[sky_rows, :] <= 0), np.nan, sky_pix)
         sky_spec_raw = np.nanmedian(sky_pix, axis=0)
 
         # Optional: per-exposure flexure correction (Delta-lambda) using sky spectrum cross-correlation.
@@ -701,7 +792,7 @@ def run_sky_sub(cfg: dict[str, Any], *, lin_fits: Path | None = None, out_dir: P
                             mask = np.zeros_like(data, dtype=np.uint16)
                         data, filled = _shift_subpix_fill_float(data, float(flex_shift_pix), axis=1, fill=float("nan"))
                         mask = _shift_subpix_mask(mask, float(flex_shift_pix), axis=1)
-                        mask[filled] |= MASK_NO_COVERAGE
+                        mask[filled] |= NO_COVERAGE
                         if var is not None:
                             var, _filled_v = _shift_subpix_fill_var(var, float(flex_shift_pix), axis=1, fill=float("inf"))
                         sky_pix = data[sky_rows, :]
@@ -812,7 +903,7 @@ def run_sky_sub(cfg: dict[str, Any], *, lin_fits: Path | None = None, out_dir: P
                         if mask is None:
                             mask = np.zeros_like(data, dtype=np.uint16)
                         data, _filled = shift2d_subpix_x(data, shift_pix_y, fill=float("nan"))
-                        mask, _filled_m = shift2d_subpix_x_mask(mask, shift_pix_y, no_coverage_bit=MASK_NO_COVERAGE)
+                        mask, _filled_m = shift2d_subpix_x_mask(mask, shift_pix_y, no_coverage_bit=NO_COVERAGE)
                         if var is not None:
                             var, _filled_v = shift2d_subpix_x_var(var, shift_pix_y, fill=float("inf"))
 
@@ -880,7 +971,7 @@ def run_sky_sub(cfg: dict[str, Any], *, lin_fits: Path | None = None, out_dir: P
                                 mask = np.zeros_like(data, dtype=np.uint16)
                             data, filled = _shift_subpix_fill_float(data, float(flex_shift_pix), axis=1, fill=float("nan"))
                             mask = _shift_subpix_mask(mask, float(flex_shift_pix), axis=1)
-                            mask[filled] |= MASK_NO_COVERAGE
+                            mask[filled] |= NO_COVERAGE
                             if var is not None:
                                 var, _filled_v = _shift_subpix_fill_var(var, float(flex_shift_pix), axis=1, fill=float("inf"))
                             sky_pix = data[sky_rows, :]
@@ -961,7 +1052,9 @@ def run_sky_sub(cfg: dict[str, Any], *, lin_fits: Path | None = None, out_dir: P
 
         # per-exposure naming if needed
         sky_model_path = base_dir / f"{tag}_sky_model.fits"
-        sky_sub_path = base_dir / f"{tag}_sky_sub.fits"
+        # New canonical naming (v5.19): *_skysub.fits
+        sky_sub_path = base_dir / f"{tag}_skysub.fits"
+        sky_sub_legacy = base_dir / f"{tag}_sky_sub.fits"
         sky_spec_csv = base_dir / f"{tag}_sky_spectrum.csv"
         sky_spec_json = base_dir / f"{tag}_sky_spectrum.json"
 
@@ -975,6 +1068,12 @@ def run_sky_sub(cfg: dict[str, Any], *, lin_fits: Path | None = None, out_dir: P
             var=None if var is None else np.asarray(var, dtype=np.float32),
             mask=None if mask is None else np.asarray(mask, dtype=np.uint16),
         )
+        # Backward-compatible alias
+        try:
+            if sky_sub_legacy != sky_sub_path:
+                shutil.copy2(sky_sub_path, sky_sub_legacy)
+        except Exception:
+            pass
 
         # 1D sky spectrum export (optional)
         if save_spectrum_1d:
@@ -1004,11 +1103,81 @@ def run_sky_sub(cfg: dict[str, Any], *, lin_fits: Path | None = None, out_dir: P
                 pass
 
         # QC metrics in sky rows
-        resid = sky_sub[sky_rows, :]
+        resid_sky = sky_sub[sky_rows, :]
+        rms_sky = float(np.sqrt(np.nanmean(resid_sky**2))) if np.isfinite(resid_sky).any() else float("nan")
+        mae_sky = float(np.nanmean(np.abs(resid_sky))) if np.isfinite(resid_sky).any() else float("nan")
+        masked_frac_sky = None
+        if mask is not None:
+            m = (mask[sky_rows, :] & _FATAL_BITS) != 0
+            masked_frac_sky = float(np.mean(m)) if m.size else None
+
+        # Critical windows (default includes the most painful OH forest region).
+        crit_A = sky_cfg.get("critical_windows_A") or [[6800, 6900]]
+        crit_pix = sky_cfg.get("critical_windows_pix")
+        crit_unit = str(sky_cfg.get("critical_windows_unit", "auto") or "auto")
+        sel = np.ones(nx, dtype=bool)
+        try:
+            tmp = _apply_xcorr_windows_any(np.ones(nx, dtype=float), hdr, crit_A, crit_pix, unit=crit_unit)
+            sel = np.isfinite(tmp)
+        except Exception:
+            sel = np.ones(nx, dtype=bool)
+
+        resid_crit = resid_sky[:, sel]
+        rms_crit = float(np.sqrt(np.nanmean(resid_crit**2))) if np.isfinite(resid_crit).any() else None
+        mae_crit = float(np.nanmean(np.abs(resid_crit))) if np.isfinite(resid_crit).any() else None
+
+        # Diagnostic plots
+        png_spec = base_dir / f"{tag}_sky_spectrum.png"
+        png_resid = base_dir / f"{tag}_sky_residuals.png"
+        try:
+            import matplotlib.pyplot as plt
+
+            with mpl_style():
+                # 1) sky spectrum raw vs spline
+                fig = plt.figure(figsize=(10, 4))
+                ax = fig.add_subplot(1, 1, 1)
+                ax.plot(wave, sky_spec_raw, lw=1, label="sky raw")
+                ax.plot(wave, sky_spec, lw=1.5, label="B-spline")
+                ax.set_xlabel(f"Wavelength [{hdr.get('CUNIT1','Angstrom')}]" if _has_linear_wcs_x(hdr) else "X")
+                ax.set_ylabel("Sky (ADU)")
+                ax.set_title(f"{tag}: sky spectrum")
+                ax.legend(loc="best")
+                fig.tight_layout()
+                fig.savefig(png_spec, dpi=160)
+                plt.close(fig)
+
+                # 2) residual map (sky rows only)
+                img = np.full_like(sky_sub, np.nan, dtype=float)
+                img[sky_rows, :] = sky_sub[sky_rows, :]
+                fig = plt.figure(figsize=(10, 4))
+                ax = fig.add_subplot(1, 1, 1)
+                finite = img[np.isfinite(img)]
+                if finite.size:
+                    vmin, vmax = np.nanpercentile(finite, [5, 95])
+                else:
+                    vmin, vmax = None, None
+                ax.imshow(img, origin="lower", aspect="auto", vmin=vmin, vmax=vmax)
+                ax.axhspan(obj_y0, obj_y1, color="#00aa00", alpha=0.08)
+                ax.set_title(f"{tag}: residuals in sky rows")
+                ax.set_xlabel("X")
+                ax.set_ylabel("Y")
+                fig.tight_layout()
+                fig.savefig(png_resid, dpi=160)
+                plt.close(fig)
+        except Exception:
+            png_spec = None
+            png_resid = None
+
         q = {
             "tag": tag,
-            "rms_sky": float(np.nanstd(resid)),
-            "mae_sky": float(np.nanmedian(np.abs(resid))),
+            "rms_sky": rms_sky,
+            "mae_sky": mae_sky,
+            "rms_critical": rms_crit,
+            "mae_critical": mae_crit,
+            "critical_windows_A": crit_A,
+            "masked_frac_sky": masked_frac_sky,
+            "diag_spectrum_png": str(png_spec) if isinstance(png_spec, Path) else None,
+            "diag_residuals_png": str(png_resid) if isinstance(png_resid, Path) else None,
             "n_sky_rows": int(sky_rows.sum()),
             "flexure_shift_pix": float(flex_shift_pix) if flex_enabled else None,
             "flexure_shift_A": float(flex_shift_A) if (flex_enabled and flex_shift_A is not None) else None,
@@ -1021,6 +1190,7 @@ def run_sky_sub(cfg: dict[str, Any], *, lin_fits: Path | None = None, out_dir: P
             "lin_fits": str(lin_path),
             "sky_model": str(sky_model_path) if write_model else None,
             "sky_sub": str(sky_sub_path),
+            "sky_sub_legacy": str(sky_sub_legacy) if sky_sub_legacy.exists() else None,
             "sky_spec_csv": str(sky_spec_csv) if (save_spectrum_1d and sky_spec_csv.exists()) else None,
             "sky_spec_json": str(sky_spec_json) if (save_spectrum_1d and sky_spec_json.exists()) else None,
             "qc": q,
@@ -1064,7 +1234,13 @@ def run_sky_sub(cfg: dict[str, Any], *, lin_fits: Path | None = None, out_dir: P
             )
         out_per = out_dir / "per_exp"
         out_per.mkdir(parents=True, exist_ok=True)
-        files = sorted(per_dir.glob("*.fits"))
+        # Prefer canonical outputs from linearize (v5.19+): *_rectified.fits.
+        # Fall back to legacy *_lin.fits if needed. Avoid processing both (duplicates).
+        files = sorted(per_dir.glob("*_rectified.fits"))
+        if not files:
+            files = sorted(per_dir.glob("*_lin.fits"))
+        if not files:
+            files = sorted(per_dir.glob("*.fits"))
         if not files:
             raise FileNotFoundError(f"No per-exposure linearized FITS found in {per_dir}")
         results: list[dict[str, Any]] = []
@@ -1072,6 +1248,8 @@ def run_sky_sub(cfg: dict[str, Any], *, lin_fits: Path | None = None, out_dir: P
             tag = f.stem
             if tag.endswith("_lin"):
                 tag = tag[:-4]
+            if tag.endswith("_rectified"):
+                tag = tag[:-10]
             res = _process_one(
                 f,
                 tag=tag,
@@ -1087,6 +1265,57 @@ def run_sky_sub(cfg: dict[str, Any], *, lin_fits: Path | None = None, out_dir: P
             "per_exposure": results,
             "stack_after_requested": stack_after,
         }
+
+    # Persist ROI used (useful for QC / reproducibility, especially if chosen interactively).
+    roi_path = out_dir / "roi.json"
+    try:
+        roi_path.write_text(
+            json.dumps(
+                {
+                    "obj_y0": int(roi.obj_y0),
+                    "obj_y1": int(roi.obj_y1),
+                    "sky_top_y0": int(roi.sky_top_y0),
+                    "sky_top_y1": int(roi.sky_top_y1),
+                    "sky_bot_y0": int(roi.sky_bot_y0),
+                    "sky_bot_y1": int(roi.sky_bot_y1),
+                },
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    except Exception:
+        roi_path = None
+
+    # QC summary JSON.
+    qc_path = out_dir / "qc_sky.json"
+    try:
+        if payload.get("mode") == "stack":
+            qcs = [((payload.get("result") or {}).get("qc") or {})]
+        else:
+            qcs = [((r.get("qc") or {})) for r in (payload.get("per_exp") or []) if isinstance(r, dict)]
+        qc_doc = {
+            "stage": "sky",
+            "mode": payload.get("mode"),
+            "out_dir": str(out_dir),
+            "roi": {
+                "obj_y0": int(roi.obj_y0),
+                "obj_y1": int(roi.obj_y1),
+                "sky_top_y0": int(roi.sky_top_y0),
+                "sky_top_y1": int(roi.sky_top_y1),
+                "sky_bot_y0": int(roi.sky_bot_y0),
+                "sky_bot_y1": int(roi.sky_bot_y1),
+            },
+            "critical_windows_A": crit_windows_A,
+            "exposures": qcs,
+        }
+        qc_path.write_text(json.dumps(qc_doc, indent=2, ensure_ascii=False), encoding="utf-8")
+        _mirror_legacy(qc_path, "qc_sky.json")
+        payload["qc_sky_json"] = str(qc_path)
+        if isinstance(roi_path, Path):
+            payload["roi_json"] = str(roi_path)
+    except Exception:
+        pass
 
     done = out_dir / "sky_sub_done.json"
     done.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")

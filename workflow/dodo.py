@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import json
 import time
+import shutil
 from typing import Any
 
 import os
@@ -25,6 +26,17 @@ def _project_root() -> Path:
 def _resolve_from_root(p: str | Path) -> Path:
     p = Path(p)
     return p if p.is_absolute() else (_project_root() / p).resolve()
+
+
+def _write_manifest_both(*, out_path: Path, cfg: dict[str, Any], cfg_path: Path, work_dir: Path) -> None:
+    """Write manifest into qc/ and mirror into legacy report/."""
+    p = write_manifest(out_path=out_path, cfg=cfg, cfg_path=cfg_path)
+    try:
+        legacy = work_dir / "report"
+        legacy.mkdir(parents=True, exist_ok=True)
+        (legacy / "manifest.json").write_text(p.read_text(encoding="utf-8"), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def _touch(path: Path, payload: dict | None = None) -> None:
@@ -92,10 +104,10 @@ def task_manifest():
     """
     cfg = _load_cfg()
     work_dir = resolve_work_dir(cfg)
-    out = work_dir / "report" / "manifest.json"
+    out = work_dir / "qc" / "manifest.json"
 
     def _action():
-        _timed("manifest", work_dir, lambda: write_manifest(out_path=out, cfg=cfg, cfg_path=_cfg_path()))
+        _timed("manifest", work_dir, lambda: _write_manifest_both(out_path=out, cfg=cfg, cfg_path=_cfg_path(), work_dir=work_dir))
 
     return {
         "actions": [_action],
@@ -104,12 +116,13 @@ def task_manifest():
         "clean": True,
     }
 
+
 def task_qc_report():
     """Lightweight QC summary (JSON + HTML index)."""
     cfg = _load_cfg()
     work_dir = resolve_work_dir(cfg)
-    out_html = work_dir / "report" / "index.html"
-    out_json = work_dir / "report" / "qc_report.json"
+    out_html = work_dir / "qc" / "index.html"
+    out_json = work_dir / "qc" / "qc_report.json"
 
     def _action():
         def _run():
@@ -120,7 +133,7 @@ def task_qc_report():
 
     return {
         "actions": [_action],
-        "file_dep": [ _cfg_path(), work_dir / "report" / "manifest.json" ],
+        "file_dep": [ _cfg_path(), work_dir / "qc" / "manifest.json" ],
         "targets": [out_html, out_json],
         "task_dep": ["manifest"],
         "clean": True,
@@ -129,7 +142,7 @@ def task_qc_report():
 def task_superbias():
     cfg = _load_cfg()
     work_dir = resolve_work_dir(cfg)
-    out = work_dir / "calib" / "superbias.fits"
+    out = work_dir / "calibs" / "superbias.fits"
 
     bias_list = cfg["frames"].get("bias", [])
 
@@ -138,6 +151,13 @@ def task_superbias():
             from scorpio_pipe.stages.calib import build_superbias
             # передаём путь к YAML-конфигу, который задан через $env:CONFIG
             build_superbias(_cfg_path(), out_path=out)
+            # legacy mirror
+            try:
+                legacy = work_dir / "calib" / "superbias.fits"
+                legacy.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(out, legacy)
+            except Exception:
+                pass
 
         _timed("superbias", work_dir, _run)
 
@@ -152,7 +172,7 @@ def task_superbias():
 def task_superflat():
     cfg = _load_cfg()
     work_dir = resolve_work_dir(cfg)
-    out = work_dir / "calib" / "superflat.fits"
+    out = work_dir / "calibs" / "superflat.fits"
 
     flat_list = cfg["frames"].get("flat", [])
 
@@ -161,6 +181,13 @@ def task_superflat():
             from scorpio_pipe.stages.calib import build_superflat
             # передаём путь к YAML-конфигу, который задан через $env:CONFIG
             build_superflat(_cfg_path(), out_path=out)
+            # legacy mirror
+            try:
+                legacy = work_dir / "calib" / "superflat.fits"
+                legacy.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(out, legacy)
+            except Exception:
+                pass
 
         _timed("superflat", work_dir, _run)
 
@@ -216,7 +243,7 @@ def task_superneon():
     superneon_cfg = (cfg.get("superneon") or {}) if isinstance(cfg.get("superneon"), dict) else {}
     bias_sub = bool(superneon_cfg.get("bias_sub", True))
 
-    superbias = Path(cfg.get("calib", {}).get("superbias_path") or (work_dir / "calib" / "superbias.fits"))
+    superbias = Path(cfg.get("calib", {}).get("superbias_path") or (work_dir / "calibs" / "superbias.fits"))
     targets = [
         outdir / "superneon.fits",
         outdir / "superneon.png",
@@ -321,7 +348,7 @@ def task_sky_sub():
         "actions": [_action],
         # Depends on linearize preview and/or per-exposure products
         "file_dep": [_cfg_path(), work_dir / "products" / "lin" / "linearize_done.json"],
-        "targets": [done],
+        "targets": [done, out_dir / "qc_sky.json", out_dir / "roi.json"],
         "task_dep": ["linearize"],
         "clean": True,
     }
@@ -350,7 +377,13 @@ def task_linearize():
     return {
         "actions": [_action],
         "file_dep": [_cfg_path(), wavesol_dir(cfg) / "lambda_map.fits"],
-        "targets": [done, out_dir / "lin_preview.fits", out_dir / "lin_preview.png"],
+        "targets": [
+            done,
+            out_dir / "wave_grid.json",
+            work_dir / "qc" / "linearize_qc.json",
+            out_dir / "lin_preview.fits",
+            out_dir / "lin_preview.png",
+        ],
         "task_dep": ["wavesol", "cosmics"],
         "clean": True,
     }

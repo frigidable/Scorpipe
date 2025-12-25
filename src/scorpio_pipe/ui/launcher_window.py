@@ -418,6 +418,31 @@ class LauncherWindow(QtWidgets.QMainWindow):
         content_lay.addWidget(content)
         return root
 
+    def _mk_basic_advanced_tabs(self, basic: QtWidgets.QWidget, advanced: QtWidgets.QWidget) -> QtWidgets.QWidget:
+        """Compact Basic/Advanced parameter container.
+
+        The old collapsible sections waste vertical space and often make long
+        parameter lists unreadable. Tabs are denser and predictable.
+
+        Each tab is wrapped into a scroll area so *everything* stays accessible
+        even on small screens.
+        """
+
+        def _wrap_scroll(w: QtWidgets.QWidget) -> QtWidgets.QScrollArea:
+            sa = QtWidgets.QScrollArea()
+            sa.setWidgetResizable(True)
+            sa.setFrameShape(QtWidgets.QFrame.NoFrame)
+            sa.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+            sa.setWidget(w)
+            return sa
+
+        tabs = QtWidgets.QTabWidget()
+        tabs.setDocumentMode(True)
+        tabs.setTabPosition(QtWidgets.QTabWidget.North)
+        tabs.addTab(_wrap_scroll(basic), "Basic")
+        tabs.addTab(_wrap_scroll(advanced), "Advanced")
+        return tabs
+
     def _mk_stage_apply_row(self, stage: str) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
         h = QtWidgets.QHBoxLayout(w)
@@ -899,7 +924,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_pick_work_dir.setCursor(QtCore.Qt.PointingHandCursor)
         row_wd.addWidget(self.edit_work_dir, 1)
         row_wd.addWidget(self.btn_pick_work_dir)
-        row_wd.addWidget(HelpButton("Папка, куда будут записаны продукты пайплайна (calib/, wavesol/, report/...)."))
+        row_wd.addWidget(HelpButton("Папка, куда будут записаны продукты пайплайна (calibs/, wavesol/, qc/ (и legacy report/...)."))
         fl.addRow("Work directory", row_wd)
 
         # Create/Load config actions
@@ -2437,8 +2462,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         adv_lbl.setWordWrap(True)
         adv_form.addRow("", adv_lbl)
 
-        pl.addWidget(self._collapsible("Basic", basic, checked=True))
-        pl.addWidget(self._collapsible("Advanced", adv, checked=False))
+        pl.addWidget(self._mk_basic_advanced_tabs(basic, adv))
         pl.addWidget(self._mk_stage_apply_row("flatfield"))
 
         row = QtWidgets.QHBoxLayout()
@@ -2852,8 +2876,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.dspin_sn_boost,
         )
 
-        pl.addWidget(self._collapsible("Basic", basic, checked=True))
-        pl.addWidget(self._collapsible("Advanced", adv, checked=False))
+        pl.addWidget(self._mk_basic_advanced_tabs(basic, adv))
         pl.addWidget(self._mk_stage_apply_row("superneon"))
 
         row = QtWidgets.QHBoxLayout()
@@ -3095,8 +3118,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             )
         )
 
-        pl.addWidget(self._collapsible("Basic", basic, checked=True))
-        pl.addWidget(self._collapsible("Advanced", adv, checked=False))
+        pl.addWidget(self._mk_basic_advanced_tabs(basic, adv))
         pl.addWidget(self._mk_stage_apply_row("lineid"))
 
         # --- Actions ---
@@ -3260,17 +3282,42 @@ class LauncherWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
-    def _setup_key_for_pairs(self) -> dict:
+    def _setup_key_for_pairs(self) -> dict[str, str]:
+        """Return a *stable* setup key used by the pairs library.
+
+        Note: some datasets store binning as a string like "1x2" (SCORPIO often
+        does). The UI must *not* cast it to int.
+        """
+
         cfg = self._cfg or {}
         setup = cfg.get("setup", {}) if isinstance(cfg.get("setup", {}), dict) else {}
+
+        def _norm(v: Any) -> str:
+            return str(v or "").strip()
+
+        def _norm_binning(v: Any) -> str:
+            if v is None:
+                return ""
+            if isinstance(v, (tuple, list)) and len(v) >= 2:
+                try:
+                    return f"{int(v[0])}x{int(v[1])}"
+                except Exception:
+                    return "x".join(str(x) for x in v[:2])
+            s = str(v).strip()
+            # common forms: "1x2", "1×2", "1 x 2"
+            import re
+            m = re.match(r"^\s*(\d+)\s*[x×]\s*(\d+)\s*$", s)
+            if m:
+                return f"{int(m.group(1))}x{int(m.group(2))}"
+            return s
+
         # Only keep fields that define pair-set identity
-        out = {
-            "instrument": str(setup.get("instrument", "")),
-            "disperser": str(setup.get("disperser", "")),
-            "slit": str(setup.get("slit", "")),
-            "binning": int(setup.get("binning", 1) or 1),
+        return {
+            "instrument": _norm(setup.get("instrument", "")),
+            "disperser": _norm(setup.get("disperser", "")),
+            "slit": _norm(setup.get("slit", "")),
+            "binning": _norm_binning(setup.get("binning", "")),
         }
-        return out
 
     def _refresh_pair_sets_combo(self) -> None:
         if not hasattr(self, "combo_pair_sets"):
@@ -3298,8 +3345,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
         else:
             combo.setEnabled(True)
             for it in items:
-                tag = "user" if it.kind == "user" else "built-in"
-                combo.addItem(f"{it.name} [{tag}]", {"kind": it.kind, "name": it.name})
+                tag = "user" if str(it.origin) == "user" else "built-in"
+                combo.addItem(
+                    f"{it.label} [{tag}]",
+                    {"origin": str(it.origin), "label": str(it.label), "path": str(it.path)},
+                )
 
         # try restore
         if prev is not None and items:
@@ -3309,16 +3359,14 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     break
         combo.blockSignals(False)
 
-        # update buttons
+        # update buttons/actions
         try:
-            has_sel = combo.currentData() is not None
-            for btn_name in (
-                "btn_use_pair_set",
-                "btn_copy_pair_set",
-                "btn_export_selected_pair_set",
-            ):
+            has_sel = isinstance(combo.currentData(), dict)
+            for btn_name in ("btn_use_pair_set", "btn_copy_pair_set"):
                 if hasattr(self, btn_name):
                     getattr(self, btn_name).setEnabled(bool(has_sel))
+            if hasattr(self, "act_export_selected_pair_set"):
+                self.act_export_selected_pair_set.setEnabled(bool(has_sel))
         except Exception:
             pass
 
@@ -3328,9 +3376,13 @@ class LauncherWindow(QtWidgets.QMainWindow):
         data = self.combo_pair_sets.currentData()
         if not isinstance(data, dict):
             return None
-        if "name" not in data or "kind" not in data:
+        if "path" not in data:
             return None
-        return {"name": str(data["name"]), "kind": str(data["kind"])}
+        return {
+            "path": str(data["path"]),
+            "label": str(data.get("label", "")),
+            "origin": str(data.get("origin", "")),
+        }
 
     def _current_pairs_path(self):
         """Resolve current hand pairs path from config (may be empty)."""
@@ -3381,17 +3433,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
         if not self._cfg_path:
             self._show_msgbox_lines("Pairs", ["Сначала сохраните config.yaml (Apply)."], icon="warn")
             return
-        setup = self._setup_key_for_pairs()
         try:
-            src = get_pair_set_path(setup, ps["name"], ps["kind"])
-        except Exception as e:
-            self._log_exception(e)
-            self._show_msgbox_lines("Pairs", ["Не удалось найти файл набора пар.", str(e)], icon="error")
-            return
-
-        try:
+            from pathlib import Path
             wd = resolve_work_dir(cfg, self._cfg_path)
-            dst = copy_pair_set_to_workdir(setup, wd, src, overwrite=True)
+            disperser = str(cfg.get("setup", {}).get("disperser", "") or "")
+            src = Path(ps["path"]).expanduser()
+            dst = copy_pair_set_to_workdir(disperser, wd, src)
             rel = _rel_to_workdir(wd, dst)
             self._set_cfg_value("wavesol.hand_pairs_path", rel)
             self.editor_yaml.blockSignals(True)
@@ -3399,67 +3446,74 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.editor_yaml.blockSignals(False)
             self._do_save_cfg()
             self._refresh_pairs_label()
-            self._log_info(f"Using pair set '{ps['name']}' → {dst}")
+            self._log_info(f"Using pair set '{ps.get('label','')}' → {dst}")
         except Exception as e:
             self._log_exception(e)
             self._show_msgbox_lines("Pairs", ["Не удалось скопировать набор пар в work_dir.", str(e)], icon="error")
 
     def _do_copy_pair_set(self) -> None:
-        """Copy selected pair set into user library under a new name."""
-        ps = self._selected_pair_set_id()
-        if ps is None:
-            self._show_msgbox_lines("Pairs", ["Не выбран набор пар."], icon="warn")
-            return
-        setup = self._setup_key_for_pairs()
-        default = f"{ps['name']}_copy"
-        new_name, ok = QtWidgets.QInputDialog.getText(self, "Copy pair set", "New name:", text=default)
-        if not ok or not str(new_name).strip():
-            return
-        new_name = str(new_name).strip()
-        try:
-            out = copy_pair_set_to_user_library(setup, ps["name"], ps["kind"], new_name=new_name)
-            self._log_info(f"Saved to user library: {out}")
-            self._refresh_pair_sets_combo()
-        except Exception as e:
-            self._log_exception(e)
-            self._show_msgbox_lines("Pairs", ["Не удалось скопировать набор в user library.", str(e)], icon="error")
-
-    def _do_save_workdir_pairs(self) -> None:
-        """Ensure current hand pairs are stored inside work_dir (copy), and point config to that copy."""
+        """Copy selected pair set into work_dir under a custom filename (does not change config)."""
         if not self._ensure_cfg_saved():
             return
         if not self._sync_cfg_from_editor():
+            return
+        ps = self._selected_pair_set_id()
+        if ps is None:
+            self._show_msgbox_lines("Pairs", ["Не выбран набор пар."], icon="warn")
             return
         if not self._cfg_path:
             self._show_msgbox_lines("Pairs", ["Сначала сохраните config.yaml (Apply)."], icon="warn")
             return
         cfg = self._cfg or {}
+
+        def _safe_name(s: str) -> str:
+            import re
+            s = re.sub(r"[^0-9A-Za-z._-]+", "_", s.strip())
+            s = re.sub(r"_+", "_", s).strip("_")
+            return s or "pair_set"
+
+        default = f"pairset_{_safe_name(ps.get('label','selected'))}.txt"
+        new_name, ok = QtWidgets.QInputDialog.getText(self, "Copy pair set", "Filename in workdir:", text=default)
+        if not ok or not str(new_name).strip():
+            return
+        new_name = str(new_name).strip()
+        try:
+            from pathlib import Path
+            wd = resolve_work_dir(cfg, self._cfg_path)
+            disperser = str(cfg.get("setup", {}).get("disperser", "") or "")
+            src = Path(ps["path"]).expanduser()
+            dst = copy_pair_set_to_workdir(disperser, wd, src, filename=new_name)
+            self._log_info(f"Copied selected pair set into work_dir: {dst}")
+            self._refresh_pair_sets_combo()
+        except Exception as e:
+            self._log_exception(e)
+            self._show_msgbox_lines("Pairs", ["Не удалось скопировать набор в work_dir.", str(e)], icon="error")
+
+    def _do_save_workdir_pairs(self) -> None:
+        """Save current workdir hand-pairs into the *user library* (reusable)."""
+        if not self._sync_cfg_from_editor():
+            return
         p = self._current_pairs_path()
         if p is None or not p.exists():
             self._show_msgbox_lines("Pairs", ["Текущий файл пар не найден."], icon="warn")
             return
         try:
             setup = self._setup_key_for_pairs()
-            wd = resolve_work_dir(cfg, self._cfg_path)
-            dst = copy_pair_set_to_workdir(setup, wd, p, overwrite=True)
-            rel = _rel_to_workdir(wd, dst)
-            self._set_cfg_value("wavesol.hand_pairs_path", rel)
-            self.editor_yaml.blockSignals(True)
-            self.editor_yaml.setPlainText(_yaml_dump(self._cfg or {}))
-            self.editor_yaml.blockSignals(False)
-            self._do_save_cfg()
-            self._refresh_pairs_label()
-            self._log_info(f"Pairs copied into work_dir: {dst}")
+            default = f"{setup.get('disperser','')}_{setup.get('slit','')}_{setup.get('binning','')}".strip("_") or "pairs"
+            label, ok = QtWidgets.QInputDialog.getText(self, "Save to user library", "Label:", text=default)
+            if not ok or not str(label).strip():
+                return
+            out = save_user_pair_set(setup, p, label=str(label).strip())
+            self._log_info(f"Saved to user library: {out}")
+            self._refresh_pair_sets_combo()
         except Exception as e:
             self._log_exception(e)
-            self._show_msgbox_lines("Pairs", ["Не удалось сохранить пары в work_dir.", str(e)], icon="error")
+            self._show_msgbox_lines("Pairs", ["Не удалось сохранить пары в user library.", str(e)], icon="error")
 
     def _do_open_pairs_library(self) -> None:
         try:
-            from scorpio_pipe.pairs_library import user_library_dir
-            from PyQt5.QtGui import QDesktopServices
-            from PyQt5.QtCore import QUrl
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(user_library_dir())))
+            root = user_pairs_root()
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(root)))
         except Exception as e:
             self._log_exception(e)
             self._show_msgbox_lines("Pairs", ["Не удалось открыть папку библиотеки.", str(e)], icon="error")
@@ -3469,19 +3523,18 @@ class LauncherWindow(QtWidgets.QMainWindow):
         if ps is None:
             self._show_msgbox_lines("Pairs", ["Не выбран набор пар."], icon="warn")
             return
-        setup = self._setup_key_for_pairs()
-        try:
-            src = get_pair_set_path(setup, ps["name"], ps["kind"])
-        except Exception as e:
-            self._log_exception(e)
-            self._show_msgbox_lines("Pairs", ["Не удалось найти файл набора пар.", str(e)], icon="error")
-            return
-        fn, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export pair set", f"{ps['name']}.txt", "Text files (*.txt);;All files (*)")
+        from pathlib import Path
+        src = Path(ps["path"]).expanduser()
+        fn, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export pair set",
+            f"{ps.get('label','pair_set')}.txt",
+            "Text files (*.txt);;All files (*)",
+        )
         if not fn:
             return
         try:
-            from shutil import copy2
-            copy2(str(src), str(fn))
+            export_pair_set(src, Path(fn))
             self._log_info(f"Exported: {fn}")
         except Exception as e:
             self._log_exception(e)
@@ -3510,9 +3563,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         if not fn:
             return
         try:
-            from shutil import copy2
-            tmp = export_user_library_zip()
-            copy2(str(tmp), str(fn))
+            from pathlib import Path
+            export_user_library_zip(Path(fn))
             self._log_info(f"Exported user library: {fn}")
         except Exception as e:
             self._log_exception(e)
@@ -3815,8 +3867,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.dspin_ws_cheb_clip,
         )
 
-        pl.addWidget(self._collapsible("Basic", basic, checked=True))
-        pl.addWidget(self._collapsible("Advanced", adv, checked=False))
+        pl.addWidget(self._mk_basic_advanced_tabs(basic, adv))
         pl.addWidget(self._mk_stage_apply_row("wavesol"))
 
         # wiring (pending)
@@ -5277,19 +5328,13 @@ class LauncherWindow(QtWidgets.QMainWindow):
             pass
 
     def _open_report_html(self) -> None:
-        wd = self._current_work_dir_resolved()
-        if not wd:
-            return
-        p = wd / 'report' / 'index.html'
+        wd = self._get_work_dir()
+        p = wd / 'qc' / 'index.html'
+        if not p.exists():
+            p = wd / 'report' / 'index.html'
         if p.exists():
-            try:
-                QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(p)))
-            except Exception:
-                pass
-        else:
-            # fallback: open folder
-            if (wd / 'report').exists():
-                self._open_in_explorer(wd / 'report')
+            self._open_in_browser(p)
+
 
     def _install_shortcuts(self) -> None:
         # Keep the UI fast: shortcuts call existing handlers.

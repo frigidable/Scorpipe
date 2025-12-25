@@ -11,7 +11,7 @@ from typing import Any, Iterator
 
 def timings_file(*, work_dir: str | Path) -> Path:
     wd = Path(work_dir).expanduser().resolve()
-    return wd / "report" / "timings.json"
+    return wd / "qc" / "timings.json"
 
 
 def _read_list(p: Path) -> list[dict[str, Any]]:
@@ -44,6 +44,13 @@ def append_timing(
         }
     )
     p.write_text(json.dumps(rows, indent=2, ensure_ascii=False), encoding="utf-8")
+    # legacy mirror
+    try:
+        legacy = Path(work_dir).expanduser().resolve() / "report"
+        legacy.mkdir(parents=True, exist_ok=True)
+        (legacy / "timings.json").write_text(p.read_text(encoding="utf-8"), encoding="utf-8")
+    except Exception:
+        pass
     return p
 
 
@@ -54,7 +61,7 @@ def timed_stage(
     stage: str,
     extra: dict[str, Any] | None = None,
 ) -> Iterator[None]:
-    """Context manager that records timings to report/timings.json.
+    """Context manager that records timings to qc/timings.json (legacy mirror: report/timings.json).
 
     It never raises on write failures: timing must not break the pipeline.
     """

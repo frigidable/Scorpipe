@@ -22,13 +22,22 @@ import json
 import numpy as np
 from astropy.io import fits
 
+from scorpio_pipe.io.mef import write_sci_var_mask, try_read_grid
+from scorpio_pipe.maskbits import BADPIX, COSMIC, NO_COVERAGE, REJECTED, SATURATED, USER
+
 from ..plot_style import mpl_style
 from ..wavesol_paths import resolve_work_dir
 from ..shift_utils import xcorr_shift_subpix
 
 
-MASK_NO_COVERAGE = np.uint16(1 << 0)
-MASK_CLIPPED = np.uint16(1 << 4)
+MASK_NO_COVERAGE = NO_COVERAGE
+MASK_CLIPPED = REJECTED
+
+# Bits that make a pixel unusable for stacking.
+FATAL_BITS = np.uint16(NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED)
+
+# Bits that make a pixel unusable for stacking.
+FATAL_BITS = np.uint16(NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED)
 
 
 def _xcorr_subpix_shift_1d(ref: np.ndarray, cur: np.ndarray, max_shift: int) -> tuple[float, float]:
@@ -295,16 +304,21 @@ def _open_mef(path: Path) -> tuple[np.ndarray, fits.Header, np.ndarray | None, n
         return sci, hdr, var, mask
 
 
-def _write_mef(path: Path, sci: np.ndarray, hdr: fits.Header, *, var: np.ndarray | None, mask: np.ndarray | None, cov: np.ndarray | None) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    hdus: list[fits.HDUBase] = [fits.PrimaryHDU(np.asarray(sci, dtype=np.float32), header=hdr)]
-    if var is not None:
-        hdus.append(fits.ImageHDU(np.asarray(var, dtype=np.float32), name="VAR"))
-    if mask is not None:
-        hdus.append(fits.ImageHDU(np.asarray(mask, dtype=np.uint16), name="MASK"))
+def _write_mef(
+    path: Path,
+    sci: np.ndarray,
+    hdr: fits.Header,
+    *,
+    var: np.ndarray | None,
+    mask: np.ndarray | None,
+    cov: np.ndarray | None,
+) -> None:
+    """Write stacked 2D product as MEF (SCI/VAR/MASK [+COV])."""
+    grid = try_read_grid(hdr)
+    extra: list[fits.ImageHDU] = []
     if cov is not None:
-        hdus.append(fits.ImageHDU(np.asarray(cov, dtype=np.int16), name="COV"))
-    fits.HDUList(hdus).writeto(path, overwrite=True)
+        extra.append(fits.ImageHDU(np.asarray(cov, dtype=np.int16), name="COV"))
+    write_sci_var_mask(path, sci, var=var, mask=mask, header=hdr, grid=grid, extra_hdus=extra)
 
 
 def _iter_slices(ny: int, chunk: int) -> Iterable[slice]:
@@ -387,7 +401,7 @@ def run_stack2d(cfg: dict[str, Any], *, inputs: Iterable[Path], out_dir: Path | 
                         m = None
                 good = np.isfinite(s)
                 if m is not None:
-                    good &= (m == 0)
+                    good &= ((m & FATAL_BITS) == 0)
 
                 sel = None
                 if y_align_mode == "windows":

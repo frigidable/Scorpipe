@@ -1,3 +1,34 @@
+## v5.20.0
+
+### GUI fixes: Pair-sets + parameters layout
+- **Fixed crash on "Create New Config" / pair-sets refresh** when binning is stored as a string like ``"1x2"`` (no more ``ValueError: invalid literal for int()``).
+- Pair-sets combobox now correctly uses the current pairs library API (``label/origin/path``), so:
+  - built-in vs user sets are listed correctly,
+  - "Use selected" copies the chosen set into workdir and updates ``wavesol.hand_pairs_path``,
+  - "Copy selected → workdir" copies without changing config,
+  - "Save workdir → library" really saves into the user library,
+  - exports/open-library actions work under **PySide6** (no PyQt5 dependency).
+- **Parameters panel**: switched **Basic/Advanced** from collapsible sections to **two tabs** (each scrollable) so long parameter lists no longer get clipped.
+
+## v5.19.0
+
+### Sky subtraction (Kelson-style, per exposure in (λ,y))
+- **Per-exposure Kelson-style sky modeling** on *linearized* frames (λ,y): B-splines along λ + smooth (polynomial) dependence of scale/offset with y.
+- ROI **object/sky**: headless from config and optional **interactive Qt picker** (if enabled).
+- New artifacts:
+  - ``products/sky/per_exp/<tag>_sky_model.fits``
+  - ``products/sky/per_exp/<tag>_skysub.fits`` (+ legacy alias ``<tag>_sky_sub.fits``)
+  - ``products/sky/qc_sky.json`` + per-exposure diagnostic PNGs (spectrum fit + residual map).
+
+### Linearize (MEF I/O + strict masks)
+- **Fixed mask propagation** bug (undefined MASK_* constants) and aligned to ``maskbits`` semantics.
+- Input science frames can now be **MEF (SCI/VAR/MASK)**; VAR/MASK are carried through linearization when present.
+- Per-exposure outputs now use the canonical name ``*_rectified.fits`` (+ legacy ``*_lin.fits`` copy).
+
+### Products/QC plumbing
+- Product registry corrected (``products/spec`` dir) and augmented with JSON artifacts (e.g. ``sky_sub_done.json``, ``stack2d_done.json``, ``extract1d_done.json``) so QC report can pick them up.
+- Products manifest now groups **per-exposure** artifacts by tag and includes FITS/PNG/JSON files.
+
 # Changelog
 
 ## v5.16.0

@@ -18,11 +18,22 @@ class QCItem:
 
 
 DEFAULT_QC_ITEMS: list[QCItem] = [
-    QCItem("Manifest (JSON)", "report/manifest.json", "text"),
-    QCItem("QC report (HTML)", "report/index.html", "text"),
-    QCItem("QC summary (JSON)", "report/qc_report.json", "text"),
-    QCItem("Timings (JSON)", "report/timings.json", "text"),
-    QCItem("Superbias (FITS)", "calib/superbias.fits", "fits"),
+    QCItem("Manifest (JSON)", "qc/manifest.json", "text"),
+    QCItem("Products manifest (JSON)", "qc/products_manifest.json", "text"),
+    QCItem("Manifest (legacy)", "report/manifest.json", "text"),
+    QCItem("Products manifest (legacy)", "report/products_manifest.json", "text"),
+    QCItem("QC report (HTML)", "qc/index.html", "text"),
+    QCItem("QC report (legacy)", "report/index.html", "text"),
+    QCItem("QC summary (JSON)", "qc/qc_report.json", "text"),
+    QCItem("QC summary (legacy)", "report/qc_report.json", "text"),
+    QCItem("Timings (JSON)", "qc/timings.json", "text"),
+    QCItem("Timings (legacy)", "report/timings.json", "text"),
+    QCItem("Linearize QC (JSON)", "qc/linearize_qc.json", "text"),
+    QCItem("Linearize QC (legacy)", "report/linearize_qc.json", "text"),
+    QCItem("Linearize QC (JSON)", "qc/linearize_qc.json", "text"),
+    QCItem("Linearize QC (legacy)", "report/linearize_qc.json", "text"),
+    QCItem("Superbias (FITS)", "calibs/superbias.fits", "fits"),
+    QCItem("Superbias (legacy)", "calib/superbias.fits", "fits"),
     QCItem("Cosmics summary (JSON)", "cosmics/summary.json", "text"),
     # legacy flat layout (still supported)
     QCItem("Superneon (PNG)", "wavesol/superneon.png", "image"),

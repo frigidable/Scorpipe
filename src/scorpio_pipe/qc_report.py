@@ -254,6 +254,30 @@ def _metrics_spec(products: list[Product]) -> dict[str, Any]:
         return {}
 
 
+def _metrics_linearize(work_dir: Path, products: list[Product]) -> dict[str, Any]:
+    """Load linearize QC metrics if available.
+
+    The linearize stage writes work_dir/qc/linearize_qc.json (v5.18+).
+    """
+    try:
+        p = next((x for x in products if x.key == "linearize_qc" and x.exists()), None)
+        if p is None:
+            return {}
+        import json
+
+        data = json.loads(Path(p.path).read_text(encoding="utf-8"))
+        # keep only summary fields for the main QC report
+        summary = {
+            "grid": data.get("grid"),
+            "preview": data.get("preview"),
+            "per_exposure": data.get("per_exposure"),
+            "critical_ranges": data.get("critical_ranges"),
+        }
+        return summary
+    except Exception:
+        return {}
+
+
 def _html_escape(s: str) -> str:
     return (
         s.replace("&", "&amp;")
@@ -364,8 +388,10 @@ def build_qc_report(cfg: dict[str, Any], *, out_dir: str | Path | None = None, c
     """Build a lightweight QC report (JSON + HTML).
 
     Writes:
-      - work_dir/report/qc_report.json
-      - work_dir/report/index.html
+      - work_dir/qc/qc_report.json
+      - (legacy) work_dir/report/qc_report.json
+      - work_dir/qc/index.html
+      - (legacy) work_dir/report/index.html
     """
 
     if config_dir is not None and not cfg.get("config_dir"):
@@ -373,9 +399,21 @@ def build_qc_report(cfg: dict[str, Any], *, out_dir: str | Path | None = None, c
         cfg["config_dir"] = str(config_dir)
     work_dir = resolve_work_dir(cfg)
     if out_dir is None:
-        out_dir = work_dir / "report"
+        out_dir = work_dir / "qc"
     out_dir = Path(out_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Ensure products manifest exists (machine-readable index incl. per-exposure trees)
+    try:
+        from scorpio_pipe.products_manifest import write_products_manifest
+        from scorpio_pipe.work_layout import ensure_work_layout
+
+        layout = ensure_work_layout(work_dir)
+        write_products_manifest(cfg=cfg, out_path=layout.qc / "products_manifest.json")
+        # legacy mirror
+        write_products_manifest(cfg=cfg, out_path=layout.report_legacy / "products_manifest.json")
+    except Exception:
+        pass
 
     products = list_products(cfg)
     # materialize relative paths for portability
@@ -396,6 +434,10 @@ def build_qc_report(cfg: dict[str, Any], *, out_dir: str | Path | None = None, c
 
     metrics: dict[str, Any] = {}
     metrics.update(_metrics_wavesol(work_dir, products))
+
+    lin = _metrics_linearize(work_dir, products)
+    if lin:
+        metrics["linearize"] = lin
     c = _metrics_cosmics(products)
     if c:
         metrics["cosmics"] = c
@@ -406,6 +448,17 @@ def build_qc_report(cfg: dict[str, Any], *, out_dir: str | Path | None = None, c
     s = _metrics_sky(products)
     if s:
         metrics["sky"] = s
+
+    # Linearize QC (v5.18+)
+    try:
+        from scorpio_pipe.work_layout import ensure_work_layout
+
+        layout = ensure_work_layout(work_dir)
+        p = layout.qc / "linearize_qc.json"
+        if p.exists():
+            metrics["linearize"] = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        pass
 
     st = _metrics_stack(products)
     if st:
@@ -558,4 +611,14 @@ def build_qc_report(cfg: dict[str, Any], *, out_dir: str | Path | None = None, c
 
     out_html = out_dir / "index.html"
     out_html.write_text(html, encoding="utf-8")
+
+    # legacy mirror: keep older UI/tests that expect work_dir/report/
+    try:
+        legacy_dir = work_dir / "report"
+        legacy_dir.mkdir(parents=True, exist_ok=True)
+        (legacy_dir / "qc_report.json").write_text(out_json.read_text(encoding="utf-8"), encoding="utf-8")
+        (legacy_dir / "index.html").write_text(out_html.read_text(encoding="utf-8"), encoding="utf-8")
+    except Exception:
+        pass
+
     return out_html

@@ -7,9 +7,10 @@ Core requirement for v5.x:
   - Preserve (first-order) flux by using edge-based cumulative rebinning.
   - Provide variance and mask as first-class citizens where possible.
 
-Current implementation (v5.3):
-  - Rectifies each exposure onto a common λ grid (optional output per exposure).
-  - Stacks rectified exposures into obj_sum_lin.fits using inverse-variance weights.
+Current implementation (v5.18):
+  - Rectifies each exposure onto a *common* linear λ grid (flux-conserving rebin).
+  - Writes per-exposure rectified products: *_rectified.fits (SCI/VAR/MASK).
+  - Optionally creates a quick-look stacked preview (lin_preview.fits) for ROI/QC.
 
 Notes:
   - Variance is a first-pass estimate (Poisson + read-noise). It is refined later.
@@ -27,17 +28,27 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 from astropy.io import fits
 
+from scorpio_pipe.io.mef import WaveGrid, write_sci_var_mask, try_read_grid, read_sci_var_mask
+from scorpio_pipe.maskbits import (
+    BADPIX,
+    COSMIC,
+    EDGE,
+    NO_COVERAGE,
+    REJECTED,
+    SATURATED,
+    USER,
+    header_cards as mask_header_cards,
+    summarize as summarize_mask,
+)
+
 from ..logging_utils import get_logger
 from ..provenance import add_provenance
 from ..wavesol_paths import resolve_work_dir
+from ..wavesol_paths import wavesol_dir
 
 log = get_logger(__name__)
 
 
-MASK_NO_COVERAGE = np.uint16(1 << 0)
-MASK_BAD = np.uint16(1 << 1)
-MASK_COSMIC = np.uint16(1 << 2)
-MASK_SAT = np.uint16(1 << 3)
 
 
 @dataclass
@@ -73,6 +84,24 @@ def _open_fits_resilient(path: Path) -> Tuple[np.ndarray, fits.Header]:
         if data is None:
             raise ValueError("Primary HDU has no data")
         return np.asarray(data, dtype=np.float64), hdul[0].header
+
+
+def _open_science_with_optional_var_mask(path: Path) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None, fits.Header]:
+    """Open science frame.
+
+    Supports both plain 2D primary-HDU FITS and pipeline MEF products with
+    SCI/VAR/MASK extensions.
+    """
+    try:
+        with fits.open(path, memmap=False) as hdul:
+            if "SCI" in hdul:
+                sci, var, mask, hdr = read_sci_var_mask(path)
+                return sci.astype(np.float64, copy=False), (None if var is None else var.astype(np.float64, copy=False)), mask, hdr
+    except Exception:
+        # fall back to primary-only
+        pass
+    data, hdr = _open_fits_resilient(path)
+    return data, None, None, fits.Header(hdr)
 
 
 def _get_gain_e_per_adu(hdr: fits.Header, default: float = 1.0) -> float:
@@ -231,20 +260,19 @@ def _write_mef(
     var: Optional[np.ndarray] = None,
     mask: Optional[np.ndarray] = None,
     cov: Optional[np.ndarray] = None,
+    grid: WaveGrid | None = None,
 ) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    ph = fits.PrimaryHDU(data=sci.astype(np.float32), header=hdr)
-    hdus = [ph]
-    if var is not None:
-        h = fits.ImageHDU(data=var.astype(np.float32), name="VAR")
-        hdus.append(h)
-    if mask is not None:
-        h = fits.ImageHDU(data=mask.astype(np.uint16), name="MASK")
-        hdus.append(h)
+    """Write 2D MEF product with canonical SCI/VAR/MASK and optional COV.
+
+    Primary HDU stores SCI data for legacy readers; SCI extension is canonical.
+    """
+    if grid is None:
+        grid = try_read_grid(hdr)
+    extra: list[fits.ImageHDU] = []
     if cov is not None:
-        h = fits.ImageHDU(data=cov.astype(np.int16), name="COV")
-        hdus.append(h)
-    fits.HDUList(hdus).writeto(path, overwrite=True)
+        extra.append(fits.ImageHDU(data=np.asarray(cov, dtype=np.float32), name="COV"))
+    write_sci_var_mask(path, sci, var=var, mask=mask, header=hdr, grid=grid, extra_hdus=extra, primary_data=sci)
+
 
 
 def _set_linear_wcs(hdr: fits.Header, wave0: float, dw: float) -> fits.Header:
@@ -258,25 +286,101 @@ def _set_linear_wcs(hdr: fits.Header, wave0: float, dw: float) -> fits.Header:
     return hdr
 
 
-def _guess_output_grid(lam_map: np.ndarray, dw_hint: float) -> Tuple[float, float, int]:
-    """Pick a common λ grid based on the lambda_map range."""
+def _infer_lambda_unit(lam_hdr: fits.Header, lam_map: np.ndarray) -> str:
+    """Best-effort guess for lambda_map unit.
+
+    SCORPIO wavesolution products usually store wavelengths in Angstrom,
+    but some intermediate workflows may store pixel coordinates.
+    """
+    for k in ("CUNIT1", "BUNIT", "UNIT", "CUNIT"):
+        if k in lam_hdr:
+            try:
+                u = str(lam_hdr[k]).strip().lower()
+                if "ang" in u or "\u00c5" in u or u == "a":
+                    return "Angstrom"
+                if "pix" in u or "px" in u:
+                    return "pix"
+            except Exception:
+                pass
+    # heuristic fallback
+    lam = np.asarray(lam_map, dtype=float)
+    finite = np.isfinite(lam)
+    if not np.any(finite):
+        return "Angstrom"
+    v = float(np.nanmedian(lam[finite]))
+    return "pix" if v < 2000.0 else "Angstrom"
+
+
+def _compute_output_grid(
+    lam_map: np.ndarray,
+    *,
+    dw_hint: float,
+    mode: str,
+    lo_pct: float,
+    hi_pct: float,
+    imin_pct: float,
+    imax_pct: float,
+) -> Tuple[float, float, float, int]:
+    """Pick a common λ grid based on the lambda_map.
+
+    mode:
+      - intersection: robust intersection across Y (recommended)
+      - percentile: robust global min/max percentiles
+      - union: robust union across Y
+    """
     lam = np.asarray(lam_map, dtype=np.float64)
     finite = np.isfinite(lam)
     if not np.any(finite):
         raise ValueError("lambda_map contains no finite values")
-    lo = float(np.nanpercentile(lam[finite], 0.2))
-    hi = float(np.nanpercentile(lam[finite], 99.8))
+
+    # per-row ranges for robust policies
+    row_mins = []
+    row_maxs = []
+    for r in lam:
+        m = r[np.isfinite(r)]
+        if m.size < 8:
+            continue
+        row_mins.append(float(np.min(m)))
+        row_maxs.append(float(np.max(m)))
+    if not row_mins:
+        lo = float(np.nanpercentile(lam[finite], lo_pct))
+        hi = float(np.nanpercentile(lam[finite], hi_pct))
+    else:
+        rm = np.asarray(row_mins, dtype=float)
+        rx = np.asarray(row_maxs, dtype=float)
+        mmode = str(mode or "intersection").strip().lower()
+        if mmode == "intersection":
+            lo = float(np.percentile(rm, float(imin_pct)))
+            hi = float(np.percentile(rx, float(imax_pct)))
+            if not (hi > lo):
+                # fallback to global percentiles
+                lo = float(np.nanpercentile(lam[finite], lo_pct))
+                hi = float(np.nanpercentile(lam[finite], hi_pct))
+        elif mmode == "union":
+            lo = float(np.percentile(rm, float(lo_pct)))
+            hi = float(np.percentile(rx, float(hi_pct)))
+        else:
+            lo = float(np.nanpercentile(lam[finite], lo_pct))
+            hi = float(np.nanpercentile(lam[finite], hi_pct))
 
     dw = float(dw_hint)
     if not (math.isfinite(dw) and dw > 0):
-        # rough fallback from median spacing in the center
-        mid = lam[lam.shape[0] // 2]
-        d = np.diff(mid[np.isfinite(mid)])
-        dw = float(np.nanmedian(d)) if d.size else 1.0
+        # median spacing across a few central rows
+        mids = []
+        for yy in np.linspace(0, lam.shape[0] - 1, num=min(7, lam.shape[0]), dtype=int):
+            row = lam[yy]
+            rr = row[np.isfinite(row)]
+            if rr.size < 16:
+                continue
+            d = np.diff(rr)
+            d = d[np.isfinite(d) & (d > 0)]
+            if d.size:
+                mids.append(float(np.median(d)))
+        dw = float(np.median(mids)) if mids else 1.0
         dw = max(dw, 0.1)
 
     n = int(max(16, math.ceil((hi - lo) / dw)))
-    return lo, dw, n
+    return lo, hi, dw, n
 
 
 def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel_token: Any | None = None) -> Dict[str, Any]:
@@ -306,7 +410,13 @@ def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel
     #   dlambda_A, lambda_min_A, lambda_max_A, per_exposure
     # Backward-compatible aliases:
     #   dw, wmin/wmax, save_per_exposure
-    dw = float(lcfg.get("dlambda_A", lcfg.get("dw", 1.0)))
+    dw_raw = lcfg.get("dlambda_A", lcfg.get("dw", 1.0))
+    if dw_raw is None:
+        dw = float("nan")
+    elif isinstance(dw_raw, str) and dw_raw.strip().lower() in {"auto", "data", "from_data"}:
+        dw = float("nan")
+    else:
+        dw = float(dw_raw)
     y_crop_top = int(lcfg.get("y_crop_top", 0))
     y_crop_bottom = int(lcfg.get("y_crop_bottom", 0))
     save_per_exp = bool(
@@ -315,21 +425,26 @@ def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel
             lcfg.get("save_per_frame", lcfg.get("save_per_exposure", True)),
         )
     )
-    stack_preview = bool(lcfg.get("stack_preview", lcfg.get("stack_preview", True)))
+    stack_preview = bool(lcfg.get("stack_preview", True))
 
-    # Locate lambda_map
-    wavesol_dir = work_dir / "wavesol"
+    # Locate lambda_map (prefer per-disperser layout)
     lam_path = None
-    # most common location in this project:
-    cand = list(wavesol_dir.rglob("lambda_map.fits"))
-    if cand:
-        lam_path = cand[0]
-    else:
-        # fallback: legacy name
-        cand = list(wavesol_dir.rglob("lambda_map*.fits"))
+    if isinstance(lcfg.get("lambda_map_path"), str) and str(lcfg.get("lambda_map_path")).strip():
+        lam_path = Path(str(lcfg.get("lambda_map_path"))).expanduser()
+        if not lam_path.is_absolute():
+            lam_path = (work_dir / lam_path).resolve()
+    if lam_path is None:
+        wsol = wavesol_dir(cfg)
+        cand = wsol / "lambda_map.fits"
+        if cand.exists():
+            lam_path = cand
+    if lam_path is None:
+        # last resort: search anywhere under work_dir/wavesol
+        base = work_dir / "wavesol"
+        cand = list(base.rglob("lambda_map.fits")) + list(base.rglob("lambda_map*.fits"))
         lam_path = cand[0] if cand else None
     if lam_path is None or not lam_path.exists():
-        raise FileNotFoundError("lambda_map.fits not found under work_dir/wavesol")
+        raise FileNotFoundError("lambda_map.fits not found (expected under work_dir/wavesol/<disperser>/)")
 
     lam_map, lam_hdr = _open_fits_resilient(lam_path)
     if lam_map.ndim != 2:
@@ -374,18 +489,46 @@ def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel
         resolved.append(clean_p if clean_p.exists() else p)
     sci_paths = [Path(p) for p in resolved]
 
-    # Output λ grid
+    # Output wavelength grid (common for the whole series)
+    unit = _infer_lambda_unit(lam_hdr, lam_map)
     wmin_cfg = lcfg.get("lambda_min_A", lcfg.get("wmin"))
     wmax_cfg = lcfg.get("lambda_max_A", lcfg.get("wmax"))
+
+    # grid policy
+    grid_mode = str(lcfg.get("grid_mode", "intersection"))
+    lo_pct = float(lcfg.get("grid_lo_pct", 1.0))
+    hi_pct = float(lcfg.get("grid_hi_pct", 99.0))
+    imin_pct = float(lcfg.get("grid_intersection_min_pct", 95.0))
+    imax_pct = float(lcfg.get("grid_intersection_max_pct", 5.0))
+
+    # dw: if in pixel space and user did not provide, default to 1
+    if unit == "pix" and not (math.isfinite(dw) and dw > 0):
+        dw = 1.0
+
     if wmin_cfg is not None and wmax_cfg is not None:
         wave0 = float(wmin_cfg)
         wmax = float(wmax_cfg)
+        if not (math.isfinite(dw) and dw > 0):
+            # compute from data
+            _, _, dw, _ = _compute_output_grid(lam_map, dw_hint=dw, mode=grid_mode, lo_pct=lo_pct, hi_pct=hi_pct, imin_pct=imin_pct, imax_pct=imax_pct)
         if wmax <= wave0:
             raise ValueError("linearize.lambda_max_A must be > lambda_min_A")
-        # include the right edge
-        nlam = int(np.ceil((wmax - wave0) / dw))
+        nlam = int(max(16, np.ceil((wmax - wave0) / dw)))
     else:
-        wave0, dw, nlam = _guess_output_grid(lam_map, dw)
+        wave0_auto, wmax_auto, dw, nlam = _compute_output_grid(
+            lam_map,
+            dw_hint=dw,
+            mode=grid_mode,
+            lo_pct=lo_pct,
+            hi_pct=hi_pct,
+            imin_pct=imin_pct,
+            imax_pct=imax_pct,
+        )
+        # allow partial overrides
+        wave0 = float(wmin_cfg) if wmin_cfg is not None else float(wave0_auto)
+        wmax = float(wmax_cfg) if wmax_cfg is not None else float(wmax_auto)
+        nlam = int(max(16, np.ceil((wmax - wave0) / dw)))
+
     wave_edges = wave0 + dw * np.arange(nlam + 1, dtype=np.float64)
 
     # Crop by Y if requested
@@ -409,13 +552,11 @@ def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel
 
     sat_levels_adu: list[float] = []
 
-    mask_sum = np.zeros((ny, nlam), dtype=np.uint16)
-
     for i, p in enumerate(sci_paths, 1):
         if cancel_token is not None and getattr(cancel_token, "cancelled", False):
             raise RuntimeError("Cancelled")
         log.info("Linearize %d/%d: %s", i, len(sci_paths), p.name)
-        data, hdr = _open_fits_resilient(p)
+        data, var_in, mask_in, hdr = _open_science_with_optional_var_mask(p)
         if data.ndim != 2:
             raise ValueError(f"Science frame must be 2D: {p}")
         data = data[y0:y1, :]
@@ -423,7 +564,13 @@ def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel
             raise ValueError(
                 f"Science shape {data.shape} != lambda_map shape {lam_map.shape} for {p.name}"
             )
-        var = _estimate_variance_adu(data, hdr)
+        if var_in is not None:
+            var = np.asarray(var_in, dtype=np.float64)[y0:y1, :]
+        else:
+            var = _estimate_variance_adu(data, hdr)
+        mask = None
+        if mask_in is not None:
+            mask = np.asarray(mask_in, dtype=np.uint16)[y0:y1, :]
 
         # Saturation masking (optional): flag detector pixels near/above full well
         mask_saturation = bool(lcfg.get('mask_saturation', True))
@@ -443,7 +590,7 @@ def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel
             except Exception:
                 satmask = None
 
-        mask = None
+        # Merge legacy cosmics masks (if present) with any input MASK plane.
         base_for_mask = Path(p).stem
         if base_for_mask.endswith("_clean"):
             base_for_mask = base_for_mask[:-6]
@@ -451,47 +598,55 @@ def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel
         if mp.exists():
             try:
                 m, _ = _open_fits_resilient(mp)
-                mask = (m.astype(np.uint16) > 0).astype(np.uint16) * MASK_COSMIC
-                mask = mask[y0:y1, :]
+                cm = ((m.astype(np.uint16) > 0).astype(np.uint16) * COSMIC).astype(np.uint16)
+                cm = cm[y0:y1, :]
+                if mask is None:
+                    mask = cm
+                else:
+                    mask = (mask | cm).astype(np.uint16, copy=False)
             except Exception as e:
                 log.warning("Failed to load cosmic mask %s: %s", mp.name, e)
-                mask = None
+                # keep existing mask if any
 
         rect = np.zeros((ny, nlam), dtype=np.float32)
         rect_var = np.zeros((ny, nlam), dtype=np.float32)
         rect_mask = np.zeros((ny, nlam), dtype=np.uint16)
+        rect_cov = np.zeros((ny, nlam), dtype=np.float32)
 
         for yy in range(ny):
             lam_row = lam_map[yy]
             # Bad rows: mark no coverage
             if not np.any(np.isfinite(lam_row)):
-                rect_mask[yy, :] |= MASK_NO_COVERAGE
+                rect_mask[yy, :] |= NO_COVERAGE
                 continue
             # Use only finite subset for rebin; if too few finite points, skip
             finite = np.isfinite(lam_row)
             if np.sum(finite) < 8:
-                rect_mask[yy, :] |= MASK_NO_COVERAGE
+                rect_mask[yy, :] |= NO_COVERAGE
                 continue
             v_row, cov = _rebin_row_cumulative(data[yy, finite], lam_row[finite], wave_edges)
             vv_row, _ = _rebin_row_cumulative(var[yy, finite], lam_row[finite], wave_edges)
             rect[yy] = v_row
             rect_var[yy] = np.maximum(vv_row, 0.0)
+            rect_cov[yy] = cov
             # mark incomplete coverage
-            rect_mask[yy, cov < 0.999] |= MASK_NO_COVERAGE
+            # Coverage is a *fraction* per output bin; mark incomplete bins as EDGE.
+            rect_mask[yy, (cov > 0) & (cov < 0.999)] |= EDGE
+            rect_mask[yy, cov <= 0] |= NO_COVERAGE
             if mask is not None:
-                # crude mask propagation: if any masked detector pixel falls into a λ bin,
-                # mark the same bin as masked. We approximate using rebinning of a 0/1 mask.
-                m_row, _ = _rebin_row_cumulative(
-                    (mask[yy, finite] > 0).astype(np.float64), lam_row[finite], wave_edges
-                )
-                rect_mask[yy, m_row > 0] |= MASK_COSMIC
+                # Bit-preserving mask propagation: propagate each known bit separately.
+                for bit in (BADPIX, COSMIC, SATURATED, USER, REJECTED):
+                    m_row, _ = _rebin_row_cumulative(
+                        ((mask[yy, finite] & bit) > 0).astype(np.float64), lam_row[finite], wave_edges
+                    )
+                    rect_mask[yy, m_row > 0] |= bit
 
             if satmask is not None:
                 # propagate saturation flags through the same rebin operator
                 sm_row, _ = _rebin_row_cumulative(
                     satmask[yy, finite].astype(np.float64), lam_row[finite], wave_edges
                 )
-                rect_mask[yy, sm_row > 0] |= MASK_SAT
+                rect_mask[yy, sm_row > 0] |= SATURATED
 
         # Per-exposure output
         if per_exp_dir is not None:
@@ -504,11 +659,23 @@ def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel
                 except Exception:
                     pass
             ohdr = add_provenance(ohdr, cfg, stage="linearize")
-            _write_mef(per_exp_dir / f"{base_for_mask}_lin.fits", rect, ohdr, rect_var, rect_mask)
+
+            # Canonical v5.18+ naming: *_rectified.fits (keep *_lin.fits as a compatibility alias)
+            out_rect = per_exp_dir / f"{base_for_mask}_rectified.fits"
+            out_lin_alias = per_exp_dir / f"{base_for_mask}_lin.fits"
+            _write_mef(out_rect, rect, ohdr, rect_var, rect_mask, rect_cov)
+            try:
+                if out_lin_alias.resolve() != out_rect.resolve():
+                    import shutil
+
+                    shutil.copy2(out_rect, out_lin_alias)
+            except Exception:
+                pass
 
         # Stack: inverse-variance weighted mean
         w = np.zeros_like(rect_var, dtype=np.float64)
-        good = (rect_var > 0) & (rect_mask == 0)
+        fatal_bits = NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED
+        good = (rect_var > 0) & ((rect_mask & fatal_bits) == 0)
         w[good] = 1.0 / rect_var[good]
         stack_num += rect.astype(np.float64) * w
         stack_den += w
@@ -523,7 +690,7 @@ def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel
     out_sci[ok] = (stack_num[ok] / stack_den[ok]).astype(np.float32)
     out_var[ok] = (1.0 / np.maximum(stack_var_den[ok], 1e-20)).astype(np.float32)
     out_mask = mask_sum.copy()
-    out_mask[~ok] |= MASK_NO_COVERAGE
+    out_mask[~ok] |= NO_COVERAGE
 
     # Output products
     preview_fits = out_dir / "lin_preview.fits"
@@ -576,6 +743,61 @@ def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel
             "preview_png": str(preview_png) if preview_png.exists() else None,
         },
     }
+
+    # Wave grid metadata (used by downstream stages & external tooling)
+    wave_grid_json = out_dir / "wave_grid.json"
+    try:
+        wave_grid_json.write_text(
+            json.dumps(
+                {
+                    "unit": "Angstrom",
+                    "wave0": float(wave0),
+                    "dw": float(dw),
+                    "nlam": int(nlam),
+                    "grid_mode": str(lcfg.get("grid_mode", "intersection")),
+                    "y_crop": {"y0": int(y0), "y1": int(y1)},
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        payload.setdefault("products", {})["wave_grid_json"] = str(wave_grid_json)
+    except Exception:
+        pass
+
+    # QC metrics for quick inspection
+    try:
+        qc_dir = work_dir / "qc"
+        qc_dir.mkdir(parents=True, exist_ok=True)
+        qc_path = qc_dir / "linearize_qc.json"
+
+        fatal_bits = NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED
+        good = (out_var > 0) & ((out_mask & fatal_bits) == 0)
+        snr = np.zeros_like(out_sci, dtype=np.float64)
+        snr[good] = np.abs(out_sci[good].astype(np.float64)) / np.sqrt(np.maximum(out_var[good].astype(np.float64), 1e-20))
+        snr_vals = snr[good]
+        qc = {
+            "stage": "linearize",
+            "preview": str(preview_fits),
+            "wave0": float(wave0),
+            "dw": float(dw),
+            "nlam": int(nlam),
+            "coverage": {
+                "min": int(np.min(coverage)),
+                "median": float(np.median(coverage)),
+                "max": int(np.max(coverage)),
+            },
+            "mask_summary": summarize_mask(out_mask),
+            "snr_abs": {
+                "median": float(np.nanmedian(snr_vals)) if snr_vals.size else None,
+                "p10": float(np.nanpercentile(snr_vals, 10)) if snr_vals.size else None,
+                "p90": float(np.nanpercentile(snr_vals, 90)) if snr_vals.size else None,
+            },
+        }
+        qc_path.write_text(json.dumps(qc, indent=2), encoding="utf-8")
+        payload.setdefault("products", {})["qc_json"] = str(qc_path)
+    except Exception:
+        pass
     done_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     # Legacy mirroring (UI / older workflows expect work_dir/lin/obj_sum_lin.*)

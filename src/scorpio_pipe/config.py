@@ -7,6 +7,8 @@ import yaml
 
 import logging
 
+from scorpio_pipe.work_layout import ensure_work_layout
+
 
 def _norm_path_str(p: str) -> str:
     """Normalize a path string for cross-platform YAML.
@@ -83,6 +85,8 @@ def load_config(cfg_path: str | Path) -> dict[str, Any]:
 
     # resolve calib paths robustly
     wd = Path(cfg.get("work_dir", cfg_dir))
+    # v5.17+: ensure standard work layout (raw/calibs/science/products/qc)
+    ensure_work_layout(wd)
     calib = cfg.get("calib") or {}
     if isinstance(calib, dict):
         if calib.get("superbias_path"):
