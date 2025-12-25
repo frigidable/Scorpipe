@@ -206,6 +206,15 @@ class SkyBlock(BaseModel):
     enabled: bool = True
     method: str = "kelson"
 
+    # Advanced (v5.12+): per-exposure sky subtraction and optional stacking.
+    per_exposure: bool = False
+    # Stack rectified per-exposure sky-subtracted frames into a combined product.
+    # In the GUI this is presented as a checkbox near "Run Sky".
+    stack_after: bool = True
+    save_per_exp_model: bool = False
+    # Save a quick-look 1D sky spectrum (mean over sky rows). Useful for QC.
+    save_spectrum_1d: bool = True
+
     # Region of interest (pixel indices in the *linearized* frame)
     roi: Dict[str, Any] = Field(default_factory=dict)
 
@@ -221,6 +230,16 @@ class SkyBlock(BaseModel):
     scale_smooth_y: int = 41
 
     save_sky_model: bool = True
+    save_png: bool = True
+
+
+class Stack2DBlock(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    enabled: bool = True
+    sigma_clip: float = 4.0
+    maxiter: int = 3
+    chunk_rows: int = 128
     save_png: bool = True
 
 
@@ -279,6 +298,7 @@ class ConfigSchema(BaseModel):
     superneon: SuperneonBlock = Field(default_factory=SuperneonBlock)
     linearize: LinearizeBlock = Field(default_factory=LinearizeBlock)
     sky: SkyBlock = Field(default_factory=SkyBlock)
+    stack2d: Stack2DBlock = Field(default_factory=Stack2DBlock)
     extract1d: Extract1DBlock = Field(default_factory=Extract1DBlock)
 
     profiles: Optional[Dict[str, Any]] = None

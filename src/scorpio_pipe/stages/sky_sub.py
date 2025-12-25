@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any
 
 import json
+import csv
+import shutil
 import numpy as np
 from astropy.io import fits
 
@@ -208,6 +210,10 @@ def run_sky_sub(cfg: dict[str, Any], *, lin_fits: Path | None = None, out_dir: P
     """
 
     sky_cfg = (cfg.get("sky") or {}) if isinstance(cfg.get("sky"), dict) else {}
+    # v5.12 defaults (best-practice): products/ as canonical outputs.
+    wd = resolve_work_dir(cfg)
+    products_root = wd / "products"
+    legacy_root = wd / "sky"
     if not bool(sky_cfg.get("enabled", True)):
         # Write a marker anyway to keep resume/QC stable.
         wd = resolve_work_dir(cfg)
@@ -219,173 +225,232 @@ def run_sky_sub(cfg: dict[str, Any], *, lin_fits: Path | None = None, out_dir: P
 
     roi = _roi_from_cfg(cfg)
 
-    wd = resolve_work_dir(cfg)
-    out_dir = Path(out_dir) if out_dir is not None else (wd / "sky")
+    out_dir = Path(out_dir) if out_dir is not None else (products_root / "sky")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    if lin_fits is None:
-        lin_fits = wd / "lin" / "obj_sum_lin.fits"
-    lin_fits = Path(lin_fits)
-    if not lin_fits.exists():
-        raise FileNotFoundError(f"Missing linearized sum: {lin_fits} (run linearize first)")
+    per_exposure = bool(sky_cfg.get("per_exposure", False))
+    stack_after = bool(sky_cfg.get("stack_after", False))
+    save_per_exp_model = bool(sky_cfg.get("save_per_exp_model", False))
+    save_spectrum_1d = bool(sky_cfg.get("save_spectrum_1d", False))
 
-    var = None
-    mask = None
-    with fits.open(lin_fits, memmap=False) as hdul:
-        data = np.array(hdul[0].data, dtype=float)
-        hdr = hdul[0].header.copy()
-        if "VAR" in hdul:
-            try:
-                var = np.array(hdul["VAR"].data, dtype=float)
-            except Exception:
-                var = None
-        if "MASK" in hdul:
-            try:
-                mask = np.array(hdul["MASK"].data, dtype=np.uint16)
-            except Exception:
-                mask = None
-
-    ny, nx = data.shape
-    wave = _wave_from_header(hdr, nx)
-
-    # --- build sky mask from ROI
-    def _clip(a: int) -> int:
-        return int(np.clip(a, 0, ny - 1))
-
-    obj_y0, obj_y1 = sorted((_clip(roi.obj_y0), _clip(roi.obj_y1)))
-    st0, st1 = sorted((_clip(roi.sky_top_y0), _clip(roi.sky_top_y1)))
-    sb0, sb1 = sorted((_clip(roi.sky_bot_y0), _clip(roi.sky_bot_y1)))
-
-    sky_rows = np.zeros(ny, dtype=bool)
-    sky_rows[st0:st1 + 1] = True
-    sky_rows[sb0:sb1 + 1] = True
-
-    # keep object rows out of the sky set (just in case user overlapped)
-    sky_rows[obj_y0:obj_y1 + 1] = False
-
-    if sky_rows.sum() < 3:
-        raise ValueError("Sky ROI is too small (need at least a few rows)")
-
-    sky_pix = data[sky_rows, :]
-
-    # robust sky spectrum per wavelength bin
-    sky_spec_raw = np.nanmedian(sky_pix, axis=0)
-
-    # B-spline smoothing
-    deg = int(sky_cfg.get("bsp_degree", 3))
-    step = float(sky_cfg.get("bsp_step_A", 3.0))
-    sigma_clip = float(sky_cfg.get("sigma_clip", 3.0))
-    maxiter = int(sky_cfg.get("maxiter", 6))
-
-    sky_spec = _fit_bspline_1d(wave, sky_spec_raw, step=step, deg=deg, sigma_clip=sigma_clip, maxiter=maxiter)
-
-    # --- spatial variation: fit a(y), b(y) from sky rows only
-    use_spatial = bool(sky_cfg.get("use_spatial_scale", True))
-    poly_deg = int(sky_cfg.get("spatial_poly_deg", 1))
-    if poly_deg < 0:
-        poly_deg = 0
-
-    a_y = np.ones(ny, dtype=float)
-    b_y = np.zeros(ny, dtype=float)
-
-    if use_spatial:
-        ys = np.where(sky_rows)[0].astype(float)
-        a_s = []
-        b_s = []
-        for y in ys.astype(int):
-            row = data[y, :]
-            m = np.isfinite(row) & np.isfinite(sky_spec)
-            if m.sum() < 30:
-                a_s.append(np.nan)
-                b_s.append(np.nan)
-                continue
-            X = np.vstack([sky_spec[m], np.ones(m.sum(), dtype=float)]).T
-            try:
-                (a, b), *_ = np.linalg.lstsq(X, row[m], rcond=None)
-            except Exception:
-                a, b = np.nan, np.nan
-            a_s.append(a)
-            b_s.append(b)
-        a_s = np.asarray(a_s, dtype=float)
-        b_s = np.asarray(b_s, dtype=float)
-
-        good = np.isfinite(a_s) & np.isfinite(b_s)
-        if good.sum() >= max(poly_deg + 2, 5):
-            # polynomial fit (in pixel units)
-            pa = np.polyfit(ys[good], a_s[good], deg=poly_deg)
-            pb = np.polyfit(ys[good], b_s[good], deg=poly_deg)
-            y_all = np.arange(ny, dtype=float)
-            a_y = np.polyval(pa, y_all)
-            b_y = np.polyval(pb, y_all)
-        else:
-            # fallback: constants
-            a0 = float(np.nanmedian(a_s)) if np.isfinite(np.nanmedian(a_s)) else 1.0
-            b0 = float(np.nanmedian(b_s)) if np.isfinite(np.nanmedian(b_s)) else 0.0
-            a_y[:] = a0
-            b_y[:] = b0
-
-    sky_model = a_y[:, None] * sky_spec[None, :] + b_y[:, None]
-    sky_sub = data - sky_model
-
-    # --- write products
-    sky_model_path = out_dir / "sky_model.fits"
-    sky_sub_path = out_dir / "obj_sky_sub.fits"
-
-    hdr_out = hdr.copy()
-    hdr_out["HISTORY"] = "Scorpio Pipe v5: sky subtraction"
-    hdr_out["SKYMETH"] = str(sky_cfg.get("method", "kelson"))
-    hdr_out["OBJY0"] = int(obj_y0)
-    hdr_out["OBJY1"] = int(obj_y1)
-    hdr_out["SKYT0"] = int(st0)
-    hdr_out["SKYT1"] = int(st1)
-    hdr_out["SKYB0"] = int(sb0)
-    hdr_out["SKYB1"] = int(sb1)
-
-    if bool(sky_cfg.get("save_sky_model", True)):
-        _write_mef(sky_model_path, np.asarray(sky_model, dtype=np.float32), hdr_out)
-
-    _write_mef(
-        sky_sub_path,
-        np.asarray(sky_sub, dtype=np.float32),
-        hdr_out,
-        var=None if var is None else np.asarray(var, dtype=np.float32),
-        mask=None if mask is None else np.asarray(mask, dtype=np.uint16),
-    )
-
-    # diagnostics plot
-    diag_png = out_dir / "sky_diagnostics.png"
-    if bool(sky_cfg.get("save_png", True)):
+    # Helper: mirror a product into legacy folder for backward compatibility.
+    def _mirror_legacy(src: Path, rel: str) -> None:
         try:
-            import matplotlib.pyplot as plt
-            with mpl_style():
-                fig = plt.figure(figsize=(8.0, 4.6))
-                ax = fig.add_subplot(111)
-                ax.plot(wave, sky_spec_raw, label="Sky (median, raw)")
-                ax.plot(wave, sky_spec, label=f"B-spline fit (deg={deg}, step={step} Å)")
-                ax.set_xlabel("Wavelength (Å)")
-                ax.set_ylabel("Intensity (ADU)")
-                ax.legend()
-                fig.tight_layout()
-                fig.savefig(diag_png)
-                plt.close(fig)
+            dst = legacy_root / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
         except Exception:
             pass
 
-    done = out_dir / "sky_sub_done.json"
-    payload = {
-        "ok": True,
-        "lin_fits": str(lin_fits),
-        "sky_model": str(sky_model_path) if bool(sky_cfg.get("save_sky_model", True)) else None,
-        "sky_sub": str(sky_sub_path),
-        "diag_png": str(diag_png) if diag_png.exists() else None,
-        "roi": {
-            "obj": [int(obj_y0), int(obj_y1)],
-            "sky_top": [int(st0), int(st1)],
-            "sky_bot": [int(sb0), int(sb1)],
-        },
-        "bsp": {"degree": deg, "step_A": step, "sigma_clip": sigma_clip, "maxiter": maxiter},
-        "spatial": {"enabled": use_spatial, "poly_deg": poly_deg},
-    }
-    done.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    def _process_one(lin_path: Path, *, tag: str, base_dir: Path, write_model: bool) -> dict[str, Any]:
+        var = None
+        mask = None
+        with fits.open(lin_path, memmap=False) as hdul:
+            data = np.array(hdul[0].data, dtype=float)
+            hdr = hdul[0].header.copy()
+            if "VAR" in hdul:
+                try:
+                    var = np.array(hdul["VAR"].data, dtype=float)
+                except Exception:
+                    var = None
+            if "MASK" in hdul:
+                try:
+                    mask = np.array(hdul["MASK"].data, dtype=np.uint16)
+                except Exception:
+                    mask = None
 
+        ny, nx = data.shape
+        wave = _wave_from_header(hdr, nx)
+
+        def _clip(a: int) -> int:
+            return int(np.clip(a, 0, ny - 1))
+
+        obj_y0, obj_y1 = sorted((_clip(roi.obj_y0), _clip(roi.obj_y1)))
+        st0, st1 = sorted((_clip(roi.sky_top_y0), _clip(roi.sky_top_y1)))
+        sb0, sb1 = sorted((_clip(roi.sky_bot_y0), _clip(roi.sky_bot_y1)))
+
+        sky_rows = np.zeros(ny, dtype=bool)
+        sky_rows[st0 : st1 + 1] = True
+        sky_rows[sb0 : sb1 + 1] = True
+        sky_rows[obj_y0 : obj_y1 + 1] = False
+        if sky_rows.sum() < 3:
+            raise ValueError("Sky ROI is too small (need at least a few rows)")
+
+        sky_pix = data[sky_rows, :]
+        sky_spec_raw = np.nanmedian(sky_pix, axis=0)
+
+        deg = int(sky_cfg.get("bsp_degree", 3))
+        step = float(sky_cfg.get("bsp_step_A", 3.0))
+        sigma_clip = float(sky_cfg.get("sigma_clip", 3.0))
+        maxiter = int(sky_cfg.get("maxiter", 6))
+        sky_spec = _fit_bspline_1d(wave, sky_spec_raw, step=step, deg=deg, sigma_clip=sigma_clip, maxiter=maxiter)
+
+        use_spatial = bool(sky_cfg.get("use_spatial_scale", True))
+        poly_deg = int(sky_cfg.get("spatial_poly_deg", 1))
+        if poly_deg < 0:
+            poly_deg = 0
+        a_y = np.ones(ny, dtype=float)
+        b_y = np.zeros(ny, dtype=float)
+        if use_spatial:
+            ys = np.where(sky_rows)[0].astype(float)
+            a_s = []
+            b_s = []
+            for y in ys.astype(int):
+                row = data[y, :]
+                m = np.isfinite(row) & np.isfinite(sky_spec)
+                if m.sum() < 30:
+                    a_s.append(np.nan)
+                    b_s.append(np.nan)
+                    continue
+                X = np.vstack([sky_spec[m], np.ones(m.sum(), dtype=float)]).T
+                try:
+                    (a, b), *_ = np.linalg.lstsq(X, row[m], rcond=None)
+                except Exception:
+                    a, b = np.nan, np.nan
+                a_s.append(a)
+                b_s.append(b)
+            a_s = np.asarray(a_s, dtype=float)
+            b_s = np.asarray(b_s, dtype=float)
+            good = np.isfinite(a_s) & np.isfinite(b_s)
+            if good.sum() >= max(poly_deg + 2, 5):
+                pa = np.polyfit(ys[good], a_s[good], deg=poly_deg)
+                pb = np.polyfit(ys[good], b_s[good], deg=poly_deg)
+                y_all = np.arange(ny, dtype=float)
+                a_y = np.polyval(pa, y_all)
+                b_y = np.polyval(pb, y_all)
+
+        sky_model = a_y[:, None] * sky_spec[None, :] + b_y[:, None]
+        sky_sub = data - sky_model
+
+        hdr_out = hdr.copy()
+        hdr_out["HISTORY"] = "Scorpio Pipe v5.12: sky subtraction"
+        hdr_out["SKYMETH"] = str(sky_cfg.get("method", "kelson"))
+        hdr_out["OBJY0"] = int(obj_y0)
+        hdr_out["OBJY1"] = int(obj_y1)
+
+        # per-exposure naming if needed
+        sky_model_path = base_dir / f"{tag}_sky_model.fits"
+        sky_sub_path = base_dir / f"{tag}_sky_sub.fits"
+        sky_spec_csv = base_dir / f"{tag}_sky_spectrum.csv"
+        sky_spec_json = base_dir / f"{tag}_sky_spectrum.json"
+
+        if write_model:
+            _write_mef(sky_model_path, np.asarray(sky_model, dtype=np.float32), hdr_out)
+
+        _write_mef(
+            sky_sub_path,
+            np.asarray(sky_sub, dtype=np.float32),
+            hdr_out,
+            var=None if var is None else np.asarray(var, dtype=np.float32),
+            mask=None if mask is None else np.asarray(mask, dtype=np.uint16),
+        )
+
+        # 1D sky spectrum export (optional)
+        if save_spectrum_1d:
+            try:
+                with sky_spec_csv.open("w", newline="", encoding="utf-8") as f:
+                    w = csv.writer(f)
+                    w.writerow(["wave_A", "sky_raw", "sky_fit"])
+                    for i in range(nx):
+                        w.writerow([float(wave[i]), float(sky_spec_raw[i]), float(sky_spec[i])])
+                sky_spec_json.write_text(
+                    json.dumps(
+                        {
+                            "tag": tag,
+                            "wave_A": wave.tolist(),
+                            "sky_raw": sky_spec_raw.tolist(),
+                            "sky_fit": sky_spec.tolist(),
+                            "bsp": {"degree": deg, "step_A": step, "sigma_clip": sigma_clip, "maxiter": maxiter},
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
+
+        # QC metrics in sky rows
+        resid = sky_sub[sky_rows, :]
+        q = {
+            "tag": tag,
+            "rms_sky": float(np.nanstd(resid)),
+            "mae_sky": float(np.nanmedian(np.abs(resid))),
+            "n_sky_rows": int(sky_rows.sum()),
+        }
+        return {
+            "ok": True,
+            "lin_fits": str(lin_path),
+            "sky_model": str(sky_model_path) if write_model else None,
+            "sky_sub": str(sky_sub_path),
+            "sky_spec_csv": str(sky_spec_csv) if (save_spectrum_1d and sky_spec_csv.exists()) else None,
+            "sky_spec_json": str(sky_spec_json) if (save_spectrum_1d and sky_spec_json.exists()) else None,
+            "qc": q,
+        }
+
+    # Determine inputs
+    if not per_exposure:
+        if lin_fits is None:
+            lin_fits = wd / "lin" / "obj_sum_lin.fits"
+        lin_fits = Path(lin_fits)
+        if not lin_fits.exists():
+            raise FileNotFoundError(f"Missing linearized sum: {lin_fits} (run linearize first)")
+        one = _process_one(
+            lin_fits,
+            tag="obj",
+            base_dir=out_dir,
+            write_model=bool(sky_cfg.get("save_sky_model", True)),
+        )
+        # Mirror to legacy names
+        if one.get("sky_sub"):
+            _mirror_legacy(Path(one["sky_sub"]), "obj_sky_sub.fits")
+        if one.get("sky_model"):
+            _mirror_legacy(Path(one["sky_model"]), "sky_model.fits")
+        payload = {"mode": "stack", "out_dir": str(out_dir), "result": one}
+    else:
+        per_dir = wd / "lin" / "per_exp"
+        if not per_dir.exists():
+            raise FileNotFoundError(f"Missing per-exposure linearized frames: {per_dir}")
+        out_per = out_dir / "per_exp"
+        out_per.mkdir(parents=True, exist_ok=True)
+        files = sorted(per_dir.glob("*.fits"))
+        if not files:
+            raise FileNotFoundError(f"No per-exposure linearized FITS found in {per_dir}")
+        results: list[dict[str, Any]] = []
+        for f in files:
+            tag = f.stem
+            res = _process_one(
+                f,
+                tag=tag,
+                base_dir=out_per,
+                write_model=bool(sky_cfg.get("save_sky_model", True)) and save_per_exp_model,
+            )
+            results.append(res)
+        payload = {"mode": "per_exposure", "out_dir": str(out_dir), "per_exp": results, "stack_after": stack_after}
+
+        # Run stacking as part of Sky, if requested.
+        if stack_after:
+            try:
+                from .stack2d import run_stack2d
+
+                sky_sub_files = [Path(r["sky_sub"]) for r in results if r.get("sky_sub")]
+                stk = run_stack2d(cfg, inputs=sky_sub_files, out_dir=products_root / "stack")
+                payload["stack2d"] = stk
+
+                # For downstream stages (extract1d) and backward compatibility:
+                # publish a combined product under the legacy and products/sky names.
+                try:
+                    src = Path(stk.get("output_fits", ""))
+                    if src.exists():
+                        comb = out_dir / "obj_sky_sub.fits"
+                        shutil.copy2(src, comb)
+                        _mirror_legacy(comb, "obj_sky_sub.fits")
+                        payload["combined_sky_sub"] = str(comb)
+                except Exception:
+                    pass
+            except Exception as e:
+                payload["stack2d_error"] = str(e)
+
+    done = out_dir / "sky_sub_done.json"
+    done.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    _mirror_legacy(done, "sky_sub_done.json")
     return payload

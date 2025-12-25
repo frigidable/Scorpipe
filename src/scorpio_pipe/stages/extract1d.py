@@ -10,6 +10,7 @@ user-defined object region.
 from pathlib import Path
 from typing import Any, Tuple
 
+import shutil
 import numpy as np
 from astropy.io import fits
 
@@ -56,7 +57,8 @@ def extract_1d(cfg: dict[str, Any], *, in_fits: Path | None = None, out_dir: Pat
 
     work_dir = resolve_work_dir(cfg)
     if out_dir is None:
-        out_dir = work_dir / "spec"
+        # v5.12+: products/ is canonical; keep legacy mirroring for older UI.
+        out_dir = work_dir / "products" / "spec"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if in_fits is None:
@@ -194,5 +196,21 @@ def extract_1d(cfg: dict[str, Any], *, in_fits: Path | None = None, out_dir: Pat
         "n_lambda": int(nx),
     }
     done.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    # Legacy mirror (work_dir/spec) for backward compatibility.
+    try:
+        import shutil
+
+        legacy = work_dir / "spec"
+        if legacy.resolve() != out_dir.resolve():
+            legacy.mkdir(parents=True, exist_ok=True)
+            for p in (out_fits, out_png, out_csv, done):
+                if p is None:
+                    continue
+                pp = Path(p)
+                if pp.exists():
+                    shutil.copy2(pp, legacy / pp.name)
+    except Exception:
+        pass
 
     return {"spectrum_1d": out_fits, "spectrum_1d_png": out_png}

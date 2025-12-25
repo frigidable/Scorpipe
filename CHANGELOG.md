@@ -1,5 +1,26 @@
 # Changelog
 
+## v5.12.0 (intermediate)
+
+Фиксируем прогресс, чтобы его не потерять, и закрываем критические «бомбы», из-за которых GUI мог не запускаться.
+
+### Critical / GUI stability
+- Исправлен крэш на старте (PyInstaller/MEI): добавлен `get_provenance()` в `scorpio_pipe.version` (его импортировал `stage_state.py`).
+- `ui/pipeline_runner.py`: добавлены отсутствующие GUI-обёртки `load_context()`, `run_lineid_prepare()`, `run_wavesolution()` и поддержка `RunContext` в `run_sequence()`.
+- Добавлены маленькие отсутствующие модули, на которые ссылались стадии: `logging_utils.py`, `provenance.py`.
+
+### Long-slit science (ядро — промежуточно)
+- `Sky` получил **per-exposure** режим (обработка `lin/per_exp/*.fits`) + опцию `stack_after` (стэкинг внутри Sky).
+  - По умолчанию `save_per_exp_model = false` (как ты просил: сохранять модель неба только при включённой галочке).
+  - Добавлено сохранение 1D спектра неба (`*_sky_spectrum.csv/.json`) при включении `save_spectrum_1d`.
+- Добавлена стадия `stack2d` (variance-weighting + опциональный sigma-clip) — пока как «первый надёжный вариант».
+
+### Products
+- Начата стандартизация: **canonical outputs** пишутся в `work_dir/products/...`, при этом для обратной совместимости копируются в старые пути (`work_dir/sky`, `work_dir/spec`).
+
+### Config/schema
+- В `schema.py` добавлены новые флаги Sky (`per_exposure`, `stack_after`, `save_per_exp_model`, `save_spectrum_1d`) и блок `Stack2DBlock`.
+
 ## v5.5.0
 
 - LineID/Wavesol: реализованы все кнопки управления библиотекой пар (Use/Copy/Save/Open/Export).

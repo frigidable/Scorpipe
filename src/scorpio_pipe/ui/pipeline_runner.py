@@ -26,6 +26,38 @@ log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
+class RunContext:
+    """Lightweight wrapper used by the GUI.
+
+    The launcher window keeps a context object around and passes it back to
+    ``run_sequence`` / per-stage helpers.
+    """
+
+    cfg_path: Path
+    cfg: dict[str, Any]
+
+
+def load_context(cfg_path: str | Path) -> RunContext:
+    """Load config from disk and return a GUI-friendly context."""
+
+    p = Path(cfg_path)
+    cfg = load_config_any(p)
+    return RunContext(cfg_path=p, cfg=cfg)
+
+
+def run_lineid_prepare(ctx: RunContext) -> None:
+    """Compatibility wrapper for the GUI."""
+
+    run_sequence(ctx, ["lineid_prepare"], resume=True, force=False, config_path=ctx.cfg_path)
+
+
+def run_wavesolution(ctx: RunContext) -> None:
+    """Compatibility wrapper for the GUI."""
+
+    run_sequence(ctx, ["wavesolution"], resume=True, force=False, config_path=ctx.cfg_path)
+
+
+@dataclass(frozen=True)
 class PlanItem:
     task: str
     action: str  # 'run'|'skip'
@@ -131,16 +163,23 @@ def _task_sky(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken |
     from scorpio_pipe.stages.sky_sub import run_sky_sub
 
     _ = cancel_token
-    res = run_sky_sub(cfg, out_dir=out_dir)
-    return Path(res.get("sky_sub", out_dir / "obj_sky_sub.fits"))
+    # v5.12+: canonical output lives in products/sky (legacy is mirrored).
+    res = run_sky_sub(cfg, out_dir=Path(out_dir) / "products" / "sky")
+    # try multiple keys for backward compatibility
+    if isinstance(res, dict):
+        if res.get("combined_sky_sub"):
+            return Path(res["combined_sky_sub"])
+        if isinstance(res.get("result"), dict) and res["result"].get("sky_sub"):
+            return Path(res["result"]["sky_sub"])
+    return Path(out_dir) / "sky" / "obj_sky_sub.fits"
 
 
 def _task_extract1d(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
     from scorpio_pipe.stages.extract1d import extract_1d
 
     _ = cancel_token
-    res = extract_1d(cfg, out_dir=out_dir)
-    return Path(res.get("spectrum_1d", out_dir / "spec1d.fits"))
+    res = extract_1d(cfg, out_dir=Path(out_dir) / "products" / "spec")
+    return Path(res.get("spectrum_1d", Path(out_dir) / "products" / "spec" / "spectrum_1d.fits"))
 
 
 TASKS: dict[str, TaskFn] = {
@@ -274,7 +313,7 @@ def plan_sequence(
 
 
 def run_sequence(
-    cfg_or_path: dict[str, Any] | str | Path,
+    cfg_or_path: dict[str, Any] | str | Path | RunContext,
     task_names: Iterable[str],
     *,
     resume: bool = True,
@@ -282,7 +321,12 @@ def run_sequence(
     cancel_token: CancelToken | None = None,
     config_path: Path | None = None,
 ) -> None:
-    cfg = load_config_any(cfg_or_path) if not isinstance(cfg_or_path, dict) else cfg_or_path
+    if isinstance(cfg_or_path, RunContext):
+        cfg = cfg_or_path.cfg
+        if config_path is None:
+            config_path = cfg_or_path.cfg_path
+    else:
+        cfg = load_config_any(cfg_or_path) if not isinstance(cfg_or_path, dict) else cfg_or_path
 
     work_dir = resolve_work_dir(cfg)
     out_dir = Path(work_dir)
