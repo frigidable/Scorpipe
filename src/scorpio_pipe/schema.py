@@ -182,6 +182,56 @@ class FlatfieldBlock(BaseModel):
     apply_to: List[str] = Field(default_factory=lambda: ["obj", "sky", "sunsky"])  # obj|sky|sunsky|neon
 
 
+class LinearizeBlock(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    enabled: bool = True
+    # Wavelength grid (Angstrom). If dlambda_A is None -> auto from lambda_map.
+    dlambda_A: Optional[float] = None
+    lambda_min_A: Optional[float] = None
+    lambda_max_A: Optional[float] = None
+
+    # Optional crop in Y before producing outputs (pixels).
+    y_crop_top: int = 0
+    y_crop_bottom: int = 0
+
+    save_per_frame: bool = False
+    save_png: bool = True
+    fill_value: float = float("nan")
+
+
+class SkyBlock(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    enabled: bool = True
+    method: str = "kelson"
+
+    # Region of interest (pixel indices in the *linearized* frame)
+    roi: Dict[str, Any] = Field(default_factory=dict)
+
+    # Kelson-like 1D B-spline fit to sky spectrum (in Angstrom)
+    bsp_degree: int = 3
+    bsp_step_A: float = 3.0
+    sigma_clip: float = 3.0
+    maxiter: int = 6
+
+    # Simple spatial variation: sky(y,λ) ≈ scale(y)*S(λ) + offset(y)
+    use_spatial_scale: bool = True
+    spatial_poly_deg: int = 1
+    scale_smooth_y: int = 41
+
+    save_sky_model: bool = True
+    save_png: bool = True
+
+
+class Extract1DBlock(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    enabled: bool = True
+    method: str = "sum"  # sum|mean
+    save_png: bool = True
+
+
 class FramesBlock(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
@@ -227,6 +277,9 @@ class ConfigSchema(BaseModel):
     flatfield: FlatfieldBlock = Field(default_factory=FlatfieldBlock)
     wavesol: WavesolBlock = Field(default_factory=WavesolBlock)
     superneon: SuperneonBlock = Field(default_factory=SuperneonBlock)
+    linearize: LinearizeBlock = Field(default_factory=LinearizeBlock)
+    sky: SkyBlock = Field(default_factory=SkyBlock)
+    extract1d: Extract1DBlock = Field(default_factory=Extract1DBlock)
 
     profiles: Optional[Dict[str, Any]] = None
 
@@ -251,6 +304,9 @@ _TOP_KEYS = {
     "flatfield",
     "wavesol",
     "superneon",
+    "linearize",
+    "sky",
+    "extract1d",
     "profiles",
     "config_path",
     "config_dir",
@@ -388,6 +444,18 @@ def schema_validate(cfg: Dict[str, Any]) -> SchemaReport:
 
     try:
         ConfigSchema.model_validate(cfg)
+        unknown = find_unknown_keys(cfg)
+        if unknown:
+            items: List[str] = []
+            for sec, keys in unknown.items():
+                for k in keys:
+                    items.append(f"{sec}: {k}")
+            msg = "Unknown config keys (typos are treated as errors):\n" + "\n".join(items)
+            return SchemaReport(
+                ok=False,
+                errors=[SchemaIssue(code="UNKNOWN_KEYS", message=msg, hint="Remove/rename unknown keys")],
+                warnings=[],
+            )
         return SchemaReport(ok=True, errors=[], warnings=[])
     except Exception as e:
         # Keep it human-readable; detailed trace is not useful for users.

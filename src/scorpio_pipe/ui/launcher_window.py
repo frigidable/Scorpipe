@@ -221,6 +221,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
             "6  SuperNeon",
             "7  Line ID",
             "8  Wavelength solution",
+            "9  Linearize (2D solution)",
+            "10 Sky subtraction (Kelson)",
+            "11 Extract 1D spectrum",
         ]:
             it = QtWidgets.QListWidgetItem(title)
             it.setIcon(self._icon_status("idle"))
@@ -244,6 +247,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.page_superneon = self._build_page_superneon()
         self.page_lineid = self._build_page_lineid()
         self.page_wavesol = self._build_page_wavesol()
+        self.page_linearize = self._build_page_linearize()
+        self.page_sky = self._build_page_sky()
+        self.page_extract1d = self._build_page_extract1d()
         for p in [
             self.page_project,
             self.page_config,
@@ -253,6 +259,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.page_superneon,
             self.page_lineid,
             self.page_wavesol,
+            self.page_linearize,
+            self.page_sky,
+            self.page_extract1d,
         ]:
             self.stack.addWidget(p)
 
@@ -1640,7 +1649,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     self.combo_cosmics_method.setCurrentIndex(max(0, idx))
             if hasattr(self, 'spin_cosmics_k'):
                 with QtCore.QSignalBlocker(self.spin_cosmics_k):
-                    self.spin_cosmics_k.setValue(int(round(float(self._cfg_get(cfg, ['cosmics', 'k'], 9.0) or 9.0))))
+                    self.spin_cosmics_k.setValue(float(self._cfg_get(cfg, ['cosmics', 'k'], 9.0) or 9.0))
             if hasattr(self, 'chk_cosmics_bias'):
                 with QtCore.QSignalBlocker(self.chk_cosmics_bias):
                     self.chk_cosmics_bias.setChecked(bool(self._cfg_get(cfg, ['cosmics', 'bias_subtract'], True)))
@@ -1769,10 +1778,85 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     with QtCore.QSignalBlocker(w):
                         w.setValue(int(self._cfg_get(cfg, ['wavesol', key], default) or default))
 
+        # --- Linearize ---
+        if hasattr(self, 'chk_lin_enabled') and not self._stage_dirty.get('linearize', False):
+            lin = cfg.get('linearize', {}) if isinstance(cfg.get('linearize'), dict) else {}
+            with QtCore.QSignalBlocker(self.chk_lin_enabled):
+                self.chk_lin_enabled.setChecked(bool(lin.get('enabled', True)))
+            for attr, key, default in [
+                ('dspin_lin_dlambda', 'dlambda_A', 0.0),
+                ('dspin_lin_lmin', 'lambda_min_A', 0.0),
+                ('dspin_lin_lmax', 'lambda_max_A', 0.0),
+            ]:
+                if hasattr(self, attr):
+                    w = getattr(self, attr)
+                    v = lin.get(key, None)
+                    vv = float(v) if v not in (None, '') else 0.0
+                    with QtCore.QSignalBlocker(w):
+                        w.setValue(vv)
+            for attr, key, default in [
+                ('spin_lin_crop_top', 'y_crop_top', 0),
+                ('spin_lin_crop_bot', 'y_crop_bottom', 0),
+            ]:
+                if hasattr(self, attr):
+                    w = getattr(self, attr)
+                    with QtCore.QSignalBlocker(w):
+                        w.setValue(int(lin.get(key, default) or default))
+            if hasattr(self, 'chk_lin_png'):
+                with QtCore.QSignalBlocker(self.chk_lin_png):
+                    self.chk_lin_png.setChecked(bool(lin.get('save_png', True)))
+            if hasattr(self, 'chk_lin_per_frame'):
+                with QtCore.QSignalBlocker(self.chk_lin_per_frame):
+                    self.chk_lin_per_frame.setChecked(bool(lin.get('save_per_frame', False)))
 
+        # --- Sky subtraction ---
+        if hasattr(self, 'chk_sky_enabled') and not self._stage_dirty.get('sky', False):
+            sky = cfg.get('sky', {}) if isinstance(cfg.get('sky'), dict) else {}
+            with QtCore.QSignalBlocker(self.chk_sky_enabled):
+                self.chk_sky_enabled.setChecked(bool(sky.get('enabled', True)))
+            if hasattr(self, 'dspin_sky_step'):
+                with QtCore.QSignalBlocker(self.dspin_sky_step):
+                    self.dspin_sky_step.setValue(float(sky.get('bsp_step_A', 2.0) or 2.0))
+            if hasattr(self, 'spin_sky_deg'):
+                with QtCore.QSignalBlocker(self.spin_sky_deg):
+                    self.spin_sky_deg.setValue(int(sky.get('bsp_degree', 3) or 3))
+            if hasattr(self, 'dspin_sky_clip'):
+                with QtCore.QSignalBlocker(self.dspin_sky_clip):
+                    self.dspin_sky_clip.setValue(float(sky.get('sigma_clip', 3.0) or 3.0))
+            if hasattr(self, 'spin_sky_iter'):
+                with QtCore.QSignalBlocker(self.spin_sky_iter):
+                    self.spin_sky_iter.setValue(int(sky.get('maxiter', 5) or 5))
+            if hasattr(self, 'chk_sky_spatial'):
+                with QtCore.QSignalBlocker(self.chk_sky_spatial):
+                    self.chk_sky_spatial.setChecked(bool(sky.get('use_spatial_poly', True)))
+            if hasattr(self, 'spin_sky_polydeg'):
+                with QtCore.QSignalBlocker(self.spin_sky_polydeg):
+                    self.spin_sky_polydeg.setValue(int(sky.get('spatial_poly_deg', 1) or 1))
+            # ROI label
+            if hasattr(self, 'lbl_sky_roi'):
+                roi = sky.get('roi', {}) if isinstance(sky.get('roi'), dict) else {}
+                def _f(k: str) -> str:
+                    v = roi.get(k, None)
+                    return str(int(v)) if v not in (None, '') else '—'
+                self.lbl_sky_roi.setText(
+                    f"Object: [{_f('obj_y0')}..{_f('obj_y1')}],  "
+                    f"Sky(top): [{_f('sky_top_y0')}..{_f('sky_top_y1')}],  "
+                    f"Sky(bot): [{_f('sky_bot_y0')}..{_f('sky_bot_y1')}]"
+                )
 
-
-
+        # --- Extract 1D ---
+        if hasattr(self, 'chk_ex1d_enabled') and not self._stage_dirty.get('extract1d', False):
+            ex = cfg.get('extract1d', {}) if isinstance(cfg.get('extract1d'), dict) else {}
+            with QtCore.QSignalBlocker(self.chk_ex1d_enabled):
+                self.chk_ex1d_enabled.setChecked(bool(ex.get('enabled', True)))
+            if hasattr(self, 'combo_ex1d_method'):
+                with QtCore.QSignalBlocker(self.combo_ex1d_method):
+                    m = str(ex.get('method', 'sum') or 'sum')
+                    idx = self.combo_ex1d_method.findText(m)
+                    self.combo_ex1d_method.setCurrentIndex(max(0, idx))
+            if hasattr(self, 'chk_ex1d_png'):
+                with QtCore.QSignalBlocker(self.chk_ex1d_png):
+                    self.chk_ex1d_png.setChecked(bool(ex.get('save_png', True)))
 
 
     def _build_page_calib(self) -> QtWidgets.QWidget:
@@ -1889,6 +1973,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_frames_calib.clicked.connect(lambda: self._open_frames_window('calib'))
         self.btn_to_cosmics.clicked.connect(lambda: self.steps.setCurrentRow(3))
 
+        try:
+            self._refresh_pair_sets_combo()
+        except Exception:
+            pass
         self._sync_stage_controls_from_cfg()
         return w
 
@@ -1994,18 +2082,22 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.spin_cosmics_k.setRange(1.0, 51.0)
         self.spin_cosmics_k.setDecimals(1)
         self.spin_cosmics_k.setSingleStep(0.5)
-        self.spin_cosmics_k.setToolTip("Median window size (px). Larger = more aggressive.")
+        self.spin_cosmics_k.setToolTip(
+            "Порог (k) в единицах σ/MAD для детекции космиков. "
+            "Меньше → агрессивнее (больше масок), больше → мягче. "
+            "Ориентир: 3–8."
+        )
         bf.addRow(
             self._param_label(
-                "k (window)",
-                "Размер окна медианного фильтра (в пикселях).\n"
-                "Больше k → агрессивнее подавление, но выше риск размыть узкие детали.\n"
-                "Типично: 5–15.",
+                "k (threshold)",
+                "Порог (k) в единицах σ/MAD для детекции космиков.\n"
+                "Меньше k → агрессивнее чистка (может резать сигнал).\n"
+                "Больше k → мягче (может оставлять космики).\n"
+                "Ориентир: 3–8. Советы: недочищает → уменьшить k; режет полезное → увеличить k.",
             ),
             self.spin_cosmics_k,
         )
 
-        pl.addWidget(basic)
 
         adv_w, adv_l, _ = _collapsible("Advanced", expanded=False)
         af = QtWidgets.QFormLayout()
@@ -3021,7 +3113,286 @@ class LauncherWindow(QtWidgets.QMainWindow):
         except Exception as e:
             self._log_exception(e)
 
-    # --------------------------- page: wavesolution ---------------------------
+    
+    # --------------------------- pair sets (wavesol hand pairs) ---------------------------
+
+    def _show_msgbox_lines(self, title: str, lines: list[str], icon: str = "info") -> None:
+        try:
+            box = QtWidgets.QMessageBox(self)
+            if icon == "warn":
+                box.setIcon(QtWidgets.QMessageBox.Warning)
+            elif icon == "error":
+                box.setIcon(QtWidgets.QMessageBox.Critical)
+            else:
+                box.setIcon(QtWidgets.QMessageBox.Information)
+            box.setWindowTitle(title)
+            box.setText("\n".join(lines) if lines else "")
+            box.exec()
+        except Exception:
+            # last resort: log
+            try:
+                self._log_error(f"{title}: " + "; ".join(lines))
+            except Exception:
+                pass
+
+    def _setup_key_for_pairs(self) -> dict:
+        cfg = self._cfg or {}
+        setup = cfg.get("setup", {}) if isinstance(cfg.get("setup", {}), dict) else {}
+        # Only keep fields that define pair-set identity
+        out = {
+            "instrument": str(setup.get("instrument", "")),
+            "disperser": str(setup.get("disperser", "")),
+            "slit": str(setup.get("slit", "")),
+            "binning": int(setup.get("binning", 1) or 1),
+        }
+        return out
+
+    def _refresh_pair_sets_combo(self) -> None:
+        if not hasattr(self, "combo_pair_sets"):
+            return
+        combo = self.combo_pair_sets
+        try:
+            setup = self._setup_key_for_pairs()
+            items = list_pair_sets(setup)
+        except Exception as e:
+            self._log_exception(e)
+            items = []
+
+        # preserve current selection if possible
+        prev = None
+        try:
+            prev = combo.currentData()
+        except Exception:
+            prev = None
+
+        combo.blockSignals(True)
+        combo.clear()
+        if not items:
+            combo.addItem("(нет наборов)", None)
+            combo.setEnabled(False)
+        else:
+            combo.setEnabled(True)
+            for it in items:
+                tag = "user" if it.kind == "user" else "built-in"
+                combo.addItem(f"{it.name} [{tag}]", {"kind": it.kind, "name": it.name})
+
+        # try restore
+        if prev is not None and items:
+            for i in range(combo.count()):
+                if combo.itemData(i) == prev:
+                    combo.setCurrentIndex(i)
+                    break
+        combo.blockSignals(False)
+
+        # update buttons
+        try:
+            has_sel = combo.currentData() is not None
+            for btn_name in (
+                "btn_use_pair_set",
+                "btn_copy_pair_set",
+                "btn_export_selected_pair_set",
+            ):
+                if hasattr(self, btn_name):
+                    getattr(self, btn_name).setEnabled(bool(has_sel))
+        except Exception:
+            pass
+
+    def _selected_pair_set_id(self) -> dict | None:
+        if not hasattr(self, "combo_pair_sets"):
+            return None
+        data = self.combo_pair_sets.currentData()
+        if not isinstance(data, dict):
+            return None
+        if "name" not in data or "kind" not in data:
+            return None
+        return {"name": str(data["name"]), "kind": str(data["kind"])}
+
+    def _current_pairs_path(self):
+        """Resolve current hand pairs path from config (may be empty)."""
+        from pathlib import Path
+        cfg = self._cfg or {}
+        hp = str(self._get_cfg_value("wavesol.hand_pairs_path", "") or "").strip()
+        if hp:
+            p = Path(hp).expanduser()
+            if not p.is_absolute() and self._cfg_path:
+                # hand_pairs_path is relative to work_dir or config_dir; prefer work_dir
+                wd = resolve_work_dir(cfg, self._cfg_path)
+                cand = (wd / p)
+                if cand.exists():
+                    return cand
+                return (self._cfg_path.parent / p).resolve()
+            return p
+
+        if not self._cfg_path:
+            return None
+        wd = resolve_work_dir(cfg, self._cfg_path)
+        # default location (disperser-specific)
+        try:
+            from scorpio_pipe.wavesol_paths import wavesol_dir
+            return wavesol_dir(wd, cfg.get("setup", {}).get("disperser", "")) / "hand_pairs.txt"
+        except Exception:
+            return wd / "wavesol" / "hand_pairs.txt"
+
+    def _refresh_pairs_label(self) -> None:
+        if not hasattr(self, "lbl_pairs_file"):
+            return
+        p = self._current_pairs_path()
+        if p is None:
+            self.lbl_pairs_file.setText("hand pairs: —")
+        else:
+            self.lbl_pairs_file.setText(f"hand pairs: {p}")
+
+    def _do_use_pair_set(self) -> None:
+        """Copy selected pair set into work_dir and point config to it."""
+        if not self._ensure_cfg_saved():
+            return
+        if not self._sync_cfg_from_editor():
+            return
+        ps = self._selected_pair_set_id()
+        if ps is None:
+            self._show_msgbox_lines("Pairs", ["Не выбран набор пар."], icon="warn")
+            return
+        cfg = self._cfg or {}
+        if not self._cfg_path:
+            self._show_msgbox_lines("Pairs", ["Сначала сохраните config.yaml (Apply)."], icon="warn")
+            return
+        setup = self._setup_key_for_pairs()
+        try:
+            src = get_pair_set_path(setup, ps["name"], ps["kind"])
+        except Exception as e:
+            self._log_exception(e)
+            self._show_msgbox_lines("Pairs", ["Не удалось найти файл набора пар.", str(e)], icon="error")
+            return
+
+        try:
+            wd = resolve_work_dir(cfg, self._cfg_path)
+            dst = copy_pair_set_to_workdir(setup, wd, src, overwrite=True)
+            rel = _rel_to_workdir(wd, dst)
+            self._set_cfg_value("wavesol.hand_pairs_path", rel)
+            self.editor_yaml.blockSignals(True)
+            self.editor_yaml.setPlainText(_yaml_dump(self._cfg or {}))
+            self.editor_yaml.blockSignals(False)
+            self._do_save_cfg()
+            self._refresh_pairs_label()
+            self._log_info(f"Using pair set '{ps['name']}' → {dst}")
+        except Exception as e:
+            self._log_exception(e)
+            self._show_msgbox_lines("Pairs", ["Не удалось скопировать набор пар в work_dir.", str(e)], icon="error")
+
+    def _do_copy_pair_set(self) -> None:
+        """Copy selected pair set into user library under a new name."""
+        ps = self._selected_pair_set_id()
+        if ps is None:
+            self._show_msgbox_lines("Pairs", ["Не выбран набор пар."], icon="warn")
+            return
+        setup = self._setup_key_for_pairs()
+        default = f"{ps['name']}_copy"
+        new_name, ok = QtWidgets.QInputDialog.getText(self, "Copy pair set", "New name:", text=default)
+        if not ok or not str(new_name).strip():
+            return
+        new_name = str(new_name).strip()
+        try:
+            out = copy_pair_set_to_user_library(setup, ps["name"], ps["kind"], new_name=new_name)
+            self._log_info(f"Saved to user library: {out}")
+            self._refresh_pair_sets_combo()
+        except Exception as e:
+            self._log_exception(e)
+            self._show_msgbox_lines("Pairs", ["Не удалось скопировать набор в user library.", str(e)], icon="error")
+
+    def _do_save_workdir_pairs(self) -> None:
+        """Ensure current hand pairs are stored inside work_dir (copy), and point config to that copy."""
+        if not self._ensure_cfg_saved():
+            return
+        if not self._sync_cfg_from_editor():
+            return
+        if not self._cfg_path:
+            self._show_msgbox_lines("Pairs", ["Сначала сохраните config.yaml (Apply)."], icon="warn")
+            return
+        cfg = self._cfg or {}
+        p = self._current_pairs_path()
+        if p is None or not p.exists():
+            self._show_msgbox_lines("Pairs", ["Текущий файл пар не найден."], icon="warn")
+            return
+        try:
+            setup = self._setup_key_for_pairs()
+            wd = resolve_work_dir(cfg, self._cfg_path)
+            dst = copy_pair_set_to_workdir(setup, wd, p, overwrite=True)
+            rel = _rel_to_workdir(wd, dst)
+            self._set_cfg_value("wavesol.hand_pairs_path", rel)
+            self.editor_yaml.blockSignals(True)
+            self.editor_yaml.setPlainText(_yaml_dump(self._cfg or {}))
+            self.editor_yaml.blockSignals(False)
+            self._do_save_cfg()
+            self._refresh_pairs_label()
+            self._log_info(f"Pairs copied into work_dir: {dst}")
+        except Exception as e:
+            self._log_exception(e)
+            self._show_msgbox_lines("Pairs", ["Не удалось сохранить пары в work_dir.", str(e)], icon="error")
+
+    def _do_open_pairs_library(self) -> None:
+        try:
+            from scorpio_pipe.pairs_library import user_library_dir
+            from PyQt5.QtGui import QDesktopServices
+            from PyQt5.QtCore import QUrl
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(user_library_dir())))
+        except Exception as e:
+            self._log_exception(e)
+            self._show_msgbox_lines("Pairs", ["Не удалось открыть папку библиотеки.", str(e)], icon="error")
+
+    def _do_export_selected_pair_set(self) -> None:
+        ps = self._selected_pair_set_id()
+        if ps is None:
+            self._show_msgbox_lines("Pairs", ["Не выбран набор пар."], icon="warn")
+            return
+        setup = self._setup_key_for_pairs()
+        try:
+            src = get_pair_set_path(setup, ps["name"], ps["kind"])
+        except Exception as e:
+            self._log_exception(e)
+            self._show_msgbox_lines("Pairs", ["Не удалось найти файл набора пар.", str(e)], icon="error")
+            return
+        fn, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export pair set", f"{ps['name']}.txt", "Text files (*.txt);;All files (*)")
+        if not fn:
+            return
+        try:
+            from shutil import copy2
+            copy2(str(src), str(fn))
+            self._log_info(f"Exported: {fn}")
+        except Exception as e:
+            self._log_exception(e)
+            self._show_msgbox_lines("Pairs", ["Экспорт не удался.", str(e)], icon="error")
+
+    def _do_export_current_pairs(self) -> None:
+        if not self._sync_cfg_from_editor():
+            return
+        p = self._current_pairs_path()
+        if p is None or not p.exists():
+            self._show_msgbox_lines("Pairs", ["Текущий файл пар не найден."], icon="warn")
+            return
+        fn, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export current pairs", "hand_pairs.txt", "Text files (*.txt);;All files (*)")
+        if not fn:
+            return
+        try:
+            from shutil import copy2
+            copy2(str(p), str(fn))
+            self._log_info(f"Exported: {fn}")
+        except Exception as e:
+            self._log_exception(e)
+            self._show_msgbox_lines("Pairs", ["Экспорт не удался.", str(e)], icon="error")
+
+    def _do_export_user_library_zip(self) -> None:
+        fn, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export user pairs library", "pairs_library.zip", "Zip (*.zip);;All files (*)")
+        if not fn:
+            return
+        try:
+            from shutil import copy2
+            tmp = export_user_library_zip()
+            copy2(str(tmp), str(fn))
+            self._log_info(f"Exported user library: {fn}")
+        except Exception as e:
+            self._log_exception(e)
+            self._show_msgbox_lines("Pairs", ["Экспорт не удался.", str(e)], icon="error")
+# --------------------------- page: wavesolution ---------------------------
 
 
     def _build_page_wavesol(self) -> QtWidgets.QWidget:
@@ -3528,6 +3899,621 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._set_step_status(7, "fail")
             self._log_exception(e)
 
+
+    # --------------------------- linearize / sky / extract1d (v5) ---------------------------
+
+    def _build_page_linearize(self) -> QtWidgets.QWidget:
+        w = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(w)
+        lay.setSpacing(12)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        lay.addWidget(splitter, 1)
+
+        # left: controls
+        left = QtWidgets.QWidget()
+        l = QtWidgets.QVBoxLayout(left)
+        l.setSpacing(12)
+
+        g = _box("Linearize (2D dispersion solution)")
+        l.addWidget(g)
+        gl = QtWidgets.QVBoxLayout(g)
+
+        lbl = QtWidgets.QLabel(
+            "Resample COSMICS-cleaned OBJ frames onto a linear wavelength grid using lambda_map(y,x).\n"
+            "Output: lin/obj_sum_lin.fits (stacked linearized frame).\n"
+            "Tip: keep dlambda/lambda_min/lambda_max = 0 for auto."
+        )
+        lbl.setWordWrap(True)
+        gl.addWidget(lbl)
+
+        gpar = _box("Parameters")
+        pl = QtWidgets.QVBoxLayout(gpar)
+        pl.setSpacing(10)
+
+        basic = _box("Basic")
+        bf = QtWidgets.QFormLayout(basic)
+        bf.setLabelAlignment(QtCore.Qt.AlignLeft)
+        bf.setHorizontalSpacing(12)
+
+        self.chk_lin_enabled = QtWidgets.QCheckBox("Enabled")
+        bf.addRow(
+            self._param_label(
+                "Enabled",
+                "Включить этап линеаризации.\n"
+                "Типично: включено.",
+            ),
+            self.chk_lin_enabled,
+        )
+
+        self.dspin_lin_dlambda = QtWidgets.QDoubleSpinBox()
+        self.dspin_lin_dlambda.setRange(0.0, 50.0)
+        self.dspin_lin_dlambda.setDecimals(4)
+        self.dspin_lin_dlambda.setSingleStep(0.05)
+        bf.addRow(
+            self._param_label(
+                "Δλ [Å]",
+                "Шаг по длине волны для линейной сетки.\n"
+                "0 = авто (по median dλ из lambda_map).\n"
+                "Типично: 0–2 Å.",
+            ),
+            self.dspin_lin_dlambda,
+        )
+
+        self.dspin_lin_lmin = QtWidgets.QDoubleSpinBox()
+        self.dspin_lin_lmin.setRange(0.0, 1_000_000.0)
+        self.dspin_lin_lmin.setDecimals(2)
+        self.dspin_lin_lmin.setSingleStep(50.0)
+        bf.addRow(
+            self._param_label(
+                "λ min [Å]",
+                "Минимальная λ для сетки.\n"
+                "0 = авто (по lambda_map).\n"
+                "Типично: 0 (авто).",
+            ),
+            self.dspin_lin_lmin,
+        )
+
+        self.dspin_lin_lmax = QtWidgets.QDoubleSpinBox()
+        self.dspin_lin_lmax.setRange(0.0, 1_000_000.0)
+        self.dspin_lin_lmax.setDecimals(2)
+        self.dspin_lin_lmax.setSingleStep(50.0)
+        bf.addRow(
+            self._param_label(
+                "λ max [Å]",
+                "Максимальная λ для сетки.\n"
+                "0 = авто (по lambda_map).\n"
+                "Типично: 0 (авто).",
+            ),
+            self.dspin_lin_lmax,
+        )
+
+        self.spin_lin_crop_top = QtWidgets.QSpinBox()
+        self.spin_lin_crop_top.setRange(0, 10000)
+        self.spin_lin_crop_top.setSingleStep(10)
+        bf.addRow(
+            self._param_label(
+                "Crop top [px]",
+                "Обрезка сверху по Y перед сохранением.\n"
+                "0 = без обрезки.\n"
+                "Типично: 0–200.",
+            ),
+            self.spin_lin_crop_top,
+        )
+
+        self.spin_lin_crop_bot = QtWidgets.QSpinBox()
+        self.spin_lin_crop_bot.setRange(0, 10000)
+        self.spin_lin_crop_bot.setSingleStep(10)
+        bf.addRow(
+            self._param_label(
+                "Crop bottom [px]",
+                "Обрезка снизу по Y перед сохранением.\n"
+                "0 = без обрезки.\n"
+                "Типично: 0–200.",
+            ),
+            self.spin_lin_crop_bot,
+        )
+
+        self.chk_lin_png = QtWidgets.QCheckBox("Save quicklook PNG")
+        bf.addRow(
+            self._param_label(
+                "PNG",
+                "Сохранить диагностическую картинку lin/obj_sum_lin.png.\n"
+                "Типично: включено.",
+            ),
+            self.chk_lin_png,
+        )
+
+        pl.addWidget(basic)
+
+        adv_w, adv_l, _ = _collapsible("Advanced", expanded=False)
+        self.chk_lin_per_frame = QtWidgets.QCheckBox("Save per-frame linearized")
+        adv_l.addWidget(
+            self._small_note(
+                "Сохранять линейризованные отдельные кадры в lin/frames/*.fits.\n"
+                "Полезно для отладки, но занимает место.\n"
+                "Типично: выключено."
+            )
+        )
+        adv_l.addWidget(self.chk_lin_per_frame)
+        pl.addWidget(adv_w)
+
+        pl.addWidget(self._mk_stage_apply_row("linearize"))
+        gl.addWidget(gpar)
+
+        row = QtWidgets.QHBoxLayout()
+        self.btn_run_linearize = QtWidgets.QPushButton("Run: Linearize")
+        self.btn_run_linearize.setProperty("primary", True)
+        self.btn_qc_linearize = QtWidgets.QPushButton("QC")
+        self.btn_frames_linearize = QtWidgets.QPushButton("Frames…")
+        row.addWidget(self.btn_run_linearize)
+        row.addWidget(self.btn_qc_linearize)
+        row.addWidget(self.btn_frames_linearize)
+        row.addStretch(1)
+        gl.addLayout(row)
+
+        l.addStretch(1)
+        splitter.addWidget(left)
+
+        self.outputs_linearize = OutputsPanel()
+        self.outputs_linearize.set_context(self._cfg, stage="linearize")
+        splitter.addWidget(self.outputs_linearize)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([650, 480])
+
+        lay.addWidget(_hline())
+        foot = QtWidgets.QHBoxLayout()
+        lay.addLayout(foot)
+        self.btn_to_sky = QtWidgets.QPushButton("Go to Sky subtraction →")
+        foot.addStretch(1)
+        foot.addWidget(self.btn_to_sky)
+
+        # pending wiring
+        self.chk_lin_enabled.stateChanged.connect(
+            lambda _: self._stage_set_pending("linearize", "linearize.enabled", bool(self.chk_lin_enabled.isChecked()))
+        )
+        self.dspin_lin_dlambda.valueChanged.connect(
+            lambda v: self._stage_set_pending(
+                "linearize", "linearize.dlambda_A", None if float(v) <= 0 else float(v)
+            )
+        )
+        self.dspin_lin_lmin.valueChanged.connect(
+            lambda v: self._stage_set_pending(
+                "linearize", "linearize.lambda_min_A", None if float(v) <= 0 else float(v)
+            )
+        )
+        self.dspin_lin_lmax.valueChanged.connect(
+            lambda v: self._stage_set_pending(
+                "linearize", "linearize.lambda_max_A", None if float(v) <= 0 else float(v)
+            )
+        )
+        self.spin_lin_crop_top.valueChanged.connect(
+            lambda v: self._stage_set_pending("linearize", "linearize.y_crop_top", int(v))
+        )
+        self.spin_lin_crop_bot.valueChanged.connect(
+            lambda v: self._stage_set_pending("linearize", "linearize.y_crop_bottom", int(v))
+        )
+        self.chk_lin_png.stateChanged.connect(
+            lambda _: self._stage_set_pending("linearize", "linearize.save_png", bool(self.chk_lin_png.isChecked()))
+        )
+        self.chk_lin_per_frame.stateChanged.connect(
+            lambda _: self._stage_set_pending(
+                "linearize", "linearize.save_per_frame", bool(self.chk_lin_per_frame.isChecked())
+            )
+        )
+
+        self.btn_run_linearize.clicked.connect(self._do_run_linearize)
+        self.btn_qc_linearize.clicked.connect(self._open_qc_viewer)
+        self.btn_frames_linearize.clicked.connect(lambda: self._open_frames_window("lin"))
+        self.btn_to_sky.clicked.connect(lambda: self.steps.setCurrentRow(9))
+
+        self._sync_stage_controls_from_cfg()
+        return w
+
+    def _do_run_linearize(self) -> None:
+        if not self._ensure_stage_applied("linearize", "Linearize"):
+            return
+        if not self._ensure_cfg_saved():
+            return
+        self._set_step_status(8, "running")
+        try:
+            ctx = load_context(self._cfg_path)
+            run_sequence(ctx, ["linearize"])
+            self._log_info("Linearize done")
+            try:
+                if hasattr(self, "outputs_linearize"):
+                    self.outputs_linearize.set_context(self._cfg, stage="linearize")
+            except Exception:
+                pass
+            self._set_step_status(8, "ok")
+            self._maybe_auto_qc()
+        except Exception as e:
+            self._set_step_status(8, "fail")
+            self._log_exception(e)
+
+    def _build_page_sky(self) -> QtWidgets.QWidget:
+        w = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(w)
+        lay.setSpacing(12)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        lay.addWidget(splitter, 1)
+
+        left = QtWidgets.QWidget()
+        l = QtWidgets.QVBoxLayout(left)
+        l.setSpacing(12)
+
+        g = _box("Sky subtraction (Kelson)")
+        l.addWidget(g)
+        gl = QtWidgets.QVBoxLayout(g)
+
+        lbl = QtWidgets.QLabel(
+            "Subtract night sky from the linearized stacked OBJ frame.\n"
+            "Workflow: select object/sky regions on lin/obj_sum_lin.fits → run Kelson." 
+        )
+        lbl.setWordWrap(True)
+        gl.addWidget(lbl)
+
+        # ROI
+        groi = _box("Regions (OBJ / SKY)")
+        rlay = QtWidgets.QVBoxLayout(groi)
+        self.lbl_sky_roi = QtWidgets.QLabel("ROI: <not set>")
+        self.lbl_sky_roi.setWordWrap(True)
+        rlay.addWidget(self.lbl_sky_roi)
+        row_roi = QtWidgets.QHBoxLayout()
+        self.btn_sky_select_roi = QtWidgets.QPushButton("Select regions…")
+        self.btn_sky_select_roi.setProperty("primary", True)
+        row_roi.addWidget(self.btn_sky_select_roi)
+        row_roi.addStretch(1)
+        rlay.addLayout(row_roi)
+        gl.addWidget(groi)
+
+        gpar = _box("Parameters")
+        pl = QtWidgets.QVBoxLayout(gpar)
+        pl.setSpacing(10)
+
+        basic = _box("Basic")
+        bf = QtWidgets.QFormLayout(basic)
+        bf.setLabelAlignment(QtCore.Qt.AlignLeft)
+        bf.setHorizontalSpacing(12)
+
+        self.chk_sky_enabled = QtWidgets.QCheckBox("Enabled")
+        bf.addRow(
+            self._param_label(
+                "Enabled",
+                "Включить этап вычитания ночного неба.\n"
+                "Типично: включено.",
+            ),
+            self.chk_sky_enabled,
+        )
+
+        self.dspin_sky_step = QtWidgets.QDoubleSpinBox()
+        self.dspin_sky_step.setRange(0.1, 50.0)
+        self.dspin_sky_step.setDecimals(2)
+        self.dspin_sky_step.setSingleStep(0.25)
+        bf.addRow(
+            self._param_label(
+                "B-spline step [Å]",
+                "Шаг узлов B-сплайна по λ.\n"
+                "Меньше шаг → точнее линии, но выше риск переобучения.\n"
+                "Типично: 1–5 Å.",
+            ),
+            self.dspin_sky_step,
+        )
+
+        self.spin_sky_deg = QtWidgets.QSpinBox()
+        self.spin_sky_deg.setRange(1, 5)
+        self.spin_sky_deg.setSingleStep(1)
+        bf.addRow(
+            self._param_label(
+                "B-spline degree",
+                "Степень B-сплайна (обычно 3).\n"
+                "Типично: 3.",
+            ),
+            self.spin_sky_deg,
+        )
+
+        self.dspin_sky_clip = QtWidgets.QDoubleSpinBox()
+        self.dspin_sky_clip.setRange(0.5, 10.0)
+        self.dspin_sky_clip.setDecimals(2)
+        self.dspin_sky_clip.setSingleStep(0.25)
+        bf.addRow(
+            self._param_label(
+                "Sigma clip",
+                "Сигма-клиппинг при подгонке сплайна к S(λ).\n"
+                "Типично: 2.5–4.",
+            ),
+            self.dspin_sky_clip,
+        )
+
+        self.spin_sky_maxiter = QtWidgets.QSpinBox()
+        self.spin_sky_maxiter.setRange(1, 20)
+        self.spin_sky_maxiter.setSingleStep(1)
+        bf.addRow(
+            self._param_label(
+                "Max iters",
+                "Максимум итераций клиппинга.\n"
+                "Типично: 3–8.",
+            ),
+            self.spin_sky_maxiter,
+        )
+
+        self.chk_sky_spatial = QtWidgets.QCheckBox("Spatial polynomial")
+        bf.addRow(
+            self._param_label(
+                "Spatial",
+                "Моделировать изменение амплитуды неба вдоль щели: a(y)*S(λ)+b(y).\n"
+                "Типично: включено.",
+            ),
+            self.chk_sky_spatial,
+        )
+
+        self.spin_sky_poly = QtWidgets.QSpinBox()
+        self.spin_sky_poly.setRange(0, 3)
+        self.spin_sky_poly.setSingleStep(1)
+        bf.addRow(
+            self._param_label(
+                "Poly deg",
+                "Степень полинома для a(y), b(y).\n"
+                "0 = константа, 1 = линейно, 2 = квадратично.\n"
+                "Типично: 0–1.",
+            ),
+            self.spin_sky_poly,
+        )
+
+        pl.addWidget(basic)
+
+        pl.addWidget(self._mk_stage_apply_row("sky"))
+        gl.addWidget(gpar)
+
+        row = QtWidgets.QHBoxLayout()
+        self.btn_run_sky = QtWidgets.QPushButton("Run: Sky subtraction")
+        self.btn_run_sky.setProperty("primary", True)
+        self.btn_qc_sky = QtWidgets.QPushButton("QC")
+        self.btn_frames_sky = QtWidgets.QPushButton("Frames…")
+        row.addWidget(self.btn_run_sky)
+        row.addWidget(self.btn_qc_sky)
+        row.addWidget(self.btn_frames_sky)
+        row.addStretch(1)
+        gl.addLayout(row)
+
+        l.addStretch(1)
+        splitter.addWidget(left)
+
+        self.outputs_sky = OutputsPanel()
+        self.outputs_sky.set_context(self._cfg, stage="sky")
+        splitter.addWidget(self.outputs_sky)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([650, 480])
+
+        lay.addWidget(_hline())
+        foot = QtWidgets.QHBoxLayout()
+        lay.addLayout(foot)
+        self.btn_to_extract1d = QtWidgets.QPushButton("Go to Extract 1D →")
+        foot.addStretch(1)
+        foot.addWidget(self.btn_to_extract1d)
+
+        # pending wiring
+        self.chk_sky_enabled.stateChanged.connect(
+            lambda _: self._stage_set_pending("sky", "sky.enabled", bool(self.chk_sky_enabled.isChecked()))
+        )
+        self.dspin_sky_step.valueChanged.connect(
+            lambda v: self._stage_set_pending("sky", "sky.bsp_step_A", float(v))
+        )
+        self.spin_sky_deg.valueChanged.connect(
+            lambda v: self._stage_set_pending("sky", "sky.bsp_degree", int(v))
+        )
+        self.dspin_sky_clip.valueChanged.connect(
+            lambda v: self._stage_set_pending("sky", "sky.sigma_clip", float(v))
+        )
+        self.spin_sky_maxiter.valueChanged.connect(
+            lambda v: self._stage_set_pending("sky", "sky.maxiter", int(v))
+        )
+        self.chk_sky_spatial.stateChanged.connect(
+            lambda _: self._stage_set_pending("sky", "sky.use_spatial_poly", bool(self.chk_sky_spatial.isChecked()))
+        )
+        self.spin_sky_poly.valueChanged.connect(
+            lambda v: self._stage_set_pending("sky", "sky.spatial_poly_deg", int(v))
+        )
+
+        self.btn_sky_select_roi.clicked.connect(self._do_select_sky_rois)
+        self.btn_run_sky.clicked.connect(self._do_run_sky)
+        self.btn_qc_sky.clicked.connect(self._open_qc_viewer)
+        self.btn_frames_sky.clicked.connect(lambda: self._open_frames_window("sky"))
+        self.btn_to_extract1d.clicked.connect(lambda: self.steps.setCurrentRow(10))
+
+        self._sync_stage_controls_from_cfg()
+        return w
+
+    def _do_select_sky_rois(self) -> None:
+        from scorpio_pipe.ui.sky_roi_dialog import SkyRoiDialog
+
+        # we select regions on the linearized stacked frame
+        if not self._ensure_cfg_saved():
+            return
+        try:
+            ctx = load_context(self._cfg_path)
+            work = resolve_work_dir(ctx.cfg)
+            fits_path = work / "lin" / "obj_sum_lin.fits"
+            if not fits_path.exists():
+                self._log_warn("Linearized sum not found. Run Linearize first.")
+                return
+            roi = (self._cfg.get("sky", {}) or {}).get("roi", {}) or {}
+            dlg = SkyRoiDialog(fits_path, roi, parent=self)
+            if dlg.exec() == QtWidgets.QDialog.Accepted:
+                r = dlg.roi.to_dict()
+                for k, v in r.items():
+                    self._stage_set_pending("sky", f"sky.roi.{k}", int(v))
+                self._sync_stage_controls_from_cfg()
+        except Exception as e:
+            self._log_exception(e)
+
+    def _do_run_sky(self) -> None:
+        if not self._ensure_stage_applied("sky", "Sky subtraction"):
+            return
+        if not self._ensure_cfg_saved():
+            return
+        # quick ROI sanity
+        roi = (self._cfg.get("sky", {}) or {}).get("roi", {}) or {}
+        need = ["obj_y0", "obj_y1", "sky_top_y0", "sky_top_y1", "sky_bot_y0", "sky_bot_y1"]
+        if any(k not in roi for k in need):
+            self._log_warn("ROI is not set. Use 'Select regions…' first.")
+            return
+        self._set_step_status(9, "running")
+        try:
+            ctx = load_context(self._cfg_path)
+            run_sequence(ctx, ["sky"])
+            self._log_info("Sky subtraction done")
+            try:
+                if hasattr(self, "outputs_sky"):
+                    self.outputs_sky.set_context(self._cfg, stage="sky")
+            except Exception:
+                pass
+            self._set_step_status(9, "ok")
+            self._maybe_auto_qc()
+        except Exception as e:
+            self._set_step_status(9, "fail")
+            self._log_exception(e)
+
+    def _build_page_extract1d(self) -> QtWidgets.QWidget:
+        w = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(w)
+        lay.setSpacing(12)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        lay.addWidget(splitter, 1)
+
+        left = QtWidgets.QWidget()
+        l = QtWidgets.QVBoxLayout(left)
+        l.setSpacing(12)
+
+        g = _box("Extract 1D spectrum")
+        l.addWidget(g)
+        gl = QtWidgets.QVBoxLayout(g)
+
+        lbl = QtWidgets.QLabel(
+            "Build a 1D spectrum F(λ) by summing rows within the user-selected object region.\n"
+            "Input: sky/obj_sky_sub.fits. Output: spec/spectrum_1d.fits (+ PNG)."
+        )
+        lbl.setWordWrap(True)
+        gl.addWidget(lbl)
+
+        gpar = _box("Parameters")
+        pl = QtWidgets.QVBoxLayout(gpar)
+        pl.setSpacing(10)
+
+        basic = _box("Basic")
+        bf = QtWidgets.QFormLayout(basic)
+        bf.setLabelAlignment(QtCore.Qt.AlignLeft)
+        bf.setHorizontalSpacing(12)
+
+        self.chk_ex1d_enabled = QtWidgets.QCheckBox("Enabled")
+        bf.addRow(
+            self._param_label(
+                "Enabled",
+                "Включить этап извлечения 1D-спектра.\nТипично: включено.",
+            ),
+            self.chk_ex1d_enabled,
+        )
+
+        self.cmb_ex1d_method = QtWidgets.QComboBox()
+        self.cmb_ex1d_method.addItems(["sum", "mean", "median"])
+        bf.addRow(
+            self._param_label(
+                "Method",
+                "Метод агрегации по Y внутри области объекта.\nТипично: sum.",
+            ),
+            self.cmb_ex1d_method,
+        )
+
+        self.chk_ex1d_png = QtWidgets.QCheckBox("Save plot PNG")
+        bf.addRow(
+            self._param_label(
+                "PNG",
+                "Сохранить график spec/spectrum_1d.png.\nТипично: включено.",
+            ),
+            self.chk_ex1d_png,
+        )
+
+        pl.addWidget(basic)
+        pl.addWidget(self._mk_stage_apply_row("extract1d"))
+        gl.addWidget(gpar)
+
+        row = QtWidgets.QHBoxLayout()
+        self.btn_run_ex1d = QtWidgets.QPushButton("Run: Extract 1D")
+        self.btn_run_ex1d.setProperty("primary", True)
+        self.btn_qc_ex1d = QtWidgets.QPushButton("QC")
+        self.btn_frames_ex1d = QtWidgets.QPushButton("Frames…")
+        row.addWidget(self.btn_run_ex1d)
+        row.addWidget(self.btn_qc_ex1d)
+        row.addWidget(self.btn_frames_ex1d)
+        row.addStretch(1)
+        gl.addLayout(row)
+
+        l.addStretch(1)
+        splitter.addWidget(left)
+
+        self.outputs_extract1d = OutputsPanel()
+        self.outputs_extract1d.set_context(self._cfg, stage="extract1d")
+        splitter.addWidget(self.outputs_extract1d)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([650, 480])
+
+        lay.addWidget(_hline())
+        foot = QtWidgets.QHBoxLayout()
+        lay.addLayout(foot)
+        self.btn_to_qc_report = QtWidgets.QPushButton("Open QC viewer →")
+        foot.addStretch(1)
+        foot.addWidget(self.btn_to_qc_report)
+
+        self.chk_ex1d_enabled.stateChanged.connect(
+            lambda _: self._stage_set_pending(
+                "extract1d", "extract1d.enabled", bool(self.chk_ex1d_enabled.isChecked())
+            )
+        )
+        self.cmb_ex1d_method.currentTextChanged.connect(
+            lambda t: self._stage_set_pending("extract1d", "extract1d.method", str(t))
+        )
+        self.chk_ex1d_png.stateChanged.connect(
+            lambda _: self._stage_set_pending(
+                "extract1d", "extract1d.save_png", bool(self.chk_ex1d_png.isChecked())
+            )
+        )
+
+        self.btn_run_ex1d.clicked.connect(self._do_run_extract1d)
+        self.btn_qc_ex1d.clicked.connect(self._open_qc_viewer)
+        self.btn_frames_ex1d.clicked.connect(lambda: self._open_frames_window("spec"))
+        self.btn_to_qc_report.clicked.connect(self._open_qc_viewer)
+
+        self._sync_stage_controls_from_cfg()
+        return w
+
+    def _do_run_extract1d(self) -> None:
+        if not self._ensure_stage_applied("extract1d", "Extract 1D"):
+            return
+        if not self._ensure_cfg_saved():
+            return
+        self._set_step_status(10, "running")
+        try:
+            ctx = load_context(self._cfg_path)
+            run_sequence(ctx, ["extract1d"])
+            self._log_info("Extract 1D done")
+            try:
+                if hasattr(self, "outputs_extract1d"):
+                    self.outputs_extract1d.set_context(self._cfg, stage="extract1d")
+            except Exception:
+                pass
+            self._set_step_status(10, "ok")
+            self._maybe_auto_qc()
+        except Exception as e:
+            self._set_step_status(10, "fail")
+            self._log_exception(e)
     # --------------------------- misc helpers ---------------------------
 
     def _ensure_cfg_saved(self) -> bool:

@@ -86,6 +86,15 @@ def validate_config(
     for it in sch.warnings:
         warnings.append(ValidationIssue('warning', it.code, it.message, it.hint))
 
+    # --- unknown keys (fail-fast) ---
+    strict_unknown = bool(cfg.get("strict_unknown", True))
+    if strict_unknown:
+        unknown = find_unknown_keys(cfg)
+        if unknown:
+            msg = "; ".join(f"{sec}: {', '.join(keys)}" for sec, keys in unknown.items())
+            errors.append(ValidationIssue("error", "UNKNOWN_KEYS", f"Unknown config keys: {msg}", "Fix typos or disable strict_unknown"))
+
+
     # --- basic paths ---
     data_dir = _get(cfg, 'data_dir')
     work_dir = _get(cfg, 'work_dir')
@@ -129,9 +138,9 @@ def validate_config(
             try:
                 p = _as_abs(str(fp), base_dir)
                 if not p.exists():
-                    (warnings if not strict_paths else warnings).append(
+                    (errors if strict_paths else warnings).append(
                         ValidationIssue(
-                            'warning',
+                            'error' if strict_paths else 'warning',
                             'MISSING_FRAME',
                             f'Missing file: {kind}: {p}',
                             'If you moved the night folder, rebuild config',

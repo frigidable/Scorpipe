@@ -89,7 +89,7 @@ def task_manifest():
     Общий manifest для воспроизводимости: что было выбрано и где work_dir.
     """
     cfg = _load_cfg()
-    work_dir = Path(cfg["work_dir"])
+    work_dir = resolve_work_dir(cfg)
     out = work_dir / "report" / "manifest.json"
 
     def _action():
@@ -105,7 +105,7 @@ def task_manifest():
 def task_qc_report():
     """Lightweight QC summary (JSON + HTML index)."""
     cfg = _load_cfg()
-    work_dir = Path(cfg["work_dir"])
+    work_dir = resolve_work_dir(cfg)
     out_html = work_dir / "report" / "index.html"
     out_json = work_dir / "report" / "qc_report.json"
 
@@ -126,7 +126,7 @@ def task_qc_report():
 
 def task_superbias():
     cfg = _load_cfg()
-    work_dir = Path(cfg["work_dir"])
+    work_dir = resolve_work_dir(cfg)
     out = work_dir / "calib" / "superbias.fits"
 
     bias_list = cfg["frames"].get("bias", [])
@@ -149,7 +149,7 @@ def task_superbias():
 
 def task_superflat():
     cfg = _load_cfg()
-    work_dir = Path(cfg["work_dir"])
+    work_dir = resolve_work_dir(cfg)
     out = work_dir / "calib" / "superflat.fits"
 
     flat_list = cfg["frames"].get("flat", [])
@@ -172,7 +172,7 @@ def task_superflat():
 
 def task_cosmics():
     cfg = _load_cfg()
-    work_dir = Path(cfg["work_dir"])
+    work_dir = resolve_work_dir(cfg)
     out = work_dir / "cosmics" / "summary.json"
 
     obj_list = cfg["frames"].get("obj", [])
@@ -202,10 +202,10 @@ def task_superneon():
             from scorpio_pipe.stages.superneon import build_superneon
             build_superneon(cfg)
 
-        _timed("superneon", Path(cfg["work_dir"]), _run)
+        _timed("superneon", resolve_work_dir(cfg), _run)
 
     cfg = _load_cfg()
-    work_dir = Path(cfg["work_dir"])
+    work_dir = resolve_work_dir(cfg)
     from scorpio_pipe.wavesol_paths import wavesol_dir as _wavesol_dir
     outdir = _wavesol_dir(cfg)
     neon_list = cfg["frames"].get("neon", [])
@@ -237,7 +237,7 @@ def task_superneon():
 
 def task_lineid_prepare():
     cfg = _load_cfg()
-    w = Path(cfg["work_dir"])
+    w = resolve_work_dir(cfg)
     from scorpio_pipe.wavesol_paths import wavesol_dir as _wavesol_dir
     wsol_dir = _wavesol_dir(cfg)
 
@@ -275,6 +275,7 @@ def task_lineid_prepare():
 def task_wavesol():
     cfg = _load_cfg()
     from scorpio_pipe.stages.wavesolution import build_wavesolution
+    from scorpio_pipe.wavesol_paths import resolve_work_dir
     from scorpio_pipe.wavesol_paths import wavesol_dir
 
     outdir = wavesol_dir(cfg)
@@ -282,7 +283,7 @@ def task_wavesol():
     hand_pairs = outdir / "hand_pairs.txt"
 
     def _action():
-        _timed("wavesolution", Path(cfg["work_dir"]), lambda: build_wavesolution(cfg))
+        _timed("wavesolution", resolve_work_dir(cfg), lambda: build_wavesolution(cfg))
 
     return {
         "actions": [_action],
@@ -303,33 +304,27 @@ def task_wavesol():
 
 
 def task_sky_sub():
+    """Kelson-style 2D sky subtraction on the stacked, linearized frame."""
     cfg = _load_cfg()
-    work_dir = Path(cfg["work_dir"])
-    out = work_dir / "sky" / "sky_sub_done.json"
-
-    obj_list = cfg["frames"].get("obj", [])
-    sky_list = cfg["frames"].get("sky", [])
-    superbias = Path(cfg.get("calib", {}).get("superbias_path") or (work_dir / "calib" / "superbias.fits"))
-    superflat = Path(cfg.get("calib", {}).get("superflat_path") or (work_dir / "calib" / "superflat.fits"))
-    from scorpio_pipe.wavesol_paths import wavesol_dir as _wavesol_dir
-    lambda_map = _wavesol_dir(cfg) / "lambda_map.fits"
-
-    flat_list = cfg["frames"].get("flat", [])
-    file_dep = [_cfg_path(), superbias, lambda_map] + [Path(p) for p in obj_list + sky_list]
-    task_dep = ["wavelength_solution"]
-
-    if flat_list:
-        file_dep.append(superflat)
-        task_dep.append("superflat")
+    work_dir = resolve_work_dir(cfg)
+    out_dir = work_dir / "sky"
+    done = out_dir / "sky_sub_done.json"
 
     def _action():
-        _timed("sky_sub", work_dir, lambda: _touch(out, {"stage": "sky_sub", "n_obj": len(obj_list), "n_sky": len(sky_list)}))
+        from scorpio_pipe.stages.sky_sub import run_sky_sub
+
+        _timed("sky_sub", work_dir, lambda: run_sky_sub(cfg, out_dir=out_dir))
 
     return {
         "actions": [_action],
-        "file_dep": file_dep,
-        "targets": [out],
-        "task_dep": task_dep,
+        "file_dep": [_cfg_path(), work_dir / "lin" / "obj_sum_lin.fits"],
+        "targets": [
+            done,
+            out_dir / "obj_sky_sub.fits",
+            out_dir / "sky_model.fits",
+            out_dir / "sky_diagnostics.png",
+        ],
+        "task_dep": ["linearize"],
         "clean": True,
     }
 
@@ -340,60 +335,73 @@ def task_wavelength_solution():
 
 
 def task_linearize():
+    """Rectify per-pixel spectra to a linear wavelength grid and stack exposures."""
     cfg = _load_cfg()
-    work_dir = Path(cfg["work_dir"])
-    out = work_dir / "lin" / "linearize_done.json"
-
-    sky_done = work_dir / "sky" / "sky_sub_done.json"
-    from scorpio_pipe.wavesol_paths import wavesol_dir as _wavesol_dir
-    lambda_map = _wavesol_dir(cfg) / "lambda_map.fits"
+    work_dir = resolve_work_dir(cfg)
+    out_dir = work_dir / "lin"
+    done = out_dir / "linearize_done.json"
 
     def _action():
-        _timed("linearize", work_dir, lambda: _touch(out, {"stage": "linearize"}))
+        from scorpio_pipe.stages.linearize import run_linearize
+
+        _timed("linearize", work_dir, lambda: run_linearize(cfg, out_dir=out_dir))
+
+    # wavesol provides the lambda_map; cosmics provides cleaned frames (optional)
+    from scorpio_pipe.wavesol_paths import wavesol_dir
 
     return {
         "actions": [_action],
-        "file_dep": [sky_done, lambda_map],
-        "targets": [out],
-        "task_dep": ["sky_sub"],
+        "file_dep": [_cfg_path(), wavesol_dir(cfg) / "lambda_map.fits"],
+        "targets": [done, out_dir / "obj_sum_lin.fits", out_dir / "obj_sum_lin.png"],
+        "task_dep": ["wavesol", "cosmics"],
         "clean": True,
     }
 
 
 def task_stack():
+    """Compatibility alias: linearize already outputs a stacked frame."""
     cfg = _load_cfg()
-    work_dir = Path(cfg["work_dir"])
-    out = work_dir / "stack" / "stack_done.json"
-
-    lin_done = work_dir / "lin" / "linearize_done.json"
+    work_dir = resolve_work_dir(cfg)
+    out_dir = work_dir / "stack"
+    done = out_dir / "stack_done.json"
 
     def _action():
-        _timed("stack", work_dir, lambda: _touch(out, {"stage": "stack"}))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        # Mirror the main products for legacy scripts
+        src = work_dir / "lin" / "obj_sum_lin.fits"
+        dst = out_dir / "obj_sum_lin.fits"
+        if src.exists():
+            import shutil
+
+            shutil.copy2(src, dst)
+        _touch(done, {"stage": "stack", "note": "linearize already produces a stacked frame"})
 
     return {
         "actions": [_action],
-        "file_dep": [lin_done],
-        "targets": [out],
+        "file_dep": [work_dir / "lin" / "linearize_done.json"],
+        "targets": [done, out_dir / "obj_sum_lin.fits"],
         "task_dep": ["linearize"],
         "clean": True,
     }
 
 
 def task_extract1d():
+    """1D extraction from the sky-subtracted linearized frame."""
     cfg = _load_cfg()
-    work_dir = Path(cfg["work_dir"])
-    out = work_dir / "spec" / "spectrum_1d.fits"
-
-    stack_done = work_dir / "stack" / "stack_done.json"
+    work_dir = resolve_work_dir(cfg)
+    out_dir = work_dir / "spec"
+    done = out_dir / "extract1d_done.json"
 
     def _action():
-        _timed("extract1d", work_dir, lambda: _touch(out, {"stage": "extract1d"}))
+        from scorpio_pipe.stages.extract1d import extract_1d
+
+        _timed("extract1d", work_dir, lambda: extract_1d(cfg, out_dir=out_dir))
 
     return {
         "actions": [_action],
-        "file_dep": [stack_done],
-        "targets": [out],
-        "task_dep": ["stack"],
+        "file_dep": [_cfg_path(), work_dir / "sky" / "obj_sky_sub.fits"],
+        "targets": [done, out_dir / "spectrum_1d.fits", out_dir / "spectrum_1d.png"],
+        "task_dep": ["sky_sub"],
         "clean": True,
     }
 

@@ -24,6 +24,46 @@ class PairSet:
     origin: str  # "builtin" | "user"
 
 
+def _setup_from_cfg_or_setup(arg: object) -> dict:
+    """Accept either full cfg dict or just a __setup__ dict."""
+    if not isinstance(arg, dict):
+        return {}
+    if "frames" in arg and isinstance(arg.get("frames"), dict):
+        setup = arg.get("frames", {}).get("__setup__", {})
+        if isinstance(setup, dict):
+            return setup
+    setup = arg.get("__setup__")
+    if isinstance(setup, dict):
+        return setup
+    return arg
+
+
+def _setup_fields(setup: dict) -> tuple[str, str, str, str]:
+    inst = str(setup.get("instrument") or setup.get("instr") or setup.get("instrume") or "unknown")
+    disp = str(setup.get("disperser") or setup.get("grism") or setup.get("grism_name") or "unknown")
+    slit = str(setup.get("slit") or setup.get("slit_width") or "unknown")
+    binning = str(setup.get("binning") or setup.get("bin") or "unknown")
+    return inst, disp, slit, binning
+
+
+def _builtin_slug_for(arg: object) -> str:
+    if isinstance(arg, str):
+        return slugify_disperser(arg)
+    setup = _setup_from_cfg_or_setup(arg)
+    _, disp, _, _ = _setup_fields(setup)
+    return slugify_disperser(disp)
+
+
+def _user_slug_for(arg: object) -> str:
+    # User library is keyed by (instrument, disperser, slit, binning)
+    if isinstance(arg, str):
+        return slugify_disperser(arg)
+    setup = _setup_from_cfg_or_setup(arg)
+    inst, disp, slit, binning = _setup_fields(setup)
+    key = f"{inst}__{disp}__slit{slit}__bin{binning}"
+    return slugify_disperser(key)
+
+
 def builtin_pairs_root() -> Path:
     """Built-in pairs shipped with the package (may be empty)."""
     return Path(__file__).resolve().parent / "resources" / "pairs"
@@ -47,20 +87,36 @@ def ensure_user_pairs_root() -> Path:
     return root
 
 
-def list_pair_sets(disperser: str) -> list[PairSet]:
-    """List available pair sets for a given disperser (built-in + user)."""
-    slug = slugify_disperser(disperser or "unknown")
-    out: list[PairSet] = []
+def list_pair_sets(setup_or_disperser: str | dict) -> list[PairSet]:
+    """List available pair sets.
 
-    bdir = builtin_pairs_root() / slug
+    - Built-in sets are keyed by disperser.
+    - User sets are keyed by (instrument, disperser, slit, binning) so they don't collide.
+
+    For backward compatibility we also search the legacy user folder keyed only by disperser.
+    """
+    builtin_slug = _builtin_slug_for(setup_or_disperser)
+    user_slug = _user_slug_for(setup_or_disperser)
+
+    out: list[PairSet] = []
+    seen: set[Path] = set()
+
+    bdir = builtin_pairs_root() / builtin_slug
     if bdir.exists():
         for p in sorted(bdir.glob("*.txt")):
-            out.append(PairSet(label=p.stem, path=p, origin="builtin"))
+            if p not in seen:
+                out.append(PairSet(label=p.stem, path=p, origin="builtin"))
+                seen.add(p)
 
-    udir = ensure_user_pairs_root() / slug
-    if udir.exists():
-        for p in sorted(udir.glob("*.txt")):
-            out.append(PairSet(label=p.stem, path=p, origin="user"))
+    roots = [ensure_user_pairs_root() / user_slug]
+    if user_slug != builtin_slug:
+        roots.append(ensure_user_pairs_root() / builtin_slug)  # legacy
+    for udir in roots:
+        if udir.exists():
+            for p in sorted(udir.glob("*.txt")):
+                if p not in seen:
+                    out.append(PairSet(label=p.stem, path=p, origin="user"))
+                    seen.add(p)
 
     return out
 
@@ -81,13 +137,13 @@ def _sanitize_label(label: str) -> str:
     return label[:64]
 
 
-def save_user_pair_set(disperser: str, source: Path, label: str | None = None) -> Path:
+def save_user_pair_set(setup_or_disperser: str | dict, source: Path, label: str | None = None) -> Path:
     """Copy a pair file into the user library and return destination path."""
     source = Path(source).expanduser().resolve()
     if not source.exists():
         raise FileNotFoundError(str(source))
 
-    slug = slugify_disperser(disperser or "unknown")
+    slug = _user_slug_for(setup_or_disperser)
     root = ensure_user_pairs_root() / slug
     root.mkdir(parents=True, exist_ok=True)
 

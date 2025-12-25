@@ -85,9 +85,12 @@ def _stack_mad_clean(
     k: float,
     bias_subtract: bool,
     save_png: bool,
+    save_mask_fits: bool,
 ) -> CosmicsSummary:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "clean").mkdir(parents=True, exist_ok=True)
+    if save_mask_fits:
+        (out_dir / "masks_fits").mkdir(parents=True, exist_ok=True)
 
     datas: list[np.ndarray] = []
     headers: list[fits.Header] = []
@@ -140,6 +143,11 @@ def _stack_mad_clean(
             mpath = out_dir / "masks" / f"{name}_mask.png"
             _save_png(mpath, mask[i].astype(np.uint8), title=f"Cosmic mask: {name}")
 
+        if save_mask_fits:
+            mf = out_dir / "masks_fits" / f"{name}_mask.fits"
+            # uint16 mask: 1 = cosmic (first reserved bit)
+            fits.writeto(mf, (mask[i].astype(np.uint16)) * 1, overwrite=True)
+
     # Reference products: sum excluding masked pixels + coverage map
     sum_excl = np.sum(stack * (~mask), axis=0)
     cov = np.sum(~mask, axis=0).astype(np.int16)
@@ -166,6 +174,8 @@ def _stack_mad_clean(
                 "masks_dir": str((out_dir / "masks").resolve()),
             }
         )
+    if save_mask_fits:
+        outputs["masks_fits_dir"] = str((out_dir / "masks_fits").resolve())
 
     return CosmicsSummary(
         kind="",
@@ -178,7 +188,7 @@ def _stack_mad_clean(
     )
 
 
-def clean_cosmics(cfg: dict[str, Any], *, out_dir: str | Path | None = None) -> Path:
+def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
     """Clean cosmics and write a report.
 
     Default method is the robust stack-based MAD detection inspired by the user's
@@ -189,6 +199,7 @@ def clean_cosmics(cfg: dict[str, Any], *, out_dir: str | Path | None = None) -> 
       work_dir/cosmics/<kind>/clean/*.fits
       work_dir/cosmics/<kind>/summary.json
     """
+    cfg = _load_cfg_any(cfg)
     base_dir = Path(str(cfg.get("config_dir", "."))).resolve()
     data_dir = Path(str(cfg.get("data_dir", "."))).expanduser().resolve()
 
@@ -223,6 +234,7 @@ def clean_cosmics(cfg: dict[str, Any], *, out_dir: str | Path | None = None) -> 
 
     bias_subtract = bool(ccfg.get("bias_subtract", True))
     save_png = bool(ccfg.get("save_png", True))
+    save_mask_fits = bool(ccfg.get("save_mask_fits", True))
 
     superbias = _load_superbias(work_dir) if bias_subtract else None
 
@@ -270,6 +282,7 @@ def clean_cosmics(cfg: dict[str, Any], *, out_dir: str | Path | None = None) -> 
                     k=k,
                     bias_subtract=bias_subtract,
                     save_png=save_png,
+                    save_mask_fits=save_mask_fits,
                 )
                 summary = CosmicsSummary(
                     kind=kind,

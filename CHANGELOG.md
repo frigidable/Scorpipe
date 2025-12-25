@@ -1,5 +1,37 @@
 # Changelog
 
+## v5.5.0
+
+- LineID/Wavesol: реализованы все кнопки управления библиотекой пар (Use/Copy/Save/Open/Export).
+- LineID/Wavesol: исправлена «мертвая» выпадашка наборов пар — теперь список корректно обновляется из built-in + user library.
+- Cosmics: k приведён к правильному смыслу (порог σ/MAD), исправлена синхронизация QDoubleSpinBox с конфигом.
+
+## v5.4.0
+
+- Sky subtraction: добавлен интерактивный выбор регионов object/sky на линейризованном кадре (ROI) и сохранение в конфиг.
+- Stage-state: улучшена индикация Dirty/Up-to-date и причины перепрогона (manifest/stage_state.json).
+
+## v5.3.0
+
+### New long-slit science steps (core v5.x)
+- **Linearize (2D λ-map):** linearizes cleaned object frames onto a common linear wavelength grid using the 2D dispersion solution (``lambda_map.fits``).
+  - Outputs a **linearized summed object frame** (WCS: Å/pix) and optional per-exposure rectified frames.
+  - Adds first-pass **variance** estimation (GAIN from FITS header, fallback defaults) and carries a mask plane (reserved for cosmic/badpix).
+- **Sky subtraction (Kelson-style, baseline v1):** runs on the linearized summed frame.
+  - User defines **object** and **sky** regions on the 2D frame (interactive GUI, stored in config).
+  - Produces ``sky_model.fits`` and ``obj_sky_sub.fits`` + QC plots/metrics for residuals in sky regions.
+- **1D extraction:** sums rows in the chosen object aperture to produce a 1D spectrum (flux(λ), var(λ), mask(λ)).
+
+### Reliability fixes required for v5.x work
+- Fixed stage execution wiring (GUI runner → actual stage functions) so Linearize/Sky/Extract run end-to-end.
+- Normalized stage naming via aliases (e.g. ``sky_sub`` → ``sky``) to keep backward compatibility in UI/workflow.
+
+## v5.2.0
+
+### Foundation for v5.x
+- Added initial stage scaffolding and parameter schema for: ``linearize``, ``sky``, ``extract1d``.
+- Introduced stage provenance helpers (pipeline/package version, git commit) for FITS/JSON products.
+
 ## v4.13.1
 
 ### UI hotfix

@@ -11,6 +11,7 @@ import numpy as np
 from scorpio_pipe.products import Product, group_by_stage, list_products
 from scorpio_pipe.qc_thresholds import build_alerts, compute_thresholds
 from scorpio_pipe.version import PIPELINE_VERSION
+from scorpio_pipe.wavesol_paths import resolve_work_dir
 
 
 def _read_json(p: Path) -> dict[str, Any] | None:
@@ -248,7 +249,7 @@ def _render_alerts(alerts: list[dict[str, Any]]) -> str:
     return "<div class='alerts'>" + "".join(items) + "</div>"
 
 
-def build_qc_report(cfg: dict[str, Any], *, out_dir: str | Path | None = None) -> Path:
+def build_qc_report(cfg: dict[str, Any], *, out_dir: str | Path | None = None, config_dir: Path | None = None) -> Path:
     """Build a lightweight QC report (JSON + HTML).
 
     Writes:
@@ -256,7 +257,10 @@ def build_qc_report(cfg: dict[str, Any], *, out_dir: str | Path | None = None) -
       - work_dir/report/index.html
     """
 
-    work_dir = Path(str(cfg.get("work_dir", "work"))).expanduser().resolve()
+    if config_dir is not None and not cfg.get("config_dir"):
+        cfg = dict(cfg)
+        cfg["config_dir"] = str(config_dir)
+    work_dir = resolve_work_dir(cfg)
     if out_dir is None:
         out_dir = work_dir / "report"
     out_dir = Path(out_dir).expanduser().resolve()

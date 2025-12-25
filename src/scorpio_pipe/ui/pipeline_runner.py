@@ -1,237 +1,325 @@
+"""Pipeline runner used by the GUI.
+
+Goals:
+- Keep the UI responsive (runner can be executed in a QThread).
+- Provide deterministic skip/re-run logic:
+  a stage is skipped only if required products exist AND the stage hash matches.
+- Record stage state to ``work_dir/manifest/stage_state.json``.
+"""
+
 from __future__ import annotations
 
-import json
+import inspect
 import logging
-import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Event
+from typing import Any, Callable, Iterable
 
-from scorpio_pipe.config import load_config
-from scorpio_pipe.manifest import write_manifest
-from scorpio_pipe.validation import validate_config
-from scorpio_pipe.qc_report import build_qc_report
+from scorpio_pipe.config import load_config_any
+from scorpio_pipe.products import products_for_task, task_is_complete
+from scorpio_pipe.stage_state import compute_stage_hash, is_stage_up_to_date, load_stage_state, record_stage_result
+from scorpio_pipe.wavesol_paths import resolve_work_dir
 
-
-log = logging.getLogger("scorpio")
-
-
-def _touch(path: Path, payload: dict | None = None) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if payload is None:
-        path.write_text(f"created {time.ctime()}\n", encoding="utf-8")
-    else:
-        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
-class RunContext:
-    cfg_path: Path
-    cfg: dict
-    work_dir: Path
+class PlanItem:
+    task: str
+    action: str  # 'run'|'skip'
+    reason: str
 
 
-def load_context(cfg_path: str | Path) -> RunContext:
-    cfg_path = Path(cfg_path).expanduser().resolve()
-    cfg = load_config(cfg_path)
+class CancelToken:
+    """Cooperative cancellation token.
 
-    # Early validation (fail-fast with human-friendly message)
-    rep = validate_config(cfg, strict_paths=False)
-    if not rep.ok:
-        msgs = [f"[{i.code}] {i.message}" for i in rep.errors]
-        raise ValueError("Invalid config\n" + "\n".join(msgs))
+    Current implementation checks cancellation *between* tasks.
+    Stage implementations may optionally accept a ``cancel_token`` parameter for
+    finer-grained cancellation.
+    """
 
-    work_dir = Path(cfg["work_dir"]).expanduser().resolve()
-    return RunContext(cfg_path=cfg_path, cfg=cfg, work_dir=work_dir)
+    def __init__(self) -> None:
+        self._ev = Event()
 
+    def cancel(self) -> None:
+        self._ev.set()
 
-def run_manifest(ctx: RunContext) -> Path:
-    out = ctx.work_dir / "report" / "manifest.json"
-    log.info("Write manifest → %s", out)
-    write_manifest(out_path=out, cfg=ctx.cfg, cfg_path=ctx.cfg_path)
-    return out
+    @property
+    def cancelled(self) -> bool:
+        return self._ev.is_set()
 
 
+# --- Task registry ---
 
-def run_qc_report(ctx: RunContext) -> Path:
-    out = ctx.work_dir / "report" / "index.html"
-    log.info("Build QC report → %s", out)
-    return build_qc_report(ctx.cfg, out_dir=out.parent)
+TaskFn = Callable[..., Any]
 
 
-def run_superbias(ctx: RunContext) -> Path:
+def _call_maybe_with_cancel(fn: TaskFn, *, cancel_token: CancelToken | None = None, **kwargs: Any) -> Any:
+    try:
+        sig = inspect.signature(fn)
+        if cancel_token is not None and "cancel_token" in sig.parameters:
+            kwargs["cancel_token"] = cancel_token
+    except Exception:
+        # ultra-defensive; never block execution due to introspection issues
+        pass
+    return fn(**kwargs)
+
+
+def _task_manifest(cfg: dict[str, Any], out_dir: Path, *, config_path: Path | None = None, cancel_token: CancelToken | None = None) -> Path:
+    from scorpio_pipe.manifest import write_manifest
+
+    return write_manifest(out_path=out_dir / "report" / "manifest.json", cfg=cfg, cfg_path=config_path)
+
+
+def _task_superbias(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
     from scorpio_pipe.stages.calib import build_superbias
 
-    out = ctx.work_dir / "calib" / "superbias.fits"
-    log.info("Build superbias → %s", out)
-    return build_superbias(ctx.cfg_path, out_path=out)
+    return build_superbias(cfg, out_dir)
 
 
-def run_superneon(ctx: RunContext) -> list[Path]:
-    from scorpio_pipe.stages.superneon import build_superneon
+def _task_superflat(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
+    # One source of truth: stages.flatfield.build_superflat
+    from scorpio_pipe.stages.flatfield import build_superflat
 
-    log.info("Build superneon (stack + peaks)")
-    build_superneon(ctx.cfg)
-
-    # expected outputs (for UI convenience)
-    from scorpio_pipe.wavesol_paths import wavesol_dir
-
-    wavesol_dir = wavesol_dir(ctx.cfg)
-    outs = [
-        wavesol_dir / "superneon.fits",
-        wavesol_dir / "superneon.png",
-        wavesol_dir / "peaks_candidates.csv",
-    ]
-    return outs
+    return build_superflat(cfg=cfg, out_dir=out_dir)
 
 
-def run_cosmics(ctx: RunContext) -> Path:
+def _task_flatfield(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
+    from scorpio_pipe.stages.flatfield import run_flatfield
+
+    return run_flatfield(cfg=cfg, out_dir=out_dir)
+
+
+def _task_cosmics(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
     from scorpio_pipe.stages.cosmics import clean_cosmics
 
-    out = ctx.work_dir / "cosmics" / "summary.json"
-    log.info("Clean cosmics → %s", out)
-    return clean_cosmics(ctx.cfg, out_dir=out.parent)
+    return clean_cosmics(cfg, out_dir)
 
 
+def _task_superneon(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
+    from scorpio_pipe.stages.superneon import build_superneon
 
-def run_flatfield(ctx: RunContext) -> Path:
-    from scorpio_pipe.stages.flatfield import run_flatfield as _run_flatfield
-
-    out_dir = ctx.work_dir / "flatfield"
-    log.info("Flat-fielding → %s", out_dir)
-    return _run_flatfield(ctx.cfg, out_dir=out_dir)
-def run_lineid_prepare(ctx: RunContext) -> Path:
-    """Open the interactive LineID GUI and write hand_pairs.txt."""
-
-    from scorpio_pipe.stages.lineid import prepare_lineid
-
-    from scorpio_pipe.wavesol_paths import wavesol_dir
-
-    w = ctx.work_dir
-    wavesol_dir = wavesol_dir(ctx.cfg)
-
-    superneon_fits = wavesol_dir / "superneon.fits"
-    peaks_csv = wavesol_dir / "peaks_candidates.csv"
-    # Allow selecting an alternative pairs file in config.
-    wcfg = (ctx.cfg.get("wavesol", {}) or {}) if isinstance(ctx.cfg.get("wavesol"), dict) else {}
-    hp_raw = str(wcfg.get("hand_pairs_path", "") or "").strip()
-    if hp_raw:
-        hp = Path(hp_raw)
-        hand_file = hp if hp.is_absolute() else (ctx.work_dir / hp).resolve()
-    else:
-        hand_file = wavesol_dir / "hand_pairs.txt"
-
-    if not superneon_fits.exists():
-        raise FileNotFoundError(f"Missing: {superneon_fits} (run superneon first)")
-    if not peaks_csv.exists():
-        raise FileNotFoundError(f"Missing: {peaks_csv} (run superneon first)")
-
-    lines_csv = (ctx.cfg.get("wavesol", {}) or {}).get("neon_lines_csv", "neon_lines.csv")
-    y_half = int((ctx.cfg.get("wavesol", {}) or {}).get("y_half", 20))
-
-    log.info("LineID GUI → will write %s", hand_file)
-    prepare_lineid(
-        ctx.cfg,
-        superneon_fits=superneon_fits,
-        peaks_candidates_csv=peaks_csv,
-        hand_file=hand_file,
-        neon_lines_csv=lines_csv,
-        y_half=y_half,
-    )
-    # Convenience for legacy tools/QC: keep a copy at wavesol/hand_pairs.txt
-    try:
-        legacy = wavesol_dir / "hand_pairs.txt"
-        if legacy.resolve() != hand_file.resolve():
-            legacy.parent.mkdir(parents=True, exist_ok=True)
-            legacy.write_text(hand_file.read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
-    except Exception:
-        pass
-    return hand_file
+    return build_superneon(cfg, out_dir)
 
 
+def _task_lineid_prepare(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> None:
+    from scorpio_pipe.stages.lineid_auto_backup import prepare_lineid
 
-def run_wavesolution(ctx: RunContext) -> dict[str, str]:
-    """Build 1D+2D dispersion solution (after LineID)."""
+    prepare_lineid(cfg, out_dir)
+
+
+def _task_wavesolution(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> None:
+    # build_wavesolution writes into the work_dir-derived wavesolution directory
+    # (it does not need out_dir, but we keep the signature consistent for the runner).
     from scorpio_pipe.stages.wavesolution import build_wavesolution
 
-    out = build_wavesolution(ctx.cfg)
-    # return JSON-serializable mapping for UI/QC
-    return {k: str(v) for k, v in out.__dict__.items()}
+    _ = cancel_token  # currently unused inside wavesolution
+    build_wavesolution(cfg)
 
-TASKS: dict[str, callable] = {
-    "manifest": run_manifest,
-    "qc_report": run_qc_report,
-    "superbias": run_superbias,
-    "cosmics": run_cosmics,
-    "flatfield": run_flatfield,
-    "superneon": run_superneon,
-    "lineid_prepare": run_lineid_prepare,
-    "wavesolution": run_wavesolution,
+
+def _task_linearize(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
+    from scorpio_pipe.stages.linearize import run_linearize
+
+    res = run_linearize(cfg, out_dir=out_dir, cancel_token=cancel_token)
+    # payload contains products.sum_fits
+    return Path(res.get("products", {}).get("sum_fits", out_dir / "obj_sum_lin.fits"))
+
+
+def _task_sky(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
+    from scorpio_pipe.stages.sky_sub import run_sky_sub
+
+    _ = cancel_token
+    res = run_sky_sub(cfg, out_dir=out_dir)
+    return Path(res.get("sky_sub", out_dir / "obj_sky_sub.fits"))
+
+
+def _task_extract1d(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
+    from scorpio_pipe.stages.extract1d import extract_1d
+
+    _ = cancel_token
+    res = extract_1d(cfg, out_dir=out_dir)
+    return Path(res.get("spectrum_1d", out_dir / "spec1d.fits"))
+
+
+TASKS: dict[str, TaskFn] = {
+    # canonical names
+    "manifest": _task_manifest,
+    "superbias": _task_superbias,
+    "superflat": _task_superflat,
+    "flatfield": _task_flatfield,
+    "cosmics": _task_cosmics,
+    "superneon": _task_superneon,
+    "lineid_prepare": _task_lineid_prepare,
+    "wavesolution": _task_wavesolution,
+    "linearize": _task_linearize,
+    "sky": _task_sky,
+    "extract1d": _task_extract1d,
+    # aliases (backward compatibility)
+    "wavesol": _task_wavesolution,
+    "wavesolution2d": _task_wavesolution,
+    "sky_sub": _task_sky,
 }
 
 
-def run_sequence(
-    cfg_path: str | Path | RunContext,
-    task_names: list[str],
+def canonical_task_name(name: str) -> str:
+    n = (name or "").strip().lower()
+    # tolerate old naming
+    aliases = {
+        "wavesol": "wavesolution",
+        "wavesol2d": "wavesolution",
+        "wavelength_solution": "wavesolution",
+        "lineid": "lineid_prepare",
+    }
+    return aliases.get(n, n)
+
+
+def _stage_cfg_for_hash(cfg: dict[str, Any], task: str) -> dict[str, Any]:
+    # map task -> config section
+    sec_map = {
+        "manifest": {},
+        "superbias": cfg.get("calib", {}),
+        "superflat": cfg.get("calib", {}),
+        "flatfield": cfg.get("flatfield", {}),
+        "cosmics": cfg.get("cosmics", {}),
+        "superneon": cfg.get("calib", {}),
+        "lineid_prepare": cfg.get("wavesol", {}),
+        "wavesolution": cfg.get("wavesol", {}),
+        "linearize": cfg.get("linearize", {}),
+        "sky": cfg.get("sky", {}),
+        "sky_sub": cfg.get("sky", {}),
+        "extract1d": cfg.get("extract1d", {}),
+    }
+    sec = sec_map.get(task, cfg.get(task, {}))
+    return sec if isinstance(sec, dict) else {}
+
+
+def _input_paths_for_hash(cfg: dict[str, Any], task: str, out_dir: Path) -> list[Path]:
+    frames = cfg.get("frames") if isinstance(cfg.get("frames"), dict) else {}
+    def _frame_list(key: str) -> list[Path]:
+        v = frames.get(key, []) if isinstance(frames, dict) else []
+        return [Path(str(x)) for x in v] if isinstance(v, list) else []
+
+    # products from previous stages
+    prod_by_key = {p.key: p.path for p in products_for_task(cfg, task)}
+
+    if task == "manifest":
+        paths: list[Path] = []
+        for k, v in frames.items() if isinstance(frames, dict) else []:
+            if isinstance(v, list):
+                paths.extend(Path(str(x)) for x in v)
+        return paths
+
+    if task == "superbias":
+        return _frame_list("bias")
+    if task == "superflat":
+        return _frame_list("flat") + [prod_by_key.get("superbias", out_dir / "calib" / "superbias.fits")]
+    if task == "flatfield":
+        return _frame_list("obj") + [out_dir / "calib" / "superflat.fits"]
+    if task == "cosmics":
+        return _frame_list("obj") + [out_dir / "calib" / "superbias.fits", out_dir / "calib" / "superflat.fits"]
+    if task == "superneon":
+        return _frame_list("neon")
+    if task == "lineid_prepare":
+        return [out_dir / "calib" / "superneon.fits"]
+    if task == "wavesolution":
+        return [out_dir / "wavesol" / "peaks_candidates.json", out_dir / "wavesol" / "hand_pairs.yaml"]
+    if task == "linearize":
+        return _frame_list("obj") + [out_dir / "wavesol" / "lambda_map.fits"]
+    if task in ("sky", "sky_sub"):
+        return [out_dir / "lin" / "obj_sum_lin.fits"]
+    if task == "extract1d":
+        return [out_dir / "sky" / "obj_sky_sub.fits"]
+
+    return []
+
+
+def plan_sequence(
+    cfg_or_path: dict[str, Any] | str | Path,
+    task_names: Iterable[str],
     *,
-    resume: bool = False,
+    resume: bool = True,
     force: bool = False,
-) -> dict[str, object]:
-    """Run a sequence of pipeline steps.
+    config_path: Path | None = None,
+) -> list[PlanItem]:
+    cfg = load_config_any(cfg_or_path) if not isinstance(cfg_or_path, dict) else cfg_or_path
+    work_dir = resolve_work_dir(cfg)
 
-    Parameters
-    ----------
-    cfg_path : path | RunContext
-        A path to config.yaml or a pre-built RunContext.
-    task_names : list[str]
-        Task names in execution order.
-    resume : bool
-        If True, skip a task when its expected products already exist.
-    force : bool
-        If True, never skip tasks (even if products exist).
-    """
+    plan: list[PlanItem] = []
+    for raw in task_names:
+        t = canonical_task_name(raw)
+        if t not in TASKS:
+            plan.append(PlanItem(task=t, action="run", reason="Unknown task (will fail)"))
+            continue
 
-    from scorpio_pipe.timings import append_timing, timed_stage
-    from scorpio_pipe.products import products_for_task, task_is_complete
+        complete = task_is_complete(cfg, t)
+        expected_hash = compute_stage_hash(
+            stage=t,
+            stage_cfg=_stage_cfg_for_hash(cfg, t),
+            input_paths=_input_paths_for_hash(cfg, t, work_dir),
+        )
+        up_to_date = complete and is_stage_up_to_date(work_dir, t, expected_hash)
+        if resume and (not force) and up_to_date:
+            plan.append(PlanItem(task=t, action="skip", reason="Up-to-date"))
+        else:
+            if not complete:
+                reason = "Missing products"
+            elif not is_stage_up_to_date(work_dir, t, expected_hash):
+                reason = "Dirty (params/inputs changed)"
+            else:
+                reason = "Forced"
+            plan.append(PlanItem(task=t, action="run", reason=reason))
+    return plan
 
-    ctx = cfg_path if isinstance(cfg_path, RunContext) else load_context(cfg_path)
-    outputs: dict[str, object] = {}
 
-    for name in task_names:
-        fn = TASKS.get(name)
+def run_sequence(
+    cfg_or_path: dict[str, Any] | str | Path,
+    task_names: Iterable[str],
+    *,
+    resume: bool = True,
+    force: bool = False,
+    cancel_token: CancelToken | None = None,
+    config_path: Path | None = None,
+) -> None:
+    cfg = load_config_any(cfg_or_path) if not isinstance(cfg_or_path, dict) else cfg_or_path
+
+    work_dir = resolve_work_dir(cfg)
+    out_dir = Path(work_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    plan = plan_sequence(cfg, task_names, resume=resume, force=force, config_path=config_path)
+    for it in plan:
+        if cancel_token is not None and cancel_token.cancelled:
+            log.warning("Cancelled before task %s", it.task)
+            record_stage_result(out_dir, it.task, status="cancelled", stage_hash=None, message="Cancelled", trace=None)
+            break
+
+        t = it.task
+        if it.action == "skip":
+            log.info("Skip %s (%s)", t, it.reason)
+            continue
+
+        fn = TASKS.get(t)
         if fn is None:
-            raise ValueError(f"Unknown task: {name}")
+            raise KeyError(f"Unknown task: {t}")
 
-        # optional stages
-        if name == "flatfield" and not ctx.cfg.get("flatfield", {}).get("enabled", False):
-            append_timing(
-                work_dir=ctx.work_dir,
-                stage=name,
-                seconds=0.0,
-                ok=True,
-                extra={"skipped": True, "reason": "flatfield disabled"},
-            )
-            continue
+        stage_hash = compute_stage_hash(
+            stage=t,
+            stage_cfg=_stage_cfg_for_hash(cfg, t),
+            input_paths=_input_paths_for_hash(cfg, t, out_dir),
+        )
 
-        if resume and not force and task_is_complete(ctx.cfg, name):
-            ps = products_for_task(ctx.cfg, name)
-            try:
-                append_timing(
-                    work_dir=ctx.work_dir,
-                    stage=name,
-                    seconds=0.0,
-                    ok=True,
-                    extra={
-                        "skipped": True,
-                        "reason": "products already exist",
-                        "products": [str(p.path) for p in ps],
-                    },
-                )
-            except Exception:
-                pass
-            outputs[name] = {"skipped": True, "reason": "products already exist"}
-            continue
+        log.info("Run %s...", t)
+        try:
+            _call_maybe_with_cancel(fn, cfg=cfg, out_dir=out_dir, config_path=config_path, cancel_token=cancel_token)
+            record_stage_result(out_dir, t, status="ok", stage_hash=stage_hash, message=None, trace=None)
+        except Exception as e:
+            tb = traceback.format_exc()
+            log.error("Task %s failed: %s", t, e, exc_info=True)
+            record_stage_result(out_dir, t, status="failed", stage_hash=stage_hash, message=str(e), trace=tb)
+            raise
 
-        with timed_stage(work_dir=ctx.work_dir, stage=name):
-            outputs[name] = fn(ctx)
 
-    return outputs
+def run_one(cfg_or_path: dict[str, Any] | str | Path, task_name: str, *, resume: bool = True, force: bool = False) -> None:
+    run_sequence(cfg_or_path, [task_name], resume=resume, force=force)

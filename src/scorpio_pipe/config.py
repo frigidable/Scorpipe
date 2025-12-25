@@ -5,17 +5,17 @@ from typing import Any
 
 import yaml
 
+import logging
+
 
 def _norm_path_str(p: str) -> str:
     """Normalize a path string for cross-platform YAML.
 
-    In practice you often generate config on Windows and then re-open it
-    from WSL/Linux during debugging. Backslashes in YAML become literal
-    characters on POSIX, so we normalize `\\` -> `/` when running on POSIX.
+    We always normalize path separators to forward slashes when serializing/
+    round-tripping configs. Python (and Astropy) accept forward slashes on
+    Windows, while POSIX treats backslashes as literal characters.
     """
-    if Path(".").anchor == "/":
-        return p.replace("\\\\", "/").replace("\\", "/")
-    return p
+    return str(p).replace("\\", "/")
 
 
 def resolve_path(p: str | Path, *, base_dir: Path) -> Path:
@@ -176,14 +176,33 @@ def load_config_any(cfg: Any) -> dict[str, Any]:
         if hasattr(cfg, attr):
             try:
                 return load_config(getattr(cfg, attr))
-            except Exception:
-                pass
+            except Exception as e:
+                logging.getLogger(__name__).warning("Failed to load config from %s=%r: %s", attr, getattr(cfg, attr), e)
 
     raise TypeError(f'Unsupported config type: {type(cfg)}')
+
+
+def _normalize_cfg_paths_for_yaml(obj: Any):
+    """Recursively normalize path-like strings for YAML portability.
+
+    Policy: whenever we write YAML, we convert backslashes to forward slashes
+    in *all* strings. This is safe in Python on Windows and avoids hard-to-debug
+    portability issues when configs are moved between OSes.
+    """
+    if isinstance(obj, dict):
+        return {k: _normalize_cfg_paths_for_yaml(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_normalize_cfg_paths_for_yaml(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_normalize_cfg_paths_for_yaml(v) for v in obj)
+    if isinstance(obj, str):
+        return obj.replace('\\', '/')
+    return obj
 
 
 def write_config(cfg: dict[str, Any], out_path: str | Path) -> None:
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as f:
-        yaml.safe_dump(cfg, f, sort_keys=False, allow_unicode=True)
+        cfg_norm = _normalize_cfg_paths_for_yaml(cfg)
+        yaml.safe_dump(cfg_norm, f, sort_keys=False, allow_unicode=True)
