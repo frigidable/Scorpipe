@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Pydantic schema for config.yaml (v4+).
 
 The pipeline continues to operate on a plain dict/YAML config for backward
@@ -12,6 +10,10 @@ Notes
 - `find_unknown_keys()` provides user-facing warnings about typos.
 - `schema_validate()` returns a small report object (ok/errors/warnings).
 """
+
+
+from __future__ import annotations
+
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -168,9 +170,7 @@ class CosmicsBlock(BaseModel):
     k: float = 9.0
     bias_subtract: bool = True
     save_png: bool = True
-    apply_to: List[str] = Field(
-        default_factory=lambda: ["obj", "sky"]
-    )  # obj|sky|sunsky|neon
+    apply_to: List[str] = Field(default_factory=lambda: ["obj", "sky"])  # obj|sky|sunsky|neon
 
 
 class FlatfieldBlock(BaseModel):
@@ -181,9 +181,7 @@ class FlatfieldBlock(BaseModel):
     norm: str = "median"  # median|mean
     bias_subtract: bool = True
     save_png: bool = True
-    apply_to: List[str] = Field(
-        default_factory=lambda: ["obj", "sky", "sunsky"]
-    )  # obj|sky|sunsky|neon
+    apply_to: List[str] = Field(default_factory=lambda: ["obj", "sky", "sunsky"])  # obj|sky|sunsky|neon
 
 
 class LinearizeBlock(BaseModel):
@@ -253,9 +251,7 @@ class SkyBlock(BaseModel):
     roi_interactive: bool = False
 
     # QC: wavelength zones where residuals are reported separately (Angstrom on linear WCS).
-    critical_windows_A: List[List[float]] = Field(
-        default_factory=lambda: [[6800.0, 6900.0]]
-    )
+    critical_windows_A: List[List[float]] = Field(default_factory=lambda: [[6800.0, 6900.0]])
 
     # Kelson-like 1D B-spline fit to sky spectrum (in Angstrom)
     bsp_degree: int = 3
@@ -526,18 +522,10 @@ def schema_validate(cfg: Dict[str, Any]) -> SchemaReport:
             for sec, keys in unknown.items():
                 for k in keys:
                     items.append(f"{sec}: {k}")
-            msg = "Unknown config keys (typos are treated as errors):\n" + "\n".join(
-                items
-            )
+            msg = "Unknown config keys (typos are treated as errors):\n" + "\n".join(items)
             return SchemaReport(
                 ok=False,
-                errors=[
-                    SchemaIssue(
-                        code="UNKNOWN_KEYS",
-                        message=msg,
-                        hint="Remove/rename unknown keys",
-                    )
-                ],
+                errors=[SchemaIssue(code="UNKNOWN_KEYS", message=msg, hint="Remove/rename unknown keys")],
                 warnings=[],
             )
         return SchemaReport(ok=True, errors=[], warnings=[])
@@ -548,10 +536,6 @@ def schema_validate(cfg: Dict[str, Any]) -> SchemaReport:
             msg = msg[:2000] + "…"
         return SchemaReport(
             ok=False,
-            errors=[
-                SchemaIssue(
-                    code="SCHEMA", message=msg, hint="Check config types/sections"
-                )
-            ],
+            errors=[SchemaIssue(code="SCHEMA", message=msg, hint="Check config types/sections")],
             warnings=[],
         )

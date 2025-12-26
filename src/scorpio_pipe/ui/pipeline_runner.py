@@ -18,13 +18,8 @@ from threading import Event
 from typing import Any, Callable, Iterable
 
 from scorpio_pipe.config import load_config_any
-from scorpio_pipe.products import products_for_task, task_is_complete
-from scorpio_pipe.stage_state import (
-    compute_stage_hash,
-    is_stage_up_to_date,
-    load_stage_state,
-    record_stage_result,
-)
+from scorpio_pipe.products import task_is_complete
+from scorpio_pipe.stage_state import compute_stage_hash, is_stage_up_to_date, record_stage_result
 from scorpio_pipe.paths import resolve_work_dir
 from scorpio_pipe.wavesol_paths import wavesol_dir
 from scorpio_pipe.work_layout import ensure_work_layout
@@ -58,9 +53,7 @@ def run_lineid_prepare(ctx: RunContext) -> dict[str, Path]:
     Runs (or skips) ``lineid_prepare`` and returns the expected output paths.
     """
 
-    run_sequence(
-        ctx, ["lineid_prepare"], resume=True, force=False, config_path=ctx.cfg_path
-    )
+    run_sequence(ctx, ["lineid_prepare"], resume=True, force=False, config_path=ctx.cfg_path)
 
     # Even if the stage is skipped (Up-to-date), the GUI wants to know
     # where the artifacts are.
@@ -75,9 +68,7 @@ def run_lineid_prepare(ctx: RunContext) -> dict[str, Path]:
 def run_wavesolution(ctx: RunContext) -> None:
     """Compatibility wrapper for the GUI."""
 
-    run_sequence(
-        ctx, ["wavesolution"], resume=True, force=False, config_path=ctx.cfg_path
-    )
+    run_sequence(ctx, ["wavesolution"], resume=True, force=False, config_path=ctx.cfg_path)
 
 
 @dataclass(frozen=True)
@@ -111,9 +102,7 @@ class CancelToken:
 TaskFn = Callable[..., Any]
 
 
-def _call_maybe_with_cancel(
-    fn: TaskFn, *, cancel_token: CancelToken | None = None, **kwargs: Any
-) -> Any:
+def _call_maybe_with_cancel(fn: TaskFn, *, cancel_token: CancelToken | None = None, **kwargs: Any) -> Any:
     """Call a task function, passing only supported keyword arguments.
 
     The GUI runner tends to call tasks with a superset of kwargs
@@ -130,9 +119,7 @@ def _call_maybe_with_cancel(
             kwargs["cancel_token"] = cancel_token
 
         # If the function does NOT accept **kwargs, filter extras.
-        accepts_varkw = any(
-            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
-        )
+        accepts_varkw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
         if not accepts_varkw:
             kwargs = {k: v for k, v in kwargs.items() if k in params}
     except Exception:
@@ -141,69 +128,47 @@ def _call_maybe_with_cancel(
     return fn(**kwargs)
 
 
-def _task_manifest(
-    cfg: dict[str, Any],
-    out_dir: Path,
-    *,
-    config_path: Path | None = None,
-    cancel_token: CancelToken | None = None,
-) -> Path:
+def _task_manifest(cfg: dict[str, Any], out_dir: Path, *, config_path: Path | None = None, cancel_token: CancelToken | None = None) -> Path:
     from scorpio_pipe.manifest import write_manifest
 
     layout = ensure_work_layout(out_dir)
     # Canonical location (work/qc). Keep a legacy mirror for older tooling.
-    p = write_manifest(
-        out_path=layout.qc / "manifest.json", cfg=cfg, cfg_path=config_path
-    )
+    p = write_manifest(out_path=layout.qc / "manifest.json", cfg=cfg, cfg_path=config_path)
     try:
-        write_manifest(
-            out_path=layout.report_legacy / "manifest.json",
-            cfg=cfg,
-            cfg_path=config_path,
-        )
+        write_manifest(out_path=layout.report_legacy / "manifest.json", cfg=cfg, cfg_path=config_path)
     except Exception:
         # Legacy mirror should never break science.
         pass
     return p
 
 
-def _task_superbias(
-    cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None
-) -> Path:
+def _task_superbias(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
     from scorpio_pipe.stages.calib import build_superbias
 
     _ = out_dir
     return build_superbias(cfg)
 
 
-def _task_superflat(
-    cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None
-) -> Path:
+def _task_superflat(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
     from scorpio_pipe.stages.calib import build_superflat
 
     _ = out_dir
     return build_superflat(cfg)
 
 
-def _task_flatfield(
-    cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None
-) -> Path:
+def _task_flatfield(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
     from scorpio_pipe.stages.flatfield import run_flatfield
 
     return run_flatfield(cfg=cfg, out_dir=Path(out_dir) / "flatfield")
 
 
-def _task_cosmics(
-    cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None
-) -> Path:
+def _task_cosmics(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
     from scorpio_pipe.stages.cosmics import clean_cosmics
 
     return clean_cosmics(cfg, out_dir=Path(out_dir) / "cosmics")
 
 
-def _task_superneon(
-    cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None
-) -> Path:
+def _task_superneon(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
     from scorpio_pipe.stages.superneon import build_superneon
 
     _ = out_dir
@@ -211,9 +176,7 @@ def _task_superneon(
     return Path(res.superneon_fits)
 
 
-def _task_lineid_prepare(
-    cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None
-) -> dict[str, Path]:
+def _task_lineid_prepare(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> dict[str, Path]:
     from scorpio_pipe.stages.lineid_auto_backup import prepare_lineid
 
     _ = out_dir
@@ -221,9 +184,7 @@ def _task_lineid_prepare(
     return prepare_lineid(cfg)
 
 
-def _task_wavesolution(
-    cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None
-) -> None:
+def _task_wavesolution(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> None:
     # build_wavesolution writes into the work_dir-derived wavesolution directory
     # (it does not need out_dir, but we keep the signature consistent for the runner).
     from scorpio_pipe.stages.wavesolution import build_wavesolution
@@ -232,9 +193,7 @@ def _task_wavesolution(
     build_wavesolution(cfg)
 
 
-def _task_qc_report(
-    cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None
-) -> Path:
+def _task_qc_report(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
     from scorpio_pipe.qc_report import build_qc_report
 
     _ = cancel_token
@@ -244,24 +203,14 @@ def _task_qc_report(
     return Path(res.get("qc_html", layout.qc / "index.html"))
 
 
-def _task_linearize(
-    cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None
-) -> Path:
+def _task_linearize(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
     from scorpio_pipe.stages.linearize import run_linearize
 
-    res = run_linearize(
-        cfg, out_dir=Path(out_dir) / "products" / "lin", cancel_token=cancel_token
-    )
-    return Path(
-        res.get("products", {}).get(
-            "preview_fits", Path(out_dir) / "products" / "lin" / "lin_preview.fits"
-        )
-    )
+    res = run_linearize(cfg, out_dir=Path(out_dir) / "products" / "lin", cancel_token=cancel_token)
+    return Path(res.get("products", {}).get("preview_fits", Path(out_dir) / "products" / "lin" / "lin_preview.fits"))
 
 
-def _task_sky(
-    cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None
-) -> Path:
+def _task_sky(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
     from scorpio_pipe.stages.sky_sub import run_sky_sub
 
     _ = cancel_token
@@ -270,9 +219,7 @@ def _task_sky(
     return Path(out_dir) / "products" / "sky" / "sky_sub_done.json"
 
 
-def _task_stack2d(
-    cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None
-) -> Path:
+def _task_stack2d(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
     from scorpio_pipe.stages.stack2d import run_stack2d
 
     _ = cancel_token
@@ -282,17 +229,13 @@ def _task_stack2d(
         per_dir = wd / "sky" / "per_exp"
     inputs = sorted(per_dir.glob("*_sky_sub.fits"))
     if not inputs:
-        raise FileNotFoundError(
-            f"No per-exposure sky-subtracted frames found in {per_dir}"
-        )
+        raise FileNotFoundError(f"No per-exposure sky-subtracted frames found in {per_dir}")
     out_p = Path(out_dir) / "products" / "stack"
     res = run_stack2d(cfg, inputs=inputs, out_dir=out_p)
     return Path(res.get("stacked2d", out_p / "stacked2d.fits"))
 
 
-def _task_extract1d(
-    cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None
-) -> Path:
+def _task_extract1d(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
     from scorpio_pipe.stages.extract1d import run_extract1d
 
     _ = cancel_token
@@ -402,12 +345,8 @@ def _input_paths_for_hash(cfg: dict[str, Any], task: str, out_dir: Path) -> list
 
     sb_cfg = _resolve_cfg_path(calib_cfg.get("superbias_path"))
     sf_cfg = _resolve_cfg_path(calib_cfg.get("superflat_path"))
-    sb = sb_cfg or _first_existing(
-        layout.calibs / "superbias.fits", layout.calib_legacy / "superbias.fits"
-    )
-    sf = sf_cfg or _first_existing(
-        layout.calibs / "superflat.fits", layout.calib_legacy / "superflat.fits"
-    )
+    sb = sb_cfg or _first_existing(layout.calibs / "superbias.fits", layout.calib_legacy / "superbias.fits")
+    sf = sf_cfg or _first_existing(layout.calibs / "superflat.fits", layout.calib_legacy / "superflat.fits")
 
     if task == "manifest":
         paths: list[Path] = []
@@ -462,20 +401,14 @@ def plan_sequence(
     force: bool = False,
     config_path: Path | None = None,
 ) -> list[PlanItem]:
-    cfg = (
-        load_config_any(cfg_or_path)
-        if not isinstance(cfg_or_path, dict)
-        else cfg_or_path
-    )
+    cfg = load_config_any(cfg_or_path) if not isinstance(cfg_or_path, dict) else cfg_or_path
     work_dir = resolve_work_dir(cfg)
 
     plan: list[PlanItem] = []
     for raw in task_names:
         t = canonical_task_name(raw)
         if t not in TASKS:
-            plan.append(
-                PlanItem(task=t, action="run", reason="Unknown task (will fail)")
-            )
+            plan.append(PlanItem(task=t, action="run", reason="Unknown task (will fail)"))
             continue
 
         complete = task_is_complete(cfg, t)
@@ -512,11 +445,7 @@ def run_sequence(
         if config_path is None:
             config_path = cfg_or_path.cfg_path
     else:
-        cfg = (
-            load_config_any(cfg_or_path)
-            if not isinstance(cfg_or_path, dict)
-            else cfg_or_path
-        )
+        cfg = load_config_any(cfg_or_path) if not isinstance(cfg_or_path, dict) else cfg_or_path
 
     work_dir = resolve_work_dir(cfg)
     out_dir = Path(work_dir)
@@ -524,20 +453,11 @@ def run_sequence(
 
     results: dict[str, Any] = {}
 
-    plan = plan_sequence(
-        cfg, task_names, resume=resume, force=force, config_path=config_path
-    )
+    plan = plan_sequence(cfg, task_names, resume=resume, force=force, config_path=config_path)
     for it in plan:
         if cancel_token is not None and cancel_token.cancelled:
             log.warning("Cancelled before task %s", it.task)
-            record_stage_result(
-                out_dir,
-                it.task,
-                status="cancelled",
-                stage_hash=None,
-                message="Cancelled",
-                trace=None,
-            )
+            record_stage_result(out_dir, it.task, status="cancelled", stage_hash=None, message="Cancelled", trace=None)
             break
 
         t = it.task
@@ -558,38 +478,17 @@ def run_sequence(
 
         log.info("Run %s...", t)
         try:
-            res = _call_maybe_with_cancel(
-                fn,
-                cfg=cfg,
-                out_dir=out_dir,
-                config_path=config_path,
-                cancel_token=cancel_token,
-            )
+            res = _call_maybe_with_cancel(fn, cfg=cfg, out_dir=out_dir, config_path=config_path, cancel_token=cancel_token)
             results[t] = res
-            record_stage_result(
-                out_dir, t, status="ok", stage_hash=stage_hash, message=None, trace=None
-            )
+            record_stage_result(out_dir, t, status="ok", stage_hash=stage_hash, message=None, trace=None)
         except Exception as e:
             tb = traceback.format_exc()
             log.error("Task %s failed: %s", t, e, exc_info=True)
-            record_stage_result(
-                out_dir,
-                t,
-                status="failed",
-                stage_hash=stage_hash,
-                message=str(e),
-                trace=tb,
-            )
+            record_stage_result(out_dir, t, status="failed", stage_hash=stage_hash, message=str(e), trace=tb)
             raise
 
     return results
 
 
-def run_one(
-    cfg_or_path: dict[str, Any] | str | Path,
-    task_name: str,
-    *,
-    resume: bool = True,
-    force: bool = False,
-) -> None:
+def run_one(cfg_or_path: dict[str, Any] | str | Path, task_name: str, *, resume: bool = True, force: bool = False) -> None:
     run_sequence(cfg_or_path, [task_name], resume=resume, force=force)

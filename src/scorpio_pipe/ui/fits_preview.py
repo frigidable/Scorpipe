@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Lightweight FITS preview widget.
 
 Goals ("DS9-like" baseline, without trying to re-implement DS9):
@@ -10,6 +8,10 @@ Goals ("DS9-like" baseline, without trying to re-implement DS9):
 
 This widget is intentionally self-contained so the GUI stays responsive.
 """
+
+
+from __future__ import annotations
+
 
 from dataclasses import dataclass
 import numpy as np
@@ -68,12 +70,7 @@ def _choose_image_hdu(hdul: fits.HDUList) -> tuple[int, np.ndarray]:
                 a = np.asarray(data)
             except Exception as e:
                 msg = str(e)
-                if (
-                    ("memory-mapped" in msg)
-                    or ("BZERO" in msg)
-                    or ("BSCALE" in msg)
-                    or ("BLANK" in msg)
-                ):
+                if ("memory-mapped" in msg) or ("BZERO" in msg) or ("BSCALE" in msg) or ("BLANK" in msg):
                     raise
                 last_err = e
                 continue
@@ -94,12 +91,7 @@ def _choose_image_hdu(hdul: fits.HDUList) -> tuple[int, np.ndarray]:
 
         except Exception as e:
             msg = str(e)
-            if (
-                ("memory-mapped" in msg)
-                or ("BZERO" in msg)
-                or ("BSCALE" in msg)
-                or ("BLANK" in msg)
-            ):
+            if ("memory-mapped" in msg) or ("BZERO" in msg) or ("BSCALE" in msg) or ("BLANK" in msg):
                 raise
             last_err = e
             continue
@@ -288,12 +280,8 @@ class _ImageView(QtWidgets.QGraphicsView):
         if self._dragging and self._last_pos is not None:
             delta = event.pos() - self._last_pos
             self._last_pos = event.pos()
-            self.horizontalScrollBar().setValue(
-                self.horizontalScrollBar().value() - delta.x()
-            )
-            self.verticalScrollBar().setValue(
-                self.verticalScrollBar().value() - delta.y()
-            )
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
             event.accept()
         else:
             super().mouseMoveEvent(event)
@@ -516,15 +504,11 @@ class FitsPreviewWidget(QtWidgets.QWidget):
                 arr = np.asarray(data)
                 return idx, arr
 
-        last: Exception | None = None
-
         try:
             idx, arr = _open(memmap=False)
-        except MemoryError as e:
-            last = e
+        except MemoryError:
             idx, arr = _open(memmap=True)
         except Exception as e:
-            last = e
             # Try common extension names and a wider ext range.
             tried = []
             for ext in ("SCI", "PRIMARY"):
@@ -558,9 +542,7 @@ class FitsPreviewWidget(QtWidgets.QWidget):
                         idx, arr = _open(memmap=True)
                     except Exception as e2:
                         # Raise a richer error message.
-                        raise RuntimeError(
-                            f"Failed to load FITS: {path}\n{e}\n{e2}"
-                        ) from e2
+                        raise RuntimeError(f"Failed to load FITS: {path}\n{e}\n{e2}") from e2
 
         self._hdu_index = idx
         return arr

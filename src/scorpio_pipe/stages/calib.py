@@ -25,15 +25,12 @@ def _resolve_work_dir(c: Dict) -> Path:
 def _load_cfg_any(cfg: Any) -> Dict:
     """Normalize config input (path/dict/RunContext) into a config dict."""
     from scorpio_pipe.config import load_config_any
-
     return load_config_any(cfg)
 
 
 def _read_fits_data(path: Path) -> Tuple[np.ndarray, fits.Header]:
     # максимально живучее открытие
-    with fits.open(
-        path, memmap=False, ignore_missing_end=True, ignore_missing_simple=True
-    ) as hdul:
+    with fits.open(path, memmap=False, ignore_missing_end=True, ignore_missing_simple=True) as hdul:
         return hdul[0].data, hdul[0].header
 
 
@@ -55,6 +52,7 @@ def build_superbias(cfg: Any, out_path: str | Path | None = None) -> Path:
 
     setup = c.get("frames", {}).get("__setup__", {}) or {}
     target_shape_str = str(setup.get("shape", "") or "")
+
 
     # читаем первый кадр, чтобы зафиксировать форму
     # если в конфиге указан target shape (из науки объекта) — используем его
@@ -89,12 +87,11 @@ def build_superbias(cfg: Any, out_path: str | Path | None = None) -> Path:
         filtered.append(p)
 
     if not filtered:
-        raise RuntimeError(
-            f"No bias frames match target shape={target_shape_str!r}. "
-            f"Check config.frames.__setup__.shape and your bias shapes."
-        )
+        raise RuntimeError(f"No bias frames match target shape={target_shape_str!r}. "
+                           f"Check config.frames.__setup__.shape and your bias shapes.")
 
     bias_paths = filtered
+
 
     calib_cfg = c.get("calib", {}) or {}
     combine = str(calib_cfg.get("bias_combine", "median")).strip().lower() or "median"
@@ -266,10 +263,8 @@ def build_superflat(cfg: Any, out_path: str | Path | None = None) -> Path:
         filtered.append(p)
 
     if not filtered:
-        raise RuntimeError(
-            f"No flat frames match target shape={target_shape_str!r}. "
-            f"Check config.frames.__setup__.shape and your flat shapes."
-        )
+        raise RuntimeError(f"No flat frames match target shape={target_shape_str!r}. "
+                           f"Check config.frames.__setup__.shape and your flat shapes.")
 
     flat_paths = filtered
 

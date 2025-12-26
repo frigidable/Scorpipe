@@ -58,10 +58,7 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
 
         # state: per-line include/exclude
         self._unique_lines = np.array(sorted(set(self._lam.tolist())), dtype=float)
-        self._active = {
-            float(l0): (not any(abs(float(l0) - r) <= 0.25 for r in self._rejected0))
-            for l0 in self._unique_lines
-        }
+        self._active = {float(l0): (not any(abs(float(l0) - r) <= 0.25 for r in self._rejected0)) for l0 in self._unique_lines}
 
         # UI
         root = QtWidgets.QHBoxLayout(self)
@@ -89,9 +86,7 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
         # plotting
         from matplotlib.figure import Figure
         from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-        from matplotlib.backends.backend_qtagg import (
-            NavigationToolbar2QT as NavigationToolbar,
-        )
+        from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
         from scorpio_pipe.plot_style import mpl_style
 
         self._mpl_style = mpl_style
@@ -112,9 +107,7 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
         right.addWidget(self.lbl_rms)
 
         # buttons
-        bb = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
-        )
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         right.addWidget(bb)
 
         bb.accepted.connect(self.accept)
@@ -153,7 +146,8 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
         m = np.isfinite(x) & np.isfinite(y) & np.isfinite(lam) & np.isfinite(score)
         return x[m], y[m], lam[m], score[m]
 
-    def save_plots(self, outdir: Path, stem: str = "wavesol2d_clean") -> list[Path]:
+
+    def save_plots(self, outdir: Path, stem: str = 'wavesol2d_clean') -> list[Path]:
         """Save two diagnostic PNGs to `outdir`.
 
         1) `*_with_rejected.png` — rejected lines shown in grey (best for audit).
@@ -175,7 +169,7 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
             pass
         p1 = outdir / f"{stem}_with_rejected.png"
         try:
-            self.fig.savefig(p1, dpi=180, bbox_inches="tight")
+            self.fig.savefig(p1, dpi=180, bbox_inches='tight')
             saved.append(p1)
         except Exception:
             pass
@@ -188,7 +182,7 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
             pass
         p2 = outdir / f"{stem}_final.png"
         try:
-            self.fig.savefig(p2, dpi=180, bbox_inches="tight")
+            self.fig.savefig(p2, dpi=180, bbox_inches='tight')
             saved.append(p2)
         except Exception:
             pass
@@ -213,9 +207,7 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
             n = int(np.sum(np.abs(self._lam - l0) < 1e-6))
             it = QtWidgets.QListWidgetItem(f"{l0:9.2f} Å   (N={n})")
             it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
-            it.setCheckState(
-                QtCore.Qt.Checked if self._active.get(l0, True) else QtCore.Qt.Unchecked
-            )
+            it.setCheckState(QtCore.Qt.Checked if self._active.get(l0, True) else QtCore.Qt.Unchecked)
             it.setData(QtCore.Qt.UserRole, l0)
             self.list_lines.addItem(it)
         self.list_lines.blockSignals(False)
@@ -234,7 +226,7 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
 
     def _on_item_changed(self, item: QtWidgets.QListWidgetItem) -> None:
         l0 = float(item.data(QtCore.Qt.UserRole))
-        self._active[l0] = item.checkState() == QtCore.Qt.Checked
+        self._active[l0] = (item.checkState() == QtCore.Qt.Checked)
         self._recompute_and_redraw()
 
     def _on_plot_click(self, event) -> None:
@@ -294,10 +286,7 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
 
         # fit both quickly
         pow_coeff, pow_meta, pow_used = robust_polyfit_2d_power(
-            x,
-            y,
-            lam,
-            int(self._cfg.power_deg),
+            x, y, lam, int(self._cfg.power_deg),
             weights=w,
             sigma_clip=float(self._cfg.sigma_clip),
             maxiter=int(self._cfg.maxiter),
@@ -307,11 +296,7 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
         pow_rms = float(np.sqrt(np.mean(pow_dlam[pow_used] ** 2)))
 
         cheb_C, cheb_meta, cheb_used = robust_polyfit_2d_cheb(
-            x,
-            y,
-            lam,
-            int(self._cfg.cheb_degx),
-            int(self._cfg.cheb_degy),
+            x, y, lam, int(self._cfg.cheb_degx), int(self._cfg.cheb_degy),
             weights=w,
             sigma_clip=float(self._cfg.sigma_clip),
             maxiter=int(self._cfg.maxiter),
@@ -331,11 +316,15 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
         if kind == "power":
             used = pow_used
             rms = pow_rms
-            model_fn = lambda xx, yy: polyval2d_power(xx, yy, pow_coeff, pow_meta)
+
+            def model_fn(xx, yy):
+                return polyval2d_power(xx, yy, pow_coeff, pow_meta)
         else:
             used = cheb_used
             rms = cheb_rms
-            model_fn = lambda xx, yy: polyval2d_cheb(xx, yy, cheb_C, cheb_meta)
+
+            def model_fn(xx, yy):
+                return polyval2d_cheb(xx, yy, cheb_C, cheb_meta)
 
         # residuals for plotting (all points, including rejected lines)
         pred_all = model_fn(self._x, self._y)
@@ -353,9 +342,7 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
         colors = cmap(_np.linspace(0.0, 1.0, max(1, len(uniq))))
 
         # choose a pleasant offset: ~ (3–4)×RMS, but not too small
-        y_offset_step = float(
-            max(0.5, min(2.0, 4.0 * (rms if _np.isfinite(rms) else 1.0)))
-        )
+        y_offset_step = float(max(0.5, min(2.0, 4.0 * (rms if _np.isfinite(rms) else 1.0))))
 
         with self._mpl_style():
             self.fig.clear()
@@ -366,9 +353,7 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
                 f"2D wavesolution residuals (RMS={rms:.3f} Å) — click a curve/point to toggle a line"
             )
 
-            text_rows: list[
-                tuple[float, tuple, float, float, float]
-            ] = []  # (y_text, color, lam, mu, sd)
+            text_rows: list[tuple[float, tuple, float, float, float]] = []  # (y_text, color, lam, mu, sd)
             click_x: list[float] = []
             click_y: list[float] = []
             click_l: list[float] = []
@@ -416,71 +401,26 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
                 else:
                     mu, sd = _np.nan, _np.nan
 
-                y_text = off + (
-                    float(_np.nanmean(dlam)) if _np.any(_np.isfinite(dlam)) else 0.0
-                )
+                y_text = off + (float(_np.nanmean(dlam)) if _np.any(_np.isfinite(dlam)) else 0.0)
                 text_rows.append((y_text, col, lam0, mu, sd))
 
             # baseline helpers at the label heights
             for y_text, col, *_ in text_rows:
-                ax.axhline(
-                    y=y_text,
-                    xmin=0.0,
-                    xmax=1.0,
-                    color=col,
-                    linestyle=":",
-                    linewidth=0.9,
-                    alpha=0.35,
-                    zorder=0,
-                )
+                ax.axhline(y=y_text, xmin=0.0, xmax=1.0, color=col, linestyle=":", linewidth=0.9, alpha=0.35, zorder=0)
 
             self.fig.canvas.draw()
             trans = mtransforms.blended_transform_factory(ax.transAxes, ax.transData)
             y_top = ax.get_ylim()[1]
             x_col1 = 1.02
             x_col2 = 1.02 + 0.18
-            ax.text(
-                x_col1,
-                y_top + 0.1,
-                "λ",
-                transform=trans,
-                ha="left",
-                va="bottom",
-                fontsize=11,
-            )
-            ax.text(
-                x_col2,
-                y_top + 0.1,
-                "Δλ [Å]",
-                transform=trans,
-                ha="left",
-                va="bottom",
-                fontsize=11,
-            )
+            ax.text(x_col1, y_top + 0.1, "λ", transform=trans, ha="left", va="bottom", fontsize=11)
+            ax.text(x_col2, y_top + 0.1, "Δλ [Å]", transform=trans, ha="left", va="bottom", fontsize=11)
 
             for y_text, col, lam0, mu, sd in text_rows:
-                ax.text(
-                    x_col1,
-                    y_text,
-                    f"{lam0:7.2f} Å",
-                    color=col,
-                    transform=trans,
-                    ha="left",
-                    va="center",
-                    fontsize=10,
-                )
+                ax.text(x_col1, y_text, f"{lam0:7.2f} Å", color=col, transform=trans, ha="left", va="center", fontsize=10)
                 s = f"{mu:+.2f} ± {sd:.2f}" if _np.isfinite(mu) else "—"
                 s = s.replace("-", "−")
-                ax.text(
-                    x_col2,
-                    y_text,
-                    s,
-                    color=col,
-                    transform=trans,
-                    ha="left",
-                    va="center",
-                    fontsize=10,
-                )
+                ax.text(x_col2, y_text, s, color=col, transform=trans, ha="left", va="center", fontsize=10)
 
             self.fig.tight_layout()
 

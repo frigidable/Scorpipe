@@ -60,9 +60,7 @@ def xcorr_integer_shift_1d(ref: np.ndarray, cur: np.ndarray, max_shift: int) -> 
     return int(best_s)
 
 
-def shift_int_fill_float(
-    arr: np.ndarray, shift: int, *, axis: int, fill: float
-) -> tuple[np.ndarray, np.ndarray]:
+def shift_int_fill_float(arr: np.ndarray, shift: int, *, axis: int, fill: float) -> tuple[np.ndarray, np.ndarray]:
     """Shift array by integer `shift` along `axis`, fill empty pixels with `fill`.
 
     Returns (shifted, filled_mask), where filled_mask marks pixels that were filled.
@@ -72,9 +70,7 @@ def shift_int_fill_float(
     if shift == 0:
         return arr.copy(), np.zeros(arr.shape, dtype=bool)
 
-    out = np.full(
-        arr.shape, fill, dtype=np.float32 if arr.dtype.kind == "f" else arr.dtype
-    )
+    out = np.full(arr.shape, fill, dtype=np.float32 if arr.dtype.kind == "f" else arr.dtype)
     filled = np.ones(arr.shape, dtype=bool)
     n = arr.shape[axis]
     s = abs(shift)
@@ -94,9 +90,7 @@ def shift_int_fill_float(
     return out, filled
 
 
-def shift_int_fill_mask(
-    mask: np.ndarray, shift: int, *, axis: int, no_cov: np.uint16 = MASK_NO_COVERAGE
-) -> np.ndarray:
+def shift_int_fill_mask(mask: np.ndarray, shift: int, *, axis: int, no_cov: np.uint16 = MASK_NO_COVERAGE) -> np.ndarray:
     """Shift uint16 mask; introduced pixels get `no_cov`."""
     mask = np.asarray(mask, dtype=np.uint16)
     shift = int(shift)
@@ -119,9 +113,7 @@ def shift_int_fill_mask(
     return out
 
 
-def take_block_yshift(
-    arr: np.ndarray, y0: int, y1: int, shift: int, *, fill: float
-) -> tuple[np.ndarray, np.ndarray]:
+def take_block_yshift(arr: np.ndarray, y0: int, y1: int, shift: int, *, fill: float) -> tuple[np.ndarray, np.ndarray]:
     """Take arr block [y0:y1, :] from a frame shifted by `shift` in y.
 
     Interprets `shift` as: out[y + shift] <- in[y].
@@ -129,9 +121,7 @@ def take_block_yshift(
     arr = np.asarray(arr)
     ny, nx = arr.shape
     shift = int(shift)
-    out = np.full(
-        (y1 - y0, nx), fill, dtype=np.float32 if arr.dtype.kind == "f" else arr.dtype
-    )
+    out = np.full((y1 - y0, nx), fill, dtype=np.float32 if arr.dtype.kind == "f" else arr.dtype)
     filled = np.ones((y1 - y0, nx), dtype=bool)
 
     src0 = y0 - shift
@@ -147,14 +137,7 @@ def take_block_yshift(
     return out, filled
 
 
-def take_block_yshift_mask(
-    mask: np.ndarray,
-    y0: int,
-    y1: int,
-    shift: int,
-    *,
-    no_cov: np.uint16 = MASK_NO_COVERAGE,
-) -> np.ndarray:
+def take_block_yshift_mask(mask: np.ndarray, y0: int, y1: int, shift: int, *, no_cov: np.uint16 = MASK_NO_COVERAGE) -> np.ndarray:
     """Take uint16 mask block with y-shift; filled pixels get `no_cov`."""
     mask = np.asarray(mask, dtype=np.uint16)
     ny, nx = mask.shape

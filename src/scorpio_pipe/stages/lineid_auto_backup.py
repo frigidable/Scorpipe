@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
 import sys
@@ -21,9 +21,7 @@ def _resolve_from_root(p: str | Path) -> Path:
 
 def _load_neon_lines_csv(path: Path) -> Tuple[np.ndarray, np.ndarray]:
     try:
-        data = np.genfromtxt(
-            str(path), delimiter=",", names=True, dtype=None, encoding=None
-        )
+        data = np.genfromtxt(str(path), delimiter=",", names=True, dtype=None, encoding=None)
         names = [n.lower() for n in data.dtype.names]
         wl_key = None
         for cand in ("wavelength", "lambda", "wl", "lam", "lambda_a", "wavelength_a"):
@@ -78,11 +76,11 @@ def _suggest_linear_pairs(
     top_lines: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
     ordp = np.argsort(-amp) if amp.size == px.size else np.arange(px.size)
-    px_top = px[ordp[: min(top_peaks, px.size)]].astype(float)
+    px_top = px[ordp[:min(top_peaks, px.size)]].astype(float)
 
     ordl = np.argsort(-w_lab) if w_lab.size == lam_lab.size else np.arange(lam_lab.size)
-    lam_top = lam_lab[ordl[: min(top_lines, lam_lab.size)]].astype(float)
-    w_top = w_lab[ordl[: min(top_lines, lam_lab.size)]].astype(float)
+    lam_top = lam_lab[ordl[:min(top_lines, lam_lab.size)]].astype(float)
+    w_top = w_lab[ordl[:min(top_lines, lam_lab.size)]].astype(float)
 
     sidx = np.argsort(lam_top)
     lam_top = lam_top[sidx]
@@ -141,9 +139,7 @@ def _suggest_linear_pairs(
         pairs.append((x0, float(lam_lab[ii]), float(dd)))
 
     if len(pairs) < 8:
-        raise RuntimeError(
-            f"Слишком мало auto-пар: {len(pairs)} (нужно хотя бы ~8–10)."
-        )
+        raise RuntimeError(f"Слишком мало auto-пар: {len(pairs)} (нужно хотя бы ~8–10).")
 
     x_pairs = np.array([p[0] for p in pairs], float)
     lam_pairs = np.array([p[1] for p in pairs], float)
@@ -173,18 +169,15 @@ def prepare_lineid(cfg: dict[str, Any]) -> dict[str, Path]:
     superneon_fits = outdir / "superneon.fits"
     peaks_csv = outdir / "peaks_candidates.csv"
     if not superneon_fits.exists() or not peaks_csv.exists():
-        raise FileNotFoundError(
-            "Нужны superneon.fits и peaks_candidates.csv. Сначала запусти doit superneon."
-        )
+        raise FileNotFoundError("Нужны superneon.fits и peaks_candidates.csv. Сначала запусти doit superneon.")
 
     wcfg = cfg.get("wavesol", {}) or {}
     from scorpio_pipe.resource_utils import resolve_resource
-
     lines_res = resolve_resource(
-        (wcfg.get("neon_lines_csv", "neon_lines.csv")),
+        (wcfg.get('neon_lines_csv', 'neon_lines.csv')),
         work_dir=work_dir,
-        config_dir=cfg.get("config_dir"),
-        project_root=cfg.get("project_root"),
+        config_dir=cfg.get('config_dir'),
+        project_root=cfg.get('project_root'),
         allow_package=True,
     )
     lines_path = lines_res.path
@@ -203,7 +196,7 @@ def prepare_lineid(cfg: dict[str, Any]) -> dict[str, Path]:
     lam_lab, w_lab = _load_neon_lines_csv(lines_path)
 
     tpl_path = outdir / "manual_pairs_template.csv"
-    sel = np.argsort(-amp)[: min(30, amp.size)]
+    sel = np.argsort(-amp)[:min(30, amp.size)]
     with tpl_path.open("w", encoding="utf-8", newline="") as f:
         f.write("use,x_pix,lambda_A,amp,fwhm_pix,comment\n")
         for i in sel:
@@ -212,18 +205,14 @@ def prepare_lineid(cfg: dict[str, Any]) -> dict[str, Path]:
     auto_path = outdir / "manual_pairs_auto.csv"
     rep_path = outdir / "lineid_report.txt"
 
-    x_pairs, lam_pairs, d_pairs, meta = _suggest_linear_pairs(
-        px, amp, lam_lab, w_lab, tol_A, top_peaks, top_lines
-    )
+    x_pairs, lam_pairs, d_pairs, meta = _suggest_linear_pairs(px, amp, lam_lab, w_lab, tol_A, top_peaks, top_lines)
 
     idx_near = np.argmin(np.abs(px[None, :] - x_pairs[:, None]), axis=1)
     with auto_path.open("w", encoding="utf-8", newline="") as f:
         f.write("use,x_pix,lambda_A,delta_A,amp,fwhm_pix,comment\n")
         for k in range(len(x_pairs)):
             i = int(idx_near[k])
-            f.write(
-                f"1,{x_pairs[k]:.6f},{lam_pairs[k]:.6f},{d_pairs[k]:.6f},{amp[i]:.6f},{fwhm[i]:.6f},auto\n"
-            )
+            f.write(f"1,{x_pairs[k]:.6f},{lam_pairs[k]:.6f},{d_pairs[k]:.6f},{amp[i]:.6f},{fwhm[i]:.6f},auto\n")
 
     with rep_path.open("w", encoding="utf-8") as f:
         f.write("LINE-ID (auto) report\n")

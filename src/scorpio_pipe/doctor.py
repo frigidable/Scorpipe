@@ -60,9 +60,7 @@ def _find_unique_by_basename(root: Path, basename: str) -> Optional[Path]:
     return None
 
 
-def _maybe_patch_frame_paths(
-    cfg: Dict[str, Any],
-) -> Tuple[Dict[str, Any], List[Dict[str, str]]]:
+def _maybe_patch_frame_paths(cfg: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, str]]]:
     """Attempt to patch missing frame paths using data_dir basename matching.
 
     Returns (new_cfg, edits).
@@ -113,9 +111,7 @@ def _maybe_patch_frame_paths(
     return out, edits
 
 
-def run_doctor(
-    *, config_path: str | Path | None = None, fix: bool = False
-) -> Dict[str, Any]:
+def run_doctor(*, config_path: str | Path | None = None, fix: bool = False) -> Dict[str, Any]:
     """Run environment + config diagnostics.
 
     Parameters
@@ -206,30 +202,17 @@ def run_doctor(
         if edits:
             patched_path = cfg_path.with_suffix(".patched.yaml")
             try:
-                patched_path.write_text(
-                    yaml.safe_dump(patched_cfg, sort_keys=False, allow_unicode=True),
-                    encoding="utf-8",
-                )
-                report["fixes"].append(
-                    {
-                        "action": "write_patched_config",
-                        "path": str(patched_path),
-                        "edits": edits,
-                    }
-                )
+                patched_path.write_text(yaml.safe_dump(patched_cfg, sort_keys=False, allow_unicode=True), encoding="utf-8")
+                report["fixes"].append({"action": "write_patched_config", "path": str(patched_path), "edits": edits})
             except Exception as e:
-                report["fixes"].append(
-                    {"action": "write_patched_config", "error": str(e), "edits": edits}
-                )
+                report["fixes"].append({"action": "write_patched_config", "error": str(e), "edits": edits})
 
         # Write a doctor.json report into work_dir/report when possible
         try:
             wd = Path(str(cfg.get("work_dir", "work"))).expanduser().resolve()
             out = wd / "report" / "doctor.json"
             out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(
-                json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
+            out.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
             report["fixes"].append({"action": "write_doctor_report", "path": str(out)})
         except Exception:
             pass

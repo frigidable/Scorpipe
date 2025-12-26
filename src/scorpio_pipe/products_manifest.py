@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Products manifest (machine-readable index of produced artifacts).
 
 This is *not* the reproducibility/provenance manifest (see :mod:`scorpio_pipe.manifest`).
@@ -13,6 +11,10 @@ The manifest is intentionally conservative: it doesn't try to list every
 intermediate file ever created, but it should cover all "scientific" products
 and the most important quicklooks.
 """
+
+
+from __future__ import annotations
+
 
 import json
 from datetime import datetime, timezone
@@ -88,7 +90,7 @@ def build_products_manifest(cfg: dict[str, Any]) -> dict[str, Any]:
     }
 
     # helpful pointers if present
-    grid = prod / "lin" / "wave_grid.json"
+    grid = (prod / "lin" / "wave_grid.json")
     if grid.exists():
         payload["stages"]["linearize"]["wave_grid_json"] = _rel(work_dir, grid)
 
@@ -103,7 +105,5 @@ def write_products_manifest(*, cfg: dict[str, Any], out_path: str | Path) -> Pat
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     payload = build_products_manifest(cfg)
-    out_path.write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return out_path

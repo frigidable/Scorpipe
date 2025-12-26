@@ -7,15 +7,15 @@ from typing import Dict, Optional
 
 @dataclass(frozen=True)
 class NightLogRow:
-    fid: str  # s23841309
-    object: str  # ngc2784 / AGK+81d266 / etc
-    kind: str  # bias/flat/neon/obj/sky...
-    start: str  # HH:MM:SS
+    fid: str            # s23841309
+    object: str         # ngc2784 / AGK+81d266 / etc
+    kind: str           # bias/flat/neon/obj/sky...
+    start: str          # HH:MM:SS
     exptime: float
-    mode: str  # Image / Spectra / ImaSlit
-    disperser: str  # VPHG1200@540 (может быть пусто)
-    slit: str  # 1.00 / 0.46 / ...
-    filt: str  # R/V/B... (может быть пусто)
+    mode: str           # Image / Spectra / ImaSlit
+    disperser: str      # VPHG1200@540 (может быть пусто)
+    slit: str           # 1.00 / 0.46 / ...
+    filt: str           # R/V/B... (может быть пусто)
 
 
 def _to_float(x: str) -> float:
@@ -114,3 +114,4 @@ def find_nightlog(data_dir: Path) -> Optional[Path]:
             best_size = p.stat().st_size
 
     return best
+

@@ -31,14 +31,13 @@ EXPECTED_COLUMNS = [
 
 # Stable display order for frame kinds (used by UI browsers)
 KIND_ORDER = [
-    "bias",
-    "flat",
-    "neon",
-    "obj",
-    "sky",
-    "sunsky",
+    'bias',
+    'flat',
+    'neon',
+    'obj',
+    'sky',
+    'sunsky',
 ]
-
 
 def _binning_from_header(hdr) -> str:
     """Return binning as 'Bx×By' when possible, else ''."""
@@ -77,12 +76,10 @@ def _window_from_header(hdr) -> str:
             return str(v)
     return ""
 
-
 def _norm_obj(s: str | None) -> str:
     if not s:
         return ""
     return "".join(ch for ch in s.strip().upper() if ch.isalnum())
-
 
 def _norm_obj_tokens(s: str | None) -> str:
     if not s:
@@ -101,7 +98,8 @@ def _is_sunsky_name(s: str | None) -> bool:
     # Normalize: keep alnum only
     norm = "".join(ch for ch in s.strip().upper() if ch.isalnum())
     # Common patterns: SUNSKY, SUN_SKY, SUN-SKY, SUN SKY
-    return "SUNSKY" in norm
+    return ("SUNSKY" in norm)
+
 
 
 def _safe_get(header, *keys, default=None):
@@ -178,7 +176,6 @@ class InspectResult:
             return []
         return sorted(df["object"].dropna().unique().tolist())
 
-
 def _fid_from_path(p: Path) -> str:
     # s23841404.fits  -> s23841404
     # s23841404.fts   -> s23841404
@@ -188,7 +185,6 @@ def _fid_from_path(p: Path) -> str:
         if name.endswith(suf):
             return name[: -len(suf)]
     return p.stem.lower()
-
 
 def _open_fits_header_safe(fp: Path) -> fits.Header:
     """Open a FITS header in the most resilient way.
@@ -201,12 +197,8 @@ def _open_fits_header_safe(fp: Path) -> fits.Header:
             return hdul[0].header
     except Exception:
         # часто помогает для "подуставших" .fts
-        with fits.open(
-            fp, memmap=False, ignore_missing_end=True, ignore_missing_simple=True
-        ) as hdul:
+        with fits.open(fp, memmap=False, ignore_missing_end=True, ignore_missing_simple=True) as hdul:
             return hdul[0].header
-
-
 def inspect_dataset(data_dir: Path, max_files: int | None = None) -> InspectResult:
     rows = []
     n_found = 0
@@ -237,12 +229,8 @@ def inspect_dataset(data_dir: Path, max_files: int | None = None) -> InspectResu
         kind = classify_frame(hdr)
 
         mode = str(_safe_get(hdr, "MODE", "OBSMODE", "OBS_MODE", default="") or "")
-        disperser = str(
-            _safe_get(hdr, "GRISM", "GRATING", "DISPERSER", "ELEMENT", default="") or ""
-        )
-        slit = str(
-            _safe_get(hdr, "SLIT", "SLITWID", "SLITW", "SLIT_WIDTH", default="") or ""
-        )
+        disperser = str(_safe_get(hdr, "GRISM", "GRATING", "DISPERSER", "ELEMENT", default="") or "")
+        slit = str(_safe_get(hdr, "SLIT", "SLITWID", "SLITW", "SLIT_WIDTH", default="") or "")
 
         # shape без чтения data
         shape = ""
@@ -254,9 +242,7 @@ def inspect_dataset(data_dir: Path, max_files: int | None = None) -> InspectResu
         except Exception:
             shape = ""
 
-        instrument = guess_instrument_from_header(hdr) or str(
-            _safe_get(hdr, "INSTRUME", "INSTRUMENT", default="") or ""
-        )
+        instrument = guess_instrument_from_header(hdr) or str(_safe_get(hdr, "INSTRUME", "INSTRUMENT", default="") or "")
         row = dict(
             path=str(fp),
             fid=fid,
@@ -288,6 +274,7 @@ def inspect_dataset(data_dir: Path, max_files: int | None = None) -> InspectResu
                 row["disperser"] = m.disperser
             if m.slit:
                 row["slit"] = m.slit
+
 
         # SUNSKY force: MODE may match science frames, so detect by name
         try:

@@ -40,12 +40,8 @@ def main() -> None:
     # GUI critical APIs
     assert hasattr(pr, "load_context"), "ui.pipeline_runner.load_context missing"
     assert hasattr(pr, "run_sequence"), "ui.pipeline_runner.run_sequence missing"
-    assert hasattr(
-        pr, "run_lineid_prepare"
-    ), "ui.pipeline_runner.run_lineid_prepare missing"
-    assert hasattr(
-        pr, "run_wavesolution"
-    ), "ui.pipeline_runner.run_wavesolution missing"
+    assert hasattr(pr, "run_lineid_prepare"), "ui.pipeline_runner.run_lineid_prepare missing"
+    assert hasattr(pr, "run_wavesolution"), "ui.pipeline_runner.run_wavesolution missing"
 
     if args.verbose:
         print("OK: gui runner API present")

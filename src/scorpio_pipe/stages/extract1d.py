@@ -47,9 +47,7 @@ def _roi_from_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
     return dict(roi)
 
 
-def _read_mef(
-    path: Path,
-) -> Tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray], fits.Header]:
+def _read_mef(path: Path) -> Tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray], fits.Header]:
     with fits.open(path, memmap=False) as hdul:
         sci = np.array(hdul[0].data, dtype=float)
         hdr = hdul[0].header.copy()
@@ -79,17 +77,11 @@ def _linear_wave_axis(hdr: fits.Header, nlam: int) -> np.ndarray:
     return float(crval) + (i + 1.0 - float(crpix)) * float(cdelt)
 
 
-def _polyfit_trace(
-    wbin: np.ndarray, ycen: np.ndarray, w_full: np.ndarray, deg: int
-) -> np.ndarray:
+def _polyfit_trace(wbin: np.ndarray, ycen: np.ndarray, w_full: np.ndarray, deg: int) -> np.ndarray:
     good = np.isfinite(wbin) & np.isfinite(ycen)
     if good.sum() < max(5, deg + 2):
         # fallback: constant trace at median
-        y0 = (
-            float(np.nanmedian(ycen))
-            if np.isfinite(np.nanmedian(ycen))
-            else (w_full * 0 + 0)
-        )
+        y0 = float(np.nanmedian(ycen)) if np.isfinite(np.nanmedian(ycen)) else (w_full * 0 + 0)
         return np.full_like(w_full, y0, dtype=float)
     w = wbin[good]
     y = ycen[good]
@@ -144,11 +136,7 @@ def _estimate_trace(
             continue
         # use positive weights to avoid centroid flips in noisy sky-sub data
         w = np.nan_to_num(sl, nan=0.0)
-        w = np.clip(
-            w,
-            0.0,
-            np.nanpercentile(w, 95) if np.isfinite(np.nanpercentile(w, 95)) else np.inf,
-        )
+        w = np.clip(w, 0.0, np.nanpercentile(w, 95) if np.isfinite(np.nanpercentile(w, 95)) else np.inf)
         if np.sum(w) <= 0:
             # fallback: argmax
             yc = float(np.nanargmax(sl) + yobj0)
@@ -241,7 +229,6 @@ def _build_profile_template(
     dys = np.arange(-profile_hw, profile_hw + 1, dtype=float)
     acc = np.zeros_like(dys, dtype=float)
     cnt = np.zeros_like(dys, dtype=float)
-    ygrid = np.arange(ny, dtype=float)
     have_mask = mask is not None and mask.shape == sci.shape
     for j in range(nlam):
         yc = float(trace[j])
@@ -265,9 +252,7 @@ def _build_profile_template(
     good = cnt > 0
     prof[good] = acc[good] / cnt[good]
     # keep only non-negative template and normalize
-    prof = np.clip(
-        prof, 0.0, np.nanmax(prof) if np.isfinite(np.nanmax(prof)) else np.inf
-    )
+    prof = np.clip(prof, 0.0, np.nanmax(prof) if np.isfinite(np.nanmax(prof)) else np.inf)
     s = float(np.nansum(prof))
     if s <= 0 or not np.isfinite(s):
         # fallback: Gaussian-ish profile
@@ -367,22 +352,13 @@ def _optimal_extract(
     return flux, out_var, out_mask, meta
 
 
-def _write_mef_1d(
-    path: Path, flux: np.ndarray, hdr0: fits.Header, var: np.ndarray, mask: np.ndarray
-) -> None:
+def _write_mef_1d(path: Path, flux: np.ndarray, hdr0: fits.Header, var: np.ndarray, mask: np.ndarray) -> None:
     """Write 1D spectrum as MEF (Primary holds flux for legacy; SCI/VAR/MASK extensions are canonical)."""
     grid = try_read_grid(hdr0)
-    write_sci_var_mask(
-        path, flux, var=var, mask=mask, header=hdr0, grid=grid, primary_data=flux
-    )
+    write_sci_var_mask(path, flux, var=var, mask=mask, header=hdr0, grid=grid, primary_data=flux)
 
 
-def run_extract1d(
-    cfg: Dict[str, Any],
-    *,
-    in_fits: Optional[Path] = None,
-    out_dir: Optional[Path] = None,
-) -> Dict[str, Any]:
+def run_extract1d(cfg: Dict[str, Any], *, in_fits: Optional[Path] = None, out_dir: Optional[Path] = None) -> Dict[str, Any]:
     ecfg = cfg.get("extract1d", {}) if isinstance(cfg.get("extract1d"), dict) else {}
     if not bool(ecfg.get("enabled", True)):
         return {"skipped": True, "reason": "extract1d.enabled=false"}
@@ -409,9 +385,7 @@ def run_extract1d(
 
     sci, var, mask, hdr = _read_mef(in_fits)
     if sci.ndim != 2:
-        raise ValueError(
-            f"extract1d expects a 2D (λ,y) frame; got {sci.shape} from {in_fits}"
-        )
+        raise ValueError(f"extract1d expects a 2D (λ,y) frame; got {sci.shape} from {in_fits}")
 
     wave = _linear_wave_axis(hdr, sci.shape[1])
     roi = _roi_from_cfg(cfg)
@@ -444,7 +418,7 @@ def run_extract1d(
         flux, v1, m1 = _boxcar_extract(sci, var, mask, trace, ap_hw=ap_hw)
         if method == "mean":
             # convert to mean by dividing by N contributing pixels
-            n = 2 * ap_hw + 1
+            n = (2 * ap_hw + 1)
             flux = flux / float(n)
             v1 = v1 / float(n * n)
         opt_meta: dict[str, Any] = {}
@@ -489,9 +463,7 @@ def run_extract1d(
         "trace_meta": trace_meta,
         "optimal_meta": opt_meta,
     }
-    trace_json.write_text(
-        json.dumps(trace_payload, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    trace_json.write_text(json.dumps(trace_payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
     if bool(ecfg.get("save_png", True)):
         try:
@@ -509,9 +481,7 @@ def run_extract1d(
                 ax.plot(wave, flux, lw=1.0)
                 ax.set_xlabel("Wavelength (Å)")
                 ax.set_ylabel("Flux")
-                ax.set_title(
-                    f"1D extraction: {method} (median S/N={np.nanmedian(snr):.1f})"
-                )
+                ax.set_title(f"1D extraction: {method} (median S/N={np.nanmedian(snr):.1f})")
                 fig.tight_layout()
                 fig.savefig(out_png)
                 plt.close(fig)

@@ -26,9 +26,7 @@ def _comma_list(raw: str | None) -> list[str]:
 
 
 def cmd_version(_args: argparse.Namespace) -> int:
-    print(
-        f"[bold]scorpio-pipe[/bold] pipeline {PIPELINE_VERSION} (package {__version__})"
-    )
+    print(f"[bold]scorpio-pipe[/bold] pipeline {PIPELINE_VERSION} (package {__version__})")
     return 0
 
 
@@ -87,12 +85,7 @@ def _infer_night_dir(res) -> str | None:
         pass
 
     try:
-        if (
-            hasattr(res, "table")
-            and res.table is not None
-            and (not res.table.empty)
-            and ("date_obs" in res.table.columns)
-        ):
+        if hasattr(res, "table") and res.table is not None and (not res.table.empty) and ("date_obs" in res.table.columns):
             import re
 
             vals = res.table["date_obs"].dropna().astype(str).tolist()
@@ -138,11 +131,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         import re
         from scorpio_pipe.workdir import RunSignature, pick_smart_run_dir
 
-        setup = (
-            cfg_model.frames.get("__setup__", {})
-            if isinstance(cfg_model.frames, dict)
-            else {}
-        )
+        setup = cfg_model.frames.get("__setup__", {}) if isinstance(cfg_model.frames, dict) else {}
         if not isinstance(setup, dict):
             setup = {}
 
@@ -179,22 +168,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 2
 
     if not args.execute:
-        print(
-            "\n[bold]Next:[/bold] run UI or doit workflow, or run this command with --execute"
-        )
+        print("\n[bold]Next:[/bold] run UI or doit workflow, or run this command with --execute")
         return 0
 
-    tasks = _comma_list(args.tasks) or [
-        "manifest",
-        "superbias",
-        "cosmics",
-        "superneon",
-        "qc_report",
-    ]
+    tasks = _comma_list(args.tasks) or ["manifest", "superbias", "cosmics", "superneon", "qc_report"]
     print(f"\n[bold]Executing tasks:[/bold] {', '.join(tasks)}")
-    out = run_sequence(
-        cfg_path, tasks, resume=bool(args.resume), force=bool(args.force)
-    )
+    out = run_sequence(cfg_path, tasks, resume=bool(args.resume), force=bool(args.force))
     print("\n[green]Done.[/green]")
     for k, v in out.items():
         print(f" - {k}: {v}")
@@ -225,12 +204,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
 def cmd_doctor(args: argparse.Namespace) -> int:
     from scorpio_pipe.doctor import run_doctor
 
-    print(
-        f"[bold]scorpio-pipe[/bold] pipeline {PIPELINE_VERSION} (package {__version__})"
-    )
-    rep = run_doctor(
-        config_path=getattr(args, "config", None), fix=bool(getattr(args, "fix", False))
-    )
+    print(f"[bold]scorpio-pipe[/bold] pipeline {PIPELINE_VERSION} (package {__version__})")
+    rep = run_doctor(config_path=getattr(args, "config", None), fix=bool(getattr(args, "fix", False)))
 
     gui = rep.get("gui", {})
     if gui.get("ok"):
@@ -241,20 +216,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     for r in rep.get("resources", []) or []:
         if r.get("found"):
-            print(
-                f"[green]Resource:[/green] {r.get('name')} → {r.get('path')} ({r.get('source')})"
-            )
+            print(f"[green]Resource:[/green] {r.get('name')} → {r.get('path')} ({r.get('source')})")
         else:
             print(f"[red]Resource missing:[/red] {r.get('name')}")
 
     cfg = rep.get("config")
     if cfg:
-        sch = cfg.get("schema") or {}
-        val = cfg.get("validate") or {}
+        sch = (cfg.get("schema") or {})
+        val = (cfg.get("validate") or {})
         print(f"\n[bold]Config:[/bold] {cfg.get('path')}")
-        print(
-            f"Schema: {'OK' if sch.get('ok') else 'FAIL'} | Validate: {'OK' if val.get('ok') else 'FAIL'}"
-        )
+        print(f"Schema: {'OK' if sch.get('ok') else 'FAIL'} | Validate: {'OK' if val.get('ok') else 'FAIL'}")
         if sch.get("warnings"):
             print("\n[yellow]Schema warnings:[/yellow]")
             for w in sch.get("warnings", [])[:15]:
@@ -312,9 +283,7 @@ def cmd_products(args: argparse.Namespace) -> int:
         t.add_row(
             p.stage,
             p.key,
-            "[green]yes[/green]"
-            if ex
-            else ("[red]no[/red]" if not p.optional else "[yellow]no[/yellow]"),
+            "[green]yes[/green]" if ex else ("[red]no[/red]" if not p.optional else "[yellow]no[/yellow]"),
             p.kind,
             str(p.path),
             ss,
@@ -338,38 +307,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ins = sub.add_parser("inspect", help="Scan data dir and list objects/frames")
     p_ins.add_argument("--data-dir", required=True)
-    p_ins.add_argument(
-        "--max-files", type=int, default=None, help="Limit FITS scan (debug)"
-    )
+    p_ins.add_argument("--max-files", type=int, default=None, help="Limit FITS scan (debug)")
     p_ins.set_defaults(func=cmd_inspect)
 
     p_val = sub.add_parser("validate", help="Validate config.yaml")
     p_val.add_argument("--config", required=True)
-    p_val.add_argument(
-        "--strict", action="store_true", help="Treat missing files as errors"
-    )
+    p_val.add_argument("--strict", action="store_true", help="Treat missing files as errors")
     p_val.set_defaults(func=cmd_validate)
 
     p_doc = sub.add_parser("doctor", help="Environment/resource diagnostics")
-    p_doc.add_argument(
-        "--config", default=None, help="Optional path to config.yaml to validate"
-    )
-    p_doc.add_argument(
-        "--fix",
-        action="store_true",
-        help="Apply safe autofixes (mkdir, materialize resources, write patched config)",
-    )
+    p_doc.add_argument("--config", default=None, help="Optional path to config.yaml to validate")
+    p_doc.add_argument("--fix", action="store_true", help="Apply safe autofixes (mkdir, materialize resources, write patched config)")
     p_doc.set_defaults(func=cmd_doctor)
 
-    p_prod = sub.add_parser(
-        "products", help="List expected pipeline products for a config"
-    )
+    p_prod = sub.add_parser("products", help="List expected pipeline products for a config")
     p_prod.add_argument("--config", required=True)
     p_prod.set_defaults(func=cmd_products)
 
-    p_run = sub.add_parser(
-        "run", help="Auto-config + (optional) execute pipeline tasks"
-    )
+    p_run = sub.add_parser("run", help="Auto-config + (optional) execute pipeline tasks")
     p_run.add_argument("--data-dir", required=True)
     p_run.add_argument("--object", required=True)
     p_run.add_argument(
@@ -380,9 +335,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--disperser", default=None)
     p_run.add_argument("--slit", default=None)
     p_run.add_argument("--binning", default=None)
-    p_run.add_argument(
-        "--execute", action="store_true", help="Actually run non-interactive tasks"
-    )
+    p_run.add_argument("--execute", action="store_true", help="Actually run non-interactive tasks")
     p_run.add_argument(
         "--resume",
         dest="resume",
@@ -396,11 +349,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Always run tasks even if products exist",
     )
-    p_run.add_argument(
-        "--force",
-        action="store_true",
-        help="Never skip tasks (stronger than --no-resume)",
-    )
+    p_run.add_argument("--force", action="store_true", help="Never skip tasks (stronger than --no-resume)")
     p_run.add_argument(
         "--tasks",
         default=None,

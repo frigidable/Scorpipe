@@ -152,9 +152,7 @@ def load_instrument_db() -> dict[str, InstrumentSpec]:
                         val = sv.get("value")
                         if isinstance(val, (list, tuple)) and len(val) == 2:
                             try:
-                                fwhm_val[str(slit)] = (
-                                    float(val[0]) + float(val[1])
-                                ) / 2.0
+                                fwhm_val[str(slit)] = (float(val[0]) + float(val[1])) / 2.0
                             except Exception:
                                 pass
                         else:
@@ -188,11 +186,7 @@ def load_instrument_db() -> dict[str, InstrumentSpec]:
 
             grisms[gid] = GrismSpec(
                 id=gid,
-                grooves_lmm=(
-                    int(g.get("grooves_lmm"))
-                    if g.get("grooves_lmm") is not None
-                    else None
-                ),
+                grooves_lmm=(int(g.get("grooves_lmm")) if g.get("grooves_lmm") is not None else None),
                 range_A=rng_val,
                 dispersion_A_per_pix=disp_val,
                 resolution_fwhm_A=res_fwhm,

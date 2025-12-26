@@ -4,9 +4,7 @@ from PySide6 import QtCore, QtWidgets
 
 
 class TextViewerDialog(QtWidgets.QDialog):
-    def __init__(
-        self, title: str, text: str, *, parent: QtWidgets.QWidget | None = None
-    ):
+    def __init__(self, title: str, text: str, *, parent: QtWidgets.QWidget | None = None):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.resize(900, 650)

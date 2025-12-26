@@ -41,9 +41,7 @@ def test_resolve_work_dir_is_imported_where_used() -> None:
         if not ok:
             offenders.append(str(p.relative_to(_project_root())))
 
-    assert not offenders, (
-        "Missing resolve_work_dir import/qualification in:\n" + "\n".join(offenders)
-    )
+    assert not offenders, "Missing resolve_work_dir import/qualification in:\n" + "\n".join(offenders)
 
 
 def test_qc_report_does_not_double_prefix_v() -> None:

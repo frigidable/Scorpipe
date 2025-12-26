@@ -11,7 +11,6 @@ from astropy.io import fits
 
 log = logging.getLogger(__name__)
 
-
 @dataclass(frozen=True)
 class CosmicsSummary:
     kind: str
@@ -55,7 +54,7 @@ def _resolve_path(p: Path, *, data_dir: Path, work_dir: Path, base_dir: Path) ->
 def _load_superbias(work_dir: Path) -> np.ndarray | None:
     # New layout (v5+): work_dir/calibs/*.fits, but keep legacy fallback too.
     for rel in (Path("calibs") / "superbias.fits", Path("calib") / "superbias.fits"):
-        p = work_dir / rel
+        p = (work_dir / rel)
         if not p.is_file():
             continue
         try:
@@ -96,7 +95,12 @@ def _boxcar_mean2d(img: np.ndarray, r: int) -> np.ndarray:
     k = 2 * pad + 1
     # sum in kxk window for each pixel
     # Using inclusion-exclusion on the integral image.
-    total = s[k:, k:] - s[:-k, k:] - s[k:, :-k] + s[:-k, :-k]
+    total = (
+        s[k:, k:]
+        - s[:-k, k:]
+        - s[k:, :-k]
+        + s[:-k, :-k]
+    )
     return (total / float(k * k)).astype(np.float32)
 
 
@@ -163,9 +167,7 @@ def _two_frame_diff_clean(
         if bias_subtract and superbias is not None and superbias.shape == data.shape:
             data = data - superbias
             hdr["BIASSUB"] = (True, "Superbias subtracted")
-            hdr["HISTORY"] = (
-                "scorpio_pipe cosmics: bias subtracted using superbias.fits"
-            )
+            hdr["HISTORY"] = "scorpio_pipe cosmics: bias subtracted using superbias.fits"
         datas.append(data)
         headers.append(hdr)
         names.append(Path(p).stem)
@@ -221,11 +223,7 @@ def _two_frame_diff_clean(
         out_files[name] = str(out_f)
 
         if save_png:
-            _save_png(
-                out_dir / "masks" / f"{name}_mask.png",
-                m.astype(np.uint8),
-                title=f"Cosmic mask: {name}",
-            )
+            _save_png(out_dir / "masks" / f"{name}_mask.png", m.astype(np.uint8), title=f"Cosmic mask: {name}")
 
         if save_mask_fits:
             mf = out_dir / "masks_fits" / f"{name}_mask.fits"
@@ -238,9 +236,7 @@ def _two_frame_diff_clean(
     fits.writeto(sum_f, sum_excl, overwrite=True)
     fits.writeto(cov_f, cov, overwrite=True)
     if save_png:
-        _save_png(
-            out_dir / "sum_excl_cosmics.png", sum_excl, title="Sum (cosmics excluded)"
-        )
+        _save_png(out_dir / "sum_excl_cosmics.png", sum_excl, title="Sum (cosmics excluded)")
         _save_png(out_dir / "coverage.png", cov, title="Coverage (non-cosmic count)")
 
     outputs = {
@@ -337,17 +333,9 @@ def _single_frame_laplacian_clean(
     fits.writeto(out_f, cleaned.astype(np.float32), header=h, overwrite=True)
 
     if save_png:
-        _save_png(
-            out_dir / "masks" / f"{name}_mask.png",
-            m.astype(np.uint8),
-            title=f"Cosmic mask: {name}",
-        )
+        _save_png(out_dir / "masks" / f"{name}_mask.png", m.astype(np.uint8), title=f"Cosmic mask: {name}")
     if save_mask_fits:
-        fits.writeto(
-            out_dir / "masks_fits" / f"{name}_mask.fits",
-            (m.astype(np.uint16)) * 1,
-            overwrite=True,
-        )
+        fits.writeto(out_dir / "masks_fits" / f"{name}_mask.fits", (m.astype(np.uint16)) * 1, overwrite=True)
 
     sum_f = out_dir / "sum_excl_cosmics.fits"
     cov_f = out_dir / "coverage.fits"
@@ -421,9 +409,7 @@ def _stack_mad_clean(
         if bias_subtract and superbias is not None and superbias.shape == data.shape:
             data = data - superbias
             hdr["BIASSUB"] = (True, "Superbias subtracted")
-            hdr["HISTORY"] = (
-                "scorpio_pipe cosmics: bias subtracted using superbias.fits"
-            )
+            hdr["HISTORY"] = "scorpio_pipe cosmics: bias subtracted using superbias.fits"
         datas.append(data)
         headers.append(hdr)
         names.append(p.stem)
@@ -478,9 +464,7 @@ def _stack_mad_clean(
     fits.writeto(cov_f, cov, overwrite=True)
 
     if save_png:
-        _save_png(
-            out_dir / "sum_excl_cosmics.png", sum_excl, title="Sum (cosmics excluded)"
-        )
+        _save_png(out_dir / "sum_excl_cosmics.png", sum_excl, title="Sum (cosmics excluded)")
         _save_png(out_dir / "coverage.png", cov, title="Coverage (non-cosmic count)")
 
     outputs = {
@@ -575,12 +559,7 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
         if not isinstance(rel_paths, (list, tuple)):
             continue
 
-        paths = [
-            _resolve_path(
-                _as_path(pp), data_dir=data_dir, work_dir=work_dir, base_dir=base_dir
-            )
-            for pp in rel_paths
-        ]
+        paths = [_resolve_path(_as_path(pp), data_dir=data_dir, work_dir=work_dir, base_dir=base_dir) for pp in rel_paths]
         paths = [p for p in paths if p.is_file()]
 
         if len(paths) == 0:
@@ -590,14 +569,7 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
         kind_out.mkdir(parents=True, exist_ok=True)
 
         summary: CosmicsSummary
-        if method in (
-            "auto",
-            "stack_mad",
-            "mad_stack",
-            "stack",
-            "two_frame_diff",
-            "laplacian",
-        ):
+        if method in ("auto", "stack_mad", "mad_stack", "stack", "two_frame_diff", "laplacian"):
             # Ensure all frames have the same shape
             shapes = []
             for pth in paths:
@@ -623,20 +595,11 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
             else:
                 # Choose best available method for the frame count.
                 if method in ("laplacian",) and len(paths) != 1:
-                    log.warning(
-                        "method=laplacian requires exactly 1 frame; falling back to auto"
-                    )
+                    log.warning("method=laplacian requires exactly 1 frame; falling back to auto")
                 if method in ("two_frame_diff",) and len(paths) != 2:
-                    log.warning(
-                        "method=two_frame_diff requires exactly 2 frames; falling back to auto"
-                    )
+                    log.warning("method=two_frame_diff requires exactly 2 frames; falling back to auto")
 
-                if len(paths) >= 3 and method in (
-                    "auto",
-                    "stack_mad",
-                    "mad_stack",
-                    "stack",
-                ):
+                if len(paths) >= 3 and method in ("auto", "stack_mad", "mad_stack", "stack"):
                     summary = _stack_mad_clean(
                         paths,
                         out_dir=kind_out,
@@ -646,13 +609,7 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
                         save_png=save_png,
                         save_mask_fits=save_mask_fits,
                     )
-                elif len(paths) == 2 and method in (
-                    "auto",
-                    "stack_mad",
-                    "mad_stack",
-                    "stack",
-                    "two_frame_diff",
-                ):
+                elif len(paths) == 2 and method in ("auto", "stack_mad", "mad_stack", "stack", "two_frame_diff"):
                     summary = _two_frame_diff_clean(
                         paths,
                         out_dir=kind_out,
@@ -675,9 +632,7 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
                 else:
                     # Nothing to do
                     (kind_out / "clean").mkdir(parents=True, exist_ok=True)
-                    outputs = {
-                        "note": f"not enough frames for cosmics cleaning (n={len(paths)})"
-                    }
+                    outputs = {"note": f"not enough frames for cosmics cleaning (n={len(paths)})"}
                     summary = CosmicsSummary(
                         kind=kind,
                         n_frames=len(paths),

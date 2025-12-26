@@ -78,11 +78,7 @@ def load_config(cfg_path: str | Path) -> dict[str, Any]:
             wd = cfg_dir.resolve()
         else:
             wd_rel = Path(wd_raw)
-            base = (
-                project_root
-                if (wd_rel.parts and wd_rel.parts[0].lower() == "work")
-                else cfg_dir
-            )
+            base = project_root if (wd_rel.parts and wd_rel.parts[0].lower() == "work") else cfg_dir
             wd = resolve_path(wd_rel, base_dir=base)
         cfg["work_dir"] = str(wd)
         cfg["work_dir_abs"] = str(wd)
@@ -94,7 +90,7 @@ def load_config(cfg_path: str | Path) -> dict[str, Any]:
     calib = cfg.get("calib") or {}
     if isinstance(calib, dict):
         if calib.get("superbias_path"):
-            sb_raw = Path(_norm_path_str(str(calib["superbias_path"])))
+            sb_raw = Path(_norm_path_str(str(calib["superbias_path"])) )
             if sb_raw.is_absolute():
                 sb = sb_raw
             else:
@@ -106,7 +102,7 @@ def load_config(cfg_path: str | Path) -> dict[str, Any]:
                 sb = cand1 if cand1.exists() else cand2
             calib["superbias_path"] = str(sb)
         if calib.get("superflat_path"):
-            sf_raw = Path(_norm_path_str(str(calib["superflat_path"])))
+            sf_raw = Path(_norm_path_str(str(calib["superflat_path"])) )
             if sf_raw.is_absolute():
                 sf = sf_raw
             else:
@@ -144,9 +140,7 @@ def load_config(cfg_path: str | Path) -> dict[str, Any]:
         profiles = cfg.get("profiles")
         setup = cfg.get("setup")
         if isinstance(profiles, dict) and isinstance(setup, dict):
-            tag = "|".join(
-                str(setup.get(k, "")) for k in ("mode", "disperser", "slit", "shape")
-            )
+            tag = "|".join(str(setup.get(k, "")) for k in ("mode", "disperser", "slit", "shape"))
             tag_l = tag.lower()
             applied = []
             for key, overrides in profiles.items():
@@ -178,20 +172,18 @@ def load_config_any(cfg: Any) -> dict[str, Any]:
         return cfg
 
     # Common wrappers: RunContext (ui.pipeline_runner) or similar
-    if hasattr(cfg, "cfg"):
-        v = getattr(cfg, "cfg")
+    if hasattr(cfg, 'cfg'):
+        v = getattr(cfg, 'cfg')
         if isinstance(v, dict):
             return v
-    for attr in ("cfg_path", "config_path"):
+    for attr in ('cfg_path', 'config_path'):
         if hasattr(cfg, attr):
             try:
                 return load_config(getattr(cfg, attr))
             except Exception as e:
-                logging.getLogger(__name__).warning(
-                    "Failed to load config from %s=%r: %s", attr, getattr(cfg, attr), e
-                )
+                logging.getLogger(__name__).warning("Failed to load config from %s=%r: %s", attr, getattr(cfg, attr), e)
 
-    raise TypeError(f"Unsupported config type: {type(cfg)}")
+    raise TypeError(f'Unsupported config type: {type(cfg)}')
 
 
 def _normalize_cfg_paths_for_yaml(obj: Any):
@@ -208,7 +200,7 @@ def _normalize_cfg_paths_for_yaml(obj: Any):
     if isinstance(obj, tuple):
         return tuple(_normalize_cfg_paths_for_yaml(v) for v in obj)
     if isinstance(obj, str):
-        return obj.replace("\\", "/")
+        return obj.replace('\\', '/')
     return obj
 
 

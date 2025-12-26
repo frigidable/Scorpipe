@@ -39,18 +39,8 @@ def _setup_from_cfg_or_setup(arg: object) -> dict:
 
 
 def _setup_fields(setup: dict) -> tuple[str, str, str, str]:
-    inst = str(
-        setup.get("instrument")
-        or setup.get("instr")
-        or setup.get("instrume")
-        or "unknown"
-    )
-    disp = str(
-        setup.get("disperser")
-        or setup.get("grism")
-        or setup.get("grism_name")
-        or "unknown"
-    )
+    inst = str(setup.get("instrument") or setup.get("instr") or setup.get("instrume") or "unknown")
+    disp = str(setup.get("disperser") or setup.get("grism") or setup.get("grism_name") or "unknown")
     slit = str(setup.get("slit") or setup.get("slit_width") or "unknown")
     binning = str(setup.get("binning") or setup.get("bin") or "unknown")
     return inst, disp, slit, binning
@@ -147,9 +137,7 @@ def _sanitize_label(label: str) -> str:
     return label[:64]
 
 
-def save_user_pair_set(
-    setup_or_disperser: str | dict, source: Path, label: str | None = None
-) -> Path:
+def save_user_pair_set(setup_or_disperser: str | dict, source: Path, label: str | None = None) -> Path:
     """Copy a pair file into the user library and return destination path."""
     source = Path(source).expanduser().resolve()
     if not source.exists():
@@ -166,9 +154,7 @@ def save_user_pair_set(
     return dest
 
 
-def copy_pair_set_to_workdir(
-    disperser: str, work_dir: Path, pair_file: Path, filename: str = "hand_pairs.txt"
-) -> Path:
+def copy_pair_set_to_workdir(disperser: str, work_dir: Path, pair_file: Path, filename: str = "hand_pairs.txt") -> Path:
     """Copy a selected pair file into the workdir wavesol/<grism>/ folder."""
     work_dir = Path(work_dir).expanduser().resolve()
     pair_file = Path(pair_file).expanduser().resolve()
@@ -183,9 +169,7 @@ def copy_pair_set_to_workdir(
     shutil.copy2(pair_file, dest)
     return dest
 
-
 # --------------------------- export helpers ---------------------------
-
 
 def export_pair_set(pair_file: Path, dest_path: Path) -> Path:
     """Export a single pair set file to an arbitrary path (copy)."""
@@ -228,9 +212,7 @@ def export_user_library_zip(dest_zip: Path, *, include_builtin: bool = False) ->
     return dest_zip
 
 
-def export_user_library_folder(
-    dest_dir: Path, *, include_builtin: bool = False
-) -> Path:
+def export_user_library_folder(dest_dir: Path, *, include_builtin: bool = False) -> Path:
     """Export the pair library into a folder."""
     dest_dir = Path(dest_dir).expanduser().resolve()
     dest_dir.mkdir(parents=True, exist_ok=True)

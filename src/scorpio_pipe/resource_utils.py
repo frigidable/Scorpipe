@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import hashlib
-import shutil
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
-from scorpio_pipe.app_paths import user_cache_root, ensure_dir
-from typing import Iterable
+
+from scorpio_pipe.app_paths import ensure_dir, user_cache_root
 
 
 @dataclass(frozen=True)
@@ -21,9 +20,7 @@ def _default_cache_dir() -> Path:
     return ensure_dir(user_cache_root("Scorpipe") / "resources")
 
 
-def _materialize_package_file(
-    name: str, *, cache_dir: Path | None = None
-) -> Path | None:
+def _materialize_package_file(name: str, *, cache_dir: Path | None = None) -> Path | None:
     """Return a stable on-disk path for a packaged resource.
 
     If the package is installed as a zip, importlib may expose resources via a

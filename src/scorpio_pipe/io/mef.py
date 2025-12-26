@@ -25,7 +25,6 @@ class WaveGrid:
     unit : str
         FITS WCS unit string (e.g. 'Angstrom', 'nm').
     """
-
     lambda0: float
     dlambda: float
     nlam: int
@@ -104,41 +103,27 @@ def write_sci_var_mask(
 
     hdus: list[fits.HDUBase] = []
     if primary_data is not None:
-        hdus.append(
-            fits.PrimaryHDU(
-                data=np.asarray(primary_data, dtype=np.float32), header=phdr
-            )
-        )
+        hdus.append(fits.PrimaryHDU(data=np.asarray(primary_data, dtype=np.float32), header=phdr))
     else:
         hdus.append(fits.PrimaryHDU(header=phdr))
 
     shdr = fits.Header()
     if grid is not None:
         _apply_cards(shdr, grid.to_wcs_cards())
-    sci_hdu = fits.ImageHDU(
-        data=sci.astype(np.float32, copy=False), header=shdr, name="SCI"
-    )
+    sci_hdu = fits.ImageHDU(data=sci.astype(np.float32, copy=False), header=shdr, name="SCI")
     hdus.append(sci_hdu)
 
     if var is not None:
         vhdr = fits.Header()
         if grid is not None:
             _apply_cards(vhdr, grid.to_wcs_cards())
-        hdus.append(
-            fits.ImageHDU(
-                data=var.astype(np.float32, copy=False), header=vhdr, name="VAR"
-            )
-        )
+        hdus.append(fits.ImageHDU(data=var.astype(np.float32, copy=False), header=vhdr, name="VAR"))
 
     if mask is not None:
         mhdr = fits.Header()
         if grid is not None:
             _apply_cards(mhdr, grid.to_wcs_cards())
-        hdus.append(
-            fits.ImageHDU(
-                data=mask.astype(np.uint16, copy=False), header=mhdr, name="MASK"
-            )
-        )
+        hdus.append(fits.ImageHDU(data=mask.astype(np.uint16, copy=False), header=mhdr, name="MASK"))
 
     if extra_hdus:
         hdus.extend(extra_hdus)
@@ -147,9 +132,7 @@ def write_sci_var_mask(
     return path
 
 
-def read_sci_var_mask(
-    path: str | Path,
-) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None, fits.Header]:
+def read_sci_var_mask(path: str | Path) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None, fits.Header]:
     """Read a MEF product with SCI/VAR/MASK extensions."""
     path = Path(path).expanduser().resolve()
     with fits.open(path) as hdul:
@@ -173,8 +156,6 @@ def try_read_grid(hdr: fits.Header) -> WaveGrid | None:
         lu = hdr.get("SCORP_LU", hdr.get("CUNIT1", "Angstrom"))
         if l0 is None or dl is None or nl is None:
             return None
-        return WaveGrid(
-            lambda0=float(l0), dlambda=float(dl), nlam=int(nl), unit=str(lu)
-        )
+        return WaveGrid(lambda0=float(l0), dlambda=float(dl), nlam=int(nl), unit=str(lu))
     except Exception:
         return None

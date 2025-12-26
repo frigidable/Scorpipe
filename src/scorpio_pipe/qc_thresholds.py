@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """QC thresholds + alerting.
 
 The pipeline is used with different dispersers, binnings, and S/N regimes.
@@ -16,6 +14,10 @@ wavesol:
 If `wavesol.qc.auto` is true (default), we apply a lightweight heuristic that
 scales thresholds based on a number found in the disperser name (e.g. VPHG1200).
 """
+
+
+from __future__ import annotations
+
 
 import re
 from dataclasses import dataclass
@@ -124,11 +126,7 @@ def compute_thresholds(cfg: Dict[str, Any]) -> Tuple[Thresholds, Dict[str, Any]]
                 cosmics_frac_bad=thr.cosmics_frac_bad,
             )
 
-    overrides = (
-        (qc or {}).get("thresholds")
-        if isinstance((qc or {}).get("thresholds"), dict)
-        else {}
-    )
+    overrides = (qc or {}).get("thresholds") if isinstance((qc or {}).get("thresholds"), dict) else {}
     applied: Dict[str, float] = {}
     if overrides:
         d = thr.to_dict()
@@ -168,9 +166,7 @@ def _classify(value: float | None, warn: float, bad: float) -> str:
     return "ok"
 
 
-def build_alerts(
-    metrics: Dict[str, Any], *, products: List[Any] | None, thresholds: Thresholds
-) -> List[Dict[str, Any]]:
+def build_alerts(metrics: Dict[str, Any], *, products: List[Any] | None, thresholds: Thresholds) -> List[Dict[str, Any]]:
     """Create alert list for QC report.
 
     Parameters
@@ -203,21 +199,9 @@ def build_alerts(
                 continue
 
     # Wavesolution RMS values
-    w1 = (
-        (metrics.get("wavesol_1d") or {})
-        if isinstance(metrics.get("wavesol_1d"), dict)
-        else {}
-    )
-    w2 = (
-        (metrics.get("wavesol_2d") or {})
-        if isinstance(metrics.get("wavesol_2d"), dict)
-        else {}
-    )
-    r2 = (
-        (metrics.get("residuals_2d") or {})
-        if isinstance(metrics.get("residuals_2d"), dict)
-        else {}
-    )
+    w1 = (metrics.get("wavesol_1d") or {}) if isinstance(metrics.get("wavesol_1d"), dict) else {}
+    w2 = (metrics.get("wavesol_2d") or {}) if isinstance(metrics.get("wavesol_2d"), dict) else {}
+    r2 = (metrics.get("residuals_2d") or {}) if isinstance(metrics.get("residuals_2d"), dict) else {}
 
     v1 = w1.get("rms_A")
     sev1 = _classify(v1, thresholds.wavesol_1d_rms_warn, thresholds.wavesol_1d_rms_bad)
@@ -255,11 +239,7 @@ def build_alerts(
             }
         )
 
-    c = (
-        (metrics.get("cosmics") or {})
-        if isinstance(metrics.get("cosmics"), dict)
-        else {}
-    )
+    c = (metrics.get("cosmics") or {}) if isinstance(metrics.get("cosmics"), dict) else {}
     cf = c.get("replaced_fraction")
     try:
         cf_num = float(cf) if cf is not None else None
@@ -267,9 +247,7 @@ def build_alerts(
         cf_num = None
 
     if cf_num is not None:
-        sev = _classify(
-            cf_num, thresholds.cosmics_frac_warn, thresholds.cosmics_frac_bad
-        )
+        sev = _classify(cf_num, thresholds.cosmics_frac_warn, thresholds.cosmics_frac_bad)
         if sev in {"warn", "bad"}:
             alerts.append(
                 {

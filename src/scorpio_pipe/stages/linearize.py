@@ -28,12 +28,7 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 from astropy.io import fits
 
-from scorpio_pipe.io.mef import (
-    WaveGrid,
-    write_sci_var_mask,
-    try_read_grid,
-    read_sci_var_mask,
-)
+from scorpio_pipe.io.mef import WaveGrid, write_sci_var_mask, try_read_grid, read_sci_var_mask
 from scorpio_pipe.maskbits import (
     BADPIX,
     COSMIC,
@@ -42,7 +37,6 @@ from scorpio_pipe.maskbits import (
     REJECTED,
     SATURATED,
     USER,
-    header_cards as mask_header_cards,
     summarize as summarize_mask,
 )
 
@@ -52,6 +46,8 @@ from scorpio_pipe.paths import resolve_work_dir
 from scorpio_pipe.wavesol_paths import wavesol_dir
 
 log = get_logger(__name__)
+
+
 
 
 @dataclass
@@ -89,9 +85,7 @@ def _open_fits_resilient(path: Path) -> Tuple[np.ndarray, fits.Header]:
         return np.asarray(data, dtype=np.float64), hdul[0].header
 
 
-def _open_science_with_optional_var_mask(
-    path: Path,
-) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None, fits.Header]:
+def _open_science_with_optional_var_mask(path: Path) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None, fits.Header]:
     """Open science frame.
 
     Supports both plain 2D primary-HDU FITS and pipeline MEF products with
@@ -101,12 +95,7 @@ def _open_science_with_optional_var_mask(
         with fits.open(path, memmap=False) as hdul:
             if "SCI" in hdul:
                 sci, var, mask, hdr = read_sci_var_mask(path)
-                return (
-                    sci.astype(np.float64, copy=False),
-                    (None if var is None else var.astype(np.float64, copy=False)),
-                    mask,
-                    hdr,
-                )
+                return sci.astype(np.float64, copy=False), (None if var is None else var.astype(np.float64, copy=False)), mask, hdr
     except Exception:
         # fall back to primary-only
         pass
@@ -153,9 +142,8 @@ def _estimate_variance_adu(data_adu: np.ndarray, hdr: fits.Header) -> np.ndarray
     return var_adu.astype(np.float32)
 
 
-def _guess_saturation_level_adu(
-    hdr: fits.Header, lcfg: Dict[str, Any]
-) -> Optional[float]:
+
+def _guess_saturation_level_adu(hdr: fits.Header, lcfg: Dict[str, Any]) -> Optional[float]:
     """Estimate detector saturation level in ADU.
 
     Order of preference:
@@ -197,9 +185,7 @@ def _guess_saturation_level_adu(
             bzero = float(hdr.get("BZERO", 0.0))
         except Exception:
             bscale, bzero = 1.0, 0.0
-        if abs(bscale - 1.0) < 1e-9 and (
-            abs(bzero - 32768.0) < 1e-3 or abs(bzero) < 1e-3
-        ):
+        if abs(bscale - 1.0) < 1e-9 and (abs(bzero - 32768.0) < 1e-3 or abs(bzero) < 1e-3):
             return 65535.0
 
     # fallback: sometimes DATAMAX is close to saturation
@@ -284,16 +270,8 @@ def _write_mef(
     extra: list[fits.ImageHDU] = []
     if cov is not None:
         extra.append(fits.ImageHDU(data=np.asarray(cov, dtype=np.float32), name="COV"))
-    write_sci_var_mask(
-        path,
-        sci,
-        var=var,
-        mask=mask,
-        header=hdr,
-        grid=grid,
-        extra_hdus=extra,
-        primary_data=sci,
-    )
+    write_sci_var_mask(path, sci, var=var, mask=mask, header=hdr, grid=grid, extra_hdus=extra, primary_data=sci)
+
 
 
 def _set_linear_wcs(hdr: fits.Header, wave0: float, dw: float) -> fits.Header:
@@ -404,12 +382,7 @@ def _compute_output_grid(
     return lo, hi, dw, n
 
 
-def run_linearize(
-    cfg: Dict[str, Any],
-    out_dir: Optional[Path] = None,
-    *,
-    cancel_token: Any | None = None,
-) -> Dict[str, Any]:
+def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel_token: Any | None = None) -> Dict[str, Any]:
     """Run linearization.
 
     Inputs:
@@ -439,11 +412,7 @@ def run_linearize(
     dw_raw = lcfg.get("dlambda_A", lcfg.get("dw", 1.0))
     if dw_raw is None:
         dw = float("nan")
-    elif isinstance(dw_raw, str) and dw_raw.strip().lower() in {
-        "auto",
-        "data",
-        "from_data",
-    }:
+    elif isinstance(dw_raw, str) and dw_raw.strip().lower() in {"auto", "data", "from_data"}:
         dw = float("nan")
     else:
         dw = float(dw_raw)
@@ -455,14 +424,10 @@ def run_linearize(
             lcfg.get("save_per_frame", lcfg.get("save_per_exposure", True)),
         )
     )
-    stack_preview = bool(lcfg.get("stack_preview", True))
 
     # Locate lambda_map (prefer per-disperser layout)
     lam_path = None
-    if (
-        isinstance(lcfg.get("lambda_map_path"), str)
-        and str(lcfg.get("lambda_map_path")).strip()
-    ):
+    if isinstance(lcfg.get("lambda_map_path"), str) and str(lcfg.get("lambda_map_path")).strip():
         lam_path = Path(str(lcfg.get("lambda_map_path"))).expanduser()
         if not lam_path.is_absolute():
             lam_path = (work_dir / lam_path).resolve()
@@ -474,14 +439,10 @@ def run_linearize(
     if lam_path is None:
         # last resort: search anywhere under work_dir/wavesol
         base = work_dir / "wavesol"
-        cand = list(base.rglob("lambda_map.fits")) + list(
-            base.rglob("lambda_map*.fits")
-        )
+        cand = list(base.rglob("lambda_map.fits")) + list(base.rglob("lambda_map*.fits"))
         lam_path = cand[0] if cand else None
     if lam_path is None or not lam_path.exists():
-        raise FileNotFoundError(
-            "lambda_map.fits not found (expected under work_dir/wavesol/<disperser>/)"
-        )
+        raise FileNotFoundError("lambda_map.fits not found (expected under work_dir/wavesol/<disperser>/)")
 
     lam_map, lam_hdr = _open_fits_resilient(lam_path)
     if lam_map.ndim != 2:
@@ -500,15 +461,15 @@ def run_linearize(
     kind = "obj"
     cosm_root = work_dir / "cosmics"
     cand_clean = [
-        cosm_root / kind / "clean",  # current
-        cosm_root / method / kind / "clean",  # legacy (method/kind)
-        cosm_root / method / "clean",  # legacy (method)
+        cosm_root / kind / "clean",                  # current
+        cosm_root / method / kind / "clean",         # legacy (method/kind)
+        cosm_root / method / "clean",                # legacy (method)
     ]
     cand_mask = [
         cosm_root / kind / "masks_fits",
         cosm_root / method / kind / "masks_fits",
         cosm_root / method / "masks_fits",
-        cosm_root / kind / "mask_fits",  # very old typo
+        cosm_root / kind / "mask_fits",              # very old typo
     ]
     clean_dir = next((p for p in cand_clean if p.exists()), cand_clean[0])
     mask_dir = next((p for p in cand_mask if p.exists()), cand_mask[0])
@@ -547,15 +508,7 @@ def run_linearize(
         wmax = float(wmax_cfg)
         if not (math.isfinite(dw) and dw > 0):
             # compute from data
-            _, _, dw, _ = _compute_output_grid(
-                lam_map,
-                dw_hint=dw,
-                mode=grid_mode,
-                lo_pct=lo_pct,
-                hi_pct=hi_pct,
-                imin_pct=imin_pct,
-                imax_pct=imax_pct,
-            )
+            _, _, dw, _ = _compute_output_grid(lam_map, dw_hint=dw, mode=grid_mode, lo_pct=lo_pct, hi_pct=hi_pct, imin_pct=imin_pct, imax_pct=imax_pct)
         if wmax <= wave0:
             raise ValueError("linearize.lambda_max_A must be > lambda_min_A")
         nlam = int(max(16, np.ceil((wmax - wave0) / dw)))
@@ -618,14 +571,14 @@ def run_linearize(
             mask = np.asarray(mask_in, dtype=np.uint16)[y0:y1, :]
 
         # Saturation masking (optional): flag detector pixels near/above full well
-        mask_saturation = bool(lcfg.get("mask_saturation", True))
+        mask_saturation = bool(lcfg.get('mask_saturation', True))
         sat_level = _guess_saturation_level_adu(hdr, lcfg) if mask_saturation else None
         if sat_level is not None:
             try:
                 sat_levels_adu.append(float(sat_level))
             except Exception:
                 pass
-        sat_margin = float(lcfg.get("saturation_margin_adu", 0.0) or 0.0)
+        sat_margin = float(lcfg.get('saturation_margin_adu', 0.0) or 0.0)
         satmask = None
         if sat_level is not None and mask_saturation:
             try:
@@ -643,9 +596,7 @@ def run_linearize(
         if mp.exists():
             try:
                 m, _ = _open_fits_resilient(mp)
-                cm = ((m.astype(np.uint16) > 0).astype(np.uint16) * COSMIC).astype(
-                    np.uint16
-                )
+                cm = ((m.astype(np.uint16) > 0).astype(np.uint16) * COSMIC).astype(np.uint16)
                 cm = cm[y0:y1, :]
                 if mask is None:
                     mask = cm
@@ -671,12 +622,8 @@ def run_linearize(
             if np.sum(finite) < 8:
                 rect_mask[yy, :] |= NO_COVERAGE
                 continue
-            v_row, cov = _rebin_row_cumulative(
-                data[yy, finite], lam_row[finite], wave_edges
-            )
-            vv_row, _ = _rebin_row_cumulative(
-                var[yy, finite], lam_row[finite], wave_edges
-            )
+            v_row, cov = _rebin_row_cumulative(data[yy, finite], lam_row[finite], wave_edges)
+            vv_row, _ = _rebin_row_cumulative(var[yy, finite], lam_row[finite], wave_edges)
             rect[yy] = v_row
             rect_var[yy] = np.maximum(vv_row, 0.0)
             rect_cov[yy] = cov
@@ -688,9 +635,7 @@ def run_linearize(
                 # Bit-preserving mask propagation: propagate each known bit separately.
                 for bit in (BADPIX, COSMIC, SATURATED, USER, REJECTED):
                     m_row, _ = _rebin_row_cumulative(
-                        ((mask[yy, finite] & bit) > 0).astype(np.float64),
-                        lam_row[finite],
-                        wave_edges,
+                        ((mask[yy, finite] & bit) > 0).astype(np.float64), lam_row[finite], wave_edges
                     )
                     rect_mask[yy, m_row > 0] |= bit
 
@@ -707,10 +652,7 @@ def run_linearize(
             # Saturation metadata (if used)
             if sat_level is not None and mask_saturation:
                 try:
-                    ohdr["SATLEV"] = (
-                        float(sat_level),
-                        "Saturation level (ADU) used to flag MASK",
-                    )
+                    ohdr["SATLEV"] = (float(sat_level), "Saturation level (ADU) used to flag MASK")
                     ohdr["SATMARG"] = (float(sat_margin), "Saturation margin (ADU)")
                 except Exception:
                     pass
@@ -789,18 +731,10 @@ def run_linearize(
         "per_exposure": str(per_exp_dir) if per_exp_dir is not None else None,
         "saturation": {
             "mask_saturation": bool(lcfg.get("mask_saturation", True)),
-            "saturation_margin_adu": float(
-                lcfg.get("saturation_margin_adu", 0.0) or 0.0
-            ),
-            "saturation_level_adu": float(np.nanmedian(sat_levels_adu))
-            if sat_levels_adu
-            else None,
-            "saturation_level_min_adu": float(np.nanmin(sat_levels_adu))
-            if sat_levels_adu
-            else None,
-            "saturation_level_max_adu": float(np.nanmax(sat_levels_adu))
-            if sat_levels_adu
-            else None,
+            "saturation_margin_adu": float(lcfg.get("saturation_margin_adu", 0.0) or 0.0),
+            "saturation_level_adu": float(np.nanmedian(sat_levels_adu)) if sat_levels_adu else None,
+            "saturation_level_min_adu": float(np.nanmin(sat_levels_adu)) if sat_levels_adu else None,
+            "saturation_level_max_adu": float(np.nanmax(sat_levels_adu)) if sat_levels_adu else None,
         },
         "products": {
             "preview_fits": str(preview_fits),
@@ -838,9 +772,7 @@ def run_linearize(
         fatal_bits = NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED
         good = (out_var > 0) & ((out_mask & fatal_bits) == 0)
         snr = np.zeros_like(out_sci, dtype=np.float64)
-        snr[good] = np.abs(out_sci[good].astype(np.float64)) / np.sqrt(
-            np.maximum(out_var[good].astype(np.float64), 1e-20)
-        )
+        snr[good] = np.abs(out_sci[good].astype(np.float64)) / np.sqrt(np.maximum(out_var[good].astype(np.float64), 1e-20))
         snr_vals = snr[good]
         qc = {
             "stage": "linearize",

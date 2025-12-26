@@ -71,11 +71,7 @@ class InstrumentBrowserDialog(QtWidgets.QDialog):
         btn.clicked.connect(self.accept)
         outer.addWidget(btn, alignment=QtCore.Qt.AlignRight)
 
-    def _on_pick(
-        self,
-        cur: QtWidgets.QTreeWidgetItem | None,
-        _prev: QtWidgets.QTreeWidgetItem | None,
-    ) -> None:
+    def _on_pick(self, cur: QtWidgets.QTreeWidgetItem | None, _prev: QtWidgets.QTreeWidgetItem | None) -> None:
         if cur is None:
             return
         kind, inst_name, grism_id = cur.data(0, QtCore.Qt.UserRole)
@@ -92,13 +88,9 @@ class InstrumentBrowserDialog(QtWidgets.QDialog):
                 lines.append(f"Display: {inst.display_name}")
 
             if inst.plate_scale_arcsec_per_pix is not None:
-                lines.append(
-                    f"Plate scale: {inst.plate_scale_arcsec_per_pix} arcsec/pix"
-                )
+                lines.append(f"Plate scale: {inst.plate_scale_arcsec_per_pix} arcsec/pix")
             if inst.fov_arcmin is not None:
-                lines.append(
-                    f"FOV (IM): {inst.fov_arcmin[0]} × {inst.fov_arcmin[1]} arcmin"
-                )
+                lines.append(f"FOV (IM): {inst.fov_arcmin[0]} × {inst.fov_arcmin[1]} arcmin")
             if inst.slit_length_arcmin is not None:
                 lines.append(f"Slit length (LS): {inst.slit_length_arcmin} arcmin")
 
@@ -115,9 +107,7 @@ class InstrumentBrowserDialog(QtWidgets.QDialog):
             self.details.setPlainText("\n".join(lines))
             return
 
-        g = find_grism(inst.name, grism_id) or (
-            inst.grisms.get(grism_id) if inst.grisms else None
-        )
+        g = find_grism(inst.name, grism_id) or (inst.grisms.get(grism_id) if inst.grisms else None)
         if g is None:
             self.details.setPlainText("—")
             return
@@ -132,10 +122,8 @@ class InstrumentBrowserDialog(QtWidgets.QDialog):
         if g.fwhm_A_at_slit_arcsec:
             lines.append("")
             lines.append("FWHM by slit")
-            for slit, fwhm in sorted(
-                g.fwhm_A_at_slit_arcsec.items(), key=lambda kv: kv[0]
-            ):
-                lines.append(f'  {slit}": {fwhm} Å')
+            for slit, fwhm in sorted(g.fwhm_A_at_slit_arcsec.items(), key=lambda kv: kv[0]):
+                lines.append(f"  {slit}\": {fwhm} Å")
         if g.notes:
             lines.append("")
             lines.append(f"Notes: {g.notes}")

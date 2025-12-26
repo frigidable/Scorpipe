@@ -15,9 +15,7 @@ def user_data_root(app_name: str = "Scorpipe") -> Path:
     app = (app_name or "Scorpipe").strip() or "Scorpipe"
 
     if sys.platform.startswith("win"):
-        base = (
-            os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or ""
-        ).strip()
+        base = (os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or "").strip()
         if base:
             return Path(base) / app
         # fallback
@@ -44,6 +42,7 @@ def ensure_dir(p: Path) -> Path:
     return p
 
 
+
 def pick_workspace_root(pipeline_root: Path | None = None) -> Path:
     """Pick a writable workspace root.
 
@@ -56,18 +55,18 @@ def pick_workspace_root(pipeline_root: Path | None = None) -> Path:
 
     # 1) prefer installation directory when it's writable
     if pipeline_root is not None:
-        cand = (Path(pipeline_root) / "workspace").resolve()
+        cand = (Path(pipeline_root) / 'workspace').resolve()
         try:
             cand.mkdir(parents=True, exist_ok=True)
             # write-test (Program Files is typically not writable)
-            t = cand / ".write_test"
-            t.write_text("ok", encoding="utf-8")
+            t = cand / '.write_test'
+            t.write_text('ok', encoding='utf-8')
             t.unlink(missing_ok=True)
             return cand
         except Exception:
             pass
 
     # 2) safe fallback
-    fb = (user_data_root("Scorpipe") / "workspace").resolve()
+    fb = (user_data_root('Scorpipe') / 'workspace').resolve()
     ensure_dir(fb)
     return fb

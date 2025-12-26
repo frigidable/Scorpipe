@@ -14,7 +14,6 @@ The implementation is chunked along y to keep memory bounded.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -41,9 +40,7 @@ FATAL_BITS = np.uint16(NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECT
 FATAL_BITS = np.uint16(NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED)
 
 
-def _xcorr_subpix_shift_1d(
-    ref: np.ndarray, cur: np.ndarray, max_shift: int
-) -> tuple[float, float]:
+def _xcorr_subpix_shift_1d(ref: np.ndarray, cur: np.ndarray, max_shift: int) -> tuple[float, float]:
     """Return (shift_pix, score) to apply to `cur` to best match `ref`.
 
     Uses NumPy-only normalized dot-product xcorr with a parabola refinement
@@ -54,9 +51,10 @@ def _xcorr_subpix_shift_1d(
     return float(est.shift_pix), float(est.score)
 
 
-def _colsel_from_windows(
-    hdr: fits.Header, nx: int, windows_A: Any | None, windows_pix: Any | None = None
-) -> np.ndarray | None:
+
+
+
+def _colsel_from_windows(hdr: fits.Header, nx: int, windows_A: Any | None, windows_pix: Any | None = None) -> np.ndarray | None:
     """Return boolean column selector for wavelength windows.
 
     Supports either Angstrom windows on a linear WCS (CRVAL1/CDELT1[/CD1_1]/CRPIX1)
@@ -131,10 +129,7 @@ def _colsel_from_windows(
         return None
     return sel
 
-
-def _take_block_yshift(
-    arr: np.ndarray, y0: int, y1: int, shift: int, *, fill: float
-) -> tuple[np.ndarray, np.ndarray]:
+def _take_block_yshift(arr: np.ndarray, y0: int, y1: int, shift: int, *, fill: float) -> tuple[np.ndarray, np.ndarray]:
     """Take arr block [y0:y1, :] from a frame shifted by `shift` in y.
 
     We interpret `shift` as a translation applied to the *input* frame to align
@@ -146,9 +141,7 @@ def _take_block_yshift(
     arr = np.asarray(arr)
     ny, nx = arr.shape
     shift = int(shift)
-    out = np.full(
-        (y1 - y0, nx), fill, dtype=np.float32 if arr.dtype.kind == "f" else arr.dtype
-    )
+    out = np.full((y1 - y0, nx), fill, dtype=np.float32 if arr.dtype.kind == "f" else arr.dtype)
     filled = np.ones((y1 - y0, nx), dtype=bool)
 
     src0 = y0 - shift
@@ -166,9 +159,7 @@ def _take_block_yshift(
     return out, filled
 
 
-def _take_block_yshift_subpix(
-    arr: np.ndarray, y0: int, y1: int, shift: float, *, fill: float
-) -> tuple[np.ndarray, np.ndarray]:
+def _take_block_yshift_subpix(arr: np.ndarray, y0: int, y1: int, shift: float, *, fill: float) -> tuple[np.ndarray, np.ndarray]:
     """Subpixel y-shifted block (SCI-like), using linear interpolation.
 
     Sign convention matches the integer helper: out[y+shift] <- in[y].
@@ -207,9 +198,7 @@ def _take_block_yshift_subpix(
     return out, filled
 
 
-def _take_block_yshift_subpix_var(
-    var: np.ndarray, y0: int, y1: int, shift: float, *, fill: float
-) -> tuple[np.ndarray, np.ndarray]:
+def _take_block_yshift_subpix_var(var: np.ndarray, y0: int, y1: int, shift: float, *, fill: float) -> tuple[np.ndarray, np.ndarray]:
     """Subpixel y-shifted block for VAR with (w0^2, w1^2) propagation."""
 
     var = np.asarray(var, dtype=float)
@@ -242,9 +231,7 @@ def _take_block_yshift_subpix_var(
     return out, filled
 
 
-def _take_block_yshift_subpix_mask(
-    mask: np.ndarray, y0: int, y1: int, shift: float
-) -> np.ndarray:
+def _take_block_yshift_subpix_mask(mask: np.ndarray, y0: int, y1: int, shift: float) -> np.ndarray:
     """Subpixel y-shifted mask block (conservative OR)."""
 
     mask = np.asarray(mask, dtype=np.uint16)
@@ -270,9 +257,7 @@ def _take_block_yshift_subpix_mask(
     return out
 
 
-def _take_block_yshift_mask(
-    mask: np.ndarray, y0: int, y1: int, shift: int
-) -> np.ndarray:
+def _take_block_yshift_mask(mask: np.ndarray, y0: int, y1: int, shift: int) -> np.ndarray:
     """Take uint16 mask block with y-shift; filled pixels get MASK_NO_COVERAGE."""
     mask = np.asarray(mask, dtype=np.uint16)
     ny, nx = mask.shape
@@ -291,9 +276,7 @@ def _take_block_yshift_mask(
     return out
 
 
-def _open_mef(
-    path: Path,
-) -> tuple[np.ndarray, fits.Header, np.ndarray | None, np.ndarray | None]:
+def _open_mef(path: Path) -> tuple[np.ndarray, fits.Header, np.ndarray | None, np.ndarray | None]:
     """Return (sci, hdr, var, mask) from a MEF or simple FITS."""
     with fits.open(path, memmap=True) as hdul:
         hdr = hdul[0].header.copy()
@@ -335,9 +318,7 @@ def _write_mef(
     extra: list[fits.ImageHDU] = []
     if cov is not None:
         extra.append(fits.ImageHDU(np.asarray(cov, dtype=np.int16), name="COV"))
-    write_sci_var_mask(
-        path, sci, var=var, mask=mask, header=hdr, grid=grid, extra_hdus=extra
-    )
+    write_sci_var_mask(path, sci, var=var, mask=mask, header=hdr, grid=grid, extra_hdus=extra)
 
 
 def _iter_slices(ny: int, chunk: int) -> Iterable[slice]:
@@ -346,9 +327,7 @@ def _iter_slices(ny: int, chunk: int) -> Iterable[slice]:
         yield slice(y0, min(ny, y0 + chunk))
 
 
-def run_stack2d(
-    cfg: dict[str, Any], *, inputs: Iterable[Path], out_dir: Path | None = None
-) -> dict[str, Any]:
+def run_stack2d(cfg: dict[str, Any], *, inputs: Iterable[Path], out_dir: Path | None = None) -> dict[str, Any]:
     st_cfg = (cfg.get("stack2d") or {}) if isinstance(cfg.get("stack2d"), dict) else {}
     if not bool(st_cfg.get("enabled", True)):
         return {"skipped": True, "reason": "stack2d.enabled=false"}
@@ -381,19 +360,14 @@ def run_stack2d(
         y_align_enabled = bool(st_cfg.get("y_align_enabled", False))
         y_align_max = int(st_cfg.get("y_align_max_shift_pix", 10))
 
+
     out_sci = np.zeros((ny, nx), dtype=np.float32)
     out_var = np.zeros((ny, nx), dtype=np.float32)
     out_mask = np.zeros((ny, nx), dtype=np.uint16)
     out_cov = np.zeros((ny, nx), dtype=np.int16)
 
-    # Keep HDUs open for slicing.
-    #
-    # NOTE: many of our MEF products store uint16 MASK planes. FITS represents
-    # unsigned integers via BZERO/BSCALE keywords, and Astropy refuses to
-    # memory-map such images (ValueError: Cannot load a memory-mapped image...
-    # Set memmap=False). Therefore we default to memmap=False for robustness.
-    memmap = bool(st_cfg.get("memmap", False))
-    hduls = [fits.open(p, memmap=memmap) for p in files]
+    # Keep HDUs open (memmap) for slicing.
+    hduls = [fits.open(p, memmap=True) for p in files]
     try:
         # Precompute per-exposure y offsets (subpixel) if requested.
         y_shifts = [0.0 for _ in files]
@@ -401,25 +375,17 @@ def run_stack2d(
         y_offsets: list[dict[str, Any]] = []
         if y_align_enabled and len(files) > 1:
             # Build a crude spatial profile for each exposure.
-            y_align_mode = "full"
+            y_align_mode = 'full'
             y_align_windows_A = None
             y_align_windows_pix = None
-            y_align_windows_unit = "auto"
+            y_align_windows_unit = 'auto'
             y_align_use_positive = True
             if isinstance(ya_cfg, dict):
-                y_align_mode = str(ya_cfg.get("mode", "full") or "full").strip().lower()
-                y_align_windows_A = (
-                    ya_cfg.get("windows_A")
-                    or ya_cfg.get("windows")
-                    or ya_cfg.get("windows_angstrom")
-                )
-                y_align_windows_pix = ya_cfg.get("windows_pix") or ya_cfg.get(
-                    "windows_pixels"
-                )
-                y_align_windows_unit = (
-                    str(ya_cfg.get("windows_unit", "auto") or "auto").strip().lower()
-                )
-                y_align_use_positive = bool(ya_cfg.get("use_positive_flux", True))
+                y_align_mode = str(ya_cfg.get('mode', 'full') or 'full').strip().lower()
+                y_align_windows_A = ya_cfg.get('windows_A') or ya_cfg.get('windows') or ya_cfg.get('windows_angstrom')
+                y_align_windows_pix = ya_cfg.get('windows_pix') or ya_cfg.get('windows_pixels')
+                y_align_windows_unit = str(ya_cfg.get('windows_unit', 'auto') or 'auto').strip().lower()
+                y_align_use_positive = bool(ya_cfg.get('use_positive_flux', True))
 
             profiles = []
             for h in hduls:
@@ -435,22 +401,19 @@ def run_stack2d(
                         m = None
                 good = np.isfinite(s)
                 if m is not None:
-                    good &= (m & FATAL_BITS) == 0
+                    good &= ((m & FATAL_BITS) == 0)
 
                 sel = None
                 if y_align_mode == "windows":
                     try:
                         hdr0 = h[0].header
-                        has_wcs = (hdr0.get("CRVAL1") is not None) and (
-                            hdr0.get("CDELT1") is not None
-                            or hdr0.get("CD1_1") is not None
-                        )
-                        unit = str(y_align_windows_unit or "auto").lower()
+                        has_wcs = (hdr0.get('CRVAL1') is not None) and (hdr0.get('CDELT1') is not None or hdr0.get('CD1_1') is not None)
+                        unit = str(y_align_windows_unit or 'auto').lower()
                         wA = y_align_windows_A
                         wp = y_align_windows_pix
-                        if unit in ("a", "angstrom"):
+                        if unit in ('a', 'angstrom'):
                             wp = None
-                        elif unit in ("pix", "pixel", "pixels"):
+                        elif unit in ('pix', 'pixel', 'pixels'):
                             wA = None
                         else:  # auto
                             if has_wcs and wA is not None:
@@ -486,9 +449,7 @@ def run_stack2d(
                 for i, (p, sh) in enumerate(zip(files, y_shifts))
             ]
         else:
-            y_offsets = [
-                {"file": p.name, "y_shift_pix": 0.0, "score": None} for p in files
-            ]
+            y_offsets = [{"file": p.name, "y_shift_pix": 0.0, "score": None} for p in files]
 
         for ys in _iter_slices(ny, chunk):
             # Build stacks for this block.
@@ -498,23 +459,15 @@ def run_stack2d(
             y0 = int(ys.start or 0)
             y1 = int(ys.stop or ny)
             for i, h in enumerate(hduls):
-                sh = (
-                    float(y_shifts[i])
-                    if (y_align_enabled and i < len(y_shifts))
-                    else 0.0
-                )
+                sh = float(y_shifts[i]) if (y_align_enabled and i < len(y_shifts)) else 0.0
 
                 sci = h[0].data
                 if sci is None and "SCI" in h:
                     sci = h["SCI"].data
                 if y_align_enabled and abs(sh) > 1e-6:
-                    block_s, filled_s = _take_block_yshift_subpix(
-                        np.asarray(sci), y0, y1, sh, fill=float("nan")
-                    )
+                    block_s, filled_s = _take_block_yshift_subpix(np.asarray(sci), y0, y1, sh, fill=float("nan"))
                 else:
-                    block_s, filled_s = _take_block_yshift(
-                        np.asarray(sci), y0, y1, int(round(sh)), fill=float("nan")
-                    )
+                    block_s, filled_s = _take_block_yshift(np.asarray(sci), y0, y1, int(round(sh)), fill=float("nan"))
                 sci_stack.append(np.asarray(block_s, dtype=np.float32))
 
                 v = None
@@ -526,22 +479,14 @@ def run_stack2d(
                         )
                     else:
                         block_v, filled_v = _take_block_yshift(
-                            np.asarray(h["VAR"].data),
-                            y0,
-                            y1,
-                            int(round(sh)),
-                            fill=float("inf"),
+                            np.asarray(h["VAR"].data), y0, y1, int(round(sh)), fill=float("inf")
                         )
                     v = np.asarray(block_v, dtype=np.float32)
                 if "MASK" in h:
                     if y_align_enabled and abs(sh) > 1e-6:
-                        m = _take_block_yshift_subpix_mask(
-                            np.asarray(h["MASK"].data), y0, y1, sh
-                        )
+                        m = _take_block_yshift_subpix_mask(np.asarray(h["MASK"].data), y0, y1, sh)
                     else:
-                        m = _take_block_yshift_mask(
-                            np.asarray(h["MASK"].data), y0, y1, int(round(sh))
-                        )
+                        m = _take_block_yshift_mask(np.asarray(h["MASK"].data), y0, y1, int(round(sh)))
                 var_stack.append(v)
                 mask_stack.append(m)
 
@@ -551,36 +496,17 @@ def run_stack2d(
                 W = np.ones_like(S, dtype=np.float32)
             else:
                 # Replace missing VAR with large values -> small weights
-                V = np.stack(
-                    [
-                        (
-                            np.asarray(v, dtype=np.float32)
-                            if v is not None
-                            else np.full_like(sci_stack[0], 1e12, dtype=np.float32)
-                        )
-                        for v in var_stack
-                    ],
-                    axis=0,
-                )
+                V = np.stack([
+                    (np.asarray(v, dtype=np.float32) if v is not None else np.full_like(sci_stack[0], 1e12, dtype=np.float32))
+                    for v in var_stack
+                ], axis=0)
                 W = np.where(np.isfinite(V) & (V > 0), 1.0 / V, 0.0).astype(np.float32)
 
             if any(m is not None for m in mask_stack):
-                M = np.stack(
-                    [
-                        (
-                            np.asarray(m, dtype=np.uint16)
-                            if m is not None
-                            else np.zeros_like(
-                                mask_stack[0]
-                                if mask_stack[0] is not None
-                                else sci_stack[0],
-                                dtype=np.uint16,
-                            )
-                        )
-                        for m in mask_stack
-                    ],
-                    axis=0,
-                )
+                M = np.stack([
+                    (np.asarray(m, dtype=np.uint16) if m is not None else np.zeros_like(mask_stack[0] if mask_stack[0] is not None else sci_stack[0], dtype=np.uint16))
+                    for m in mask_stack
+                ], axis=0)
                 W = np.where(M != 0, 0.0, W)
             else:
                 M = None
@@ -594,11 +520,7 @@ def run_stack2d(
                 wsum = np.sum(W, axis=0)
                 mu = np.where(wsum > 0, np.sum(W * S, axis=0) / wsum, np.nan)
                 if V is not None:
-                    sigma = np.sqrt(
-                        np.maximum(
-                            np.sum((W**2) * V, axis=0) / np.maximum(wsum**2, 1e-20), 0.0
-                        )
-                    )
+                    sigma = np.sqrt(np.maximum(np.sum((W ** 2) * V, axis=0) / np.maximum(wsum ** 2, 1e-20), 0.0))
                 else:
                     # robust estimate
                     med = np.nanmedian(S, axis=0)
@@ -621,10 +543,8 @@ def run_stack2d(
             m_out = np.where(np.any(clipped, axis=0), m_out | MASK_CLIPPED, m_out)
             if M is not None:
                 # preserve any remaining flags (OR across exposures that contributed)
-                contrib = W > 0
-                m_or = np.bitwise_or.reduce(np.where(contrib, M, 0), axis=0).astype(
-                    np.uint16
-                )
+                contrib = (W > 0)
+                m_or = np.bitwise_or.reduce(np.where(contrib, M, 0), axis=0).astype(np.uint16)
                 m_out |= m_or
 
             out_sci[ys, :] = mu.astype(np.float32)
@@ -674,27 +594,11 @@ def run_stack2d(
         "maxiter": maxiter,
         "chunk_rows": chunk,
         "y_align_enabled": bool(y_align_enabled),
-        "y_align_mode": str(ya_cfg.get("mode", "full")).lower()
-        if isinstance(ya_cfg, dict)
-        else "full",
-        "y_align_windows_A": (
-            ya_cfg.get("windows_A")
-            or ya_cfg.get("windows")
-            or ya_cfg.get("windows_angstrom")
-        )
-        if isinstance(ya_cfg, dict)
-        else None,
-        "y_align_windows_pix": (
-            ya_cfg.get("windows_pix") or ya_cfg.get("windows_pixels")
-        )
-        if isinstance(ya_cfg, dict)
-        else None,
-        "y_align_windows_unit": (ya_cfg.get("windows_unit") or "auto")
-        if isinstance(ya_cfg, dict)
-        else "auto",
-        "y_align_use_positive_flux": bool(ya_cfg.get("use_positive_flux", True))
-        if isinstance(ya_cfg, dict)
-        else True,
+        "y_align_mode": str(ya_cfg.get("mode", "full")).lower() if isinstance(ya_cfg, dict) else "full",
+        "y_align_windows_A": (ya_cfg.get("windows_A") or ya_cfg.get("windows") or ya_cfg.get("windows_angstrom")) if isinstance(ya_cfg, dict) else None,
+        "y_align_windows_pix": (ya_cfg.get("windows_pix") or ya_cfg.get("windows_pixels")) if isinstance(ya_cfg, dict) else None,
+        "y_align_windows_unit": (ya_cfg.get("windows_unit") or 'auto') if isinstance(ya_cfg, dict) else 'auto',
+        "y_align_use_positive_flux": bool(ya_cfg.get("use_positive_flux", True)) if isinstance(ya_cfg, dict) else True,
         "y_offsets": y_offsets,
     }
     done.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
