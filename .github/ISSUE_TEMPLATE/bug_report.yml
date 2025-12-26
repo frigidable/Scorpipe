@@ -1,0 +1,69 @@
+name: Bug report
+description: Something is broken or behaves unexpectedly
+title: "[BUG] "
+labels: ["bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Scorpipe version
+      placeholder: "e.g. v5.26.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options:
+        - Windows 11
+        - Windows 10
+        - Linux
+        - macOS
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Describe the actual behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Minimal reproducible steps.
+      placeholder: |
+        1) ...
+        2) ...
+        3) ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / traceback
+      description: Paste logs here (or attach files).
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: data
+    attributes:
+      label: Dataset info (optional)
+      description: Instrument / grism / exposure count / critical wavelength range, etc.
+    validations:
+      required: false

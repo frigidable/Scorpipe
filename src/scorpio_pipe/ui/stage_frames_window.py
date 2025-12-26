@@ -60,7 +60,7 @@ class _FilesBrowser(QtWidgets.QWidget):
             return
         path = self._paths[row]
         suf = path.suffix.lower()
-        if suf in {".fits", ".fit"}:
+        if suf in {".fits", ".fit", ".fts"}:
             self._stack.setCurrentWidget(self._fits_preview)
             self._fits_preview.load_fits(path)
         elif suf in {".png", ".jpg", ".jpeg"}:
@@ -184,7 +184,7 @@ class StageFramesWindow(QtWidgets.QMainWindow):
             self.tabs.addTab(empty, name)
             return
         paths = []
-        for ext in ("*.fits", "*.fit", "*.png", "*.jpg", "*.jpeg"):
+        for ext in ("*.fits", "*.fit", "*.fts", "*.png", "*.jpg", "*.jpeg"):
             paths.extend(sorted(folder.rglob(ext)))
         w = _FilesBrowser(self)
         w.set_files(paths)

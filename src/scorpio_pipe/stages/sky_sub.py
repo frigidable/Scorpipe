@@ -33,6 +33,7 @@ from scorpio_pipe.wavesol_paths import resolve_work_dir
 from scorpio_pipe.plot_style import mpl_style
 from scorpio_pipe.shift_utils import xcorr_shift_subpix, shift2d_subpix_x, shift2d_subpix_x_var, shift2d_subpix_x_mask
 from scorpio_pipe.io.mef import read_sci_var_mask, write_sci_var_mask, try_read_grid
+from scorpio_pipe.version import PIPELINE_VERSION
 from scorpio_pipe.maskbits import (
     NO_COVERAGE,
     EDGE,
@@ -1030,7 +1031,7 @@ def run_sky_sub(cfg: dict[str, Any], *, lin_fits: Path | None = None, out_dir: P
         sky_sub = data - sky_model
 
         hdr_out = hdr.copy()
-        hdr_out["HISTORY"] = "Scorpio Pipe v5.16: sky subtraction (Kelson-like)"
+        hdr_out["HISTORY"] = f"Scorpio Pipe {PIPELINE_VERSION}: sky subtraction (Kelson-like)"
         hdr_out["SKYMETH"] = str(sky_cfg.get("method", "kelson"))
         if flex_enabled:
             hdr_out["DLAMPIX"] = float(flex_shift_pix)

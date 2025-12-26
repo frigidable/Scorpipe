@@ -1,0 +1,28 @@
+name: Feature request
+description: Propose an improvement / new capability
+title: "[FEAT] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What outcome do you want?
+    validations:
+      required: true
+
+  - type: textarea
+    id: rationale
+    attributes:
+      label: Rationale
+      description: Why is this important? (workflow/science/reliability)
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: UI/CLI changes, parameters, expected behavior, defaults.
+    validations:
+      required: false

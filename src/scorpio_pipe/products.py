@@ -6,7 +6,7 @@ This module provides a small, explicit product registry used by QC/UI.
 It intentionally does NOT try to be exhaustive for every intermediate file;
 instead it lists stable, canonical artifacts users can expect.
 
-v5.25 notes
+v5.26 notes
 ----------
 - QC outputs live in work/qc/ (legacy mirror in work/report/)
 - Calibrations live in work/calibs/ (legacy mirror/compat in work/calib/)
@@ -15,7 +15,7 @@ v5.25 notes
 UI
 --
 - All stages now expose Parameters as Basic/Advanced tabs with scrollable content.
-- FITS preview now retries correctly with memmap=False when FITS require scaling.
+- FITS preview: more robust image-HDU discovery + better diagnostics; stage frame browsers also recognize *.fts.
 """
 
 from dataclasses import dataclass

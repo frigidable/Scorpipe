@@ -23,6 +23,7 @@ import numpy as np
 from astropy.io import fits
 
 from scorpio_pipe.io.mef import write_sci_var_mask, try_read_grid
+from scorpio_pipe.version import PIPELINE_VERSION
 from scorpio_pipe.maskbits import BADPIX, COSMIC, NO_COVERAGE, REJECTED, SATURATED, USER
 
 from ..plot_style import mpl_style
@@ -561,7 +562,7 @@ def run_stack2d(cfg: dict[str, Any], *, inputs: Iterable[Path], out_dir: Path | 
 
     out_fits = out_dir / "stacked2d.fits"
     hdr = hdr0.copy()
-    hdr["HISTORY"] = "Scorpio Pipe v5.16: stack2d"
+    hdr["HISTORY"] = f"Scorpio Pipe {PIPELINE_VERSION}: stack2d"
     _write_mef(out_fits, out_sci, hdr, var=out_var, mask=out_mask, cov=out_cov)
 
     # quick QC plot: coverage histogram

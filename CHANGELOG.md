@@ -1,3 +1,12 @@
+## v5.26.0
+
+### GUI + stage robustness sweep
+- **Extract 1D**: fixed a latent crash when running the stage (wrong import of a removed module); stage now uses the canonical work-dir resolver.
+- **FITS preview**: more robust image-HDU discovery + richer diagnostics (includes `HDUList.info()` on failure). Preview now defaults to `memmap=False` for stability and only falls back to `memmap=True` when needed.
+- **Frames windows**: browsers now recognize `*.fts` alongside `.fits/.fit` when scanning stage output folders.
+- **QC viewer**: opens maximized by default (consistent with other windows).
+- **Packaging**: aligned `pyproject.toml` and internal version strings to avoid mismatched release metadata.
+
 ## v5.25.0
 
 ### Hotfixes: runner stability + FITS viewer + window behavior

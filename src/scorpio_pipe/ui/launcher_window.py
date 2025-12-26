@@ -5328,7 +5328,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._qc = QCViewer(wd)
         else:
             self._qc.set_work_dir(wd)
-        self._qc.show()
+        try:
+            self._qc.showMaximized()
+        except Exception:
+            self._qc.show()
         self._qc.raise_()
         self._qc.activateWindow()
 

@@ -40,28 +40,80 @@ def _as_2d_float(a: np.ndarray | None) -> np.ndarray:
 
 
 def _choose_image_hdu(hdul: fits.HDUList) -> tuple[int, np.ndarray]:
-    """Pick the first HDU that looks like an image."""
+    """Pick the first HDU that looks like an image.
+
+    Notes
+    -----
+    Some real-world FITS files can trigger exceptions when accessing ``hdu.data``
+    (e.g. scaled integer data with BZERO/BSCALE + memmap=True). We must not
+    swallow those specific errors, otherwise the caller cannot retry with
+    ``memmap=False``.
+
+    For other errors, we keep the last exception and surface it if no suitable
+    image HDU is found, instead of hiding the root cause behind a generic
+    message.
+    """
+
+    last_err: Exception | None = None
+
     for i, hdu in enumerate(hdul):
         try:
             data = getattr(hdu, "data", None)
             if data is None:
                 continue
-            a = np.asarray(data)
+
+            # Some HDU.data objects are lazy wrappers; np.asarray may yield a
+            # 0-d object array. Prefer the declared shape if available.
+            try:
+                a = np.asarray(data)
+            except Exception as e:
+                msg = str(e)
+                if ("memory-mapped" in msg) or ("BZERO" in msg) or ("BSCALE" in msg) or ("BLANK" in msg):
+                    raise
+                last_err = e
+                continue
+
+            if a.ndim == 0 and hasattr(data, "shape"):
+                shp = getattr(data, "shape", None)
+                if isinstance(shp, tuple) and len(shp) >= 2:
+                    try:
+                        a2 = np.array(data)
+                        if a2.ndim >= 2:
+                            return i, a2
+                    except Exception as e:
+                        last_err = e
+                        continue
+
             if a.ndim >= 2:
                 return i, data
+
         except Exception as e:
-            # IMPORTANT: do not swallow Astropy's "Cannot load a memory-mapped image"
-            # errors here, otherwise the caller cannot retry with memmap=False.
             msg = str(e)
-            if (
-                "memory-mapped" in msg
-                or "BZERO" in msg
-                or "BSCALE" in msg
-                or "BLANK" in msg
-            ):
+            if ("memory-mapped" in msg) or ("BZERO" in msg) or ("BSCALE" in msg) or ("BLANK" in msg):
                 raise
+            last_err = e
             continue
-    raise ValueError("No image HDU with data found")
+
+    # Give a more actionable error with HDU summary.
+    info = ""
+    try:
+        import io
+
+        s = io.StringIO()
+        hdul.info(output=s)
+        info = s.getvalue().strip()
+    except Exception:
+        info = ""
+
+    if last_err is not None:
+        msg = f"No image HDU with data found (last error: {last_err})."
+    else:
+        msg = "No image HDU with data found."
+
+    if info:
+        msg = msg + "\n\nHDUList.info():\n" + info
+
+    raise ValueError(msg)
 
 
 def _safe_percentiles(x: np.ndarray, p_lo: float, p_hi: float) -> tuple[float, float]:
@@ -423,48 +475,79 @@ class FitsPreviewWidget(QtWidgets.QWidget):
         self._view.clear()
 
     # ---------------------------- FITS loading ----------------------------
-
     def _read_fits_image(self, path: str) -> np.ndarray:
         """Read FITS image robustly.
 
-        Some SCORPIO FITS contain BZERO/BSCALE/BLANK keywords. Astropy cannot
-        memory-map such images if scaling is required, and raises:
-        "Cannot load a memory-mapped image ... Set memmap=False".
+        Previewing FITS in a GUI should prefer *robustness* over maximum IO
+        micro-optimizations. In practice, memmap=True can be fragile on some
+        scaled integer files (BZERO/BSCALE/BLANK), and the performance gain is
+        not important for typical SCORPIO frame sizes.
 
-        We first try memmap=True (fast/low RAM). If that specific case occurs,
-        we transparently fall back to memmap=False.
+        Strategy:
+          1) Try ``fits.open(..., memmap=False)`` and pick the first image-like HDU.
+          2) If that fails, try common extension names ("SCI") and a broader ext range.
+          3) As a last resort, retry with memmap=True (can help for huge files).
         """
 
         def _open(memmap: bool) -> tuple[int, np.ndarray]:
-            with fits.open(path, memmap=memmap, ignore_missing_end=True, ignore_missing_simple=True) as hdul:
+            with fits.open(
+                path,
+                memmap=memmap,
+                ignore_missing_end=True,
+                ignore_missing_simple=True,
+                do_not_scale_image_data=False,
+            ) as hdul:
                 idx, data = _choose_image_hdu(hdul)
-                return idx, data
+                # Materialize into a real ndarray so we are not tied to an open file.
+                arr = np.asarray(data)
+                return idx, arr
+
+        last: Exception | None = None
 
         try:
-            idx, data = _open(memmap=True)
+            idx, arr = _open(memmap=False)
+        except MemoryError as e:
+            last = e
+            idx, arr = _open(memmap=True)
         except Exception as e:
-            msg = str(e)
-            if "memory-mapped" in msg or "BZERO" in msg or "BSCALE" in msg or "BLANK" in msg:
-                idx, data = _open(memmap=False)
+            last = e
+            # Try common extension names and a wider ext range.
+            tried = []
+            for ext in ("SCI", "PRIMARY"):
+                try:
+                    d = fits.getdata(path, ext=ext, memmap=False)
+                    if d is None:
+                        continue
+                    a = np.asarray(d)
+                    if a.ndim >= 2:
+                        idx, arr = (0 if ext == "PRIMARY" else 1), a
+                        break
+                except Exception as ee:
+                    tried.append((ext, str(ee)))
             else:
-                # As a last resort, try astropy.io.fits.getdata on each extension.
-                # Some non-standard FITS variants can confuse HDU.data discovery.
-                for ext in range(0, 16):
+                found = False
+                for ext in range(0, 64):
                     try:
                         d = fits.getdata(path, ext=ext, memmap=False)
                         if d is None:
                             continue
                         a = np.asarray(d)
                         if a.ndim >= 2:
-                            idx, data = ext, d
+                            idx, arr = ext, a
+                            found = True
                             break
                     except Exception:
                         continue
-                else:
-                    raise
+                if not found:
+                    # Retry memmap=True as a last resort.
+                    try:
+                        idx, arr = _open(memmap=True)
+                    except Exception as e2:
+                        # Raise a richer error message.
+                        raise RuntimeError(f"Failed to load FITS: {path}\n{e}\n{e2}") from e2
 
         self._hdu_index = idx
-        return data
+        return arr
 
     def _make_display_array(self, a: np.ndarray) -> np.ndarray:
         a = _as_2d_float(a)

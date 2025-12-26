@@ -1,30 +1,35 @@
-name: windows-release
+name: Windows Release
 
 on:
-  workflow_dispatch:
-  push:
-    tags:
-      - "v*"
-      - "*.*"
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v5.26.0). Leave empty to use current ref."
+        required: false
+        type: string
 
 jobs:
   build:
     runs-on: windows-latest
     permissions:
       contents: write
+
     env:
-      TAG_NAME: ${{ github.event.release.tag_name || github.ref_name }}
+      TAG_NAME: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name || github.ref_name }}
+          ref: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
 
       - name: Install Python deps
         run: |
@@ -35,36 +40,41 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup -y
 
-      - name: Verify Inno Setup (ISCC)
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Continue'
-          $cmd = (Get-Command ISCC.exe -ErrorAction SilentlyContinue)
-          if ($cmd) { Write-Host ('ISCC in PATH: ' + $cmd.Source) -ForegroundColor Cyan } else { Write-Host 'ISCC not in PATH (will fallback to common locations).' -ForegroundColor Yellow }
-          $candidates = @()
-          if ($env:ProgramFiles -and (Test-Path (Join-Path $env:ProgramFiles 'Inno Setup 6\ISCC.exe'))) { $candidates += (Join-Path $env:ProgramFiles 'Inno Setup 6\ISCC.exe') }
-          if (${env:ProgramFiles(x86)} -and (Test-Path (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'))) { $candidates += (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe') }
-          if ($candidates.Count -gt 0) { Write-Host ('ISCC candidate: ' + $candidates[0]) -ForegroundColor Cyan }
-
       - name: Build scorpipe.exe + setup.exe
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
           $ver = "${env:TAG_NAME}".TrimStart('v')
           Write-Host "Building Scorpipe for version: $ver" -ForegroundColor Cyan
+
           & .\packaging\windows\build.ps1 -SkipInstall
 
           if (-not (Test-Path packaging\windows\Output\setup.exe)) {
             throw "setup.exe was not produced. Check Inno Setup / ISCC step logs."
           }
 
-      - name: Package release zip
+      - name: Prepare release folder
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force -Path release | Out-Null
           Copy-Item packaging\windows\Output\setup.exe release\setup.exe -Force
           Copy-Item INSTALL.md release\INSTALL.md -Force
+
+      - name: Generate checksums (SHA256)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $sumPath = "release\SHA256SUMS.txt"
+          "SHA256 checksums for ${env:TAG_NAME}" | Out-File -Encoding utf8 $sumPath
+          "" | Out-File -Append -Encoding utf8 $sumPath
+          (Get-FileHash -Algorithm SHA256 release\setup.exe).Hash + "  setup.exe" | Out-File -Append -Encoding utf8 $sumPath
+          (Get-FileHash -Algorithm SHA256 release\INSTALL.md).Hash + "  INSTALL.md" | Out-File -Append -Encoding utf8 $sumPath
+
+      - name: Package zip
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
           Compress-Archive -Path release\* -DestinationPath Scorpipe-Windows-x64.zip -Force
 
       - name: Upload artifacts
@@ -74,21 +84,25 @@ jobs:
           path: |
             Scorpipe-Windows-x64.zip
             packaging\windows\Output\setup.exe
+            release\SHA256SUMS.txt
 
       - name: Upload build logs (always)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: Windows-build-logs
+          if-no-files-found: ignore
           path: |
             packaging\windows\Output\*.log*
-            packaging\windows\Output\setup.exe
+            packaging\windows\Output\*.txt
+            packaging\windows\Output\*.json
 
       - name: Publish GitHub Release assets
-        if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/')
+        if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.release.tag_name || github.ref_name }}
+          tag_name: ${{ github.event.release.tag_name }}
           files: |
             Scorpipe-Windows-x64.zip
             packaging\windows\Output\setup.exe
+            release\SHA256SUMS.txt
