@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -16,6 +16,9 @@ dependencies = [
   "rich",
   "loguru",
   "matplotlib"
+license = { file = "LICENSE" }
+license-files = ["LICENSE"]
+readme = "README.md"
 ]
 
 [project.optional-dependencies]
@@ -48,17 +51,11 @@ scorpipe = "scorpio_pipe.ui.launcher_app:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+include-package-data = true
+license-files = ["LICENSE"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
 scorpio_pipe = ["resources/**/*"]
-
-[project]
-license = { file = "LICENSE" }
-readme = "README.md"
-
-[tool.setuptools]
-include-package-data = true
-license-files = ["LICENSE"]
