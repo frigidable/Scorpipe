@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -27,7 +28,16 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.widgets import SpanSelector
 
 from scorpio_pipe.plot_style import mpl_style
-from scorpio_pipe.roi import ROI
+
+
+@dataclass
+class ROI:
+    obj_y0: int = 0
+    obj_y1: int = 0
+    sky_top_y0: int = 0
+    sky_top_y1: int = 0
+    sky_bot_y0: int = 0
+    sky_bot_y1: int = 0
 
 
 class SkyRoiDialog(QDialog):

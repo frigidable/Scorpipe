@@ -512,7 +512,7 @@ def build_qc_report(cfg: dict[str, Any], *, out_dir: str | Path | None = None, c
 <head>
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
-  <title>Scorpio Pipe QC — v{_html_escape(PIPELINE_VERSION)}</title>
+  <title>Scorpio Pipe QC — {_html_escape(PIPELINE_VERSION)}</title>
   <style>
     :root {{ --bg:#0b0f16; --card:#121a26; --text:#e7eefc; --muted:#9fb2d7; --ok:#1f9d55; --warn:#f59e0b; --bad:#ef4444; --line:#23314a; }}
     body {{ margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; background:var(--bg); color:var(--text); }}
@@ -557,7 +557,7 @@ def build_qc_report(cfg: dict[str, Any], *, out_dir: str | Path | None = None, c
   <div class='wrap'>
     <div class='top'>
       <div>
-        <h1>Scorpio Pipe — QC report <span class='pill'>v{_html_escape(PIPELINE_VERSION)}</span></h1>
+        <h1>Scorpio Pipe — QC report <span class='pill'>{_html_escape(PIPELINE_VERSION)}</span></h1>
         <div class='meta'>Generated: {_html_escape(payload['generated_utc'])} · Work dir: <code>{_html_escape(str(work_dir))}</code></div>
       </div>
       <div class='meta'>{'' if timings_total is None else 'Last run total: ' + _html_escape(_fmt_seconds(float(timings_total)))}</div>
