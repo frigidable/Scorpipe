@@ -55,7 +55,10 @@ where = ["src"]
 [tool.setuptools.package-data]
 scorpio_pipe = ["resources/**/*"]
 
+[project]
 license = { file = "LICENSE" }
-classifiers = [
-  "License :: OSI Approved :: BSD License",
-]
+readme = "README.md"
+
+[tool.setuptools]
+include-package-data = true
+license-files = ["LICENSE"]
