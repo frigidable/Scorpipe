@@ -30,6 +30,7 @@ import numpy as np
 from astropy.io import fits
 
 from scorpio_pipe.paths import resolve_work_dir
+from scorpio_pipe.roi import ROI
 from scorpio_pipe.plot_style import mpl_style
 from scorpio_pipe.shift_utils import xcorr_shift_subpix, shift2d_subpix_x, shift2d_subpix_x_var, shift2d_subpix_x_mask
 from scorpio_pipe.io.mef import read_sci_var_mask, write_sci_var_mask, try_read_grid
@@ -430,30 +431,70 @@ def _write_mef(
     write_sci_var_mask(path, sci, var=var, mask=mask, header=hdr2, grid=grid, primary_data=sci)
 
 def _roi_from_cfg(cfg: dict[str, Any]) -> ROI:
-    # Canonical v5.x location: cfg['sky']['roi'].
-    # Backward compatibility:
-    #  - cfg['roi'] (older smoke tests)
-    #  - alternative key spellings (obj_y1/obj_y2, etc.)
+    """Parse ROI from config.
+
+    Canonical v5.x location: ``cfg['sky']['roi']``.
+
+    Backward compatibility:
+      - ``cfg['roi']`` (older smoke tests / configs)
+      - legacy naming with y1/y2 instead of y0/y1:
+        ``obj_y1,obj_y2, sky_y1,sky_y2, sky2_y1,sky2_y2``
+    """
+
     sky = (cfg.get("sky") or {}) if isinstance(cfg.get("sky"), dict) else {}
     roi = (sky.get("roi") or {}) if isinstance(sky.get("roi"), dict) else {}
     if not roi and isinstance(cfg.get("roi"), dict):
         roi = cfg.get("roi") or {}
 
-    def _g(*keys: str, default: int | None = None) -> int:
+    def _pick(*keys: str) -> int | None:
         for k in keys:
             if k in roi and roi[k] is not None:
-                return int(roi[k])
-        if default is None:
-            raise KeyError(f"Missing ROI key(s): {keys}")
-        return int(default)
+                try:
+                    return int(roi[k])
+                except Exception:
+                    return int(float(roi[k]))
+        return None
+
+    def _req(name: str, v: int | None) -> int:
+        if v is None:
+            raise KeyError(f"Missing ROI key(s) for '{name}'")
+        return int(v)
+
+    # Object band
+    obj0 = _pick("obj_y0", "obj_ymin")
+    obj1 = _pick("obj_y1", "obj_ymax")
+    if obj0 is None and _pick("obj_y1") is not None and _pick("obj_y2") is not None:
+        # Legacy: obj_y1/obj_y2 are the endpoints
+        obj0 = _pick("obj_y1")
+        obj1 = _pick("obj_y2")
+    if obj1 is None:
+        obj1 = _pick("obj_y2", "obj_ymax")
+
+    # Sky top band
+    st0 = _pick("sky_top_y0", "sky_up_y0", "sky1_y0")
+    st1 = _pick("sky_top_y1", "sky_up_y1", "sky1_y1")
+    if st0 is None and _pick("sky_y1") is not None and _pick("sky_y2") is not None:
+        st0 = _pick("sky_y1")
+        st1 = _pick("sky_y2")
+    if st1 is None:
+        st1 = _pick("sky1_y1", "sky1_y2", "sky_y2")
+
+    # Sky bottom band
+    sb0 = _pick("sky_bot_y0", "sky_down_y0", "sky2_y0")
+    sb1 = _pick("sky_bot_y1", "sky_down_y1", "sky2_y1")
+    if sb0 is None and _pick("sky2_y1") is not None and _pick("sky2_y2") is not None:
+        sb0 = _pick("sky2_y1")
+        sb1 = _pick("sky2_y2")
+    if sb1 is None:
+        sb1 = _pick("sky2_y1", "sky2_y2")
 
     return ROI(
-        obj_y0=_g("obj_y0", "obj_ymin"),
-        obj_y1=_g("obj_y1", "obj_y2", "obj_ymax"),
-        sky_top_y0=_g("sky_top_y0", "sky_up_y0", "sky1_y0"),
-        sky_top_y1=_g("sky_top_y1", "sky_up_y1", "sky1_y1"),
-        sky_bot_y0=_g("sky_bot_y0", "sky_down_y0", "sky2_y0"),
-        sky_bot_y1=_g("sky_bot_y1", "sky_down_y1", "sky2_y1"),
+        obj_y0=_req("object", obj0),
+        obj_y1=_req("object", obj1),
+        sky_top_y0=_req("sky_top", st0),
+        sky_top_y1=_req("sky_top", st1),
+        sky_bot_y0=_req("sky_bottom", sb0),
+        sky_bot_y1=_req("sky_bottom", sb1),
     )
 
 
