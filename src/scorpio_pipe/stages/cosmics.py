@@ -160,17 +160,45 @@ def _two_frame_diff_clean(
     datas: list[np.ndarray] = []
     headers: list[fits.Header] = []
     names: list[str] = []
+
     for p in paths:
         with fits.open(p) as hdul:
             data = np.asarray(hdul[0].data, dtype=np.float32)
             hdr = hdul[0].header.copy()
-        if bias_subtract and superbias is not None and superbias.shape == data.shape:
-            data = data - superbias
-            hdr["BIASSUB"] = (True, "Superbias subtracted")
-            hdr["HISTORY"] = "scorpio_pipe cosmics: bias subtracted using superbias.fits"
         datas.append(data)
         headers.append(hdr)
         names.append(Path(p).stem)
+
+    # Some nights contain frames with a 1-pixel geometry mismatch (e.g. last
+    # row/column missing in one exposure). Downstream stages (stack/linearize)
+    # require consistent geometry, so we crop to the common overlap here.
+    shapes = [d.shape for d in datas]
+    ny = min(s[0] for s in shapes)
+    nx = min(s[1] for s in shapes)
+    if any(s != (ny, nx) for s in shapes):
+        logger.warning("Cosmics(two_frame_diff): input shapes differ %s; cropping to (%d, %d)", shapes, ny, nx)
+        datas = [d[:ny, :nx] for d in datas]
+        for hdr, s in zip(headers, shapes):
+            if s != (ny, nx):
+                hdr["CROPY"] = (ny, "Cropped to common height")
+                hdr["CROPX"] = (nx, "Cropped to common width")
+                hdr["HISTORY"] = f"scorpio_pipe cosmics: cropped from {s} to {(ny, nx)} for geometry match"
+
+    # Apply superbias after cropping if requested.
+    if bias_subtract and superbias is not None:
+        if superbias.shape[0] >= ny and superbias.shape[1] >= nx:
+            sb = superbias[:ny, :nx]
+            datas = [d - sb for d in datas]
+            for hdr in headers:
+                hdr["BIASSUB"] = (True, "Superbias subtracted")
+                hdr["HISTORY"] = "scorpio_pipe cosmics: bias subtracted using superbias.fits"
+        else:
+            logger.warning(
+                "Cosmics(two_frame_diff): superbias shape %s is smaller than cropped science (%d, %d); skipping bias subtraction",
+                getattr(superbias, "shape", None),
+                ny,
+                nx,
+            )
 
     a, b = datas
     diff = (a - b).astype(np.float32)
@@ -395,6 +423,8 @@ def _stack_mad_clean(
 ) -> CosmicsSummary:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "clean").mkdir(parents=True, exist_ok=True)
+    if save_png:
+        (out_dir / "masks").mkdir(parents=True, exist_ok=True)
     if save_mask_fits:
         (out_dir / "masks_fits").mkdir(parents=True, exist_ok=True)
 
@@ -406,13 +436,37 @@ def _stack_mad_clean(
         with fits.open(p) as hdul:
             data = np.asarray(hdul[0].data, dtype=np.float32)
             hdr = hdul[0].header.copy()
-        if bias_subtract and superbias is not None and superbias.shape == data.shape:
-            data = data - superbias
-            hdr["BIASSUB"] = (True, "Superbias subtracted")
-            hdr["HISTORY"] = "scorpio_pipe cosmics: bias subtracted using superbias.fits"
         datas.append(data)
         headers.append(hdr)
         names.append(p.stem)
+
+    # Harmonize geometry (see comment in _two_frame_diff_clean).
+    shapes = [d.shape for d in datas]
+    ny = min(s[0] for s in shapes)
+    nx = min(s[1] for s in shapes)
+    if any(s != (ny, nx) for s in shapes):
+        logger.warning("Cosmics(stack_mad): input shapes differ %s; cropping to (%d, %d)", shapes, ny, nx)
+        datas = [d[:ny, :nx] for d in datas]
+        for hdr, s in zip(headers, shapes):
+            if s != (ny, nx):
+                hdr["CROPY"] = (ny, "Cropped to common height")
+                hdr["CROPX"] = (nx, "Cropped to common width")
+                hdr["HISTORY"] = f"scorpio_pipe cosmics: cropped from {s} to {(ny, nx)} for geometry match"
+
+    if bias_subtract and superbias is not None:
+        if superbias.shape[0] >= ny and superbias.shape[1] >= nx:
+            sb = superbias[:ny, :nx]
+            datas = [d - sb for d in datas]
+            for hdr in headers:
+                hdr["BIASSUB"] = (True, "Superbias subtracted")
+                hdr["HISTORY"] = "scorpio_pipe cosmics: bias subtracted using superbias.fits"
+        else:
+            logger.warning(
+                "Cosmics(stack_mad): superbias shape %s is smaller than cropped science (%d, %d); skipping bias subtraction",
+                getattr(superbias, "shape", None),
+                ny,
+                nx,
+            )
 
     stack = np.stack(datas, axis=0)  # (N, H, W)
     med = np.median(stack, axis=0)

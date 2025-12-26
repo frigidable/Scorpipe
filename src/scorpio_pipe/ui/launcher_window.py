@@ -3356,13 +3356,48 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 self._do_save_cfg()
                 ctx = load_context(self._cfg_path)
 
+            # 1) Generate auxiliary artifacts (auto/template/report) if needed.
             out = run_lineid_prepare(ctx)
+
+            # Restore cursor BEFORE opening interactive GUI.
+            try:
+                QApplication.restoreOverrideCursor()
+            except Exception:
+                pass
+
+            # 2) Open the interactive LineID GUI to create/update hand_pairs.txt.
+            #    This mirrors the v4.13.2 behavior users expect.
+            try:
+                from scorpio_pipe.wavesol_paths import wavesol_dir
+                from scorpio_pipe.stages.lineid_gui import prepare_lineid
+
+                wdir = wavesol_dir(ctx.cfg)
+                superneon_f = wdir / "superneon.fits"
+                peaks_f = wdir / "peaks_candidates.csv"
+                hand_f = self._current_pairs_path() or (wdir / "hand_pairs.txt")
+
+                wcfg = (ctx.cfg.get("wavesol", {}) or {}) if isinstance(ctx.cfg, dict) else {}
+                y_half = int(wcfg.get("y_half", 20))
+
+                prepare_lineid(
+                    ctx.cfg,
+                    superneon_fits=superneon_f,
+                    peaks_candidates_csv=peaks_f,
+                    hand_file=hand_f,
+                    y_half=y_half,
+                    title="LineID",
+                )
+            except Exception as e:
+                # Interactive GUI errors should not mask preparation results.
+                self._log_exception(e)
+
             # Pretty-print: show the key artifacts, not a raw Python object.
             try:
                 msg = ", ".join(f"{k}={v}" for k, v in out.items())
             except Exception:
                 msg = str(out)
             self._log_info(f"LineID wrote: {msg}")
+
             self._refresh_pairs_label()
             try:
                 if hasattr(self, "outputs_lineid"):
@@ -5719,6 +5754,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
     def _log_info(self, msg: str) -> None:
         self.log_view.appendPlainText(msg)
+
+    def _log_warn(self, msg: str) -> None:
+        # Keep the log format consistent with errors, but do not spam dialogs.
+        self.log_view.appendPlainText("[WARN] " + msg)
 
     def _log_error(self, msg: str) -> None:
         self.log_view.appendPlainText("[ERROR] " + msg)

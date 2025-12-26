@@ -1,3 +1,10 @@
+## v5.29.0
+
+### Fixes: LineID GUI restore + robust cosmics geometry + GUI logging
+- **LineID GUI**: the **"Open LineID GUI"** action now actually opens the interactive LineID dialog (v4.13.2 behavior) and allows creating/updating `hand_pairs.txt`.
+- **Cosmics**: fixed crashes when input frames differ by ~1 pixel in geometry (e.g. `(1040, 4112)` vs `(1039, 4111)`). The stage now crops science frames (and superbias) to the common overlap and proceeds.
+- **GUI**: fixed crash `AttributeError: 'LauncherWindow' object has no attribute '_log_warn'` (Sky ROI selection now logs warnings correctly).
+
 ## v5.27.0
 
 ### Critical fixes: LineID + cosmics for small N + work-dir resolver
