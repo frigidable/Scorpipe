@@ -9,7 +9,9 @@ from PySide6 import QtCore
 class PandasTableModel(QtCore.QAbstractTableModel):
     """A tiny QAbstractTableModel wrapper for a pandas DataFrame."""
 
-    def __init__(self, df: pd.DataFrame | None = None, parent: QtCore.QObject | None = None):
+    def __init__(
+        self, df: pd.DataFrame | None = None, parent: QtCore.QObject | None = None
+    ):
         super().__init__(parent)
         self._df = df if df is not None else pd.DataFrame()
 
@@ -28,7 +30,12 @@ class PandasTableModel(QtCore.QAbstractTableModel):
     def columnCount(self, parent: QtCore.QModelIndex = QtCore.QModelIndex()) -> int:  # noqa: N802
         return 0 if parent.isValid() else int(self._df.shape[1])
 
-    def headerData(self, section: int, orientation: QtCore.Qt.Orientation, role: int = QtCore.Qt.DisplayRole):  # noqa: N802
+    def headerData(
+        self,
+        section: int,
+        orientation: QtCore.Qt.Orientation,
+        role: int = QtCore.Qt.DisplayRole,
+    ):  # noqa: N802
         if role != QtCore.Qt.DisplayRole:
             return None
         if orientation == QtCore.Qt.Horizontal:

@@ -1,14 +1,14 @@
+from __future__ import annotations
+
 """Frame browser widget (filters + table + FITS preview).
 
 This is used on the "Project & data" page after Inspect.
 """
 
-
-from __future__ import annotations
-
-
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
+
 import pandas as pd
 from PySide6 import QtCore, QtGui, QtWidgets
 
@@ -47,7 +47,9 @@ class FrameBrowser(QtWidgets.QWidget):
         self.edit_search = QtWidgets.QLineEdit()
         self.edit_search.setPlaceholderText("Search object/path…")
         self.combo_kind = QtWidgets.QComboBox()
-        self.combo_kind.addItems(["all", "obj", "sky", "sunsky", "neon", "flat", "bias"])
+        self.combo_kind.addItems(
+            ["all", "obj", "sky", "sunsky", "neon", "flat", "bias"]
+        )
         self.combo_disperser = QtWidgets.QComboBox()
         self.combo_disperser.addItem("all")
         self.combo_slit = QtWidgets.QComboBox()
@@ -74,13 +76,13 @@ class FrameBrowser(QtWidgets.QWidget):
         lay.addWidget(splitter, 1)
 
         left = QtWidgets.QWidget()
-        vbox_left = QtWidgets.QVBoxLayout(left)
-        vbox_left.setContentsMargins(0, 0, 0, 0)
-        vbox_left.setSpacing(6)
+        l = QtWidgets.QVBoxLayout(left)
+        l.setContentsMargins(0, 0, 0, 0)
+        l.setSpacing(6)
 
         self.lbl_counts = QtWidgets.QLabel("—")
         self.lbl_counts.setStyleSheet("color: #A0A0A0;")
-        vbox_left.addWidget(self.lbl_counts)
+        l.addWidget(self.lbl_counts)
 
         self.model = PandasTableModel(pd.DataFrame())
         self.table = QtWidgets.QTableView()
@@ -92,7 +94,7 @@ class FrameBrowser(QtWidgets.QWidget):
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        vbox_left.addWidget(self.table, 1)
+        l.addWidget(self.table, 1)
 
         splitter.addWidget(left)
 
@@ -126,7 +128,9 @@ class FrameBrowser(QtWidgets.QWidget):
         self.combo_slit.currentTextChanged.connect(self._apply_filters)
         self.combo_binning.currentTextChanged.connect(self._apply_filters)
         self.btn_reset.clicked.connect(self._reset_filters)
-        self.table.selectionModel().selectionChanged.connect(lambda *_: self._on_selection_changed())
+        self.table.selectionModel().selectionChanged.connect(
+            lambda *_: self._on_selection_changed()
+        )
         self.btn_open_file.clicked.connect(self._open_selected)
         self.btn_use_setup.clicked.connect(self._emit_use_setup)
 
@@ -235,7 +239,9 @@ class FrameBrowser(QtWidgets.QWidget):
             "fid",
             "path",
         ]
-        cols = [c for c in preferred if c in out.columns] + [c for c in out.columns if c not in preferred]
+        cols = [c for c in preferred if c in out.columns] + [
+            c for c in out.columns if c not in preferred
+        ]
         out = out[cols]
 
         self._df = out

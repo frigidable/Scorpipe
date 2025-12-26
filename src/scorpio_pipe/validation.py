@@ -24,7 +24,7 @@ class ValidationReport:
 
 def _get(cfg: dict[str, Any], dotted: str, default: Any = None) -> Any:
     cur: Any = cfg
-    for part in dotted.split('.'):
+    for part in dotted.split("."):
         if not isinstance(cur, dict) or part not in cur:
             return default
         cur = cur[part]
@@ -82,57 +82,85 @@ def validate_config(
     # --- schema (typos / types) ---
     sch = schema_validate(cfg)
     for it in sch.errors:
-        errors.append(ValidationIssue('error', it.code, it.message, it.hint))
+        errors.append(ValidationIssue("error", it.code, it.message, it.hint))
     for it in sch.warnings:
-        warnings.append(ValidationIssue('warning', it.code, it.message, it.hint))
+        warnings.append(ValidationIssue("warning", it.code, it.message, it.hint))
 
     # --- unknown keys (fail-fast) ---
     strict_unknown = bool(cfg.get("strict_unknown", True))
     if strict_unknown:
         unknown = find_unknown_keys(cfg)
         if unknown:
-            msg = "; ".join(f"{sec}: {', '.join(keys)}" for sec, keys in unknown.items())
-            errors.append(ValidationIssue("error", "UNKNOWN_KEYS", f"Unknown config keys: {msg}", "Fix typos or disable strict_unknown"))
-
+            msg = "; ".join(
+                f"{sec}: {', '.join(keys)}" for sec, keys in unknown.items()
+            )
+            errors.append(
+                ValidationIssue(
+                    "error",
+                    "UNKNOWN_KEYS",
+                    f"Unknown config keys: {msg}",
+                    "Fix typos or disable strict_unknown",
+                )
+            )
 
     # --- basic paths ---
-    data_dir = _get(cfg, 'data_dir')
-    work_dir = _get(cfg, 'work_dir')
+    data_dir = _get(cfg, "data_dir")
+    work_dir = _get(cfg, "work_dir")
 
     if not data_dir:
-        errors.append(ValidationIssue('error', 'DATA_DIR', 'data_dir is missing', 'Select the night folder'))
+        errors.append(
+            ValidationIssue(
+                "error", "DATA_DIR", "data_dir is missing", "Select the night folder"
+            )
+        )
     else:
         p = _as_abs(str(data_dir), base_dir)
         if not p.exists():
             (errors if strict_paths else warnings).append(
                 ValidationIssue(
-                    'error' if strict_paths else 'warning',
-                    'DATA_DIR',
-                    f'data_dir does not exist: {p}',
-                    'Fix the path',
+                    "error" if strict_paths else "warning",
+                    "DATA_DIR",
+                    f"data_dir does not exist: {p}",
+                    "Fix the path",
                 )
             )
 
     if not work_dir:
-        errors.append(ValidationIssue('error', 'WORK_DIR', 'work_dir is missing', 'Choose a work directory'))
+        errors.append(
+            ValidationIssue(
+                "error", "WORK_DIR", "work_dir is missing", "Choose a work directory"
+            )
+        )
     else:
         try:
             _as_abs(str(work_dir), base_dir)
         except Exception:
-            errors.append(ValidationIssue('error', 'WORK_DIR', f'Bad work_dir: {work_dir}', 'Fix the path'))
+            errors.append(
+                ValidationIssue(
+                    "error", "WORK_DIR", f"Bad work_dir: {work_dir}", "Fix the path"
+                )
+            )
 
     # --- frames ---
-    frames = _get(cfg, 'frames', {}) or {}
+    frames = _get(cfg, "frames", {}) or {}
     if not isinstance(frames, dict):
-        errors.append(ValidationIssue('error', 'FRAMES', 'frames must be a mapping', 'Recreate config'))
+        errors.append(
+            ValidationIssue(
+                "error", "FRAMES", "frames must be a mapping", "Recreate config"
+            )
+        )
         frames = {}
 
-    for kind in ('bias', 'flat', 'neon', 'obj', 'sky', 'sunsky'):
+    for kind in ("bias", "flat", "neon", "obj", "sky", "sunsky"):
         v = frames.get(kind)
         if v is None:
             continue
         if not isinstance(v, list):
-            errors.append(ValidationIssue('error', 'FRAMES', f'frames.{kind} must be a list', 'Fix YAML'))
+            errors.append(
+                ValidationIssue(
+                    "error", "FRAMES", f"frames.{kind} must be a list", "Fix YAML"
+                )
+            )
             continue
         for fp in v:
             try:
@@ -140,14 +168,21 @@ def validate_config(
                 if not p.exists():
                     (errors if strict_paths else warnings).append(
                         ValidationIssue(
-                            'error' if strict_paths else 'warning',
-                            'MISSING_FRAME',
-                            f'Missing file: {kind}: {p}',
-                            'If you moved the night folder, rebuild config',
+                            "error" if strict_paths else "warning",
+                            "MISSING_FRAME",
+                            f"Missing file: {kind}: {p}",
+                            "If you moved the night folder, rebuild config",
                         )
                     )
             except Exception:
-                warnings.append(ValidationIssue('warning', 'BAD_FRAME', f'Bad frame path in {kind}: {fp}', 'Fix YAML'))
+                warnings.append(
+                    ValidationIssue(
+                        "warning",
+                        "BAD_FRAME",
+                        f"Bad frame path in {kind}: {fp}",
+                        "Fix YAML",
+                    )
+                )
 
     ok = len(errors) == 0
     return ValidationReport(ok=ok, errors=errors, warnings=warnings)

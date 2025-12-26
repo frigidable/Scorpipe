@@ -67,8 +67,14 @@ def apply_theme(app: QtWidgets.QApplication, *, mode: str = "dark") -> None:
     pal.setColor(QtGui.QPalette.ColorRole.HighlightedText, hl_text)
     pal.setColor(QtGui.QPalette.ColorRole.BrightText, QtGui.QColor(255, 0, 0))
 
-    pal.setColor(QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.Text, disabled)
-    pal.setColor(QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.ButtonText, disabled)
+    pal.setColor(
+        QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.Text, disabled
+    )
+    pal.setColor(
+        QtGui.QPalette.ColorGroup.Disabled,
+        QtGui.QPalette.ColorRole.ButtonText,
+        disabled,
+    )
     app.setPalette(pal)
 
     # Global font: keep defaults, but encourage consistent sizing.

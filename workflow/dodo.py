@@ -28,13 +28,17 @@ def _resolve_from_root(p: str | Path) -> Path:
     return p if p.is_absolute() else (_project_root() / p).resolve()
 
 
-def _write_manifest_both(*, out_path: Path, cfg: dict[str, Any], cfg_path: Path, work_dir: Path) -> None:
+def _write_manifest_both(
+    *, out_path: Path, cfg: dict[str, Any], cfg_path: Path, work_dir: Path
+) -> None:
     """Write manifest into qc/ and mirror into legacy report/."""
     p = write_manifest(out_path=out_path, cfg=cfg, cfg_path=cfg_path)
     try:
         legacy = work_dir / "report"
         legacy.mkdir(parents=True, exist_ok=True)
-        (legacy / "manifest.json").write_text(p.read_text(encoding="utf-8"), encoding="utf-8")
+        (legacy / "manifest.json").write_text(
+            p.read_text(encoding="utf-8"), encoding="utf-8"
+        )
     except Exception:
         pass
 
@@ -44,7 +48,9 @@ def _touch(path: Path, payload: dict | None = None) -> None:
     if payload is None:
         path.write_text(f"created {time.ctime()}\n", encoding="utf-8")
     else:
-        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
 
 
 def _timed(stage: str, work_dir: Path, fn) -> None:
@@ -98,6 +104,7 @@ def _load_cfg() -> dict:
         _CFG_CACHE = load_config(_cfg_path())
     return _CFG_CACHE
 
+
 def task_manifest():
     """
     Общий manifest для воспроизводимости: что было выбрано и где work_dir.
@@ -107,7 +114,13 @@ def task_manifest():
     out = work_dir / "qc" / "manifest.json"
 
     def _action():
-        _timed("manifest", work_dir, lambda: _write_manifest_both(out_path=out, cfg=cfg, cfg_path=_cfg_path(), work_dir=work_dir))
+        _timed(
+            "manifest",
+            work_dir,
+            lambda: _write_manifest_both(
+                out_path=out, cfg=cfg, cfg_path=_cfg_path(), work_dir=work_dir
+            ),
+        )
 
     return {
         "actions": [_action],
@@ -127,17 +140,19 @@ def task_qc_report():
     def _action():
         def _run():
             from scorpio_pipe.qc_report import build_qc_report
+
             build_qc_report(cfg, out_dir=out_html.parent)
 
         _timed("qc_report", work_dir, _run)
 
     return {
         "actions": [_action],
-        "file_dep": [ _cfg_path(), work_dir / "qc" / "manifest.json" ],
+        "file_dep": [_cfg_path(), work_dir / "qc" / "manifest.json"],
         "targets": [out_html, out_json],
         "task_dep": ["manifest"],
         "clean": True,
     }
+
 
 def task_superbias():
     cfg = _load_cfg()
@@ -149,6 +164,7 @@ def task_superbias():
     def _action():
         def _run():
             from scorpio_pipe.stages.calib import build_superbias
+
             # передаём путь к YAML-конфигу, который задан через $env:CONFIG
             build_superbias(_cfg_path(), out_path=out)
             # legacy mirror
@@ -179,6 +195,7 @@ def task_superflat():
     def _action():
         def _run():
             from scorpio_pipe.stages.calib import build_superflat
+
             # передаём путь к YAML-конфигу, который задан через $env:CONFIG
             build_superflat(_cfg_path(), out_path=out)
             # legacy mirror
@@ -211,6 +228,7 @@ def task_cosmics():
     def _action():
         def _run():
             from scorpio_pipe.stages.cosmics import clean_cosmics
+
             clean_cosmics(_cfg_path(), out_dir=out.parent)
 
         _timed("cosmics", work_dir, _run)
@@ -225,10 +243,13 @@ def task_cosmics():
 
 def task_superneon():
     """Build stacked super-neon + candidates."""
+
     def _action():
         cfg = _load_cfg()
+
         def _run():
             from scorpio_pipe.stages.superneon import build_superneon
+
             build_superneon(cfg)
 
         _timed("superneon", resolve_work_dir(cfg), _run)
@@ -236,14 +257,20 @@ def task_superneon():
     cfg = _load_cfg()
     work_dir = resolve_work_dir(cfg)
     from scorpio_pipe.wavesol_paths import wavesol_dir as _wavesol_dir
+
     outdir = _wavesol_dir(cfg)
     neon_list = cfg["frames"].get("neon", [])
 
     # bias subtraction in superneon is optional
-    superneon_cfg = (cfg.get("superneon") or {}) if isinstance(cfg.get("superneon"), dict) else {}
+    superneon_cfg = (
+        (cfg.get("superneon") or {}) if isinstance(cfg.get("superneon"), dict) else {}
+    )
     bias_sub = bool(superneon_cfg.get("bias_sub", True))
 
-    superbias = Path(cfg.get("calib", {}).get("superbias_path") or (work_dir / "calibs" / "superbias.fits"))
+    superbias = Path(
+        cfg.get("calib", {}).get("superbias_path")
+        or (work_dir / "calibs" / "superbias.fits")
+    )
     targets = [
         outdir / "superneon.fits",
         outdir / "superneon.png",
@@ -264,24 +291,34 @@ def task_superneon():
         "clean": True,
     }
 
+
 def task_lineid_prepare():
     cfg = _load_cfg()
     w = resolve_work_dir(cfg)
     from scorpio_pipe.wavesol_paths import wavesol_dir as _wavesol_dir
+
     wsol_dir = _wavesol_dir(cfg)
 
     superneon_fits = wsol_dir / "superneon.fits"
     peaks_csv = wsol_dir / "peaks_candidates.csv"
-    hand_file = wsol_dir / "hand_pairs.txt"   # итог ручной привязки
+    hand_file = wsol_dir / "hand_pairs.txt"  # итог ручной привязки
 
     # neon_lines.csv: resolve from work_dir/config_dir/project_root or packaged resource
     from scorpio_pipe.resource_utils import resolve_resource
+
     lines_csv = cfg.get("wavesol", {}).get("neon_lines_csv", "neon_lines.csv")
-    lines_path = resolve_resource(lines_csv, work_dir=w, config_dir=Path(cfg.get("config_dir", w)), project_root=Path(cfg.get("project_root", _project_root())), allow_package=True).path
+    lines_path = resolve_resource(
+        lines_csv,
+        work_dir=w,
+        config_dir=Path(cfg.get("config_dir", w)),
+        project_root=Path(cfg.get("project_root", _project_root())),
+        allow_package=True,
+    ).path
 
     def _action():
         def _run():
             from scorpio_pipe.stages.lineid import prepare_lineid
+
             prepare_lineid(
                 cfg,
                 superneon_fits=superneon_fits,
@@ -347,7 +384,10 @@ def task_sky_sub():
     return {
         "actions": [_action],
         # Depends on linearize preview and/or per-exposure products
-        "file_dep": [_cfg_path(), work_dir / "products" / "lin" / "linearize_done.json"],
+        "file_dep": [
+            _cfg_path(),
+            work_dir / "products" / "lin" / "linearize_done.json",
+        ],
         "targets": [done, out_dir / "qc_sky.json", out_dir / "roi.json"],
         "task_dep": ["linearize"],
         "clean": True,

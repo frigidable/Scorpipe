@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
 
 import numpy as np
 
@@ -16,14 +18,16 @@ def _read_pairs(path: Path) -> list[tuple[float, float, bool]]:
         s = line.strip()
         if not s or s.startswith("#"):
             continue
-        blend = ("blend" in s.lower())
+        blend = "blend" in s.lower()
         nums = re.findall(r"[-+]?\d+(?:\.\d+)?", s)
         if len(nums) >= 2:
             out.append((float(nums[0]), float(nums[1]), blend))
     return out
 
 
-def _save_pairs(path: Path, pairs: list[tuple[float, float, bool]], *, header_note: str = "") -> None:
+def _save_pairs(
+    path: Path, pairs: list[tuple[float, float, bool]], *, header_note: str = ""
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         f.write("# manual pairs: x  lambda   (# blend if marked)\n")
@@ -80,7 +84,9 @@ class PairRejectorDialog(QtWidgets.QDialog):
         self.spin_deg = QtWidgets.QSpinBox()
         self.spin_deg.setRange(2, 10)
         self.spin_deg.setValue(self.poly_deg)
-        self.spin_deg.setToolTip("Polynomial degree for quick 1D fit used in this QC tool")
+        self.spin_deg.setToolTip(
+            "Polynomial degree for quick 1D fit used in this QC tool"
+        )
         head.addWidget(QtWidgets.QLabel("deg:"))
         head.addWidget(self.spin_deg)
 
@@ -164,8 +170,14 @@ class PairRejectorDialog(QtWidgets.QDialog):
             self.table.insertRow(i)
 
             chk = QtWidgets.QTableWidgetItem("")
-            chk.setFlags(QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
-            chk.setCheckState(QtCore.Qt.Checked if self._active[i] else QtCore.Qt.Unchecked)
+            chk.setFlags(
+                QtCore.Qt.ItemIsUserCheckable
+                | QtCore.Qt.ItemIsEnabled
+                | QtCore.Qt.ItemIsSelectable
+            )
+            chk.setCheckState(
+                QtCore.Qt.Checked if self._active[i] else QtCore.Qt.Unchecked
+            )
             self.table.setItem(i, 0, chk)
 
             def _it(v: str) -> QtWidgets.QTableWidgetItem:
@@ -188,7 +200,7 @@ class PairRejectorDialog(QtWidgets.QDialog):
         it = self.table.item(row, 0)
         if it is None:
             return
-        self._active[row] = (it.checkState() == QtCore.Qt.Checked)
+        self._active[row] = it.checkState() == QtCore.Qt.Checked
         self.recalculate()
 
     def _restore_all(self) -> None:
@@ -209,8 +221,16 @@ class PairRejectorDialog(QtWidgets.QDialog):
 
     def recalculate(self) -> None:
         deg = int(self.spin_deg.value())
-        x_all = np.array([p[0] for p in self._pairs], float) if self._pairs else np.array([])
-        lam_all = np.array([p[1] for p in self._pairs], float) if self._pairs else np.array([])
+        x_all = (
+            np.array([p[0] for p in self._pairs], float)
+            if self._pairs
+            else np.array([])
+        )
+        lam_all = (
+            np.array([p[1] for p in self._pairs], float)
+            if self._pairs
+            else np.array([])
+        )
         active = np.array(self._active, bool) if self._pairs else np.array([], bool)
 
         self.fig.clear()
@@ -227,7 +247,9 @@ class PairRejectorDialog(QtWidgets.QDialog):
         x_use = x_all[active]
         lam_use = lam_all[active]
         if x_use.size < deg + 1:
-            self.lbl_stats.setText(f"Need ≥{deg+1} active pairs for deg={deg} (now {x_use.size})")
+            self.lbl_stats.setText(
+                f"Need ≥{deg+1} active pairs for deg={deg} (now {x_use.size})"
+            )
             # still show which points are active
             ax.scatter(x_use, np.zeros_like(x_use), s=28)
             self.canvas.draw()
@@ -246,15 +268,25 @@ class PairRejectorDialog(QtWidgets.QDialog):
                 for c in range(1, 6):
                     cell = self.table.item(i, c)
                     if cell is not None:
-                        cell.setForeground(QtGui.QBrush(QtGui.QColor(200, 200, 200) if self._active[i] else QtGui.QColor(140, 140, 140)))
+                        cell.setForeground(
+                            QtGui.QBrush(
+                                QtGui.QColor(200, 200, 200)
+                                if self._active[i]
+                                else QtGui.QColor(140, 140, 140)
+                            )
+                        )
         self.table.blockSignals(False)
 
         rms = float(np.sqrt(np.mean(resid_all[active] ** 2)))
-        self.lbl_stats.setText(f"Active: {active.sum()}/{len(active)}   deg={deg}   RMS={rms:.3f} Å")
+        self.lbl_stats.setText(
+            f"Active: {active.sum()}/{len(active)}   deg={deg}   RMS={rms:.3f} Å"
+        )
 
         ax.scatter(x_all[active], resid_all[active], s=34, label="used")
         if (~active).any():
-            ax.scatter(x_all[~active], resid_all[~active], s=28, marker="x", label="rejected")
+            ax.scatter(
+                x_all[~active], resid_all[~active], s=28, marker="x", label="rejected"
+            )
         ax.legend(frameon=False, loc="best")
         self.fig.tight_layout()
         self.canvas.draw()
@@ -285,12 +317,18 @@ class PairRejectorDialog(QtWidgets.QDialog):
         if not self._pairs:
             return
         default = self.pairs_path.with_name(self.pairs_path.stem + ".cleaned.txt")
-        fn, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save cleaned pairs", str(default), "Text files (*.txt)")
+        fn, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save cleaned pairs", str(default), "Text files (*.txt)"
+        )
         if not fn:
             return
         out = Path(fn)
         clean = self._current_clean_pairs()
-        _save_pairs(out, clean, header_note=f"cleaned from {self.pairs_path.name}, kept {len(clean)}/{len(self._pairs)}")
+        _save_pairs(
+            out,
+            clean,
+            header_note=f"cleaned from {self.pairs_path.name}, kept {len(clean)}/{len(self._pairs)}",
+        )
         self.pairs_path = out
         self.lbl_path.setText(str(self.pairs_path))
 
@@ -298,7 +336,11 @@ class PairRejectorDialog(QtWidgets.QDialog):
         if not self._pairs:
             return
         clean = self._current_clean_pairs()
-        _save_pairs(self.pairs_path, clean, header_note=f"cleaned in-place, kept {len(clean)}/{len(self._pairs)}")
+        _save_pairs(
+            self.pairs_path,
+            clean,
+            header_note=f"cleaned in-place, kept {len(clean)}/{len(self._pairs)}",
+        )
         self.accept()
 
 

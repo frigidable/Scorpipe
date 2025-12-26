@@ -11,6 +11,7 @@ Usage:
 
 This does NOT require real FITS from SCORPIO; it is meant to catch obvious regressions.
 """
+
 from __future__ import annotations
 
 import tempfile
@@ -32,7 +33,12 @@ def _make_synthetic_frame(shape=(32, 64), *, seed=0, obj_y=(14, 18)) -> np.ndarr
 
     # "Sky": smooth background + a few fake OH-like emission lines in x
     x = np.arange(nx)[None, :]
-    sky = 50.0 + 0.2 * x + 8.0 * np.exp(-0.5 * ((x - 18.0) / 1.5) ** 2) + 6.0 * np.exp(-0.5 * ((x - 43.0) / 2.0) ** 2)
+    sky = (
+        50.0
+        + 0.2 * x
+        + 8.0 * np.exp(-0.5 * ((x - 18.0) / 1.5) ** 2)
+        + 6.0 * np.exp(-0.5 * ((x - 43.0) / 2.0) ** 2)
+    )
 
     # Object: narrow spatial profile + one emission feature
     y = np.arange(ny)[:, None]

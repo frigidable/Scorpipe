@@ -105,7 +105,7 @@ class LambdaWindowsDialog(QDialog):
         info = QLabel(
             "Выберите 2–6 диапазонов по X (λ или пиксели), где есть яркие и узкие линии (макс. S/N).\n"
             "Эти окна используются для стабильного определения сдвигов (Δλ и/или y-align).\n"
-            "ЛКМ+drag — выделить, кнопки ниже — удалить/очистить." 
+            "ЛКМ+drag — выделить, кнопки ниже — удалить/очистить."
         )
         info.setWordWrap(True)
         lay.addWidget(info)
@@ -174,8 +174,10 @@ class LambdaWindowsDialog(QDialog):
             st1 = int(self._roi.get("sky_top_y1", 0))
             sb0 = int(self._roi.get("sky_bot_y0", 0))
             sb1 = int(self._roi.get("sky_bot_y1", 0))
+
             def _clip(v):
                 return max(0, min(ny - 1, int(v)))
+
             obj_y0, obj_y1 = sorted((_clip(obj_y0), _clip(obj_y1)))
             st0, st1 = sorted((_clip(st0), _clip(st1)))
             sb0, sb1 = sorted((_clip(sb0), _clip(sb1)))
@@ -213,6 +215,7 @@ class LambdaWindowsDialog(QDialog):
             k = 7
             if spec.size > k:
                 from numpy.lib.stride_tricks import sliding_window_view
+
                 sw = sliding_window_view(spec, k)
                 sm = np.nanmedian(sw, axis=1)
                 spec2 = spec.copy()
@@ -228,7 +231,9 @@ class LambdaWindowsDialog(QDialog):
         self.ax.clear()
         with mpl_style():
             self.ax.plot(self._x, self._spec)
-            self.ax.set_xlabel("Wavelength [Å]" if self.windows.unit == "A" else "X [pix]")
+            self.ax.set_xlabel(
+                "Wavelength [Å]" if self.windows.unit == "A" else "X [pix]"
+            )
             self.ax.set_ylabel("Median sky flux")
             self.ax.grid(True, alpha=0.3)
             self.ax.set_title("Select windows with bright, narrow lines")

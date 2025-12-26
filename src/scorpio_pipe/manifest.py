@@ -26,7 +26,15 @@ def _md5_file(path: Path) -> str | None:
 def _pkg_versions() -> dict[str, str]:
     out: dict[str, str] = {}
     # keep this defensive: missing optional deps shouldn't break manifest
-    for name in ("numpy", "astropy", "pandas", "yaml", "pydantic", "matplotlib", "scipy"):
+    for name in (
+        "numpy",
+        "astropy",
+        "pandas",
+        "yaml",
+        "pydantic",
+        "matplotlib",
+        "scipy",
+    ):
         try:
             mod = __import__(name)
             ver = getattr(mod, "__version__", "unknown")
@@ -53,9 +61,21 @@ def build_manifest(*, cfg: dict, cfg_path: str | Path | None = None) -> Manifest
     now = datetime.now(timezone.utc)
     cfg_path_p = Path(cfg_path).expanduser().resolve() if cfg_path is not None else None
 
-    work_dir = Path(str(cfg.get("work_dir", ""))).expanduser().resolve() if cfg.get("work_dir") else None
-    config_dir = Path(str(cfg.get("config_dir", ""))).expanduser().resolve() if cfg.get("config_dir") else None
-    project_root = Path(str(cfg.get("project_root", ""))).expanduser().resolve() if cfg.get("project_root") else None
+    work_dir = (
+        Path(str(cfg.get("work_dir", ""))).expanduser().resolve()
+        if cfg.get("work_dir")
+        else None
+    )
+    config_dir = (
+        Path(str(cfg.get("config_dir", ""))).expanduser().resolve()
+        if cfg.get("config_dir")
+        else None
+    )
+    project_root = (
+        Path(str(cfg.get("project_root", ""))).expanduser().resolve()
+        if cfg.get("project_root")
+        else None
+    )
 
     frames = cfg.get("frames") if isinstance(cfg.get("frames"), dict) else {}
     frames_summary: dict[str, object] = {}
@@ -102,10 +122,14 @@ def build_manifest(*, cfg: dict, cfg_path: str | Path | None = None) -> Manifest
         },
         "dependencies": _pkg_versions(),
         "paths": {
-            "config_path": str(cfg_path_p) if cfg_path_p else str(cfg.get("config_path", "")),
+            "config_path": str(cfg_path_p)
+            if cfg_path_p
+            else str(cfg.get("config_path", "")),
             "work_dir": str(work_dir) if work_dir else str(cfg.get("work_dir", "")),
             "data_dir": str(cfg.get("data_dir", "")),
-            "project_root": str(project_root) if project_root else str(cfg.get("project_root", "")),
+            "project_root": str(project_root)
+            if project_root
+            else str(cfg.get("project_root", "")),
         },
         "setup": cfg.get("setup", cfg.get("frames", {}).get("__setup__", {})),
         "frames": frames_summary,
@@ -122,7 +146,9 @@ def build_manifest(*, cfg: dict, cfg_path: str | Path | None = None) -> Manifest
             },
         },
         "config": {
-            "md5": _md5_file(cfg_path_p) if cfg_path_p and cfg_path_p.exists() else None,
+            "md5": _md5_file(cfg_path_p)
+            if cfg_path_p and cfg_path_p.exists()
+            else None,
             "profiles_applied": cfg.get("_profiles_applied"),
         },
     }
@@ -130,7 +156,9 @@ def build_manifest(*, cfg: dict, cfg_path: str | Path | None = None) -> Manifest
     return Manifest(payload=payload)
 
 
-def write_manifest(*, out_path: str | Path, cfg: dict, cfg_path: str | Path | None = None) -> Path:
+def write_manifest(
+    *, out_path: str | Path, cfg: dict, cfg_path: str | Path | None = None
+) -> Path:
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     m = build_manifest(cfg=cfg, cfg_path=cfg_path)

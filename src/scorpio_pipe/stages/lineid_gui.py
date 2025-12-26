@@ -3,11 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import sys
-from typing import Optional
+from typing import Optional, Iterable
 import re
 import numpy as np
 from astropy.io import fits
+from PySide6 import QtWidgets, QtCore, QtGui
 
+# Local UI widget: robust embedded PDF viewer (QtPdfWidgets → PyMuPDF fallback)
+from scorpio_pipe.ui import PdfViewer
 
 
 def _project_root() -> Path:
@@ -63,7 +66,6 @@ def _profile_1d(img2d: np.ndarray, y_half: int = 20) -> np.ndarray:
         return np.asarray(prof, dtype=float)
 
     return np.zeros(nx, dtype=float)
-
 
 
 def _read_peaks_candidates(path: Path) -> tuple[np.ndarray, np.ndarray]:
@@ -128,7 +130,9 @@ def _read_neon_lines_csv(path: Path) -> list[float]:
     return out
 
 
-def _auto_min_amp(pk_amp: np.ndarray, sigma_k: float = 5.0, q_noise: float = 0.40) -> float:
+def _auto_min_amp(
+    pk_amp: np.ndarray, sigma_k: float = 5.0, q_noise: float = 0.40
+) -> float:
     """Pick a sane default amplitude threshold.
 
     The peak list often contains a mix of real lines and local maxima from
@@ -165,7 +169,7 @@ def _read_hand_pairs(hand_file: Path) -> list[tuple[float, float, bool]]:
         s = line.strip()
         if not s or s.startswith("#"):
             continue
-        blend = ("blend" in s.lower())
+        blend = "blend" in s.lower()
         nums = re.findall(r"[-+]?\d+(?:\.\d+)?", s)
         if len(nums) >= 2:
             pairs.append((float(nums[0]), float(nums[1]), blend))
@@ -183,6 +187,7 @@ def _save_hand_pairs(hand_file: Path, pairs: list[tuple[float, float, bool]]) ->
 # NOTE: AtlasImageViewer was removed.
 # We now use a single robust PdfViewer widget (QtPdfWidgets → PyMuPDF fallback)
 # that supports mouse+keyboard navigation similar to a typical PDF reader.
+
 
 @dataclass
 class LineIdInputs:
@@ -205,8 +210,6 @@ class LineIdInputs:
 def run_lineid_gui(inp: LineIdInputs) -> None:
     from PySide6 import QtCore, QtGui, QtWidgets
     import pyqtgraph as pg
-
-    from scorpio_pipe.ui import PdfViewer
 
     # 1) QApplication ДО всего
     app = QtWidgets.QApplication.instance()
@@ -240,7 +243,9 @@ def run_lineid_gui(inp: LineIdInputs) -> None:
             if inp.min_amp_default is not None:
                 self.pk_min_amp = float(inp.min_amp_default)
             else:
-                self.pk_min_amp = _auto_min_amp(self.pk_amp, sigma_k=float(inp.min_amp_sigma_k))
+                self.pk_min_amp = _auto_min_amp(
+                    self.pk_amp, sigma_k=float(inp.min_amp_sigma_k)
+                )
             self._pk_active = self.pk_x.copy()
             self.ref_lams = inp.ref_lams
             self.hand_file = inp.hand_file
@@ -250,7 +255,9 @@ def run_lineid_gui(inp: LineIdInputs) -> None:
             self.atlas_page0 = inp.atlas_page0
             self._atlas_inited = False
 
-            self.pairs: list[tuple[float, float, bool]] = _read_hand_pairs(self.hand_file)
+            self.pairs: list[tuple[float, float, bool]] = _read_hand_pairs(
+                self.hand_file
+            )
             self.used = {lam for _, lam, _ in self.pairs}
 
             self._build()
@@ -331,7 +338,9 @@ def run_lineid_gui(inp: LineIdInputs) -> None:
                 lo = float(self.lam_min_A)
                 hi = float(self.lam_max_A)
                 if hi > lo:
-                    self.edit_filter.setPlaceholderText(f"Авто-диапазон: {lo:.0f}–{hi:.0f} Å (можно искать по числу)")
+                    self.edit_filter.setPlaceholderText(
+                        f"Авто-диапазон: {lo:.0f}–{hi:.0f} Å (можно искать по числу)"
+                    )
             rowf.addWidget(self.edit_filter, 1)
             rlay.addLayout(rowf)
 
@@ -370,7 +379,9 @@ def run_lineid_gui(inp: LineIdInputs) -> None:
             self.table.setColumnCount(3)
             self.table.setHorizontalHeaderLabels(["x", "λ", "flag"])
             self.table.horizontalHeader().setStretchLastSection(True)
-            self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+            self.table.setSelectionBehavior(
+                QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+            )
             rlay.addWidget(self.table, 1)
 
             self.status = QtWidgets.QLabel("")
@@ -383,8 +394,8 @@ def run_lineid_gui(inp: LineIdInputs) -> None:
             self.split.setStretchFactor(2, 2)
 
             box = QtWidgets.QDialogButtonBox(
-                QtWidgets.QDialogButtonBox.StandardButton.Ok |
-                QtWidgets.QDialogButtonBox.StandardButton.Cancel
+                QtWidgets.QDialogButtonBox.StandardButton.Ok
+                | QtWidgets.QDialogButtonBox.StandardButton.Cancel
             )
             lay.addWidget(box)
 
@@ -436,7 +447,9 @@ def run_lineid_gui(inp: LineIdInputs) -> None:
             lo = max(0, i0 - halfwin)
             hi = min(len(self.prof), i0 + halfwin + 1)
             if lo >= hi:
-                return float(np.nanmax(self.prof)) if np.isfinite(self.prof).any() else 0.0
+                return (
+                    float(np.nanmax(self.prof)) if np.isfinite(self.prof).any() else 0.0
+                )
             slab = self.prof[lo:hi]
             m = np.nanmax(slab)
             if not np.isfinite(m):
@@ -450,8 +463,11 @@ def run_lineid_gui(inp: LineIdInputs) -> None:
 
             # 2) какие пики считаем "непривязанными"?
             # Мы считаем привязанным тот пик, возле которого стоит x0 из pairs.
-            paired_x = np.array([x0 for x0, _, _ in self.pairs], dtype=float) if self.pairs else np.array([],
-                                                                                                          dtype=float)
+            paired_x = (
+                np.array([x0 for x0, _, _ in self.pairs], dtype=float)
+                if self.pairs
+                else np.array([], dtype=float)
+            )
 
             def is_paired(px: float, tol: float = 0.5) -> bool:
                 if paired_x.size == 0:
@@ -480,7 +496,9 @@ def run_lineid_gui(inp: LineIdInputs) -> None:
                 ymax = self._peak_local_max(float(x0), halfwin=10)
                 y = ymax * 1.05 if np.isfinite(ymax) else 0.0
 
-                txt = pg.TextItem(text=f"{lam:.2f}", color=(220, 0, 0), anchor=(0.5, 0.0))
+                txt = pg.TextItem(
+                    text=f"{lam:.2f}", color=(220, 0, 0), anchor=(0.5, 0.0)
+                )
                 # повернуть текст вертикально
                 txt.setAngle(90)
 
@@ -504,7 +522,9 @@ def run_lineid_gui(inp: LineIdInputs) -> None:
                 self._pk_active = self.pk_x.copy()
 
             self._redraw_markers()
-            self._set_status(f"Peaks: {len(self._pk_active)} / {len(self.pk_x)} (min amp={thr:g})")
+            self._set_status(
+                f"Peaks: {len(self._pk_active)} / {len(self.pk_x)} (min amp={thr:g})"
+            )
 
         def _replot_peaks(self):
             self._redraw_markers()
@@ -536,7 +556,9 @@ def run_lineid_gui(inp: LineIdInputs) -> None:
             # Use a single robust embedded PDF viewer.
             # It prefers QtPdfWidgets (vector), and falls back to PyMuPDF with
             # full mouse+keyboard navigation.
-            state_page0 = int(self.atlas_page0) if isinstance(self.atlas_page0, int) else 0
+            state_page0 = (
+                int(self.atlas_page0) if isinstance(self.atlas_page0, int) else 0
+            )
             viewer = PdfViewer(atlas_path, state=None, parent=self)
             # Jump to the relevant page right away.
             try:
@@ -583,6 +605,7 @@ def run_lineid_gui(inp: LineIdInputs) -> None:
 
         def _on_click(self, ev):
             from PySide6 import QtCore
+
             if ev.button() != QtCore.Qt.MouseButton.LeftButton:
                 return
             pos = ev.scenePos()
@@ -623,7 +646,9 @@ def run_lineid_gui(inp: LineIdInputs) -> None:
                 f = float(txt)
                 if f < 1000:
                     # "585" → всё, что начинается на 585*
-                    return [v for v in vals if str(int(round(v))).startswith(str(int(f)))]
+                    return [
+                        v for v in vals if str(int(round(v))).startswith(str(int(f)))
+                    ]
                 return [v for v in vals if abs(v - f) <= 1.0]
             except Exception:
                 return [v for v in vals if txt in f"{v:.2f}"]
@@ -659,13 +684,20 @@ def run_lineid_gui(inp: LineIdInputs) -> None:
 
         def _refresh_table(self):
             from PySide6 import QtCore, QtWidgets
+
             self.table.setRowCount(len(self.pairs))
             for r, (x0, lam, blend) in enumerate(self.pairs):
                 itx = QtWidgets.QTableWidgetItem(f"{x0:.3f}")
                 itl = QtWidgets.QTableWidgetItem(f"{lam:.2f}")
                 itf = QtWidgets.QTableWidgetItem("blend" if blend else "")
-                itx.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
-                itl.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+                itx.setTextAlignment(
+                    QtCore.Qt.AlignmentFlag.AlignRight
+                    | QtCore.Qt.AlignmentFlag.AlignVCenter
+                )
+                itl.setTextAlignment(
+                    QtCore.Qt.AlignmentFlag.AlignRight
+                    | QtCore.Qt.AlignmentFlag.AlignVCenter
+                )
                 self.table.setItem(r, 0, itx)
                 self.table.setItem(r, 1, itl)
                 self.table.setItem(r, 2, itf)
@@ -866,7 +898,9 @@ def prepare_lineid(
         from scorpio_pipe.instrument_db import find_grism
 
         inst_name = None
-        inst_section = cfg.get("instrument") if isinstance(cfg.get("instrument"), dict) else {}
+        inst_section = (
+            cfg.get("instrument") if isinstance(cfg.get("instrument"), dict) else {}
+        )
         if isinstance(inst_section, dict):
             inst_name = str(inst_section.get("name") or "").strip() or None
         if not inst_name:
@@ -883,18 +917,23 @@ def prepare_lineid(
     t = title or f"LineID | {cfg.get('object','OBJECT')}"
     min_amp_default = wcfg.get("gui_min_amp", None)
     min_amp_sigma_k = float(wcfg.get("gui_min_amp_sigma_k", 5.0))
-    run_lineid_gui(LineIdInputs(
-        x=x, prof=prof,
-        pk_x=pk_x, pk_amp=pk_amp,
-        ref_lams=ref_lams,
-        hand_file=hand_file,
-        title=t,
-        atlas_pdf=atlas_path,
-        atlas_page0=atlas_page0,
-        disperser=disp_raw,
-        lam_min_A=lam_min_A,
-        lam_max_A=lam_max_A,
-        min_amp_default=(float(min_amp_default) if min_amp_default is not None else None),
-        min_amp_sigma_k=min_amp_sigma_k,
-    ))
-
+    run_lineid_gui(
+        LineIdInputs(
+            x=x,
+            prof=prof,
+            pk_x=pk_x,
+            pk_amp=pk_amp,
+            ref_lams=ref_lams,
+            hand_file=hand_file,
+            title=t,
+            atlas_pdf=atlas_path,
+            atlas_page0=atlas_page0,
+            disperser=disp_raw,
+            lam_min_A=lam_min_A,
+            lam_max_A=lam_max_A,
+            min_amp_default=(
+                float(min_amp_default) if min_amp_default is not None else None
+            ),
+            min_amp_sigma_k=min_amp_sigma_k,
+        )
+    )

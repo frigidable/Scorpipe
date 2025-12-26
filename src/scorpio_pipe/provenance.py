@@ -17,7 +17,9 @@ from astropy.io import fits
 from .version import as_header_cards
 
 
-def add_provenance(hdr: fits.Header, cfg: dict[str, Any] | None = None, *, stage: str | None = None) -> fits.Header:
+def add_provenance(
+    hdr: fits.Header, cfg: dict[str, Any] | None = None, *, stage: str | None = None
+) -> fits.Header:
     """Return a *copy* of ``hdr`` with stable provenance cards.
 
     Notes

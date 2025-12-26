@@ -21,6 +21,7 @@ class MaskBits(IntEnum):
     6: CLIPPED        (rejected by sigma-clip in stacking)
     7: RESERVED       (future)
     """
+
     BADPIX = 1 << 0
     COSMIC = 1 << 1
     SATURATED = 1 << 2

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from scorpio_pipe.app_paths import ensure_dir
 from scorpio_pipe.inspect import KIND_ORDER
 from scorpio_pipe.paths import resolve_work_dir
 from scorpio_pipe.wavesol_paths import wavesol_dir
@@ -103,7 +104,9 @@ class StageFramesWindow(QtWidgets.QMainWindow):
 
         self._last_work_dir: Path | None = None
 
-    def set_context(self, cfg: dict | None, *, inspect_df=None, data_dir: Path | None = None) -> None:
+    def set_context(
+        self, cfg: dict | None, *, inspect_df=None, data_dir: Path | None = None
+    ) -> None:
         self._cfg = cfg
         self._inspect_df = inspect_df
         self._data_dir = data_dir
@@ -164,7 +167,7 @@ class StageFramesWindow(QtWidgets.QMainWindow):
         # The inspect step already provides absolute `path`, so no base_dir is needed.
         fb.set_frames_df(self._inspect_df)
         fb.useSetupRequested.connect(lambda sel: self.useSetupRequested.emit(sel))
-        self.tabs.addTab(fb, 'Night frames')
+        self.tabs.addTab(fb, "Night frames")
 
     def _add_files_tab(self, name: str, paths: list[Path]) -> None:
         w = _FilesBrowser(self)
