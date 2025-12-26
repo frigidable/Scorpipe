@@ -43,8 +43,8 @@ from scorpio_pipe.maskbits import (
 
 from ..logging_utils import get_logger
 from ..provenance import add_provenance
-from ..wavesol_paths import resolve_work_dir
-from ..wavesol_paths import wavesol_dir
+from scorpio_pipe.paths import resolve_work_dir
+from scorpio_pipe.wavesol_paths import wavesol_dir
 
 log = get_logger(__name__)
 

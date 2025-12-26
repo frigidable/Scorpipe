@@ -27,7 +27,7 @@ from scorpio_pipe.version import PIPELINE_VERSION
 from scorpio_pipe.maskbits import BADPIX, COSMIC, NO_COVERAGE, REJECTED, SATURATED, USER
 
 from ..plot_style import mpl_style
-from ..wavesol_paths import resolve_work_dir
+from scorpio_pipe.paths import resolve_work_dir
 from ..shift_utils import xcorr_shift_subpix
 
 

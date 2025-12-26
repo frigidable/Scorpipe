@@ -20,7 +20,8 @@ from typing import Any, Callable, Iterable
 from scorpio_pipe.config import load_config_any
 from scorpio_pipe.products import products_for_task, task_is_complete
 from scorpio_pipe.stage_state import compute_stage_hash, is_stage_up_to_date, load_stage_state, record_stage_result
-from scorpio_pipe.wavesol_paths import resolve_work_dir, wavesol_dir
+from scorpio_pipe.paths import resolve_work_dir
+from scorpio_pipe.wavesol_paths import wavesol_dir
 from scorpio_pipe.work_layout import ensure_work_layout
 
 log = logging.getLogger(__name__)
@@ -46,10 +47,22 @@ def load_context(cfg_path: str | Path) -> RunContext:
     return RunContext(cfg_path=p, cfg=cfg)
 
 
-def run_lineid_prepare(ctx: RunContext) -> None:
-    """Compatibility wrapper for the GUI."""
+def run_lineid_prepare(ctx: RunContext) -> dict[str, Path]:
+    """Compatibility wrapper for the GUI.
+
+    Runs (or skips) ``lineid_prepare`` and returns the expected output paths.
+    """
 
     run_sequence(ctx, ["lineid_prepare"], resume=True, force=False, config_path=ctx.cfg_path)
+
+    # Even if the stage is skipped (Up-to-date), the GUI wants to know
+    # where the artifacts are.
+    outdir = wavesol_dir(ctx.cfg)
+    return {
+        "template": (outdir / "manual_pairs_template.csv"),
+        "auto": (outdir / "manual_pairs_auto.csv"),
+        "report": (outdir / "lineid_report.txt"),
+    }
 
 
 def run_wavesolution(ctx: RunContext) -> None:
@@ -163,11 +176,12 @@ def _task_superneon(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelT
     return Path(res.superneon_fits)
 
 
-def _task_lineid_prepare(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> None:
+def _task_lineid_prepare(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> dict[str, Path]:
     from scorpio_pipe.stages.lineid_auto_backup import prepare_lineid
 
     _ = out_dir
-    prepare_lineid(cfg)
+    _ = cancel_token
+    return prepare_lineid(cfg)
 
 
 def _task_wavesolution(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> None:
@@ -425,7 +439,7 @@ def run_sequence(
     force: bool = False,
     cancel_token: CancelToken | None = None,
     config_path: Path | None = None,
-) -> None:
+) -> dict[str, Any]:
     if isinstance(cfg_or_path, RunContext):
         cfg = cfg_or_path.cfg
         if config_path is None:
@@ -437,6 +451,8 @@ def run_sequence(
     out_dir = Path(work_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    results: dict[str, Any] = {}
+
     plan = plan_sequence(cfg, task_names, resume=resume, force=force, config_path=config_path)
     for it in plan:
         if cancel_token is not None and cancel_token.cancelled:
@@ -447,6 +463,7 @@ def run_sequence(
         t = it.task
         if it.action == "skip":
             log.info("Skip %s (%s)", t, it.reason)
+            results[t] = None
             continue
 
         fn = TASKS.get(t)
@@ -461,13 +478,16 @@ def run_sequence(
 
         log.info("Run %s...", t)
         try:
-            _call_maybe_with_cancel(fn, cfg=cfg, out_dir=out_dir, config_path=config_path, cancel_token=cancel_token)
+            res = _call_maybe_with_cancel(fn, cfg=cfg, out_dir=out_dir, config_path=config_path, cancel_token=cancel_token)
+            results[t] = res
             record_stage_result(out_dir, t, status="ok", stage_hash=stage_hash, message=None, trace=None)
         except Exception as e:
             tb = traceback.format_exc()
             log.error("Task %s failed: %s", t, e, exc_info=True)
             record_stage_result(out_dir, t, status="failed", stage_hash=stage_hash, message=str(e), trace=tb)
             raise
+
+    return results
 
 
 def run_one(cfg_or_path: dict[str, Any] | str | Path, task_name: str, *, resume: bool = True, force: bool = False) -> None:

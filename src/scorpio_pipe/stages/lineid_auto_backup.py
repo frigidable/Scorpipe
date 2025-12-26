@@ -149,7 +149,18 @@ def _suggest_linear_pairs(
 
 
 def prepare_lineid(cfg: dict[str, Any]) -> dict[str, Path]:
-    from scorpio_pipe.wavesol_paths import resolve_work_dir, wavesol_dir
+    """Prepare files for the LineID GUI.
+
+    Writes:
+      - manual_pairs_template.csv  (top peaks template for manual selection)
+      - manual_pairs_auto.csv      (auto-suggested (x_pix, lambda) pairs)
+      - lineid_report.txt          (human-readable summary)
+
+    Returns a dict with these paths.
+    """
+
+    from scorpio_pipe.paths import resolve_work_dir
+    from scorpio_pipe.wavesol_paths import wavesol_dir
 
     work_dir = resolve_work_dir(cfg)
     outdir = wavesol_dir(cfg)

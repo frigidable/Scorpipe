@@ -6,7 +6,7 @@ This module provides a small, explicit product registry used by QC/UI.
 It intentionally does NOT try to be exhaustive for every intermediate file;
 instead it lists stable, canonical artifacts users can expect.
 
-v5.26 notes
+v5.27 notes
 ----------
 - QC outputs live in work/qc/ (legacy mirror in work/report/)
 - Calibrations live in work/calibs/ (legacy mirror/compat in work/calib/)
@@ -22,7 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from scorpio_pipe.wavesol_paths import resolve_work_dir, wavesol_dir
+from scorpio_pipe.paths import resolve_work_dir
+from scorpio_pipe.wavesol_paths import wavesol_dir
 from scorpio_pipe.work_layout import ensure_work_layout
 
 

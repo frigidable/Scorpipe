@@ -68,6 +68,300 @@ def _robust_mad(x: np.ndarray, axis: int = 0) -> np.ndarray:
     return mad
 
 
+def _robust_sigma_mad_1d(x: np.ndarray) -> float:
+    """Robust sigma estimate from MAD (1D flatten)."""
+
+    x = np.asarray(x, dtype=np.float64).ravel()
+    if x.size == 0:
+        return 0.0
+    med = np.median(x)
+    mad = np.median(np.abs(x - med))
+    return float(1.4826 * mad)
+
+
+def _boxcar_mean2d(img: np.ndarray, r: int) -> np.ndarray:
+    """Fast boxcar mean using an integral image (no SciPy)."""
+
+    if r <= 0:
+        return np.asarray(img, dtype=np.float32)
+
+    a = np.asarray(img, dtype=np.float32)
+    pad = int(r)
+    ap = np.pad(a, ((pad, pad), (pad, pad)), mode="reflect")
+    # integral image
+    s = ap.cumsum(axis=0).cumsum(axis=1)
+    k = 2 * pad + 1
+    # sum in kxk window for each pixel
+    # Using inclusion-exclusion on the integral image.
+    total = (
+        s[k:, k:]
+        - s[:-k, k:]
+        - s[k:, :-k]
+        + s[:-k, :-k]
+    )
+    return (total / float(k * k)).astype(np.float32)
+
+
+def _dilate_mask(mask: np.ndarray, r: int = 1) -> np.ndarray:
+    """Binary dilation with a (2r+1)x(2r+1) square structuring element."""
+
+    if r <= 0:
+        return mask
+    m = mask.astype(bool)
+    h, w = m.shape
+    out = m.copy()
+    for dy in range(-r, r + 1):
+        for dx in range(-r, r + 1):
+            if dy == 0 and dx == 0:
+                continue
+            y0_src = max(0, -dy)
+            y1_src = min(h, h - dy)
+            x0_src = max(0, -dx)
+            x1_src = min(w, w - dx)
+            y0_dst = y0_src + dy
+            y1_dst = y1_src + dy
+            x0_dst = x0_src + dx
+            x1_dst = x1_src + dx
+            out[y0_dst:y1_dst, x0_dst:x1_dst] |= m[y0_src:y1_src, x0_src:x1_src]
+    return out
+
+
+def _two_frame_diff_clean(
+    paths: list[Path],
+    *,
+    out_dir: Path,
+    superbias: np.ndarray | None,
+    k: float,
+    bias_subtract: bool,
+    save_png: bool,
+    save_mask_fits: bool,
+    dilate: int = 1,
+) -> CosmicsSummary:
+    """Cosmic cleaning specialized for N=2 exposures.
+
+    With only two frames, MAD-around-median is mathematically unable to flag
+    outliers (the MAD scales with the difference itself). Instead we build a
+    per-pixel difference frame and flag spikes that are both globally and
+    locally deviant; then we replace them by the value from the other exposure.
+    """
+
+    if len(paths) != 2:
+        raise ValueError("_two_frame_diff_clean expects exactly 2 frames")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "clean").mkdir(parents=True, exist_ok=True)
+    if save_png:
+        (out_dir / "masks").mkdir(parents=True, exist_ok=True)
+    if save_mask_fits:
+        (out_dir / "masks_fits").mkdir(parents=True, exist_ok=True)
+
+    datas: list[np.ndarray] = []
+    headers: list[fits.Header] = []
+    names: list[str] = []
+    for p in paths:
+        with fits.open(p) as hdul:
+            data = np.asarray(hdul[0].data, dtype=np.float32)
+            hdr = hdul[0].header.copy()
+        if bias_subtract and superbias is not None and superbias.shape == data.shape:
+            data = data - superbias
+            hdr["BIASSUB"] = (True, "Superbias subtracted")
+            hdr["HISTORY"] = "scorpio_pipe cosmics: bias subtracted using superbias.fits"
+        datas.append(data)
+        headers.append(hdr)
+        names.append(Path(p).stem)
+
+    a, b = datas
+    diff = (a - b).astype(np.float32)
+    absdiff = np.abs(diff)
+
+    sigma = _robust_sigma_mad_1d(diff)
+    if not np.isfinite(sigma) or sigma <= 0:
+        sigma = float(np.std(diff)) if diff.size else 0.0
+
+    # local scale proxy: 5x5 mean of |diff|
+    loc = _boxcar_mean2d(absdiff, r=2)
+
+    k2 = max(5.0, 0.8 * float(k))
+    thr_global = float(k2 * sigma)
+    # require also locally deviant (spike-like)
+    thr_local = (4.0 * loc + 2.5 * sigma).astype(np.float32)
+
+    cand = absdiff > np.maximum(thr_global, thr_local)
+
+    # Assign to the higher frame (sign of diff)
+    m0 = cand & (diff > 0)
+    m1 = cand & (diff < 0)
+
+    # Expand masks slightly to cover halo pixels
+    m0 = _dilate_mask(m0, r=int(dilate))
+    m1 = _dilate_mask(m1, r=int(dilate))
+
+    cleaned0 = a.copy()
+    cleaned1 = b.copy()
+    cleaned0[m0] = b[m0]
+    cleaned1[m1] = a[m1]
+
+    # Summaries
+    replaced_pixels = int(m0.sum() + m1.sum())
+    total_pix = int(a.size + b.size)
+    replaced_fraction = float(replaced_pixels) / float(total_pix) if total_pix else 0.0
+    per_frame_fraction = [float(m0.mean()), float(m1.mean())]
+
+    out_files: dict[str, str] = {}
+    for i, (name, hdr, img, m) in enumerate(
+        [(names[0], headers[0], cleaned0, m0), (names[1], headers[1], cleaned1, m1)]
+    ):
+        out_f = out_dir / "clean" / f"{name}_clean.fits"
+        h = hdr.copy()
+        h["COSMCLEA"] = (True, "Cosmics cleaned")
+        h["COSM_K"] = (float(k), "Threshold control")
+        h["COSM_MD"] = ("two_frame_diff", "Cosmics method")
+        h["HISTORY"] = "scorpio_pipe cosmics: replaced spikes using the other exposure"
+        fits.writeto(out_f, img.astype(np.float32), header=h, overwrite=True)
+        out_files[name] = str(out_f)
+
+        if save_png:
+            _save_png(out_dir / "masks" / f"{name}_mask.png", m.astype(np.uint8), title=f"Cosmic mask: {name}")
+
+        if save_mask_fits:
+            mf = out_dir / "masks_fits" / f"{name}_mask.fits"
+            fits.writeto(mf, (m.astype(np.uint16)) * 1, overwrite=True)
+
+    sum_excl = (a * (~m0) + b * (~m1)).astype(np.float32)
+    cov = ((~m0).astype(np.int16) + (~m1).astype(np.int16)).astype(np.int16)
+    sum_f = out_dir / "sum_excl_cosmics.fits"
+    cov_f = out_dir / "coverage.fits"
+    fits.writeto(sum_f, sum_excl, overwrite=True)
+    fits.writeto(cov_f, cov, overwrite=True)
+    if save_png:
+        _save_png(out_dir / "sum_excl_cosmics.png", sum_excl, title="Sum (cosmics excluded)")
+        _save_png(out_dir / "coverage.png", cov, title="Coverage (non-cosmic count)")
+
+    outputs = {
+        "clean_dir": str((out_dir / "clean").resolve()),
+        "sum_excl_fits": str(sum_f.resolve()),
+        "coverage_fits": str(cov_f.resolve()),
+        "sigma_diff": float(sigma),
+    }
+    if save_png:
+        outputs.update(
+            {
+                "sum_excl_png": str((out_dir / "sum_excl_cosmics.png").resolve()),
+                "coverage_png": str((out_dir / "coverage.png").resolve()),
+                "masks_dir": str((out_dir / "masks").resolve()),
+            }
+        )
+    if save_mask_fits:
+        outputs["masks_fits_dir"] = str((out_dir / "masks_fits").resolve())
+
+    return CosmicsSummary(
+        kind="",
+        n_frames=2,
+        k=float(k),
+        replaced_pixels=replaced_pixels,
+        replaced_fraction=replaced_fraction,
+        per_frame_fraction=per_frame_fraction,
+        outputs=outputs,
+    )
+
+
+def _single_frame_laplacian_clean(
+    path: Path,
+    *,
+    out_dir: Path,
+    superbias: np.ndarray | None,
+    k: float,
+    bias_subtract: bool,
+    save_png: bool,
+    save_mask_fits: bool,
+    dilate: int = 1,
+) -> CosmicsSummary:
+    """Single-frame fallback using a Laplacian high-pass detector."""
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "clean").mkdir(parents=True, exist_ok=True)
+    if save_png:
+        (out_dir / "masks").mkdir(parents=True, exist_ok=True)
+    if save_mask_fits:
+        (out_dir / "masks_fits").mkdir(parents=True, exist_ok=True)
+
+    with fits.open(path) as hdul:
+        img = np.asarray(hdul[0].data, dtype=np.float32)
+        hdr = hdul[0].header.copy()
+
+    if bias_subtract and superbias is not None and superbias.shape == img.shape:
+        img = img - superbias
+        hdr["BIASSUB"] = (True, "Superbias subtracted")
+
+    # Laplacian (4-neighbor) with reflect padding
+    ip = np.pad(img, ((1, 1), (1, 1)), mode="reflect")
+    lap = (
+        -4.0 * ip[1:-1, 1:-1]
+        + ip[:-2, 1:-1]
+        + ip[2:, 1:-1]
+        + ip[1:-1, :-2]
+        + ip[1:-1, 2:]
+    ).astype(np.float32)
+
+    sigma = _robust_sigma_mad_1d(lap)
+    if not np.isfinite(sigma) or sigma <= 0:
+        sigma = float(np.std(lap)) if lap.size else 0.0
+
+    # Local baseline for replacement: 5x5 mean
+    loc_mean = _boxcar_mean2d(img, r=2)
+
+    # Candidate pixels: strong high-frequency outliers.
+    thr = max(5.0, 0.8 * float(k)) * sigma
+    m = np.abs(lap) > float(thr)
+    m = _dilate_mask(m, r=int(dilate))
+
+    cleaned = img.copy()
+    cleaned[m] = loc_mean[m]
+
+    replaced_pixels = int(m.sum())
+    replaced_fraction = float(m.mean()) if m.size else 0.0
+
+    name = Path(path).stem
+    out_f = out_dir / "clean" / f"{name}_clean.fits"
+    h = hdr.copy()
+    h["COSMCLEA"] = (True, "Cosmics cleaned")
+    h["COSM_K"] = (float(k), "Threshold control")
+    h["COSM_MD"] = ("laplacian", "Cosmics method")
+    h["HISTORY"] = "scorpio_pipe cosmics: laplacian detector + local mean replacement"
+    fits.writeto(out_f, cleaned.astype(np.float32), header=h, overwrite=True)
+
+    if save_png:
+        _save_png(out_dir / "masks" / f"{name}_mask.png", m.astype(np.uint8), title=f"Cosmic mask: {name}")
+    if save_mask_fits:
+        fits.writeto(out_dir / "masks_fits" / f"{name}_mask.fits", (m.astype(np.uint16)) * 1, overwrite=True)
+
+    sum_f = out_dir / "sum_excl_cosmics.fits"
+    cov_f = out_dir / "coverage.fits"
+    fits.writeto(sum_f, (img * (~m)).astype(np.float32), overwrite=True)
+    fits.writeto(cov_f, (~m).astype(np.int16), overwrite=True)
+
+    outputs = {
+        "clean_dir": str((out_dir / "clean").resolve()),
+        "sum_excl_fits": str(sum_f.resolve()),
+        "coverage_fits": str(cov_f.resolve()),
+        "sigma_lap": float(sigma),
+    }
+    if save_png:
+        outputs["masks_dir"] = str((out_dir / "masks").resolve())
+    if save_mask_fits:
+        outputs["masks_fits_dir"] = str((out_dir / "masks_fits").resolve())
+
+    return CosmicsSummary(
+        kind="",
+        n_frames=1,
+        k=float(k),
+        replaced_pixels=replaced_pixels,
+        replaced_fraction=float(replaced_fraction),
+        per_frame_fraction=[float(replaced_fraction)],
+        outputs=outputs,
+    )
+
+
 def _save_png(path: Path, arr: np.ndarray, title: str | None = None) -> None:
     # Optional visualization; avoid heavy dependencies.
     import matplotlib
@@ -273,7 +567,7 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
         kind_out.mkdir(parents=True, exist_ok=True)
 
         summary: CosmicsSummary
-        if method in ("stack_mad", "mad_stack", "stack") and len(paths) >= 2:
+        if method in ("auto", "stack_mad", "mad_stack", "stack", "two_frame_diff", "laplacian"):
             # Ensure all frames have the same shape
             shapes = []
             for pth in paths:
@@ -284,35 +578,91 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
                     shapes.append(None)
             shapes_ok = all(s == shapes[0] and s is not None for s in shapes)
 
-            if shapes_ok:
-                summary = _stack_mad_clean(
-                    paths,
-                    out_dir=kind_out,
-                    superbias=superbias,
-                    k=k,
-                    bias_subtract=bias_subtract,
-                    save_png=save_png,
-                    save_mask_fits=save_mask_fits,
-                )
+            if not shapes_ok:
+                (kind_out / "clean").mkdir(parents=True, exist_ok=True)
+                outputs = {"note": "shape mismatch: skipped cosmics cleaning"}
                 summary = CosmicsSummary(
                     kind=kind,
-                    n_frames=summary.n_frames,
-                    k=summary.k,
-                    replaced_pixels=summary.replaced_pixels,
-                    replaced_fraction=summary.replaced_fraction,
-                    per_frame_fraction=summary.per_frame_fraction,
-                    outputs=summary.outputs,
+                    n_frames=len(paths),
+                    k=float(k),
+                    replaced_pixels=0,
+                    replaced_fraction=0.0,
+                    per_frame_fraction=[0.0] * len(paths),
+                    outputs=outputs,
                 )
             else:
-                # Fallback: just copy files to make the stage non-fatal
-                (kind_out / "clean").mkdir(parents=True, exist_ok=True)
-                outputs = {"note": "shape mismatch: skipped stack MAD cleaning"}
-                summary = CosmicsSummary(kind=kind, n_frames=len(paths), k=float(k), replaced_pixels=0, replaced_fraction=0.0,
-                                         per_frame_fraction=[0.0]*len(paths), outputs=outputs)
+                # Choose best available method for the frame count.
+                if method in ("laplacian",) and len(paths) != 1:
+                    log.warning("method=laplacian requires exactly 1 frame; falling back to auto")
+                if method in ("two_frame_diff",) and len(paths) != 2:
+                    log.warning("method=two_frame_diff requires exactly 2 frames; falling back to auto")
+
+                if len(paths) >= 3 and method in ("auto", "stack_mad", "mad_stack", "stack"):
+                    summary = _stack_mad_clean(
+                        paths,
+                        out_dir=kind_out,
+                        superbias=superbias,
+                        k=k,
+                        bias_subtract=bias_subtract,
+                        save_png=save_png,
+                        save_mask_fits=save_mask_fits,
+                    )
+                elif len(paths) == 2 and method in ("auto", "stack_mad", "mad_stack", "stack", "two_frame_diff"):
+                    summary = _two_frame_diff_clean(
+                        paths,
+                        out_dir=kind_out,
+                        superbias=superbias,
+                        k=k,
+                        bias_subtract=bias_subtract,
+                        save_png=save_png,
+                        save_mask_fits=save_mask_fits,
+                    )
+                elif len(paths) == 1 and method in ("auto", "laplacian"):
+                    summary = _single_frame_laplacian_clean(
+                        paths[0],
+                        out_dir=kind_out,
+                        superbias=superbias,
+                        k=k,
+                        bias_subtract=bias_subtract,
+                        save_png=save_png,
+                        save_mask_fits=save_mask_fits,
+                    )
+                else:
+                    # Nothing to do
+                    (kind_out / "clean").mkdir(parents=True, exist_ok=True)
+                    outputs = {"note": f"not enough frames for cosmics cleaning (n={len(paths)})"}
+                    summary = CosmicsSummary(
+                        kind=kind,
+                        n_frames=len(paths),
+                        k=float(k),
+                        replaced_pixels=0,
+                        replaced_fraction=0.0,
+                        per_frame_fraction=[0.0] * len(paths),
+                        outputs=outputs,
+                    )
+
+                # Ensure 'kind' is set in summary
+                if summary.kind != kind:
+                    summary = CosmicsSummary(
+                        kind=kind,
+                        n_frames=summary.n_frames,
+                        k=summary.k,
+                        replaced_pixels=summary.replaced_pixels,
+                        replaced_fraction=summary.replaced_fraction,
+                        per_frame_fraction=summary.per_frame_fraction,
+                        outputs=summary.outputs,
+                    )
         else:
-            outputs = {"note": f"method={method} not supported in this build"}
-            summary = CosmicsSummary(kind=kind, n_frames=len(paths), k=float(k), replaced_pixels=0, replaced_fraction=0.0,
-                                     per_frame_fraction=[0.0]*len(paths), outputs=outputs)
+            outputs = {"note": f"method={method} not supported"}
+            summary = CosmicsSummary(
+                kind=kind,
+                n_frames=len(paths),
+                k=float(k),
+                replaced_pixels=0,
+                replaced_fraction=0.0,
+                per_frame_fraction=[0.0] * len(paths),
+                outputs=outputs,
+            )
 
         all_summaries.append(
             {

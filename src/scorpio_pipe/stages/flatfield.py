@@ -8,7 +8,7 @@ import numpy as np
 from astropy.io import fits
 
 from scorpio_pipe.app_paths import ensure_dir
-from scorpio_pipe.wavesol_paths import resolve_work_dir
+from scorpio_pipe.paths import resolve_work_dir
 
 
 def _read_fits(path: Path) -> tuple[np.ndarray, fits.Header]:

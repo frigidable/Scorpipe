@@ -11,7 +11,7 @@ import numpy as np
 from scorpio_pipe.products import Product, group_by_stage, list_products
 from scorpio_pipe.qc_thresholds import build_alerts, compute_thresholds
 from scorpio_pipe.version import PIPELINE_VERSION
-from scorpio_pipe.wavesol_paths import resolve_work_dir
+from scorpio_pipe.paths import resolve_work_dir
 
 
 def _read_json(p: Path) -> dict[str, Any] | None:

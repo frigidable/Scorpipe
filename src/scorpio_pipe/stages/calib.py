@@ -14,7 +14,7 @@ log = logging.getLogger(__name__)
 
 def _resolve_work_dir(c: Dict) -> Path:
     """Resolve work_dir robustly and ensure canonical layout exists."""
-    from scorpio_pipe.wavesol_paths import resolve_work_dir
+    from scorpio_pipe.paths import resolve_work_dir
     from scorpio_pipe.work_layout import ensure_work_layout
 
     wd = resolve_work_dir(c)

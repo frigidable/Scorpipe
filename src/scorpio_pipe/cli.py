@@ -255,7 +255,7 @@ def cmd_products(args: argparse.Namespace) -> int:
     """List expected pipeline products for a given config.yaml."""
     from scorpio_pipe.config import load_config
     from scorpio_pipe.products import list_products
-    from scorpio_pipe.wavesol_paths import resolve_work_dir
+    from scorpio_pipe.paths import resolve_work_dir
 
     cfg_path = Path(args.config).expanduser().resolve()
     cfg = load_config(cfg_path)

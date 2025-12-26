@@ -34,7 +34,7 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 from astropy.io import fits
 
-from scorpio_pipe.wavesol_paths import resolve_work_dir
+from scorpio_pipe.paths import resolve_work_dir
 from scorpio_pipe.provenance import add_provenance
 
 log = logging.getLogger(__name__)

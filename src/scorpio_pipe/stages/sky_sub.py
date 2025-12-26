@@ -29,7 +29,7 @@ import shutil
 import numpy as np
 from astropy.io import fits
 
-from scorpio_pipe.wavesol_paths import resolve_work_dir
+from scorpio_pipe.paths import resolve_work_dir
 from scorpio_pipe.plot_style import mpl_style
 from scorpio_pipe.shift_utils import xcorr_shift_subpix, shift2d_subpix_x, shift2d_subpix_x_var, shift2d_subpix_x_mask
 from scorpio_pipe.io.mef import read_sci_var_mask, write_sci_var_mask, try_read_grid

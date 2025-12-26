@@ -1,4 +1,5 @@
 from __future__ import annotations
+from scorpio_pipe.paths import resolve_work_dir
 
 import re
 from pathlib import Path
@@ -36,16 +37,6 @@ def get_selected_disperser(cfg: dict[str, Any]) -> str:
             return d
 
     return ""
-
-
-def resolve_work_dir(cfg: dict[str, Any]) -> Path:
-    work_dir = Path(str(cfg.get("work_dir", "."))).expanduser()
-    if not work_dir.is_absolute():
-        base = Path(str(cfg.get("config_dir", "."))).expanduser().resolve()
-        work_dir = (base / work_dir).resolve()
-    else:
-        work_dir = work_dir.resolve()
-    return work_dir
 
 
 def wavesol_dir(cfg: dict[str, Any]) -> Path:

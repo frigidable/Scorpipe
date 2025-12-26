@@ -1,3 +1,15 @@
+## v5.27.0
+
+### Critical fixes: LineID + cosmics for small N + work-dir resolver
+- **resolve_work_dir**: removed remaining fragile imports; all stages now import the canonical resolver from `scorpio_pipe.paths` (eliminates the frequent `NameError: resolve_work_dir is not defined`).
+- **LineID GUI**:
+  - `lineid_prepare` now returns the actual artifact paths (template/auto/report) so the log no longer shows `LineID wrote: None`.
+  - Added a **wait cursor** while preparing LineID artifacts to reduce the “frozen UI” feel.
+- **Cosmics**: new robust behavior when you have *very few science frames*:
+  - For **N=2**, automatic fallback to a **two-frame difference** detector (replaces spikes using the other exposure).
+  - For **N=1**, fallback to a **Laplacian high-pass** detector with local-mean replacement.
+  - Keeps the original stack-MAD method for **N>=3**.
+
 ## v5.26.0
 
 ### GUI + stage robustness sweep

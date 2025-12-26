@@ -26,7 +26,8 @@ from scorpio_pipe.ui.frame_browser import FrameBrowser, SelectedFrame
 from scorpio_pipe.ui.outputs_panel import OutputsPanel
 from scorpio_pipe.ui.run_plan_dialog import RunPlanDialog
 from scorpio_pipe.ui.config_diff import ConfigDiffDialog
-from scorpio_pipe.wavesol_paths import slugify_disperser, wavesol_dir, resolve_work_dir
+from scorpio_pipe.paths import resolve_work_dir
+from scorpio_pipe.wavesol_paths import slugify_disperser, wavesol_dir
 from scorpio_pipe.pairs_library import (
     list_pair_sets,
     find_builtin_pairs_for_disperser,
@@ -3338,6 +3339,13 @@ class LauncherWindow(QtWidgets.QMainWindow):
         if not self._ensure_cfg_saved():
             return
         try:
+            # LineID preparation can take noticeable time on large frames.
+            from PySide6.QtWidgets import QApplication
+            from PySide6.QtCore import Qt
+
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            QApplication.processEvents()
+
             ctx = load_context(self._cfg_path)
             # if config points to built-in pairs (absolute), avoid overwriting: use workdir file.
             pairs = self._current_pairs_path()
@@ -3351,7 +3359,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 ctx = load_context(self._cfg_path)
 
             out = run_lineid_prepare(ctx)
-            self._log_info(f"LineID wrote: {out}")
+            # Pretty-print: show the key artifacts, not a raw Python object.
+            try:
+                msg = ", ".join(f"{k}={v}" for k, v in out.items())
+            except Exception:
+                msg = str(out)
+            self._log_info(f"LineID wrote: {msg}")
             self._refresh_pairs_label()
             try:
                 if hasattr(self, "outputs_lineid"):
@@ -3361,6 +3374,13 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._maybe_auto_qc()
         except Exception as e:
             self._log_exception(e)
+        finally:
+            try:
+                from PySide6.QtWidgets import QApplication
+
+                QApplication.restoreOverrideCursor()
+            except Exception:
+                pass
 
     
     # --------------------------- pair sets (wavesol hand pairs) ---------------------------

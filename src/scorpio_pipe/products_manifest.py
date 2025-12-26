@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from scorpio_pipe.work_layout import ensure_work_layout
-from scorpio_pipe.wavesol_paths import resolve_work_dir
+from scorpio_pipe.paths import resolve_work_dir
 
 
 def _rel(work_dir: Path, path: Path | str | None) -> str | None:
