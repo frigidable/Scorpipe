@@ -82,7 +82,14 @@ def _robust_sigma_mad_1d(x: np.ndarray) -> float:
 
 
 def _boxcar_mean2d(img: np.ndarray, r: int) -> np.ndarray:
-    """Fast boxcar mean using an integral image (no SciPy)."""
+    """Fast boxcar mean using an integral image (no SciPy).
+
+    Important: must preserve the input shape.
+
+    The integral-image inclusion/exclusion formula requires a leading
+    row/column of zeros. Without it, the output becomes (ny-1, nx-1) and
+    downstream broadcasting fails.
+    """
 
     if r <= 0:
         return np.asarray(img, dtype=np.float32)
@@ -90,17 +97,19 @@ def _boxcar_mean2d(img: np.ndarray, r: int) -> np.ndarray:
     a = np.asarray(img, dtype=np.float32)
     pad = int(r)
     ap = np.pad(a, ((pad, pad), (pad, pad)), mode="reflect")
-    # integral image
-    s = ap.cumsum(axis=0).cumsum(axis=1)
+
+    # Integral image with a leading 0 row/col.
+    s = np.pad(ap, ((1, 0), (1, 0)), mode="constant", constant_values=0.0)
+    s = s.cumsum(axis=0).cumsum(axis=1)
+
     k = 2 * pad + 1
-    # sum in kxk window for each pixel
-    # Using inclusion-exclusion on the integral image.
     total = (
         s[k:, k:]
         - s[:-k, k:]
         - s[k:, :-k]
         + s[:-k, :-k]
     )
+    # `total` now has the same shape as the original `a`.
     return (total / float(k * k)).astype(np.float32)
 
 

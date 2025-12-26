@@ -31,3 +31,15 @@ class ROI:
     sky_top_y1: int = 0
     sky_bot_y0: int = 0
     sky_bot_y1: int = 0
+
+    def to_dict(self) -> dict[str, int]:
+        """Serialize to a JSON/YAML-friendly dict."""
+        return {
+            'obj_y0': int(self.obj_y0),
+            'obj_y1': int(self.obj_y1),
+            'sky_top_y0': int(self.sky_top_y0),
+            'sky_top_y1': int(self.sky_top_y1),
+            'sky_bot_y0': int(self.sky_bot_y0),
+            'sky_bot_y1': int(self.sky_bot_y1),
+        }
+

@@ -1,3 +1,9 @@
+## v5.30.0
+
+### Hotfixes: cosmics diff + Sky ROI serialization
+- **Cosmics**: fixed an off-by-one bug in the fast boxcar local-mean computation that produced `(ny-1, nx-1)` arrays and caused broadcasting crashes during 2-frame cleaning.
+- **Sky ROI**: added `ROI.to_dict()` so Sky ROI selection can be saved back into the config without crashing the GUI.
+
 ## v5.29.0
 
 ### Fixes: LineID GUI restore + robust cosmics geometry + GUI logging

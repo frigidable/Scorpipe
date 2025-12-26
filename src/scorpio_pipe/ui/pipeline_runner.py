@@ -65,10 +65,14 @@ def run_lineid_prepare(ctx: RunContext) -> dict[str, Path]:
     }
 
 
-def run_wavesolution(ctx: RunContext) -> None:
-    """Compatibility wrapper for the GUI."""
+def run_wavesolution(ctx: RunContext) -> dict[str, Any]:
+    """Compatibility wrapper for the GUI.
 
-    run_sequence(ctx, ["wavesolution"], resume=True, force=False, config_path=ctx.cfg_path)
+    Returns the per-task results dict from :func:`run_sequence` so the UI can show outputs
+    without crashing when a stage returns ``None``.
+    """
+
+    return run_sequence(ctx, ["wavesolution"], resume=True, force=False, config_path=ctx.cfg_path)
 
 
 @dataclass(frozen=True)
