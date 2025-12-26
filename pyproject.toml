@@ -4,8 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scorpio-pipe"
-version = "5.27.0"
+version = "5.28.0"
 requires-python = ">=3.10"
+readme = "README.md"
+# NOTE: setuptools (as used in CI) validates PEP 621 `license` as a string.
+# The license text is shipped via [tool.setuptools].license-files below.
+license = "BSD-3-Clause"
 dependencies = [
   "astropy>=6",
   "numpy",
@@ -15,10 +19,7 @@ dependencies = [
   "doit",
   "rich",
   "loguru",
-  "matplotlib"
-license = { file = "LICENSE" }
-license-files = ["LICENSE"]
-readme = "README.md"
+  "matplotlib",
 ]
 
 [project.optional-dependencies]
