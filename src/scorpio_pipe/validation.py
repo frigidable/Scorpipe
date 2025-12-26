@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from scorpio_pipe.schema import schema_validate
+from scorpio_pipe.schema import find_unknown_keys, schema_validate
 
 
 @dataclass

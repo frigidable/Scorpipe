@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import numpy as np
 from astropy.io import fits
 
+log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class CosmicsSummary:

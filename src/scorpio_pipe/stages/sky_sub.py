@@ -19,7 +19,6 @@ but provides the same user-facing semantics and can be swapped out by a more
 advanced method later.
 """
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +30,7 @@ from astropy.io import fits
 
 from scorpio_pipe.paths import resolve_work_dir
 from scorpio_pipe.plot_style import mpl_style
+from scorpio_pipe.roi import ROI
 from scorpio_pipe.shift_utils import xcorr_shift_subpix, shift2d_subpix_x, shift2d_subpix_x_var, shift2d_subpix_x_mask
 from scorpio_pipe.io.mef import read_sci_var_mask, write_sci_var_mask, try_read_grid
 from scorpio_pipe.version import PIPELINE_VERSION

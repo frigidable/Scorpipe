@@ -36,6 +36,7 @@ from astropy.io import fits
 
 from scorpio_pipe.paths import resolve_work_dir
 from scorpio_pipe.provenance import add_provenance
+from scorpio_pipe.io.mef import try_read_grid, write_sci_var_mask
 
 log = logging.getLogger(__name__)
 

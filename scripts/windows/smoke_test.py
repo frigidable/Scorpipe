@@ -119,7 +119,7 @@ def main() -> int:
 
         # Run pipeline stages
         lin_info = run_linearize(cfg)
-        sky_info = run_sky_sub(cfg)
+        _ = run_sky_sub(cfg)
         # gather per-exp sky-subtracted
         per_exp_dir = work_dir / "products" / "sky" / "per_exp"
         sky_fits = sorted(per_exp_dir.glob("*_skysub.fits"))
