@@ -15,14 +15,44 @@ if (-not (Test-Path $setup)) {
   throw "setup.exe not found: $setup (run: setup.bat --installer)"
 }
 
-$releaseDir = Join-Path $ProjectRoot "release"
-New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
+$bundleName = "Scorpipe-Windows-x64"
+$bundleRoot = Join-Path $ProjectRoot "release\$bundleName"
+$docsDir    = Join-Path $bundleRoot "docs"
 
-Copy-Item $setup (Join-Path $releaseDir "setup.exe") -Force
-Copy-Item (Join-Path $ProjectRoot "INSTALL.md") (Join-Path $releaseDir "INSTALL.md") -Force
+if (Test-Path $bundleRoot) { Remove-Item $bundleRoot -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $docsDir | Out-Null
 
-$zip = Join-Path $ProjectRoot "Scorpipe-Windows-x64.zip"
+Copy-Item $setup (Join-Path $bundleRoot "setup.exe") -Force
+Copy-Item (Join-Path $ProjectRoot "INSTALL.md") (Join-Path $bundleRoot "INSTALL.md") -Force
+
+# docs
+$docList = @(
+  "docs\MANUAL.md",
+  "docs\RUNBOOK.md",
+  "docs\SETUP_TROUBLESHOOTING.md",
+  "docs\GET_SETUP_EXE.md"
+)
+
+foreach ($rel in $docList) {
+  $src = Join-Path $ProjectRoot $rel
+  if (Test-Path $src) {
+    Copy-Item $src (Join-Path $docsDir (Split-Path $rel -Leaf)) -Force
+  }
+}
+
+# checksums
+$sumPath = Join-Path $bundleRoot "SHA256SUMS.txt"
+"SHA256 checksums for $bundleName" | Out-File -Encoding utf8 $sumPath
+"" | Out-File -Append -Encoding utf8 $sumPath
+
+Get-ChildItem -File -Recurse $bundleRoot | ForEach-Object {
+  $relPath = $_.FullName.Substring($bundleRoot.Length + 1).Replace("\","/")
+  $hash = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash
+  "$hash  $relPath" | Out-File -Append -Encoding utf8 $sumPath
+}
+
+$zip = Join-Path $ProjectRoot "$bundleName.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
 
-Compress-Archive -Path (Join-Path $releaseDir "*") -DestinationPath $zip -Force
+Compress-Archive -Path $bundleRoot -DestinationPath $zip -Force
 Write-Host "Built: $zip" -ForegroundColor Green
