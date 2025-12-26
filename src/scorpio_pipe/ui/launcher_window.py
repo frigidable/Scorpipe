@@ -22,24 +22,22 @@ from scorpio_pipe.ui.pipeline_runner import (
 )
 from scorpio_pipe.ui.qc_viewer import QCViewer
 from scorpio_pipe.ui.pair_rejector import clean_pairs_interactively
-from scorpio_pipe.ui.frame_browser import FrameBrowser, SelectedFrame
+from scorpio_pipe.ui.frame_browser import SelectedFrame
 from scorpio_pipe.ui.outputs_panel import OutputsPanel
 from scorpio_pipe.ui.run_plan_dialog import RunPlanDialog
 from scorpio_pipe.ui.config_diff import ConfigDiffDialog
 from scorpio_pipe.paths import resolve_work_dir
-from scorpio_pipe.wavesol_paths import slugify_disperser, wavesol_dir
+from scorpio_pipe.wavesol_paths import wavesol_dir
 from scorpio_pipe.pairs_library import (
     list_pair_sets,
-    find_builtin_pairs_for_disperser,
     save_user_pair_set,
     copy_pair_set_to_workdir,
     user_pairs_root,
     export_pair_set,
     export_user_library_zip,
-    export_user_library_folder,
 )
 from scorpio_pipe.ui.theme import apply_theme, load_ui_settings
-from scorpio_pipe.instrument_db import find_grism, load_instrument_db
+from scorpio_pipe.instrument_db import find_grism
 
 
 # --------------------------- tiny widgets ---------------------------
@@ -1367,7 +1365,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
             from scorpio_pipe.workdir import RunSignature, pick_smart_run_dir
 
             if _re.match(r"^\d{2}_\d{2}_\d{4}$", work_dir.name):
-                setup = getattr(self._inspect, "setup", {}) or {}
                 sig = RunSignature(obj, disp or "", slit or "", binning or "")
                 smart = pick_smart_run_dir(work_dir, sig, prefer_flat=True)
                 if smart != work_dir:
@@ -1706,7 +1703,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         m.setText(f"{title}: есть неприменённые изменения параметров.")
         m.setInformativeText("Нажми Apply, чтобы применить параметры, и затем запусти этап.")
         btn_apply = m.addButton("Apply", QtWidgets.QMessageBox.AcceptRole)
-        btn_cancel = m.addButton("Cancel", QtWidgets.QMessageBox.RejectRole)
+        m.addButton("Cancel", QtWidgets.QMessageBox.RejectRole)
         m.setDefaultButton(btn_apply)
         m.exec()
         if m.clickedButton() == btn_apply:
@@ -2114,11 +2111,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         # left: controls
         left = QtWidgets.QWidget()
-        l = QtWidgets.QVBoxLayout(left)
-        l.setSpacing(12)
+        left_layout = QtWidgets.QVBoxLayout(left)
+        left_layout.setSpacing(12)
 
         g = _box("Calibrations")
-        l.addWidget(g)
+        left_layout.addWidget(g)
         gl = QtWidgets.QVBoxLayout(g)
         self.lbl_calib = QtWidgets.QLabel(
             "Build report/manifest.json and calib/superbias.fits.\n"
@@ -2199,7 +2196,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         row.addWidget(self.btn_frames_calib)
         row.addStretch(1)
         gl.addLayout(row)
-        l.addStretch(1)
+        left_layout.addStretch(1)
 
         splitter.addWidget(self._mk_scroll_panel(left))
 
@@ -2263,11 +2260,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
         lay.addWidget(splitter, 1)
 
         left = QtWidgets.QWidget()
-        l = QtWidgets.QVBoxLayout(left)
-        l.setSpacing(12)
+        left_layout = QtWidgets.QVBoxLayout(left)
+        left_layout.setSpacing(12)
 
         g = _box("Clean Cosmics")
-        l.addWidget(g)
+        left_layout.addWidget(g)
         gl = QtWidgets.QVBoxLayout(g)
         lbl = QtWidgets.QLabel(
             "Clean cosmic rays in object/sky frames using a simple median filter.\n"
@@ -2391,7 +2388,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         row.addWidget(self.btn_frames_cosmics)
         row.addStretch(1)
         gl.addLayout(row)
-        l.addStretch(1)
+        left_layout.addStretch(1)
 
         splitter.addWidget(self._mk_scroll_panel(left))
         self.outputs_cosmics = OutputsPanel()
@@ -2485,11 +2482,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
         lay.addWidget(splitter, 1)
 
         left = QtWidgets.QWidget()
-        l = QtWidgets.QVBoxLayout(left)
-        l.setSpacing(12)
+        left_layout = QtWidgets.QVBoxLayout(left)
+        left_layout.setSpacing(12)
 
         g = _box("Flat-fielding (optional)")
-        l.addWidget(g)
+        left_layout.addWidget(g)
         gl = QtWidgets.QVBoxLayout(g)
 
         lbl = QtWidgets.QLabel(
@@ -2501,7 +2498,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         gl.addWidget(lbl)
 
         gpar = _box("Parameters")
-        l.addWidget(gpar)
+        left_layout.addWidget(gpar)
         pl = QtWidgets.QVBoxLayout(gpar)
         pl.setSpacing(8)
 
@@ -2580,7 +2577,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         row.addStretch(1)
         gl.addLayout(row)
 
-        l.addStretch(1)
+        left_layout.addStretch(1)
         splitter.addWidget(self._mk_scroll_panel(left))
 
         self.outputs_flatfield = OutputsPanel()
@@ -2658,11 +2655,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
         lay.addWidget(splitter, 1)
 
         left = QtWidgets.QWidget()
-        l = QtWidgets.QVBoxLayout(left)
-        l.setSpacing(12)
+        left_layout = QtWidgets.QVBoxLayout(left)
+        left_layout.setSpacing(12)
 
         g = _box("SuperNeon")
-        l.addWidget(g)
+        left_layout.addWidget(g)
         gl = QtWidgets.QVBoxLayout(g)
         lbl = QtWidgets.QLabel(
             "Stack all NEON frames into a single superneon image,\n"
@@ -2672,7 +2669,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         gl.addWidget(lbl)
 
         gpar = _box("Parameters")
-        l.addWidget(gpar)
+        left_layout.addWidget(gpar)
         pl = QtWidgets.QVBoxLayout(gpar)
         pl.setSpacing(8)
 
@@ -2943,7 +2940,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         rb_row.addWidget(QtWidgets.QLabel("boost"))
         rb_row.addWidget(self.dspin_sn_boost)
         rb_row.addStretch(1)
-        rb_w = QtWidgets.QWidget(); rb_w.setLayout(rb_row)
+        rb_w = QtWidgets.QWidget()
+        rb_w.setLayout(rb_row)
         aform.addRow(
             self._param_label(
                 "Relax/Boost",
@@ -2994,7 +2992,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         row.addStretch(1)
         gl.addLayout(row)
 
-        l.addStretch(1)
+        left_layout.addStretch(1)
         splitter.addWidget(self._mk_scroll_panel(left))
 
         self.outputs_superneon = OutputsPanel()
@@ -3121,11 +3119,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
         lay.addWidget(splitter)
 
         left = QtWidgets.QWidget()
-        l = QtWidgets.QVBoxLayout(left)
-        l.setSpacing(12)
+        left_layout = QtWidgets.QVBoxLayout(left)
+        left_layout.setSpacing(12)
 
         g = _box("LineID (manual pairs)")
-        l.addWidget(g)
+        left_layout.addWidget(g)
         gl = QtWidgets.QVBoxLayout(g)
 
         self.lbl_lineid = QtWidgets.QLabel(
@@ -3141,7 +3139,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         # --- Parameters (Basic/Advanced) + Apply ---
         gpar = _box("Parameters")
-        l.addWidget(gpar)
+        left_layout.addWidget(gpar)
         pl = QtWidgets.QVBoxLayout(gpar)
         pl.setContentsMargins(10, 10, 10, 10)
 
@@ -3266,7 +3264,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         row2.addStretch(1)
         gl.addLayout(row2)
 
-        l.addStretch(1)
+        left_layout.addStretch(1)
         splitter.addWidget(self._mk_scroll_panel(left))
 
         self.outputs_lineid = OutputsPanel()
@@ -3709,11 +3707,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
         lay.addWidget(splitter, 1)
 
         left = QtWidgets.QWidget()
-        l = QtWidgets.QVBoxLayout(left)
-        l.setSpacing(12)
+        left_layout = QtWidgets.QVBoxLayout(left)
+        left_layout.setSpacing(12)
 
         g = _box("Wavelength solution (1D + 2D)")
-        l.addWidget(g)
+        left_layout.addWidget(g)
         gl = QtWidgets.QVBoxLayout(g)
 
         lbl = QtWidgets.QLabel(
@@ -3730,7 +3728,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         # ---------------- parameters ----------------
         gpar = _box("Parameters")
-        l.addWidget(gpar)
+        left_layout.addWidget(gpar)
         pl = QtWidgets.QVBoxLayout(gpar)
         pl.setSpacing(8)
 
@@ -4054,7 +4052,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         row.addStretch(1)
         gl.addLayout(row)
 
-        l.addStretch(1)
+        left_layout.addStretch(1)
 
         splitter.addWidget(self._mk_scroll_panel(left))
         self.outputs_wavesol = OutputsPanel()
@@ -4216,11 +4214,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         # left: controls
         left = QtWidgets.QWidget()
-        l = QtWidgets.QVBoxLayout(left)
-        l.setSpacing(12)
+        left_layout = QtWidgets.QVBoxLayout(left)
+        left_layout.setSpacing(12)
 
         g = _box("Linearize (2D dispersion solution)")
-        l.addWidget(g)
+        left_layout.addWidget(g)
         gl = QtWidgets.QVBoxLayout(g)
 
         lbl = QtWidgets.QLabel(
@@ -4360,7 +4358,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         row.addStretch(1)
         gl.addLayout(row)
 
-        l.addStretch(1)
+        left_layout.addStretch(1)
         splitter.addWidget(self._mk_scroll_panel(left))
 
         self.outputs_linearize = OutputsPanel()
@@ -4451,11 +4449,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
         lay.addWidget(splitter, 1)
 
         left = QtWidgets.QWidget()
-        l = QtWidgets.QVBoxLayout(left)
-        l.setSpacing(12)
+        left_layout = QtWidgets.QVBoxLayout(left)
+        left_layout.setSpacing(12)
 
         g = _box("Sky subtraction (Kelson)")
-        l.addWidget(g)
+        left_layout.addWidget(g)
         gl = QtWidgets.QVBoxLayout(g)
 
         lbl = QtWidgets.QLabel(
@@ -4862,7 +4860,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         row.addStretch(1)
         gl.addLayout(row)
 
-        l.addStretch(1)
+        left_layout.addStretch(1)
         splitter.addWidget(self._mk_scroll_panel(left))
 
         self.outputs_sky = OutputsPanel()
@@ -5082,11 +5080,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
         lay.addWidget(splitter, 1)
 
         left = QtWidgets.QWidget()
-        l = QtWidgets.QVBoxLayout(left)
-        l.setSpacing(12)
+        left_layout = QtWidgets.QVBoxLayout(left)
+        left_layout.setSpacing(12)
 
         g = _box("Extract 1D spectrum")
-        l.addWidget(g)
+        left_layout.addWidget(g)
         gl = QtWidgets.QVBoxLayout(g)
 
         lbl = QtWidgets.QLabel(
@@ -5226,7 +5224,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         row.addStretch(1)
         gl.addLayout(row)
 
-        l.addStretch(1)
+        left_layout.addStretch(1)
         splitter.addWidget(self._mk_scroll_panel(left))
 
         self.outputs_extract1d = OutputsPanel()

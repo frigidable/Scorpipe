@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Always-visible right-side inspector panel.
 
 Keeps key context on-screen:
@@ -10,11 +8,15 @@ Keeps key context on-screen:
 No heavy computations are performed here.
 """
 
+
+from __future__ import annotations
+
+
 import json
 from pathlib import Path
 from typing import Any
 
-from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 from scorpio_pipe.products import products_for_task, task_is_complete
 from scorpio_pipe.ui.pipeline_runner import TASKS

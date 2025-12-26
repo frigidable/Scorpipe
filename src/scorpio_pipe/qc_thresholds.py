@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """QC thresholds + alerting.
 
 The pipeline is used with different dispersers, binnings, and S/N regimes.
@@ -16,6 +14,10 @@ wavesol:
 If `wavesol.qc.auto` is true (default), we apply a lightweight heuristic that
 scales thresholds based on a number found in the disperser name (e.g. VPHG1200).
 """
+
+
+from __future__ import annotations
+
 
 import re
 from dataclasses import dataclass

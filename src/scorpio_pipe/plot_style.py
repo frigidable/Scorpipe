@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Shared Matplotlib style for Scorpio Pipe.
 
 All pipeline plots should look consistent and remain readable in papers, PDFs
@@ -8,6 +6,10 @@ and quick QA screenshots.
 This module defines a single style dictionary and a context manager that
 temporarily applies it.
 """
+
+
+from __future__ import annotations
+
 
 from contextlib import contextmanager
 

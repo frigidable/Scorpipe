@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import hashlib
-import shutil
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
-from scorpio_pipe.app_paths import user_cache_root, ensure_dir
-from typing import Iterable
+
+from scorpio_pipe.app_paths import ensure_dir, user_cache_root
 
 
 @dataclass(frozen=True)

@@ -229,7 +229,6 @@ def _build_profile_template(
     dys = np.arange(-profile_hw, profile_hw + 1, dtype=float)
     acc = np.zeros_like(dys, dtype=float)
     cnt = np.zeros_like(dys, dtype=float)
-    ygrid = np.arange(ny, dtype=float)
     have_mask = mask is not None and mask.shape == sci.shape
     for j in range(nlam):
         yc = float(trace[j])

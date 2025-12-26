@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Pydantic schema for config.yaml (v4+).
 
 The pipeline continues to operate on a plain dict/YAML config for backward
@@ -12,6 +10,10 @@ Notes
 - `find_unknown_keys()` provides user-facing warnings about typos.
 - `schema_validate()` returns a small report object (ok/errors/warnings).
 """
+
+
+from __future__ import annotations
+
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional

@@ -318,7 +318,9 @@ def robust_polyfit_2d_cheb(
     lam = np.asarray(lam, float)
 
     m0 = np.isfinite(x) & np.isfinite(y) & np.isfinite(lam)
-    x = x[m0]; y = y[m0]; lam = lam[m0]
+    x = x[m0]
+    y = y[m0]
+    lam = lam[m0]
 
     if x.size < (degx + 1) * (degy + 1):
         raise RuntimeError(f"Not enough control points for degx={degx},degy={degy}: N={x.size}")
@@ -404,7 +406,9 @@ def robust_polyfit_2d_power(
     lam = np.asarray(lam, float)
 
     m0 = np.isfinite(x) & np.isfinite(y) & np.isfinite(lam)
-    x = x[m0]; y = y[m0]; lam = lam[m0]
+    x = x[m0]
+    y = y[m0]
+    lam = lam[m0]
 
     deg = int(deg)
     terms = _terms_total_degree(deg)
@@ -702,7 +706,10 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
         if m.sum() < min_pts:
             keep[m] = False
 
-    xs_cp = xs_cp[keep]; ys_cp = ys_cp[keep]; lams_cp = lams_cp[keep]; scores = scores[keep]
+    xs_cp = xs_cp[keep]
+    ys_cp = ys_cp[keep]
+    lams_cp = lams_cp[keep]
+    scores = scores[keep]
 
     # edge crop (matches reference workflow: avoid low-SNR borders)
     H, W = img2d.shape
@@ -791,7 +798,6 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
     if kind == "power":
         used2d = pow_used
         resid2d = pow_resid
-        model_meta = pow_meta
         model_payload = {
             "kind": "power",
             "power": {"deg": int(pow_meta.get("deg", pow_deg)), "coeff": [float(c) for c in np.asarray(pow_coeff).tolist()], "meta": pow_meta, "rms_A": float(pow_rms), "n_used": int(np.sum(pow_used))},
@@ -803,7 +809,6 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
     else:
         used2d = cheb_used
         resid2d = cheb_resid
-        model_meta = cheb_meta
         model_payload = {
             "kind": "chebyshev",
             "power": {"deg": int(pow_meta.get("deg", pow_deg)), "coeff": [float(c) for c in np.asarray(pow_coeff).tolist()], "meta": pow_meta, "rms_A": float(pow_rms), "n_used": int(np.sum(pow_used))},

@@ -18,8 +18,8 @@ from threading import Event
 from typing import Any, Callable, Iterable
 
 from scorpio_pipe.config import load_config_any
-from scorpio_pipe.products import products_for_task, task_is_complete
-from scorpio_pipe.stage_state import compute_stage_hash, is_stage_up_to_date, load_stage_state, record_stage_result
+from scorpio_pipe.products import task_is_complete
+from scorpio_pipe.stage_state import compute_stage_hash, is_stage_up_to_date, record_stage_result
 from scorpio_pipe.paths import resolve_work_dir
 from scorpio_pipe.wavesol_paths import wavesol_dir
 from scorpio_pipe.work_layout import ensure_work_layout

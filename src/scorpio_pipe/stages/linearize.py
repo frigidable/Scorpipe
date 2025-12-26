@@ -37,7 +37,6 @@ from scorpio_pipe.maskbits import (
     REJECTED,
     SATURATED,
     USER,
-    header_cards as mask_header_cards,
     summarize as summarize_mask,
 )
 
@@ -425,7 +424,6 @@ def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel
             lcfg.get("save_per_frame", lcfg.get("save_per_exposure", True)),
         )
     )
-    stack_preview = bool(lcfg.get("stack_preview", True))
 
     # Locate lambda_map (prefer per-disperser layout)
     lam_path = None

@@ -1,11 +1,12 @@
-from __future__ import annotations
-
 """Run plan dialog.
 
 Shows what tasks will run and which will be skipped in resume mode.
 """
 
-from pathlib import Path
+
+from __future__ import annotations
+
+
 from typing import Any
 
 from PySide6 import QtCore, QtWidgets

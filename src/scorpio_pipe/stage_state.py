@@ -4,7 +4,8 @@ import hashlib
 import json
 import time
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
+from typing import Iterable
 
 from .version import get_provenance
 

@@ -5,7 +5,6 @@ from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from scorpio_pipe.app_paths import ensure_dir
 from scorpio_pipe.inspect import KIND_ORDER
 from scorpio_pipe.paths import resolve_work_dir
 from scorpio_pipe.wavesol_paths import wavesol_dir

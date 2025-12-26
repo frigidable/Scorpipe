@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Embedded PDF viewer widget for PySide6.
 
 Design goals:
@@ -9,6 +7,10 @@ Design goals:
 
 This widget is meant to be used inside larger dialogs (e.g. LineID GUI).
 """
+
+
+from __future__ import annotations
+
 
 from dataclasses import dataclass
 from pathlib import Path

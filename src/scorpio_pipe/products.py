@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Registry of pipeline products.
 
 This module provides a small, explicit product registry used by QC/UI.
@@ -17,6 +15,10 @@ UI
 - All stages now expose Parameters as Basic/Advanced tabs with scrollable content.
 - FITS preview: more robust image-HDU discovery + better diagnostics; stage frame browsers also recognize *.fts.
 """
+
+
+from __future__ import annotations
+
 
 from dataclasses import dataclass
 from pathlib import Path

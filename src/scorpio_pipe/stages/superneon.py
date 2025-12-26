@@ -6,7 +6,7 @@ import sys
 import os
 from concurrent.futures import ThreadPoolExecutor
 import logging
-from typing import Any, Iterable
+from typing import Any
 
 import numpy as np
 from astropy.io import fits

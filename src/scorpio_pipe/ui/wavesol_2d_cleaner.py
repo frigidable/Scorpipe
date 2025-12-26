@@ -316,11 +316,15 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
         if kind == "power":
             used = pow_used
             rms = pow_rms
-            model_fn = lambda xx, yy: polyval2d_power(xx, yy, pow_coeff, pow_meta)
+
+            def model_fn(xx, yy):
+                return polyval2d_power(xx, yy, pow_coeff, pow_meta)
         else:
             used = cheb_used
             rms = cheb_rms
-            model_fn = lambda xx, yy: polyval2d_cheb(xx, yy, cheb_C, cheb_meta)
+
+            def model_fn(xx, yy):
+                return polyval2d_cheb(xx, yy, cheb_C, cheb_meta)
 
         # residuals for plotting (all points, including rejected lines)
         pred_all = model_fn(self._x, self._y)

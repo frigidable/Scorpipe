@@ -3,14 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import sys
-from typing import Optional, Iterable
+from typing import Optional
 import re
 import numpy as np
 from astropy.io import fits
-from PySide6 import QtWidgets, QtCore, QtGui
-
-# Local UI widget: robust embedded PDF viewer (QtPdfWidgets → PyMuPDF fallback)
-from scorpio_pipe.ui import PdfViewer
 
 
 
@@ -210,6 +206,8 @@ def run_lineid_gui(inp: LineIdInputs) -> None:
     from PySide6 import QtCore, QtGui, QtWidgets
     import pyqtgraph as pg
 
+    from scorpio_pipe.ui import PdfViewer
+
     # 1) QApplication ДО всего
     app = QtWidgets.QApplication.instance()
     if app is None:
@@ -330,7 +328,8 @@ def run_lineid_gui(inp: LineIdInputs) -> None:
             self.edit_filter = QtWidgets.QLineEdit()
             self.edit_filter.setPlaceholderText("5400-5700 или 5852.5 или 585")
             if self.lam_min_A is not None and self.lam_max_A is not None:
-                lo = float(self.lam_min_A); hi = float(self.lam_max_A)
+                lo = float(self.lam_min_A)
+                hi = float(self.lam_max_A)
                 if hi > lo:
                     self.edit_filter.setPlaceholderText(f"Авто-диапазон: {lo:.0f}–{hi:.0f} Å (можно искать по числу)")
             rowf.addWidget(self.edit_filter, 1)
@@ -602,7 +601,8 @@ def run_lineid_gui(inp: LineIdInputs) -> None:
             # Auto range (per grism) — limit reference lines to the disperser window.
             if self.lam_min_A is not None and self.lam_max_A is not None:
                 try:
-                    lo = float(self.lam_min_A); hi = float(self.lam_max_A)
+                    lo = float(self.lam_min_A)
+                    hi = float(self.lam_max_A)
                     if hi < lo:
                         lo, hi = hi, lo
                     vals = [v for v in vals if (lo <= float(v) <= hi)]
@@ -614,7 +614,8 @@ def run_lineid_gui(inp: LineIdInputs) -> None:
 
             m = re.match(r"^\s*(\d+(\.\d+)?)\s*-\s*(\d+(\.\d+)?)\s*$", txt)
             if m:
-                a = float(m.group(1)); b = float(m.group(3))
+                a = float(m.group(1))
+                b = float(m.group(3))
                 lo, hi = min(a, b), max(a, b)
                 return [v for v in vals if lo <= v <= hi]
 

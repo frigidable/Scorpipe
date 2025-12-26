@@ -1,13 +1,21 @@
 from __future__ import annotations
 
-from pathlib import Path
+"""Synthetic end-to-end smoke test.
+
+This test uses `pytest.importorskip` at module import time to avoid hard
+dependency on optional runtime pieces in minimal environments.
+"""
+
+# ruff: noqa: E402
+
 import tempfile
+from pathlib import Path
 
 import numpy as np
 import pytest
 
 pytest.importorskip("astropy")
-from astropy.io import fits
+from astropy.io import fits  # noqa: E402
 
 from scorpio_pipe.work_layout import ensure_work_layout
 from scorpio_pipe.stages.linearize import run_linearize

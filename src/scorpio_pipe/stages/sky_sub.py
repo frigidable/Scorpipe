@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Night-sky subtraction (Kelson-like baseline implementation).
 
 v5.0 implements a pragmatic, fast variant suitable for interactive use:
@@ -19,6 +17,10 @@ but provides the same user-facing semantics and can be swapped out by a more
 advanced method later.
 """
 
+
+from __future__ import annotations
+
+
 from pathlib import Path
 from typing import Any
 
@@ -36,7 +38,6 @@ from scorpio_pipe.io.mef import read_sci_var_mask, write_sci_var_mask, try_read_
 from scorpio_pipe.version import PIPELINE_VERSION
 from scorpio_pipe.maskbits import (
     NO_COVERAGE,
-    EDGE,
     BADPIX,
     COSMIC,
     SATURATED,
@@ -430,10 +431,21 @@ def _write_mef(
     write_sci_var_mask(path, sci, var=var, mask=mask, header=hdr2, grid=grid, primary_data=sci)
 
 def _roi_from_cfg(cfg: dict[str, Any]) -> ROI:
+    """Parse ROI from config with backward-compatible key spellings.
+
+    Canonical v5.x: cfg["sky"]["roi"] with keys:
+      - obj_y0, obj_y1
+      - sky_top_y0, sky_top_y1
+      - sky_bot_y0, sky_bot_y1
+
+    Backward compatibility:
+      - cfg["roi"] (older configs / smoke tests)
+      - obj_y1/obj_y2 (legacy object bounds)
+      - sky_y1/sky_y2, sky2_y1/sky2_y2 (legacy sky bounds)
+      - sky_up_*, sky_down_*, sky1_*, sky2_* (alternative spellings)
+    """
+
     # Canonical v5.x location: cfg['sky']['roi'].
-    # Backward compatibility:
-    #  - cfg['roi'] (older smoke tests)
-    #  - alternative key spellings (obj_y1/obj_y2, etc.)
     sky = (cfg.get("sky") or {}) if isinstance(cfg.get("sky"), dict) else {}
     roi = (sky.get("roi") or {}) if isinstance(sky.get("roi"), dict) else {}
     if not roi and isinstance(cfg.get("roi"), dict):
@@ -447,13 +459,39 @@ def _roi_from_cfg(cfg: dict[str, Any]) -> ROI:
             raise KeyError(f"Missing ROI key(s): {keys}")
         return int(default)
 
+    def _pair(
+        canonical_y0_keys: tuple[str, ...],
+        canonical_y1_keys: tuple[str, ...],
+        legacy_pairs: tuple[tuple[str, str], ...],
+    ) -> tuple[int, int]:
+        for k0, k1 in legacy_pairs:
+            if k0 in roi and roi.get(k0) is not None and k1 in roi and roi.get(k1) is not None:
+                return int(roi[k0]), int(roi[k1])
+        return _g(*canonical_y0_keys), _g(*canonical_y1_keys)
+
+    obj_y0, obj_y1 = _pair(
+        ("obj_y0", "obj_ymin"),
+        ("obj_y1", "obj_ymax", "obj_y2"),
+        (("obj_y1", "obj_y2"), ("obj_ymin", "obj_ymax")),
+    )
+    sky_top_y0, sky_top_y1 = _pair(
+        ("sky_top_y0", "sky_up_y0", "sky1_y0"),
+        ("sky_top_y1", "sky_up_y1", "sky1_y1"),
+        (("sky_y1", "sky_y2"), ("sky_y0", "sky_y1"), ("sky1_y1", "sky1_y2"), ("sky1_y0", "sky1_y1")),
+    )
+    sky_bot_y0, sky_bot_y1 = _pair(
+        ("sky_bot_y0", "sky_down_y0", "sky2_y0"),
+        ("sky_bot_y1", "sky_down_y1", "sky2_y1"),
+        (("sky2_y1", "sky2_y2"), ("sky2_y0", "sky2_y1")),
+    )
+
     return ROI(
-        obj_y0=_g("obj_y0", "obj_ymin"),
-        obj_y1=_g("obj_y1", "obj_y2", "obj_ymax"),
-        sky_top_y0=_g("sky_top_y0", "sky_up_y0", "sky1_y0"),
-        sky_top_y1=_g("sky_top_y1", "sky_up_y1", "sky1_y1"),
-        sky_bot_y0=_g("sky_bot_y0", "sky_down_y0", "sky2_y0"),
-        sky_bot_y1=_g("sky_bot_y1", "sky_down_y1", "sky2_y1"),
+        obj_y0=obj_y0,
+        obj_y1=obj_y1,
+        sky_top_y0=sky_top_y0,
+        sky_top_y1=sky_top_y1,
+        sky_bot_y0=sky_bot_y0,
+        sky_bot_y1=sky_bot_y1,
     )
 
 
@@ -606,7 +644,7 @@ def run_sky_sub(cfg: dict[str, Any], *, lin_fits: Path | None = None, out_dir: P
             from PySide6 import QtWidgets
             from scorpio_pipe.ui.sky_roi_dialog import SkyRoiDialog
 
-            app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+            _app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
             dlg = SkyRoiDialog(str(preview_fits))
             if dlg.exec() == QtWidgets.QDialog.Accepted:
                 return dlg.get_roi_dict()

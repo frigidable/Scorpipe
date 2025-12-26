@@ -1,13 +1,15 @@
+"""UI widget to show expected products and their existence."""
+
+
 from __future__ import annotations
 
-"""UI widget to show expected products and their existence."""
 
 from pathlib import Path
 from typing import Any
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from scorpio_pipe.products import group_by_stage, list_products
+from scorpio_pipe.products import list_products
 
 
 class OutputsPanel(QtWidgets.QWidget):

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Lightweight FITS preview widget.
 
 Goals ("DS9-like" baseline, without trying to re-implement DS9):
@@ -10,6 +8,10 @@ Goals ("DS9-like" baseline, without trying to re-implement DS9):
 
 This widget is intentionally self-contained so the GUI stays responsive.
 """
+
+
+from __future__ import annotations
+
 
 from dataclasses import dataclass
 import numpy as np
@@ -502,15 +504,11 @@ class FitsPreviewWidget(QtWidgets.QWidget):
                 arr = np.asarray(data)
                 return idx, arr
 
-        last: Exception | None = None
-
         try:
             idx, arr = _open(memmap=False)
-        except MemoryError as e:
-            last = e
+        except MemoryError:
             idx, arr = _open(memmap=True)
         except Exception as e:
-            last = e
             # Try common extension names and a wider ext range.
             tried = []
             for ext in ("SCI", "PRIMARY"):

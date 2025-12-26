@@ -1,14 +1,14 @@
-from __future__ import annotations
-
 """Frame browser widget (filters + table + FITS preview).
 
 This is used on the "Project & data" page after Inspect.
 """
 
+
+from __future__ import annotations
+
+
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
-
 import pandas as pd
 from PySide6 import QtCore, QtGui, QtWidgets
 
@@ -74,13 +74,13 @@ class FrameBrowser(QtWidgets.QWidget):
         lay.addWidget(splitter, 1)
 
         left = QtWidgets.QWidget()
-        l = QtWidgets.QVBoxLayout(left)
-        l.setContentsMargins(0, 0, 0, 0)
-        l.setSpacing(6)
+        vbox_left = QtWidgets.QVBoxLayout(left)
+        vbox_left.setContentsMargins(0, 0, 0, 0)
+        vbox_left.setSpacing(6)
 
         self.lbl_counts = QtWidgets.QLabel("—")
         self.lbl_counts.setStyleSheet("color: #A0A0A0;")
-        l.addWidget(self.lbl_counts)
+        vbox_left.addWidget(self.lbl_counts)
 
         self.model = PandasTableModel(pd.DataFrame())
         self.table = QtWidgets.QTableView()
@@ -92,7 +92,7 @@ class FrameBrowser(QtWidgets.QWidget):
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        l.addWidget(self.table, 1)
+        vbox_left.addWidget(self.table, 1)
 
         splitter.addWidget(left)
 

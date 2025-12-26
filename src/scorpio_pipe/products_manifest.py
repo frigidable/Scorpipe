@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Products manifest (machine-readable index of produced artifacts).
 
 This is *not* the reproducibility/provenance manifest (see :mod:`scorpio_pipe.manifest`).
@@ -13,6 +11,10 @@ The manifest is intentionally conservative: it doesn't try to list every
 intermediate file ever created, but it should cover all "scientific" products
 and the most important quicklooks.
 """
+
+
+from __future__ import annotations
+
 
 import json
 from datetime import datetime, timezone
