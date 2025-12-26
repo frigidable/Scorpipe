@@ -1,3 +1,11 @@
+## v5.36.1
+
+### Stage contract + QC metrics skeleton + FITS I/O hardening
+- **Stage contract**: added a lightweight `StageContract` registry describing per-stage inputs/outputs/metrics (used by tests and QC).
+- **QC skeleton**: added a persistent `products/metrics.json` store that is updated after each stage run/skip/fail; added automatic mirroring of `work/qc` into `products/qc`.
+- **FITS I/O**: unified GUI preview loading on a single smart loader (`open_fits_smart` / `read_image_smart`) with explicit scaling diagnostics (BZERO/BSCALE/BLANK).
+- **NumPy 2.0 compatibility**: removed strict `copy=False` dtype conversions that could crash FITS display and some numeric paths.
+
 ## v5.30.0
 
 ### Hotfixes: cosmics diff + Sky ROI serialization

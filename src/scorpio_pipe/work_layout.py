@@ -39,10 +39,13 @@ def ensure_work_layout(work_dir: str | Path) -> WorkLayout:
     products = wd / "products"
     qc = wd / "qc"
 
+    # v5.36+: canonical "products/qc" mirror for QC artifacts.
+    products_qc = products / "qc"
+
     calib_legacy = wd / "calib"
     report_legacy = wd / "report"
 
-    for p in [raw, calibs, science, products, qc, calib_legacy, report_legacy]:
+    for p in [raw, calibs, science, products, qc, products_qc, calib_legacy, report_legacy]:
         p.mkdir(parents=True, exist_ok=True)
 
     return WorkLayout(

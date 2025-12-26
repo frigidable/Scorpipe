@@ -233,47 +233,103 @@ class PairRejectorDialog(QtWidgets.QDialog):
             self.canvas.draw()
             return
 
-        coeffs = _polyfit(x_use, lam_use, deg)
+        # Robust 1D fit (sigma-clipped) like the main wavesolution stage.
+        from scorpio_pipe.stages.wavesolution import robust_polyfit_1d
+
+        blend_all = np.array([bool(p[2]) for p in self._pairs], bool)
+        x_act = x_all[active]
+        lam_act = lam_all[active]
+        w_act = np.where(blend_all[active], 0.3, 1.0)  # down-weight blends
+
+        coeffs, used_local = robust_polyfit_1d(
+            x_act,
+            lam_act,
+            deg,
+            weights=w_act,
+            sigma_clip=3.0,
+            maxiter=10,
+        )
+        # Expand "used" mask back to all rows
+        used_all = np.zeros_like(active, dtype=bool)
+        used_all[active] = np.asarray(used_local, bool)
+
         resid_all = lam_all - np.polyval(coeffs, x_all)
 
-        # update table residual column
+        # update table residual + notes
         self.table.blockSignals(True)
         for i in range(len(self._pairs)):
             it = self.table.item(i, 3)
             if it is not None:
                 it.setText(f"{resid_all[i]:+.3f}")
-                # visually dim rejected
-                for c in range(1, 6):
-                    cell = self.table.item(i, c)
-                    if cell is not None:
-                        cell.setForeground(QtGui.QBrush(QtGui.QColor(200, 200, 200) if self._active[i] else QtGui.QColor(140, 140, 140)))
+            note = self.table.item(i, 5)
+            if note is not None:
+                if not self._active[i]:
+                    note.setText("disabled")
+                elif not bool(used_all[i]):
+                    note.setText("clipped")
+                else:
+                    note.setText("")
+            # visually dim disabled; mark clipped lightly
+            for c in range(1, 6):
+                cell = self.table.item(i, c)
+                if cell is None:
+                    continue
+                if not self._active[i]:
+                    cell.setForeground(QtGui.QBrush(QtGui.QColor(140, 140, 140)))
+                elif self._active[i] and (not bool(used_all[i])) and c != 5:
+                    cell.setForeground(QtGui.QBrush(QtGui.QColor(190, 190, 190)))
+                else:
+                    cell.setForeground(QtGui.QBrush(QtGui.QColor(220, 220, 220)))
         self.table.blockSignals(False)
 
-        rms = float(np.sqrt(np.mean(resid_all[active] ** 2)))
-        self.lbl_stats.setText(f"Active: {active.sum()}/{len(active)}   deg={deg}   RMS={rms:.3f} Å")
+        rms = float(np.sqrt(np.mean(resid_all[used_all] ** 2))) if np.any(used_all) else float("nan")
+        self.lbl_stats.setText(
+            f"Active: {int(active.sum())}/{len(active)}   Used(inliers): {int(np.sum(used_all))}   deg={deg}   RMS={rms:.3f} Å"
+        )
 
-        ax.scatter(x_all[active], resid_all[active], s=34, label="used")
+        ax.scatter(x_all[used_all], resid_all[used_all], s=34, label="used (inliers)")
+        m_clip = active & (~used_all)
+        if m_clip.any():
+            ax.scatter(x_all[m_clip], resid_all[m_clip], s=28, marker="o", label="clipped")
         if (~active).any():
-            ax.scatter(x_all[~active], resid_all[~active], s=28, marker="x", label="rejected")
+            ax.scatter(x_all[~active], resid_all[~active], s=28, marker="x", label="disabled")
         ax.legend(frameon=False, loc="best")
         self.fig.tight_layout()
         self.canvas.draw()
 
     def _auto_reject_3sigma(self) -> None:
+        # Auto sigma-clip using the same robust fitter as wavesolution.
         deg = int(self.spin_deg.value())
+        if not self._pairs:
+            return
         x_all = np.array([p[0] for p in self._pairs], float)
         lam_all = np.array([p[1] for p in self._pairs], float)
+        blend_all = np.array([bool(p[2]) for p in self._pairs], bool)
         active = np.array(self._active, bool)
-        if active.sum() < deg + 1:
+        if int(active.sum()) < deg + 1:
             return
-        coeffs = _polyfit(x_all[active], lam_all[active], deg)
-        resid = lam_all - np.polyval(coeffs, x_all)
-        s = float(np.std(resid[active]))
-        if not np.isfinite(s) or s <= 0:
+
+        from scorpio_pipe.stages.wavesolution import robust_polyfit_1d
+
+        x_act = x_all[active]
+        lam_act = lam_all[active]
+        w_act = np.where(blend_all[active], 0.3, 1.0)
+
+        try:
+            _, used_local = robust_polyfit_1d(
+                x_act, lam_act, deg,
+                weights=w_act,
+                sigma_clip=3.0,
+                maxiter=10,
+            )
+        except Exception:
             return
-        new_active = np.abs(resid) <= 3.0 * s
+
+        new_active = active.copy()
+        new_active[active] = np.asarray(used_local, bool)
         self._active = new_active.tolist()
         self._populate_table()
+        self.recalculate()
         self.recalculate()
 
     # -------------- save --------------

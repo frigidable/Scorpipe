@@ -147,6 +147,11 @@ def _two_frame_diff_clean(
     save_png: bool,
     save_mask_fits: bool,
     dilate: int = 1,
+    local_r: int = 2,
+    k2_scale: float = 0.8,
+    k2_min: float = 5.0,
+    thr_local_a: float = 4.0,
+    thr_local_b: float = 2.5,
 ) -> CosmicsSummary:
     """Cosmic cleaning specialized for N=2 exposures.
 
@@ -185,7 +190,7 @@ def _two_frame_diff_clean(
     ny = min(s[0] for s in shapes)
     nx = min(s[1] for s in shapes)
     if any(s != (ny, nx) for s in shapes):
-        logger.warning("Cosmics(two_frame_diff): input shapes differ %s; cropping to (%d, %d)", shapes, ny, nx)
+        log.warning("Cosmics(two_frame_diff): input shapes differ %s; cropping to (%d, %d)", shapes, ny, nx)
         datas = [d[:ny, :nx] for d in datas]
         for hdr, s in zip(headers, shapes):
             if s != (ny, nx):
@@ -202,7 +207,7 @@ def _two_frame_diff_clean(
                 hdr["BIASSUB"] = (True, "Superbias subtracted")
                 hdr["HISTORY"] = "scorpio_pipe cosmics: bias subtracted using superbias.fits"
         else:
-            logger.warning(
+            log.warning(
                 "Cosmics(two_frame_diff): superbias shape %s is smaller than cropped science (%d, %d); skipping bias subtraction",
                 getattr(superbias, "shape", None),
                 ny,
@@ -217,13 +222,13 @@ def _two_frame_diff_clean(
     if not np.isfinite(sigma) or sigma <= 0:
         sigma = float(np.std(diff)) if diff.size else 0.0
 
-    # local scale proxy: 5x5 mean of |diff|
-    loc = _boxcar_mean2d(absdiff, r=2)
+    # local scale proxy: (2*local_r+1)^2 mean of |diff|
+    loc = _boxcar_mean2d(absdiff, r=int(local_r))
 
-    k2 = max(5.0, 0.8 * float(k))
+    k2 = max(float(k2_min), float(k2_scale) * float(k))
     thr_global = float(k2 * sigma)
     # require also locally deviant (spike-like)
-    thr_local = (4.0 * loc + 2.5 * sigma).astype(np.float32)
+    thr_local = (float(thr_local_a) * loc + float(thr_local_b) * sigma).astype(np.float32)
 
     cand = absdiff > np.maximum(thr_global, thr_local)
 
@@ -314,6 +319,9 @@ def _single_frame_laplacian_clean(
     save_png: bool,
     save_mask_fits: bool,
     dilate: int = 1,
+    local_r: int = 2,
+    k_scale: float = 0.8,
+    k_min: float = 5.0,
 ) -> CosmicsSummary:
     """Single-frame fallback using a Laplacian high-pass detector."""
 
@@ -346,11 +354,11 @@ def _single_frame_laplacian_clean(
     if not np.isfinite(sigma) or sigma <= 0:
         sigma = float(np.std(lap)) if lap.size else 0.0
 
-    # Local baseline for replacement: 5x5 mean
-    loc_mean = _boxcar_mean2d(img, r=2)
+    # Local baseline for replacement: (2*local_r+1)^2 mean
+    loc_mean = _boxcar_mean2d(img, r=int(local_r))
 
     # Candidate pixels: strong high-frequency outliers.
-    thr = max(5.0, 0.8 * float(k)) * sigma
+    thr = max(float(k_min), float(k_scale) * float(k)) * sigma
     m = np.abs(lap) > float(thr)
     m = _dilate_mask(m, r=int(dilate))
 
@@ -426,6 +434,10 @@ def _stack_mad_clean(
     out_dir: Path,
     superbias: np.ndarray | None,
     k: float,
+    mad_scale: float = 1.0,
+    min_mad: float = 0.0,
+    max_frac_per_frame: float | None = None,
+    dilate: int = 0,
     bias_subtract: bool,
     save_png: bool,
     save_mask_fits: bool,
@@ -454,7 +466,7 @@ def _stack_mad_clean(
     ny = min(s[0] for s in shapes)
     nx = min(s[1] for s in shapes)
     if any(s != (ny, nx) for s in shapes):
-        logger.warning("Cosmics(stack_mad): input shapes differ %s; cropping to (%d, %d)", shapes, ny, nx)
+        log.warning("Cosmics(stack_mad): input shapes differ %s; cropping to (%d, %d)", shapes, ny, nx)
         datas = [d[:ny, :nx] for d in datas]
         for hdr, s in zip(headers, shapes):
             if s != (ny, nx):
@@ -470,7 +482,7 @@ def _stack_mad_clean(
                 hdr["BIASSUB"] = (True, "Superbias subtracted")
                 hdr["HISTORY"] = "scorpio_pipe cosmics: bias subtracted using superbias.fits"
         else:
-            logger.warning(
+            log.warning(
                 "Cosmics(stack_mad): superbias shape %s is smaller than cropped science (%d, %d); skipping bias subtraction",
                 getattr(superbias, "shape", None),
                 ny,
@@ -481,12 +493,34 @@ def _stack_mad_clean(
     med = np.median(stack, axis=0)
     mad = _robust_mad(stack, axis=0)
 
-    # Protect against zero MAD (flat pixels)
-    eps = np.finfo(np.float32).eps
-    mad = np.maximum(mad, eps)
+    # Protect against zero/too-small MAD (flat pixels) + allow user floor.
+    eps = float(np.finfo(np.float32).eps)
+    floor = max(eps, float(min_mad))
+    mad = np.maximum(mad, floor)
 
-    thr = (k * mad).astype(np.float32)
-    mask = np.abs(stack - med[None, :, :]) > thr[None, :, :]
+    # Threshold score (dimensionless): |x-med| / (mad_scale*mad)
+    ms = max(eps, float(mad_scale))
+    score = np.abs(stack - med[None, :, :]) / (ms * mad[None, :, :])
+    mask = score > float(k)
+
+    # Optional safety: cap per-frame masked fraction by raising the effective threshold.
+    if max_frac_per_frame is not None:
+        mf = float(max_frac_per_frame)
+        if 0.0 < mf < 1.0:
+            for i in range(mask.shape[0]):
+                frac = float(mask[i].mean()) if mask[i].size else 0.0
+                if frac <= mf:
+                    continue
+                # Pick a threshold that yields ~mf masked fraction.
+                # (This protects against pathological MAD underestimation.)
+                thr_i = float(np.quantile(score[i].ravel(), 1.0 - mf))
+                thr_i = max(float(k), thr_i)
+                mask[i] = score[i] > thr_i
+
+    # Optional dilation to catch halo pixels around a hit.
+    if int(dilate) > 0:
+        for i in range(mask.shape[0]):
+            mask[i] = _dilate_mask(mask[i], r=int(dilate))
 
     # Replace cosmics by per-pixel median of the stack
     cleaned = np.where(mask, med[None, :, :], stack)
@@ -605,6 +639,57 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
     save_png = bool(ccfg.get("save_png", True))
     save_mask_fits = bool(ccfg.get("save_mask_fits", True))
 
+    # ---- optional tuning knobs (safe defaults keep legacy behavior) ----
+    def _as_int(x: Any, default: int) -> int:
+        try:
+            return int(x)
+        except Exception:
+            return int(default)
+
+    def _as_float(x: Any, default: float) -> float:
+        try:
+            v = float(x)
+            return v
+        except Exception:
+            return float(default)
+
+    dilate = _as_int(ccfg.get("dilate", 1), 1)
+
+    mad_scale = _as_float(ccfg.get("mad_scale", 1.0), 1.0)
+    min_mad = _as_float(ccfg.get("min_mad", 0.0), 0.0)
+    max_frac_per_frame = ccfg.get("max_frac_per_frame", None)
+    if max_frac_per_frame is not None:
+        try:
+            max_frac_per_frame = float(max_frac_per_frame)
+        except Exception:
+            max_frac_per_frame = None
+
+    stack_dilate = ccfg.get("stack_dilate", None)
+    if stack_dilate is not None:
+        stack_dilate = _as_int(stack_dilate, dilate)
+
+    local_r = _as_int(ccfg.get("local_r", 2), 2)
+    two_diff_local_r = ccfg.get("two_diff_local_r", None)
+    if two_diff_local_r is not None:
+        two_diff_local_r = _as_int(two_diff_local_r, local_r)
+
+    two_diff_k2_scale = _as_float(ccfg.get("two_diff_k2_scale", 0.8), 0.8)
+    two_diff_k2_min = _as_float(ccfg.get("two_diff_k2_min", 5.0), 5.0)
+    two_diff_thr_local_a = _as_float(ccfg.get("two_diff_thr_local_a", 4.0), 4.0)
+    two_diff_thr_local_b = _as_float(ccfg.get("two_diff_thr_local_b", 2.5), 2.5)
+    two_diff_dilate = ccfg.get("two_diff_dilate", None)
+    if two_diff_dilate is not None:
+        two_diff_dilate = _as_int(two_diff_dilate, dilate)
+
+    lap_local_r = ccfg.get("lap_local_r", None)
+    if lap_local_r is not None:
+        lap_local_r = _as_int(lap_local_r, local_r)
+    lap_k_scale = _as_float(ccfg.get("lap_k_scale", 0.8), 0.8)
+    lap_k_min = _as_float(ccfg.get("lap_k_min", 5.0), 5.0)
+    lap_dilate = ccfg.get("lap_dilate", None)
+    if lap_dilate is not None:
+        lap_dilate = _as_int(lap_dilate, dilate)
+
     superbias = _load_superbias(work_dir) if bias_subtract else None
 
     out_root = Path(out_dir) if out_dir is not None else (work_dir / "cosmics")
@@ -633,19 +718,60 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
 
         summary: CosmicsSummary
         if method in ("auto", "stack_mad", "mad_stack", "stack", "two_frame_diff", "laplacian"):
-            # Ensure all frames have the same shape
-            shapes = []
-            for pth in paths:
-                try:
-                    with fits.open(pth) as hdul:
-                        shapes.append(np.asarray(hdul[0].data).shape)
-                except Exception:
-                    shapes.append(None)
-            shapes_ok = all(s == shapes[0] and s is not None for s in shapes)
+            # Choose best available method for the frame count.
+            if method in ("laplacian",) and len(paths) != 1:
+                log.warning("method=laplacian requires exactly 1 frame; falling back to auto")
+            if method in ("two_frame_diff",) and len(paths) != 2:
+                log.warning("method=two_frame_diff requires exactly 2 frames; falling back to auto")
 
-            if not shapes_ok:
+            if len(paths) >= 3 and method in ("auto", "stack_mad", "mad_stack", "stack"):
+                summary = _stack_mad_clean(
+                    paths,
+                    out_dir=kind_out,
+                    superbias=superbias,
+                    k=k,
+                    mad_scale=mad_scale,
+                    min_mad=min_mad,
+                    max_frac_per_frame=max_frac_per_frame,
+                    dilate=int(stack_dilate if stack_dilate is not None else dilate),
+                    bias_subtract=bias_subtract,
+                    save_png=save_png,
+                    save_mask_fits=save_mask_fits,
+                )
+            elif len(paths) == 2 and method in ("auto", "stack_mad", "mad_stack", "stack", "two_frame_diff"):
+                summary = _two_frame_diff_clean(
+                    paths,
+                    out_dir=kind_out,
+                    superbias=superbias,
+                    k=k,
+                    dilate=int(two_diff_dilate if two_diff_dilate is not None else dilate),
+                    local_r=int(two_diff_local_r if two_diff_local_r is not None else local_r),
+                    k2_scale=two_diff_k2_scale,
+                    k2_min=two_diff_k2_min,
+                    thr_local_a=two_diff_thr_local_a,
+                    thr_local_b=two_diff_thr_local_b,
+                    bias_subtract=bias_subtract,
+                    save_png=save_png,
+                    save_mask_fits=save_mask_fits,
+                )
+            elif len(paths) == 1 and method in ("auto", "laplacian"):
+                summary = _single_frame_laplacian_clean(
+                    paths[0],
+                    out_dir=kind_out,
+                    superbias=superbias,
+                    k=k,
+                    dilate=int(lap_dilate if lap_dilate is not None else dilate),
+                    local_r=int(lap_local_r if lap_local_r is not None else local_r),
+                    k_scale=lap_k_scale,
+                    k_min=lap_k_min,
+                    bias_subtract=bias_subtract,
+                    save_png=save_png,
+                    save_mask_fits=save_mask_fits,
+                )
+            else:
+                # Nothing to do
                 (kind_out / "clean").mkdir(parents=True, exist_ok=True)
-                outputs = {"note": "shape mismatch: skipped cosmics cleaning"}
+                outputs = {"note": f"not enough frames for cosmics cleaning (n={len(paths)})"}
                 summary = CosmicsSummary(
                     kind=kind,
                     n_frames=len(paths),
@@ -655,68 +781,18 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
                     per_frame_fraction=[0.0] * len(paths),
                     outputs=outputs,
                 )
-            else:
-                # Choose best available method for the frame count.
-                if method in ("laplacian",) and len(paths) != 1:
-                    log.warning("method=laplacian requires exactly 1 frame; falling back to auto")
-                if method in ("two_frame_diff",) and len(paths) != 2:
-                    log.warning("method=two_frame_diff requires exactly 2 frames; falling back to auto")
 
-                if len(paths) >= 3 and method in ("auto", "stack_mad", "mad_stack", "stack"):
-                    summary = _stack_mad_clean(
-                        paths,
-                        out_dir=kind_out,
-                        superbias=superbias,
-                        k=k,
-                        bias_subtract=bias_subtract,
-                        save_png=save_png,
-                        save_mask_fits=save_mask_fits,
-                    )
-                elif len(paths) == 2 and method in ("auto", "stack_mad", "mad_stack", "stack", "two_frame_diff"):
-                    summary = _two_frame_diff_clean(
-                        paths,
-                        out_dir=kind_out,
-                        superbias=superbias,
-                        k=k,
-                        bias_subtract=bias_subtract,
-                        save_png=save_png,
-                        save_mask_fits=save_mask_fits,
-                    )
-                elif len(paths) == 1 and method in ("auto", "laplacian"):
-                    summary = _single_frame_laplacian_clean(
-                        paths[0],
-                        out_dir=kind_out,
-                        superbias=superbias,
-                        k=k,
-                        bias_subtract=bias_subtract,
-                        save_png=save_png,
-                        save_mask_fits=save_mask_fits,
-                    )
-                else:
-                    # Nothing to do
-                    (kind_out / "clean").mkdir(parents=True, exist_ok=True)
-                    outputs = {"note": f"not enough frames for cosmics cleaning (n={len(paths)})"}
-                    summary = CosmicsSummary(
-                        kind=kind,
-                        n_frames=len(paths),
-                        k=float(k),
-                        replaced_pixels=0,
-                        replaced_fraction=0.0,
-                        per_frame_fraction=[0.0] * len(paths),
-                        outputs=outputs,
-                    )
-
-                # Ensure 'kind' is set in summary
-                if summary.kind != kind:
-                    summary = CosmicsSummary(
-                        kind=kind,
-                        n_frames=summary.n_frames,
-                        k=summary.k,
-                        replaced_pixels=summary.replaced_pixels,
-                        replaced_fraction=summary.replaced_fraction,
-                        per_frame_fraction=summary.per_frame_fraction,
-                        outputs=summary.outputs,
-                    )
+            # Ensure 'kind' is set in summary
+            if summary.kind != kind:
+                summary = CosmicsSummary(
+                    kind=kind,
+                    n_frames=summary.n_frames,
+                    k=summary.k,
+                    replaced_pixels=summary.replaced_pixels,
+                    replaced_fraction=summary.replaced_fraction,
+                    per_frame_fraction=summary.per_frame_fraction,
+                    outputs=summary.outputs,
+                )
         else:
             outputs = {"note": f"method={method} not supported"}
             summary = CosmicsSummary(
@@ -751,6 +827,28 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
         "k": float(k),
         "bias_subtract": bias_subtract,
         "save_png": save_png,
+        "save_mask_fits": save_mask_fits,
+        "dilate": int(dilate),
+        "stack": {
+            "mad_scale": float(mad_scale),
+            "min_mad": float(min_mad),
+            "max_frac_per_frame": (float(max_frac_per_frame) if max_frac_per_frame is not None else None),
+            "dilate": int(stack_dilate if stack_dilate is not None else dilate),
+        },
+        "two_frame_diff": {
+            "local_r": int(two_diff_local_r if two_diff_local_r is not None else local_r),
+            "k2_scale": float(two_diff_k2_scale),
+            "k2_min": float(two_diff_k2_min),
+            "thr_local_a": float(two_diff_thr_local_a),
+            "thr_local_b": float(two_diff_thr_local_b),
+            "dilate": int(two_diff_dilate if two_diff_dilate is not None else dilate),
+        },
+        "laplacian": {
+            "local_r": int(lap_local_r if lap_local_r is not None else local_r),
+            "k_scale": float(lap_k_scale),
+            "k_min": float(lap_k_min),
+            "dilate": int(lap_dilate if lap_dilate is not None else dilate),
+        },
         "items": all_summaries,
     }
 

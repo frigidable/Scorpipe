@@ -670,7 +670,7 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
                comments="", fmt="%.6f")
 
     # 2D: trace lines and fit a 2D model (power + Chebyshev, like the reference program)
-    img2d = fits.getdata(superneon_fits).astype(float)
+    img2d = fits.getdata(superneon_fits, memmap=False).astype(float)
     y0 = wcfg.get("trace_y0", None)
     # allow manual rejection of bad lamp lines for the 2D fit
     rej = []

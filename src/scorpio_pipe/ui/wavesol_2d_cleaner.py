@@ -14,8 +14,12 @@ class Wave2DCleanConfig:
     power_deg: int = 5
     cheb_degx: int = 5
     cheb_degy: int = 3
-    sigma_clip: float = 3.0
-    maxiter: int = 10
+    # Keep separate robustness controls so the interactive view can exactly
+    # mirror the stage outputs.
+    power_sigma_clip: float = 3.0
+    power_maxiter: int = 10
+    cheb_sigma_clip: float = 3.0
+    cheb_maxiter: int = 10
 
 
 class Wave2DLineCleanerDialog(QtWidgets.QDialog):
@@ -95,9 +99,11 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
         self.toolbar = NavigationToolbar(self.canvas, self)
         right.addWidget(self.toolbar)
 
-        # view toggle: show rejected lines in grey vs final view
-        self.chk_hide_rejected = QtWidgets.QCheckBox("Final view (hide rejected lines)")
-        self.chk_hide_rejected.setChecked(False)
+        # View toggle: in "final" mode we hide rejected lines AND show only the
+        # points actually used by the robust fit. This makes the plot visually
+        # consistent with the stage's residuals_2d.png (QC).
+        self.chk_hide_rejected = QtWidgets.QCheckBox("Fit-consistent view (inliers only)")
+        self.chk_hide_rejected.setChecked(True)
         right.addWidget(self.chk_hide_rejected)
 
         right.addWidget(self.canvas, 1)
@@ -163,7 +169,7 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
 
         # with rejected visible
         try:
-            self.chk_hide_rejected.setChecked(False)
+            self.chk_hide_rejected.setChecked(True)
             self._recompute_and_plot()
         except Exception:
             pass
@@ -195,6 +201,10 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
             pass
 
         return saved
+
+    # Keep backwards compatibility: older code used a private helper with this name.
+    def _recompute_and_plot(self) -> None:
+        self._recompute_and_redraw()
 
     def rejected_lines(self) -> list[float]:
         return sorted([float(l0) for l0, on in self._active.items() if not on])
@@ -288,8 +298,8 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
         pow_coeff, pow_meta, pow_used = robust_polyfit_2d_power(
             x, y, lam, int(self._cfg.power_deg),
             weights=w,
-            sigma_clip=float(self._cfg.sigma_clip),
-            maxiter=int(self._cfg.maxiter),
+            sigma_clip=float(self._cfg.power_sigma_clip),
+            maxiter=int(self._cfg.power_maxiter),
         )
         pow_pred = polyval2d_power(x, y, pow_coeff, pow_meta)
         pow_dlam = pow_pred - lam
@@ -298,8 +308,8 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
         cheb_C, cheb_meta, cheb_used = robust_polyfit_2d_cheb(
             x, y, lam, int(self._cfg.cheb_degx), int(self._cfg.cheb_degy),
             weights=w,
-            sigma_clip=float(self._cfg.sigma_clip),
-            maxiter=int(self._cfg.maxiter),
+            sigma_clip=float(self._cfg.cheb_sigma_clip),
+            maxiter=int(self._cfg.cheb_maxiter),
         )
         cheb_pred = polyval2d_cheb(x, y, cheb_C, cheb_meta)
         cheb_dlam = cheb_pred - lam
@@ -314,35 +324,43 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
             kind = "power" if pow_rms <= cheb_rms else "chebyshev"
 
         if kind == "power":
-            used = pow_used
+            used_fit = pow_used
             rms = pow_rms
 
             def model_fn(xx, yy):
                 return polyval2d_power(xx, yy, pow_coeff, pow_meta)
         else:
-            used = cheb_used
+            used_fit = cheb_used
             rms = cheb_rms
 
             def model_fn(xx, yy):
                 return polyval2d_cheb(xx, yy, cheb_C, cheb_meta)
 
-        # residuals for plotting (all points, including rejected lines)
+        # Expand used mask to all control points (for QC-consistent plotting).
+        used_all = np.zeros_like(self._x, dtype=bool)
+        used_all[mask_fit] = np.asarray(used_fit, bool)
+
+        # Residuals for plotting (all points), but in "final" mode we will show
+        # only the inliers used by the robust fit.
         pred_all = model_fn(self._x, self._y)
         dlam_all = pred_all - self._lam
 
-        # IDL-like plot: each line is a curve Δλ(y), stacked with vertical offsets
-        hide_rej = bool(self.chk_hide_rejected.isChecked())
+        # IDL-like plot: each line is a curve Δλ(y), stacked with vertical offsets.
+        final_view = bool(self.chk_hide_rejected.isChecked())
 
-        import numpy as _np
+        _np = np  # readability: keep the plotting section close to the stage plotter
         import matplotlib.transforms as mtransforms
         from matplotlib.colors import LinearSegmentedColormap
 
-        uniq = _np.asarray(self._unique_lines, float)
+        uniq_all = _np.asarray(self._unique_lines, float)
+        uniq = uniq_all
+
         cmap = LinearSegmentedColormap.from_list("blue_to_red", ["blue", "red"])
         colors = cmap(_np.linspace(0.0, 1.0, max(1, len(uniq))))
 
-        # choose a pleasant offset: ~ (3–4)×RMS, but not too small
-        y_offset_step = float(max(0.5, min(2.0, 4.0 * (rms if _np.isfinite(rms) else 1.0))))
+        # Choose a pleasant offset: ~ (3–4)×RMS, but not too small.
+        # Keep consistent with the stage plotter.
+        y_offset_step = float(max(0.5, min(2.5, 4.0 * (rms if _np.isfinite(rms) else 1.0))))
 
         with self._mpl_style():
             self.fig.clear()
@@ -365,11 +383,25 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
                     continue
 
                 is_on = bool(self._active.get(lam0, True))
-                if (not is_on) and hide_rej:
-                    continue
 
-                yk = self._y[m_line]
-                dlam = dlam_all[m_line]
+                # Select points to display.
+                # - In fit-consistent view: active lines show only robust-fit inliers (used_all).
+                #   Rejected lines are still shown (grey) to make manual cleaning transparent.
+                # - In audit view: show all points for all lines.
+                if final_view:
+                    if is_on:
+                        m_disp = m_line & used_all
+                        # If the robust fit kept too few points, fall back to all points
+                        # so the line remains visible for manual inspection.
+                        if int(_np.count_nonzero(m_disp)) < 3:
+                            m_disp = m_line
+                    else:
+                        m_disp = m_line
+                else:
+                    m_disp = m_line
+
+                yk = self._y[m_disp]
+                dlam = dlam_all[m_disp]
                 if yk.size < 3:
                     continue
 
@@ -378,6 +410,7 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
                 dlam_sorted = dlam[ordy]
                 off = k * y_offset_step
 
+                # Stable color by line index; rejected lines are grey.
                 col = colors[k % len(colors)]
                 if not is_on:
                     col = (0.65, 0.65, 0.65, 0.9)
@@ -388,20 +421,23 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
                 ys_s = y_sorted[::step_pts]
                 ds_s = (dlam_sorted + off)[::step_pts]
                 ax.scatter(ys_s, ds_s, s=3, color=col, alpha=0.85, linewidths=0.0)
-
                 # for click-to-toggle
                 click_x.extend(ys_s.tolist())
                 click_y.extend(ds_s.tolist())
                 click_l.extend([lam0] * len(ys_s))
 
-                good = _np.isfinite(dlam)
+                # Stats: prefer robust-fit inliers if available (stable / QC-consistent).
+                d_stat = dlam_all[m_line & used_all]
+                if d_stat.size < 2:
+                    d_stat = dlam
+                good = _np.isfinite(d_stat)
                 if int(_np.count_nonzero(good)) >= 2:
-                    mu = float(_np.mean(dlam[good]))
-                    sd = float(_np.std(dlam[good], ddof=1))
+                    mu = float(_np.mean(d_stat[good]))
+                    sd = float(_np.std(d_stat[good], ddof=1))
                 else:
                     mu, sd = _np.nan, _np.nan
 
-                y_text = off + (float(_np.nanmean(dlam)) if _np.any(_np.isfinite(dlam)) else 0.0)
+                y_text = off + (float(_np.nanmean(d_stat)) if _np.any(_np.isfinite(d_stat)) else 0.0)
                 text_rows.append((y_text, col, lam0, mu, sd))
 
             # baseline helpers at the label heights
@@ -431,12 +467,12 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
 
         self.canvas.draw()
 
-        n_used = int(_np.sum(used))
+        n_used = int(_np.sum(used_fit))
         self.lbl_rms.setText(
             f"Model: {kind}   |   RMS: {rms:.4f} Å   |   Points used: {n_used}/{x.size}   |   Lines rejected: {len(self.rejected_lines())}"
         )
         self.lbl_info.setText(
             "Tip: uncheck a wavelength (line) to exclude it from the 2D fit.\n"
             "You can also click near a curve/point on the plot to toggle its line.\n"
-            "Use 'Final view' to hide rejected (grey) lines."
+            "Use 'Fit-consistent view (inliers only)' to compare the fit cleanly with the QC residual plot."
         )

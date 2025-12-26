@@ -173,7 +173,8 @@ def shift2d_subpix_x(arr: np.ndarray, shift_pix_y: np.ndarray | float, *, fill: 
     out = (1.0 - frac) * a0 + frac * a1
     filled = ~valid
     if np.any(filled):
-        out = out.astype(float, copy=False)
+        # NumPy 2.0: copy=False is strict; allow a copy when dtype conversion is needed.
+        out = np.asarray(out, dtype=float)
         out[filled] = float(fill)
     return out, filled
 
@@ -213,7 +214,7 @@ def shift2d_subpix_x_var(var: np.ndarray, shift_pix_y: np.ndarray | float, *, fi
 
     filled = ~valid
     if np.any(filled):
-        out = out.astype(float, copy=False)
+        out = np.asarray(out, dtype=float)
         out[filled] = float(fill)
     return out, filled
 
@@ -244,10 +245,10 @@ def shift2d_subpix_x_mask(mask: np.ndarray, shift_pix_y: np.ndarray | float, *, 
     i0c = np.clip(i0, 0, nx - 1)
     i1c = np.clip(i1, 0, nx - 1)
 
-    m0 = np.take_along_axis(m, i0c, axis=1).astype(np.uint16, copy=False)
-    m1 = np.take_along_axis(m, i1c, axis=1).astype(np.uint16, copy=False)
+    m0 = np.asarray(np.take_along_axis(m, i0c, axis=1), dtype=np.uint16)
+    m1 = np.asarray(np.take_along_axis(m, i1c, axis=1), dtype=np.uint16)
 
-    out = (m0 | m1).astype(np.uint16, copy=False)
+    out = np.asarray((m0 | m1), dtype=np.uint16)
     filled = ~valid
     if np.any(filled):
         out[filled] |= np.uint16(no_cov)

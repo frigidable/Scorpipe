@@ -166,11 +166,47 @@ class CosmicsBlock(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     enabled: bool = True
+    # auto | stack_mad | two_frame_diff | laplacian
     method: str = "stack_mad"
+    # Global detection threshold (see method-specific notes).
     k: float = 9.0
     bias_subtract: bool = True
     save_png: bool = True
+    save_mask_fits: bool = True
     apply_to: List[str] = Field(default_factory=lambda: ["obj", "sky"])  # obj|sky|sunsky|neon
+
+    # --- Common tuning knobs ---
+    # Binary mask dilation radius (pixels). 0 disables.
+    dilate: int = 1
+
+    # --- stack_mad tuning ---
+    # Thresholding uses |x-med| / (mad_scale*MAD) > k.
+    mad_scale: float = 1.0
+    # Optional floor for MAD (prevents pathological over-masking on flat pixels).
+    min_mad: float = 0.0
+    # Optional cap for per-frame masked fraction (0..1). None disables.
+    max_frac_per_frame: Optional[float] = None
+    # Per-method override for dilate (None -> use `dilate`).
+    stack_dilate: Optional[int] = None
+
+    # --- two_frame_diff tuning ---
+    # Local mean radius for |diff| (used in local threshold term).
+    local_r: int = 2
+    two_diff_local_r: Optional[int] = None
+    # Global threshold factor: max(k2_min, k2_scale*k) * sigma(diff)
+    two_diff_k2_scale: float = 0.8
+    two_diff_k2_min: float = 5.0
+    # Local threshold: thr_local_a*loc + thr_local_b*sigma
+    two_diff_thr_local_a: float = 4.0
+    two_diff_thr_local_b: float = 2.5
+    two_diff_dilate: Optional[int] = None
+
+    # --- laplacian tuning ---
+    lap_local_r: Optional[int] = None
+    # Laplacian threshold: max(lap_k_min, lap_k_scale*k) * sigma(lap)
+    lap_k_scale: float = 0.8
+    lap_k_min: float = 5.0
+    lap_dilate: Optional[int] = None
 
 
 class FlatfieldBlock(BaseModel):
@@ -448,7 +484,35 @@ _CALIB_KEYS = {"superbias_path", "superflat_path", "bias_combine", "bias_sigma_c
 
 _SUPERNEON_KEYS = {"bias_sub"}
 
-_COSMICS_KEYS = {"enabled", "method", "k", "bias_subtract", "save_png", "apply_to"}
+_COSMICS_KEYS = {
+    "enabled",
+    "method",
+    "k",
+    "bias_subtract",
+    "save_png",
+    "save_mask_fits",
+    "apply_to",
+    # common
+    "dilate",
+    # stack_mad
+    "mad_scale",
+    "min_mad",
+    "max_frac_per_frame",
+    "stack_dilate",
+    # two_frame_diff
+    "local_r",
+    "two_diff_local_r",
+    "two_diff_k2_scale",
+    "two_diff_k2_min",
+    "two_diff_thr_local_a",
+    "two_diff_thr_local_b",
+    "two_diff_dilate",
+    # laplacian
+    "lap_local_r",
+    "lap_k_scale",
+    "lap_k_min",
+    "lap_dilate",
+}
 
 _FLATFIELD_KEYS = {"enabled", "method", "norm", "bias_subtract", "save_png", "apply_to"}
 

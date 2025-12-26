@@ -8,6 +8,8 @@ from typing import Iterable
 import pandas as pd
 from astropy.io import fits
 
+from scorpio_pipe.fits_utils import open_fits_smart
+
 from scorpio_pipe.nightlog import find_nightlog, parse_nightlog
 from scorpio_pipe.instrument_db import guess_instrument_from_header
 
@@ -193,7 +195,7 @@ def _open_fits_header_safe(fp: Path) -> fits.Header:
     кадра берём из NAXIS* в заголовке.
     """
     try:
-        with fits.open(fp, memmap=True) as hdul:
+        with open_fits_smart(fp, prefer_memmap=True) as hdul:
             return hdul[0].header
     except Exception:
         # часто помогает для "подуставших" .fts

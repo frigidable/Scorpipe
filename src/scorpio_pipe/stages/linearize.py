@@ -95,7 +95,9 @@ def _open_science_with_optional_var_mask(path: Path) -> tuple[np.ndarray, np.nda
         with fits.open(path, memmap=False) as hdul:
             if "SCI" in hdul:
                 sci, var, mask, hdr = read_sci_var_mask(path)
-                return sci.astype(np.float64, copy=False), (None if var is None else var.astype(np.float64, copy=False)), mask, hdr
+                sci64 = np.asarray(sci, dtype=np.float64)
+                var64 = None if var is None else np.asarray(var, dtype=np.float64)
+                return sci64, var64, mask, hdr
     except Exception:
         # fall back to primary-only
         pass
@@ -601,7 +603,7 @@ def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel
                 if mask is None:
                     mask = cm
                 else:
-                    mask = (mask | cm).astype(np.uint16, copy=False)
+                    mask = np.asarray((mask | cm), dtype=np.uint16)
             except Exception as e:
                 log.warning("Failed to load cosmic mask %s: %s", mp.name, e)
                 # keep existing mask if any

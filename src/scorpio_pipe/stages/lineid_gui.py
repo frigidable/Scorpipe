@@ -808,7 +808,7 @@ def prepare_lineid(
     )
     neon_lines_csv = neon_lines_csv_res.path
 
-    img = fits.getdata(superneon_fits).astype(float)
+    img = fits.getdata(superneon_fits, memmap=False).astype(float)
     prof = _profile_1d(img, y_half=y_half)
     x = np.arange(prof.size, dtype=float)
 

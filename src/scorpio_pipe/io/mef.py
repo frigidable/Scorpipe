@@ -83,7 +83,8 @@ def write_sci_var_mask(
         if mask.shape != sci.shape:
             raise ValueError(f"MASK shape {mask.shape} != SCI shape {sci.shape}")
         if mask.dtype != np.uint16:
-            mask = mask.astype(np.uint16, copy=False)
+            # NumPy 2.0 strictness: allow a copy when needed.
+            mask = np.asarray(mask, dtype=np.uint16)
 
     phdr = fits.Header() if header is None else fits.Header(header)
     _apply_cards(phdr, as_header_cards(prefix="SCORP"))
@@ -110,20 +111,20 @@ def write_sci_var_mask(
     shdr = fits.Header()
     if grid is not None:
         _apply_cards(shdr, grid.to_wcs_cards())
-    sci_hdu = fits.ImageHDU(data=sci.astype(np.float32, copy=False), header=shdr, name="SCI")
+    sci_hdu = fits.ImageHDU(data=np.asarray(sci, dtype=np.float32), header=shdr, name="SCI")
     hdus.append(sci_hdu)
 
     if var is not None:
         vhdr = fits.Header()
         if grid is not None:
             _apply_cards(vhdr, grid.to_wcs_cards())
-        hdus.append(fits.ImageHDU(data=var.astype(np.float32, copy=False), header=vhdr, name="VAR"))
+        hdus.append(fits.ImageHDU(data=np.asarray(var, dtype=np.float32), header=vhdr, name="VAR"))
 
     if mask is not None:
         mhdr = fits.Header()
         if grid is not None:
             _apply_cards(mhdr, grid.to_wcs_cards())
-        hdus.append(fits.ImageHDU(data=mask.astype(np.uint16, copy=False), header=mhdr, name="MASK"))
+        hdus.append(fits.ImageHDU(data=np.asarray(mask, dtype=np.uint16), header=mhdr, name="MASK"))
 
     if extra_hdus:
         hdus.extend(extra_hdus)

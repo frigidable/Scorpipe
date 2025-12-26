@@ -468,6 +468,12 @@ def run_sequence(
         if it.action == "skip":
             log.info("Skip %s (%s)", t, it.reason)
             results[t] = None
+            try:
+                from scorpio_pipe.qc.metrics_store import update_after_stage
+
+                update_after_stage(cfg, stage=t, status="skipped", stage_hash=None)
+            except Exception:
+                pass
             continue
 
         fn = TASKS.get(t)
@@ -485,10 +491,24 @@ def run_sequence(
             res = _call_maybe_with_cancel(fn, cfg=cfg, out_dir=out_dir, config_path=config_path, cancel_token=cancel_token)
             results[t] = res
             record_stage_result(out_dir, t, status="ok", stage_hash=stage_hash, message=None, trace=None)
+            try:
+                from scorpio_pipe.qc.metrics_store import mirror_qc_to_products, update_after_stage
+
+                update_after_stage(cfg, stage=t, status="ok", stage_hash=stage_hash)
+                if t in ("manifest", "qc_report"):
+                    mirror_qc_to_products(out_dir)
+            except Exception:
+                pass
         except Exception as e:
             tb = traceback.format_exc()
             log.error("Task %s failed: %s", t, e, exc_info=True)
             record_stage_result(out_dir, t, status="failed", stage_hash=stage_hash, message=str(e), trace=tb)
+            try:
+                from scorpio_pipe.qc.metrics_store import update_after_stage
+
+                update_after_stage(cfg, stage=t, status="failed", stage_hash=stage_hash, stage_metrics={"error": str(e)})
+            except Exception:
+                pass
             raise
 
     return results

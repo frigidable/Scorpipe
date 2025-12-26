@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from astropy.io import fits
 
+from scorpio_pipe.fits_utils import open_fits_smart
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
@@ -160,7 +162,7 @@ class LambdaWindowsDialog(QDialog):
     def _make_spectrum(self) -> tuple[np.ndarray, np.ndarray]:
         if not self._fits_path.exists():
             raise FileNotFoundError(str(self._fits_path))
-        with fits.open(self._fits_path, memmap=True) as hdul:
+        with open_fits_smart(self._fits_path, prefer_memmap=True) as hdul:
             sci, hdr = _extract_sci_and_hdr(hdul)
 
         ny, nx = sci.shape

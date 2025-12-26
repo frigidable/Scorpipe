@@ -94,7 +94,7 @@ def _read_text_file(path: Path, max_chars: int = 250_000) -> str:
 
 
 def _fits_to_qpixmap(path: Path, *, w: int = 1200, h: int = 600) -> QtGui.QPixmap:
-    data = fits.getdata(path).astype(float)
+    data = fits.getdata(path, memmap=False).astype(float)
     data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
 
     # percentile stretch

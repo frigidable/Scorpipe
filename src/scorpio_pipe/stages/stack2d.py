@@ -21,6 +21,8 @@ import json
 import numpy as np
 from astropy.io import fits
 
+from scorpio_pipe.fits_utils import open_fits_smart
+
 from scorpio_pipe.io.mef import write_sci_var_mask, try_read_grid
 from scorpio_pipe.version import PIPELINE_VERSION
 from scorpio_pipe.maskbits import BADPIX, COSMIC, NO_COVERAGE, REJECTED, SATURATED, USER
@@ -32,9 +34,6 @@ from ..shift_utils import xcorr_shift_subpix
 
 MASK_NO_COVERAGE = NO_COVERAGE
 MASK_CLIPPED = REJECTED
-
-# Bits that make a pixel unusable for stacking.
-FATAL_BITS = np.uint16(NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED)
 
 # Bits that make a pixel unusable for stacking.
 FATAL_BITS = np.uint16(NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED)
@@ -193,7 +192,7 @@ def _take_block_yshift_subpix(arr: np.ndarray, y0: int, y1: int, shift: float, *
         w1 = frac[:, None]
         w0 = 1.0 - w1
         vv = valid[:, None]
-        out[vv] = (w0[vv] * a0[vv] + w1[vv] * a1[vv]).astype(np.float32, copy=False)
+        out[vv] = (w0[vv] * a0[vv] + w1[vv] * a1[vv])
         filled[vv] = False
     return out, filled
 
@@ -207,7 +206,7 @@ def _take_block_yshift_subpix_var(var: np.ndarray, y0: int, y1: int, shift: floa
     if not np.isfinite(s) or abs(s) < 1e-9:
         blk = var[y0:y1, :].copy()
         filled = ~np.isfinite(blk)
-        return blk.astype(np.float32, copy=False), filled
+        return np.asarray(blk, dtype=np.float32), filled
 
     y_out = np.arange(y0, y1, dtype=float)
     y_in = y_out - s
@@ -253,7 +252,7 @@ def _take_block_yshift_subpix_mask(mask: np.ndarray, y0: int, y1: int, shift: fl
         m0 = mask[i0c, :]
         m1 = mask[i1c, :]
         vv = valid[:, None]
-        out[vv] = (m0[vv] | m1[vv]).astype(np.uint16, copy=False)
+        out[vv] = (m0[vv] | m1[vv])
     return out
 
 
@@ -278,7 +277,7 @@ def _take_block_yshift_mask(mask: np.ndarray, y0: int, y1: int, shift: int) -> n
 
 def _open_mef(path: Path) -> tuple[np.ndarray, fits.Header, np.ndarray | None, np.ndarray | None]:
     """Return (sci, hdr, var, mask) from a MEF or simple FITS."""
-    with fits.open(path, memmap=True) as hdul:
+    with open_fits_smart(path, prefer_memmap=True) as hdul:
         hdr = hdul[0].header.copy()
         sci = hdul[0].data
         if sci is None:
@@ -367,7 +366,7 @@ def run_stack2d(cfg: dict[str, Any], *, inputs: Iterable[Path], out_dir: Path | 
     out_cov = np.zeros((ny, nx), dtype=np.int16)
 
     # Keep HDUs open (memmap) for slicing.
-    hduls = [fits.open(p, memmap=True) for p in files]
+    hduls = [open_fits_smart(p, prefer_memmap=True) for p in files]
     try:
         # Precompute per-exposure y offsets (subpixel) if requested.
         y_shifts = [0.0 for _ in files]

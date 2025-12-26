@@ -229,7 +229,7 @@ def _shift_subpix_fill_float(arr: np.ndarray, shift: float, *, axis: int, fill: 
             a1 = arr[:, i1c]
             w1 = frac[None, :]
             w0 = 1.0 - w1
-            out[:, valid] = (w0[:, valid] * a0[:, valid] + w1[:, valid] * a1[:, valid]).astype(out.dtype, copy=False)
+            out[:, valid] = (w0[:, valid] * a0[:, valid] + w1[:, valid] * a1[:, valid])
             filled[:, valid] = False
         return out, filled
     else:
@@ -249,7 +249,7 @@ def _shift_subpix_fill_float(arr: np.ndarray, shift: float, *, axis: int, fill: 
             a1 = arr[i1c, :]
             w1 = frac[:, None]
             w0 = 1.0 - w1
-            out[valid, :] = (w0[valid, :] * a0[valid, :] + w1[valid, :] * a1[valid, :]).astype(out.dtype, copy=False)
+            out[valid, :] = (w0[valid, :] * a0[valid, :] + w1[valid, :] * a1[valid, :])
             filled[valid, :] = False
         return out, filled
 
@@ -337,7 +337,7 @@ def _shift_subpix_mask(mask: np.ndarray, shift: float, *, axis: int) -> np.ndarr
         if np.any(valid):
             m0 = mask[:, i0c]
             m1 = mask[:, i1c]
-            out[:, valid] = (m0[:, valid] | m1[:, valid]).astype(np.uint16, copy=False)
+            out[:, valid] = (m0[:, valid] | m1[:, valid])
         return out
     else:
         n = ny
@@ -351,7 +351,7 @@ def _shift_subpix_mask(mask: np.ndarray, shift: float, *, axis: int) -> np.ndarr
         if np.any(valid):
             m0 = mask[i0c, :]
             m1 = mask[i1c, :]
-            out[valid, :] = (m0[valid, :] | m1[valid, :]).astype(np.uint16, copy=False)
+            out[valid, :] = (m0[valid, :] | m1[valid, :])
         return out
 
 

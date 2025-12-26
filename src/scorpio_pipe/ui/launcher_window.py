@@ -1847,7 +1847,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             if hasattr(self, 'chk_cosmics_enabled'):
                 _set_checked(getattr(self, 'chk_cosmics_enabled', None), bool(self._cfg_get(cfg, ['cosmics', 'enabled'], True)))
             if hasattr(self, 'combo_cosmics_method'):
-                m = str(self._cfg_get(cfg, ['cosmics', 'method'], 'stack_mad') or 'stack_mad')
+                m = str(self._cfg_get(cfg, ['cosmics', 'method'], 'auto') or 'auto')
                 _set_combo_text(getattr(self, 'combo_cosmics_method', None), m)
             if hasattr(self, 'spin_cosmics_k'):
                 _set_value(getattr(self, 'spin_cosmics_k', None), _safe_float(self._cfg_get(cfg, ['cosmics', 'k'], 9.0), 9.0))
@@ -1855,6 +1855,37 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 _set_checked(getattr(self, 'chk_cosmics_bias', None), bool(self._cfg_get(cfg, ['cosmics', 'bias_subtract'], True)))
             if hasattr(self, 'chk_cosmics_png'):
                 _set_checked(getattr(self, 'chk_cosmics_png', None), bool(self._cfg_get(cfg, ['cosmics', 'save_png'], True)))
+            if hasattr(self, 'chk_cosmics_mask_fits'):
+                _set_checked(getattr(self, 'chk_cosmics_mask_fits', None), bool(self._cfg_get(cfg, ['cosmics', 'save_mask_fits'], True)))
+            if hasattr(self, 'spin_cosmics_dilate'):
+                _set_value(getattr(self, 'spin_cosmics_dilate', None), _safe_int(self._cfg_get(cfg, ['cosmics', 'dilate'], 1), 1))
+            if hasattr(self, 'dspin_cosmics_mad_scale'):
+                _set_value(getattr(self, 'dspin_cosmics_mad_scale', None), _safe_float(self._cfg_get(cfg, ['cosmics', 'mad_scale'], 1.0), 1.0))
+            if hasattr(self, 'dspin_cosmics_min_mad'):
+                _set_value(getattr(self, 'dspin_cosmics_min_mad', None), _safe_float(self._cfg_get(cfg, ['cosmics', 'min_mad'], 0.0), 0.0))
+            if hasattr(self, 'dspin_cosmics_max_frac'):
+                v = self._cfg_get(cfg, ['cosmics', 'max_frac_per_frame'], None)
+                vv = 0.0
+                try:
+                    if v not in (None, ""):
+                        vv = float(v)
+                except Exception:
+                    vv = 0.0
+                _set_value(getattr(self, 'dspin_cosmics_max_frac', None), vv)
+            if hasattr(self, 'spin_cosmics_local_r'):
+                _set_value(getattr(self, 'spin_cosmics_local_r', None), _safe_int(self._cfg_get(cfg, ['cosmics', 'local_r'], 2), 2))
+            if hasattr(self, 'dspin_cosmics_k2_scale'):
+                _set_value(getattr(self, 'dspin_cosmics_k2_scale', None), _safe_float(self._cfg_get(cfg, ['cosmics', 'two_diff_k2_scale'], 0.8), 0.8))
+            if hasattr(self, 'dspin_cosmics_k2_min'):
+                _set_value(getattr(self, 'dspin_cosmics_k2_min', None), _safe_float(self._cfg_get(cfg, ['cosmics', 'two_diff_k2_min'], 5.0), 5.0))
+            if hasattr(self, 'dspin_cosmics_thr_a'):
+                _set_value(getattr(self, 'dspin_cosmics_thr_a', None), _safe_float(self._cfg_get(cfg, ['cosmics', 'two_diff_thr_local_a'], 4.0), 4.0))
+            if hasattr(self, 'dspin_cosmics_thr_b'):
+                _set_value(getattr(self, 'dspin_cosmics_thr_b', None), _safe_float(self._cfg_get(cfg, ['cosmics', 'two_diff_thr_local_b'], 2.5), 2.5))
+            if hasattr(self, 'dspin_cosmics_lap_k_scale'):
+                _set_value(getattr(self, 'dspin_cosmics_lap_k_scale', None), _safe_float(self._cfg_get(cfg, ['cosmics', 'lap_k_scale'], 0.8), 0.8))
+            if hasattr(self, 'dspin_cosmics_lap_k_min'):
+                _set_value(getattr(self, 'dspin_cosmics_lap_k_min', None), _safe_float(self._cfg_get(cfg, ['cosmics', 'lap_k_min'], 5.0), 5.0))
 
         # --- Flatfield ---
         if hasattr(self, 'chk_flat_enabled') and not self._stage_dirty.get('flatfield', False):
@@ -2267,7 +2298,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
         left_layout.addWidget(g)
         gl = QtWidgets.QVBoxLayout(g)
         lbl = QtWidgets.QLabel(
-            "Clean cosmic rays in object/sky frames using a simple median filter.\n"
+            "Clean cosmic rays in object/sky frames.\n"
+            "Methods:\n"
+            "• auto — choose the best method by the number of frames\n"
+            "• stack_mad — robust stack MAD masking (>=3 frames)\n"
+            "• two_frame_diff — 2-frame diff-based masking (2 frames)\n"
+            "• laplacian — single-frame Laplacian detector (1 frame)\n"
             "Outputs are written under work_dir/cosmics/."
         )
         lbl.setWordWrap(True)
@@ -2295,13 +2331,16 @@ class LauncherWindow(QtWidgets.QMainWindow):
         )
 
         self.combo_cosmics_method = QtWidgets.QComboBox()
-        self.combo_cosmics_method.addItems(["stack_mad"])
+        self.combo_cosmics_method.addItems(["auto", "stack_mad", "two_frame_diff", "laplacian"])
         bf.addRow(
             self._param_label(
                 "Method",
                 "Алгоритм подавления космиков.\n"
+                "auto — выбрать метод автоматически по числу кадров.\n"
                 "stack_mad — устойчивый метод по стеку кадров.\n"
-                "Типично: stack_mad (по умолчанию).",
+                "two_frame_diff — разностный метод для 2 экспозиций.\n"
+                "laplacian — одиночный кадр (fallback).\n"
+                "Типично: auto (по умолчанию).",
             ),
             self.combo_cosmics_method,
         )
@@ -2344,6 +2383,22 @@ class LauncherWindow(QtWidgets.QMainWindow):
             ),
             self.spin_cosmics_k,
         )
+
+        self.spin_cosmics_dilate = QtWidgets.QSpinBox()
+        self.spin_cosmics_dilate.setRange(0, 10)
+        self.spin_cosmics_dilate.setSingleStep(1)
+        self.spin_cosmics_dilate.setToolTip(
+            "Радиус дилатации бинарной маски (пикс). 0 — без расширения. "
+            "Полезно, чтобы захватывать 'хвосты' космиков. Ориентир: 0–2."
+        )
+        bf.addRow(
+            self._param_label(
+                "Dilate (px)",
+                "Радиус расширения маски космиков (в пикселях).\n"
+                "0 — отключено; 1–2 — типично; больше — агрессивно.",
+            ),
+            self.spin_cosmics_dilate,
+        )
         adv = QtWidgets.QWidget()
         af = QtWidgets.QFormLayout(adv)
         af.setLabelAlignment(QtCore.Qt.AlignLeft)
@@ -2369,8 +2424,181 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.chk_cosmics_png,
         )
 
+        self.chk_cosmics_mask_fits = QtWidgets.QCheckBox("Yes")
+        af.addRow(
+            self._param_label(
+                "Save mask FITS",
+                "Сохранять FITS-маски космиков (по кадрам) в work_dir/cosmics/.../masks_fits/.\n"
+                "Полезно для диагностики и повторной обработки.",
+            ),
+            self.chk_cosmics_mask_fits,
+        )
+
+        # --- method-specific advanced tuning ---
+        af.addRow(QtWidgets.QLabel("<b>stack_mad</b>"))
+
+        self.dspin_cosmics_mad_scale = QtWidgets.QDoubleSpinBox()
+        self.dspin_cosmics_mad_scale.setRange(0.05, 10.0)
+        self.dspin_cosmics_mad_scale.setDecimals(3)
+        self.dspin_cosmics_mad_scale.setSingleStep(0.05)
+        self.dspin_cosmics_mad_scale.setToolTip(
+            "Масштаб MAD: используется в |x-med|/(mad_scale*MAD) > k. "
+            "1.0 — как сейчас; 1.4826 ≈ перевод MAD→σ для нормального распределения."
+        )
+        af.addRow(
+            self._param_label(
+                "MAD scale",
+                "Масштаб для MAD в stack_mad: |x-med|/(mad_scale*MAD) > k.\n"
+                "1.0 — оставить поведение прежним; 1.4826 — приблизить к σ.",
+            ),
+            self.dspin_cosmics_mad_scale,
+        )
+
+        self.dspin_cosmics_min_mad = QtWidgets.QDoubleSpinBox()
+        self.dspin_cosmics_min_mad.setRange(0.0, 1e6)
+        self.dspin_cosmics_min_mad.setDecimals(6)
+        self.dspin_cosmics_min_mad.setSingleStep(1e-6)
+        self.dspin_cosmics_min_mad.setToolTip(
+            "Минимально допустимый MAD (floor). 0 — авто (eps). "
+            "Помогает, если кадры слишком плоские и маска становится огромной."
+        )
+        af.addRow(
+            self._param_label(
+                "min MAD",
+                "Нижняя граница для MAD (floor).\n"
+                "0 — авто (eps); увеличить, если видишь неадекватно большую маску.",
+            ),
+            self.dspin_cosmics_min_mad,
+        )
+
+        self.dspin_cosmics_max_frac = QtWidgets.QDoubleSpinBox()
+        self.dspin_cosmics_max_frac.setRange(0.0, 1.0)
+        self.dspin_cosmics_max_frac.setDecimals(3)
+        self.dspin_cosmics_max_frac.setSingleStep(0.01)
+        self.dspin_cosmics_max_frac.setToolTip(
+            "Ограничение доли замаскированных пикселей на кадр (0..1). "
+            "0 отключает. Типично 0.01–0.05, если нужно подстраховаться."
+        )
+        af.addRow(
+            self._param_label(
+                "max masked frac",
+                "Лимит доли замаскированных пикселей (на кадр) для stack_mad.\n"
+                "0 — отключено; например 0.02 = максимум 2% пикселей.",
+            ),
+            self.dspin_cosmics_max_frac,
+        )
+
+        af.addRow(QtWidgets.QLabel("<b>two_frame_diff</b>"))
+
+        self.spin_cosmics_local_r = QtWidgets.QSpinBox()
+        self.spin_cosmics_local_r.setRange(0, 20)
+        self.spin_cosmics_local_r.setSingleStep(1)
+        self.spin_cosmics_local_r.setToolTip(
+            "Радиус локального окна для |diff| (среднее). 2 => 5x5. Типично 1–3."
+        )
+        af.addRow(
+            self._param_label(
+                "local r",
+                "Радиус локального окна для оценки локального масштаба |diff| (two_frame_diff / laplacian).\n"
+                "2 ⇒ 5×5; типично 1–3.",
+            ),
+            self.spin_cosmics_local_r,
+        )
+
+        self.dspin_cosmics_k2_scale = QtWidgets.QDoubleSpinBox()
+        self.dspin_cosmics_k2_scale.setRange(0.0, 5.0)
+        self.dspin_cosmics_k2_scale.setDecimals(3)
+        self.dspin_cosmics_k2_scale.setSingleStep(0.05)
+        af.addRow(
+            self._param_label(
+                "k2 scale",
+                "two_frame_diff: k2 = max(k2_min, k2_scale*k).\n"
+                "Типично: 0.8.",
+            ),
+            self.dspin_cosmics_k2_scale,
+        )
+
+        self.dspin_cosmics_k2_min = QtWidgets.QDoubleSpinBox()
+        self.dspin_cosmics_k2_min.setRange(0.0, 50.0)
+        self.dspin_cosmics_k2_min.setDecimals(2)
+        self.dspin_cosmics_k2_min.setSingleStep(0.5)
+        af.addRow(
+            self._param_label(
+                "k2 min",
+                "two_frame_diff: нижняя граница для k2.\n"
+                "Типично: 5.",
+            ),
+            self.dspin_cosmics_k2_min,
+        )
+
+        self.dspin_cosmics_thr_a = QtWidgets.QDoubleSpinBox()
+        self.dspin_cosmics_thr_a.setRange(0.0, 20.0)
+        self.dspin_cosmics_thr_a.setDecimals(2)
+        self.dspin_cosmics_thr_a.setSingleStep(0.2)
+        af.addRow(
+            self._param_label(
+                "local a",
+                "two_frame_diff: thr_local = a*loc + b*sigma.\n"
+                "Типично: a=4.",
+            ),
+            self.dspin_cosmics_thr_a,
+        )
+
+        self.dspin_cosmics_thr_b = QtWidgets.QDoubleSpinBox()
+        self.dspin_cosmics_thr_b.setRange(0.0, 20.0)
+        self.dspin_cosmics_thr_b.setDecimals(2)
+        self.dspin_cosmics_thr_b.setSingleStep(0.2)
+        af.addRow(
+            self._param_label(
+                "local b",
+                "two_frame_diff: thr_local = a*loc + b*sigma.\n"
+                "Типично: b=2.5.",
+            ),
+            self.dspin_cosmics_thr_b,
+        )
+
+        af.addRow(QtWidgets.QLabel("<b>laplacian</b>"))
+
+        self.dspin_cosmics_lap_k_scale = QtWidgets.QDoubleSpinBox()
+        self.dspin_cosmics_lap_k_scale.setRange(0.0, 5.0)
+        self.dspin_cosmics_lap_k_scale.setDecimals(3)
+        self.dspin_cosmics_lap_k_scale.setSingleStep(0.05)
+        af.addRow(
+            self._param_label(
+                "lap k scale",
+                "laplacian: thr = max(lap_k_min, lap_k_scale*k) * sigma(lap).\n"
+                "Типично: 0.8.",
+            ),
+            self.dspin_cosmics_lap_k_scale,
+        )
+
+        self.dspin_cosmics_lap_k_min = QtWidgets.QDoubleSpinBox()
+        self.dspin_cosmics_lap_k_min.setRange(0.0, 50.0)
+        self.dspin_cosmics_lap_k_min.setDecimals(2)
+        self.dspin_cosmics_lap_k_min.setSingleStep(0.5)
+        af.addRow(
+            self._param_label(
+                "lap k min",
+                "laplacian: нижняя граница для k-терма.\n"
+                "Типично: 5.",
+            ),
+            self.dspin_cosmics_lap_k_min,
+        )
+
         # locale for doubles
         self._force_dot_locale(self.spin_cosmics_k)
+        for w in (
+            self.dspin_cosmics_mad_scale,
+            self.dspin_cosmics_min_mad,
+            self.dspin_cosmics_max_frac,
+            self.dspin_cosmics_k2_scale,
+            self.dspin_cosmics_k2_min,
+            self.dspin_cosmics_thr_a,
+            self.dspin_cosmics_thr_b,
+            self.dspin_cosmics_lap_k_scale,
+            self.dspin_cosmics_lap_k_min,
+        ):
+            self._force_dot_locale(w)
 
         pl.addWidget(self._mk_basic_advanced_tabs(basic, adv))
         pl.addWidget(self._mk_stage_apply_row("cosmics"))
@@ -2443,6 +2671,43 @@ class LauncherWindow(QtWidgets.QMainWindow):
         )
         self.chk_cosmics_png.toggled.connect(
             lambda v: self._stage_set_pending("cosmics", "cosmics.save_png", bool(v))
+        )
+
+        self.spin_cosmics_dilate.valueChanged.connect(
+            lambda v: self._stage_set_pending("cosmics", "cosmics.dilate", int(v))
+        )
+        self.chk_cosmics_mask_fits.toggled.connect(
+            lambda v: self._stage_set_pending("cosmics", "cosmics.save_mask_fits", bool(v))
+        )
+        self.dspin_cosmics_mad_scale.valueChanged.connect(
+            lambda v: self._stage_set_pending("cosmics", "cosmics.mad_scale", float(v))
+        )
+        self.dspin_cosmics_min_mad.valueChanged.connect(
+            lambda v: self._stage_set_pending("cosmics", "cosmics.min_mad", float(v))
+        )
+        self.dspin_cosmics_max_frac.valueChanged.connect(
+            lambda v: self._stage_set_pending("cosmics", "cosmics.max_frac_per_frame", float(v))
+        )
+        self.spin_cosmics_local_r.valueChanged.connect(
+            lambda v: self._stage_set_pending("cosmics", "cosmics.local_r", int(v))
+        )
+        self.dspin_cosmics_k2_scale.valueChanged.connect(
+            lambda v: self._stage_set_pending("cosmics", "cosmics.two_diff_k2_scale", float(v))
+        )
+        self.dspin_cosmics_k2_min.valueChanged.connect(
+            lambda v: self._stage_set_pending("cosmics", "cosmics.two_diff_k2_min", float(v))
+        )
+        self.dspin_cosmics_thr_a.valueChanged.connect(
+            lambda v: self._stage_set_pending("cosmics", "cosmics.two_diff_thr_local_a", float(v))
+        )
+        self.dspin_cosmics_thr_b.valueChanged.connect(
+            lambda v: self._stage_set_pending("cosmics", "cosmics.two_diff_thr_local_b", float(v))
+        )
+        self.dspin_cosmics_lap_k_scale.valueChanged.connect(
+            lambda v: self._stage_set_pending("cosmics", "cosmics.lap_k_scale", float(v))
+        )
+        self.dspin_cosmics_lap_k_min.valueChanged.connect(
+            lambda v: self._stage_set_pending("cosmics", "cosmics.lap_k_min", float(v))
         )
 
         # initial sync from YAML
@@ -4184,8 +4449,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
             power_deg=int(wcfg.get("power_deg", max(int(wcfg.get("cheb_degx", 5)), int(wcfg.get("cheb_degy", 3))))),
             cheb_degx=int(wcfg.get("cheb_degx", 5)),
             cheb_degy=int(wcfg.get("cheb_degy", 3)),
-            sigma_clip=float(wcfg.get("cheb_sigma_clip", 3.0)),
-            maxiter=int(wcfg.get("cheb_maxiter", 10)),
+            power_sigma_clip=float(wcfg.get("power_sigma_clip", wcfg.get("cheb_sigma_clip", 3.0))),
+            power_maxiter=int(wcfg.get("power_maxiter", wcfg.get("cheb_maxiter", 10))),
+            cheb_sigma_clip=float(wcfg.get("cheb_sigma_clip", 3.0)),
+            cheb_maxiter=int(wcfg.get("cheb_maxiter", 10)),
         )
 
         dlg = Wave2DLineCleanerDialog(cp_csv, cfg=dlg_cfg, rejected_lines_A=rejected, parent=self)

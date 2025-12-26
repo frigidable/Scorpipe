@@ -57,11 +57,27 @@ class AutoConfig:
             },
             cosmics={
                 "enabled": True,
-                "method": "stack_mad",
+                "method": "auto",
                 "k": 9.0,
                 "bias_subtract": True,
                 "save_png": True,
+                "save_mask_fits": True,
                 "apply_to": ["obj", "sky"],
+                # Common tuning knobs
+                "dilate": 1,
+                # stack_mad tuning
+                "mad_scale": 1.0,
+                "min_mad": 0.0,
+                "max_frac_per_frame": None,
+                # two_frame_diff tuning
+                "local_r": 2,
+                "two_diff_k2_scale": 0.8,
+                "two_diff_k2_min": 5.0,
+                "two_diff_thr_local_a": 4.0,
+                "two_diff_thr_local_b": 2.5,
+                # laplacian tuning
+                "lap_k_scale": 0.8,
+                "lap_k_min": 5.0,
             },
             flatfield={
                 # Optional step after cosmics: divide by object-matched flats.

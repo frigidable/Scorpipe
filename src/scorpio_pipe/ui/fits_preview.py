@@ -16,6 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
 from astropy.io import fits
+
+from scorpio_pipe.fits_utils import open_fits_smart
 from PySide6 import QtCore, QtGui, QtWidgets
 
 
@@ -38,7 +40,10 @@ def _as_2d_float(a: np.ndarray | None) -> np.ndarray:
         a = np.squeeze(a)
     if a.ndim != 2:
         raise ValueError(f"Unsupported FITS image ndim={a.ndim} (expected 2D)")
-    return np.array(a, dtype=np.float32, copy=False)
+    # NumPy 2.0: copy=False is *strict* and may raise if a copy is required.
+    # We prefer robustness in the GUI, so we allow copies when needed.
+    a = np.asarray(a, dtype=np.float32)
+    return a
 
 
 def _choose_image_hdu(hdul: fits.HDUList) -> tuple[int, np.ndarray]:
@@ -322,6 +327,7 @@ class FitsPreviewWidget(QtWidgets.QWidget):
         self._data_disp: np.ndarray | None = None
         self._params = StretchParams()
         self._hdu_index: int | None = None
+        self._fits_info: dict[str, object] | None = None
 
         # Controls
         self.cmb_cmap = QtWidgets.QComboBox()
@@ -376,6 +382,11 @@ class FitsPreviewWidget(QtWidgets.QWidget):
         self.lbl_path = QtWidgets.QLabel("No file")
         self.lbl_path.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
 
+        # Two separate lines: stats (file-level) and cursor info (dynamic).
+        self.lbl_stats = QtWidgets.QLabel("—")
+        self.lbl_stats.setStyleSheet("color: #A0A0A0;")
+        self.lbl_stats.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+
         self.lbl_info = QtWidgets.QLabel("—")
         self.lbl_info.setStyleSheet("color: #A0A0A0;")
         self.lbl_info.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
@@ -408,6 +419,7 @@ class FitsPreviewWidget(QtWidgets.QWidget):
         lay = QtWidgets.QVBoxLayout(self)
         lay.addLayout(top)
         lay.addWidget(self.lbl_path)
+        lay.addWidget(self.lbl_stats)
         lay.addWidget(self.lbl_info)
         lay.addWidget(self._view, 1)
 
@@ -442,8 +454,10 @@ class FitsPreviewWidget(QtWidgets.QWidget):
         except Exception as e:
             self._data = None
             self._data_disp = None
+            self._fits_info = None
             self._view.clear()
             self.lbl_path.setText(path)
+            self.lbl_stats.setText("—")
             self.lbl_info.setText(f"Failed to load FITS: {e}")
             # Put a readable message directly in the view area.
             sc = self._view.scene()
@@ -455,6 +469,40 @@ class FitsPreviewWidget(QtWidgets.QWidget):
 
         # Prepare display array (optional downsample)
         self._data_disp = self._make_display_array(self._data)
+
+        # File-level stats/diagnostics (computed on the display array for speed).
+        try:
+            img = self._data_disp
+            finite = img[np.isfinite(img)]
+            if finite.size:
+                p1 = float(np.percentile(finite, 1.0))
+                p50 = float(np.percentile(finite, 50.0))
+                p99 = float(np.percentile(finite, 99.0))
+                vmin = float(np.min(finite))
+                vmax = float(np.max(finite))
+            else:
+                p1 = p50 = p99 = vmin = vmax = float("nan")
+
+            info = self._fits_info or {}
+            mm = info.get("memmap_used", None)
+            scale = "scaled" if info.get("has_scaling") else "unscaled"
+            bzero = info.get("bzero")
+            bscale = info.get("bscale")
+            dtype = info.get("dtype", str(self._data.dtype))
+
+            extra = []
+            if mm is not None:
+                extra.append(f"memmap={bool(mm)}")
+            extra.append(scale)
+            if bzero is not None or bscale is not None:
+                extra.append(f"BZERO={bzero} BSCALE={bscale}")
+
+            self.lbl_stats.setText(
+                f"dtype={dtype}   min={vmin:.3g}  p01={p1:.3g}  median={p50:.3g}  p99={p99:.3g}  max={vmax:.3g}   |   "
+                + "   ".join(extra)
+            )
+        except Exception:
+            self.lbl_stats.setText("—")
 
         # Add a little context: HDU index, shape
         extra = ""
@@ -472,7 +520,9 @@ class FitsPreviewWidget(QtWidgets.QWidget):
         self._data = None
         self._data_disp = None
         self._hdu_index = None
+        self._fits_info = None
         self.lbl_path.setText("No file")
+        self.lbl_stats.setText("—")
         self.lbl_info.setText("—")
         self._view.clear()
 
@@ -491,60 +541,12 @@ class FitsPreviewWidget(QtWidgets.QWidget):
           3) As a last resort, retry with memmap=True (can help for huge files).
         """
 
-        def _open(memmap: bool) -> tuple[int, np.ndarray]:
-            with fits.open(
-                path,
-                memmap=memmap,
-                ignore_missing_end=True,
-                ignore_missing_simple=True,
-                do_not_scale_image_data=False,
-            ) as hdul:
-                idx, data = _choose_image_hdu(hdul)
-                # Materialize into a real ndarray so we are not tied to an open file.
-                arr = np.asarray(data)
-                return idx, arr
+        # Use the same loader as the pipeline to avoid "preview-only" surprises.
+        from scorpio_pipe.fits_utils import read_image_smart
 
-        try:
-            idx, arr = _open(memmap=False)
-        except MemoryError:
-            idx, arr = _open(memmap=True)
-        except Exception as e:
-            # Try common extension names and a wider ext range.
-            tried = []
-            for ext in ("SCI", "PRIMARY"):
-                try:
-                    d = fits.getdata(path, ext=ext, memmap=False)
-                    if d is None:
-                        continue
-                    a = np.asarray(d)
-                    if a.ndim >= 2:
-                        idx, arr = (0 if ext == "PRIMARY" else 1), a
-                        break
-                except Exception as ee:
-                    tried.append((ext, str(ee)))
-            else:
-                found = False
-                for ext in range(0, 64):
-                    try:
-                        d = fits.getdata(path, ext=ext, memmap=False)
-                        if d is None:
-                            continue
-                        a = np.asarray(d)
-                        if a.ndim >= 2:
-                            idx, arr = ext, a
-                            found = True
-                            break
-                    except Exception:
-                        continue
-                if not found:
-                    # Retry memmap=True as a last resort.
-                    try:
-                        idx, arr = _open(memmap=True)
-                    except Exception as e2:
-                        # Raise a richer error message.
-                        raise RuntimeError(f"Failed to load FITS: {path}\n{e}\n{e2}") from e2
-
-        self._hdu_index = idx
+        arr, _hdr, info = read_image_smart(path, memmap="auto", dtype=np.float32)
+        self._fits_info = info
+        self._hdu_index = info.get("hdu_index") if isinstance(info, dict) else None
         return arr
 
     def _make_display_array(self, a: np.ndarray) -> np.ndarray:
