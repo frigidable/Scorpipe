@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from scorpio_pipe.stage_contracts import list_stage_contracts, validate_contracts
 from scorpio_pipe.work_layout import ensure_work_layout
 

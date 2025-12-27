@@ -17,7 +17,6 @@ from dataclasses import dataclass
 import numpy as np
 from astropy.io import fits
 
-from scorpio_pipe.fits_utils import open_fits_smart
 from PySide6 import QtCore, QtGui, QtWidgets
 
 

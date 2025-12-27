@@ -9,6 +9,8 @@ from typing import Any
 import numpy as np
 from astropy.io import fits
 
+from scorpio_pipe.fits_utils import read_image_smart
+
 log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
@@ -113,6 +115,58 @@ def _boxcar_mean2d(img: np.ndarray, r: int) -> np.ndarray:
     return (total / float(k * k)).astype(np.float32)
 
 
+def _boxcar_mean2d_masked(img: np.ndarray, mask_bad: np.ndarray, r: int) -> np.ndarray:
+    """Fast boxcar mean excluding masked pixels.
+
+    Parameters
+    ----------
+    img
+        Image.
+    mask_bad
+        Boolean mask where True means "exclude".
+    r
+        Radius of the square window.
+
+    Notes
+    -----
+    - Uses integral images, no SciPy.
+    - Returns an array with the same shape as `img`.
+    """
+
+    if r <= 0:
+        return np.asarray(img, dtype=np.float32)
+    a = np.asarray(img, dtype=np.float32)
+    bad = np.asarray(mask_bad, dtype=bool)
+    good = (~bad).astype(np.float32)
+
+    pad = int(r)
+    ap = np.pad(a * good, ((pad, pad), (pad, pad)), mode="reflect")
+    gp = np.pad(good, ((pad, pad), (pad, pad)), mode="reflect")
+
+    # Integral images with leading 0 row/col.
+    s = np.pad(ap, ((1, 0), (1, 0)), mode="constant", constant_values=0.0).cumsum(axis=0).cumsum(axis=1)
+    c = np.pad(gp, ((1, 0), (1, 0)), mode="constant", constant_values=0.0).cumsum(axis=0).cumsum(axis=1)
+
+    k = 2 * pad + 1
+    total = s[k:, k:] - s[:-k, k:] - s[k:, :-k] + s[:-k, :-k]
+    count = c[k:, k:] - c[:-k, k:] - c[k:, :-k] + c[:-k, :-k]
+    mean = total / np.maximum(count, 1.0)
+    return mean.astype(np.float32)
+
+
+def _laplacian4(img: np.ndarray) -> np.ndarray:
+    """4-neighbor Laplacian with reflect padding."""
+    a = np.asarray(img, dtype=np.float32)
+    ip = np.pad(a, ((1, 1), (1, 1)), mode="reflect")
+    return (
+        -4.0 * ip[1:-1, 1:-1]
+        + ip[:-2, 1:-1]
+        + ip[2:, 1:-1]
+        + ip[1:-1, :-2]
+        + ip[1:-1, 2:]
+    ).astype(np.float32)
+
+
 def _dilate_mask(mask: np.ndarray, r: int = 1) -> np.ndarray:
     """Binary dilation with a (2r+1)x(2r+1) square structuring element."""
 
@@ -176,9 +230,7 @@ def _two_frame_diff_clean(
     names: list[str] = []
 
     for p in paths:
-        with fits.open(p) as hdul:
-            data = np.asarray(hdul[0].data, dtype=np.float32)
-            hdr = hdul[0].header.copy()
+        data, hdr, _info = read_image_smart(p, memmap="auto", dtype=np.float32)
         datas.append(data)
         headers.append(hdr)
         names.append(Path(p).stem)
@@ -269,7 +321,9 @@ def _two_frame_diff_clean(
 
         if save_mask_fits:
             mf = out_dir / "masks_fits" / f"{name}_mask.fits"
-            fits.writeto(mf, (m.astype(np.uint16)) * 1, overwrite=True)
+            # Store as uint8 to avoid FITS unsigned-int scaling keywords (BZERO/BSCALE)
+            # that may break strict memmap readers.
+            fits.writeto(mf, m.astype(np.uint8), overwrite=True)
 
     sum_excl = (a * (~m0) + b * (~m1)).astype(np.float32)
     cov = ((~m0).astype(np.int16) + (~m1).astype(np.int16)).astype(np.int16)
@@ -332,23 +386,14 @@ def _single_frame_laplacian_clean(
     if save_mask_fits:
         (out_dir / "masks_fits").mkdir(parents=True, exist_ok=True)
 
-    with fits.open(path) as hdul:
-        img = np.asarray(hdul[0].data, dtype=np.float32)
-        hdr = hdul[0].header.copy()
+    img, hdr, _info = read_image_smart(path, memmap="auto", dtype=np.float32)
 
     if bias_subtract and superbias is not None and superbias.shape == img.shape:
         img = img - superbias
         hdr["BIASSUB"] = (True, "Superbias subtracted")
 
     # Laplacian (4-neighbor) with reflect padding
-    ip = np.pad(img, ((1, 1), (1, 1)), mode="reflect")
-    lap = (
-        -4.0 * ip[1:-1, 1:-1]
-        + ip[:-2, 1:-1]
-        + ip[2:, 1:-1]
-        + ip[1:-1, :-2]
-        + ip[1:-1, 2:]
-    ).astype(np.float32)
+    lap = _laplacian4(img)
 
     sigma = _robust_sigma_mad_1d(lap)
     if not np.isfinite(sigma) or sigma <= 0:
@@ -380,7 +425,190 @@ def _single_frame_laplacian_clean(
     if save_png:
         _save_png(out_dir / "masks" / f"{name}_mask.png", m.astype(np.uint8), title=f"Cosmic mask: {name}")
     if save_mask_fits:
-        fits.writeto(out_dir / "masks_fits" / f"{name}_mask.fits", (m.astype(np.uint16)) * 1, overwrite=True)
+        # Store as uint8 to avoid FITS unsigned-int scaling keywords (BZERO/BSCALE)
+        # that may break strict memmap readers.
+        fits.writeto(out_dir / "masks_fits" / f"{name}_mask.fits", m.astype(np.uint8), overwrite=True)
+
+    # Reference QC products for single frame
+    sum_excl = cleaned * (~m)
+    cov = (~m).astype(np.int16)
+    fits.writeto(out_dir / "sum_excl_cosmics.fits", sum_excl.astype(np.float32), header=h, overwrite=True)
+    fits.writeto(out_dir / "coverage.fits", cov, overwrite=True)
+    if save_png:
+        _save_png(out_dir / "sum_excl_cosmics.png", sum_excl, title="Sum excl. cosmics")
+        _save_png(out_dir / "coverage.png", cov, title="Coverage")
+
+    outputs = {
+        "clean_dir": str((out_dir / "clean").resolve()),
+        "masks_dir": str((out_dir / "masks").resolve()),
+        "masks_fits_dir": str((out_dir / "masks_fits").resolve()),
+        "sum_excl_fits": str((out_dir / "sum_excl_cosmics.fits").resolve()),
+        "coverage_fits": str((out_dir / "coverage.fits").resolve()),
+        "sum_excl_png": str((out_dir / "sum_excl_cosmics.png").resolve()) if save_png else None,
+        "coverage_png": str((out_dir / "coverage.png").resolve()) if save_png else None,
+    }
+    return CosmicsSummary(
+        kind="",
+        n_frames=1,
+        k=float(k),
+        replaced_pixels=replaced_pixels,
+        replaced_fraction=replaced_fraction,
+        per_frame_fraction=[replaced_fraction],
+        outputs=outputs,
+    )
+
+
+
+def _single_frame_lacosmic_clean(
+    path: Path,
+    *,
+    out_dir: Path,
+    superbias: np.ndarray | None,
+    bias_subtract: bool,
+    save_png: bool,
+    save_mask_fits: bool,
+    niter: int = 4,
+    sigclip: float = 4.5,
+    sigfrac: float = 0.3,
+    objlim: float = 5.0,
+    replace_r: int = 2,
+    dilate: int = 1,
+    protect_lines: bool = True,
+    protect_half_x: int = 6,
+    protect_half_y: int = 1,
+    protect_k: float = 5.0,
+) -> CosmicsSummary:
+    """Single-frame L.A.Cosmic-like detector (van Dokkum 2001 style).
+
+    This is a lightweight, SciPy-free implementation meant to be conservative
+    on long-slit data: prefer missing a few cosmics to eating real narrow
+    emission/sky features.
+
+    If `astroscrappy` is available, it will be used as the reference engine.
+    """
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "clean").mkdir(parents=True, exist_ok=True)
+    if save_png:
+        (out_dir / "masks").mkdir(parents=True, exist_ok=True)
+    if save_mask_fits:
+        (out_dir / "masks_fits").mkdir(parents=True, exist_ok=True)
+
+    img, hdr, _info = read_image_smart(path, memmap="auto", dtype=np.float32)
+    if bias_subtract and superbias is not None and superbias.shape == img.shape:
+        img = img - superbias
+        hdr["BIASSUB"] = (True, "Superbias subtracted")
+
+    # Optional safeguard for long-slit: don't classify strong vertical sky/arc
+    # features as cosmics. This is intentionally conservative: it protects
+    # line cores, but leaves most of the continuum available for cleaning.
+    line_protect: np.ndarray | None = None
+    if bool(protect_lines):
+        rx = img - _boxcar_mean2d(img, r=int(max(1, protect_half_x)))
+        ry = img - _boxcar_mean2d(img, r=int(max(1, protect_half_y)))
+        sx = _robust_sigma_mad_1d(rx)
+        sy = _robust_sigma_mad_1d(ry)
+        if np.isfinite(sx) and np.isfinite(sy) and sx > 0 and sy > 0:
+            # Sky/arc lines: sharp in X, but extended/consistent in Y.
+            line_protect = (np.abs(rx) > float(protect_k) * sx) & (np.abs(ry) < 0.8 * float(protect_k) * sy)
+
+    # Try astroscrappy first (closest to van Dokkum L.A.Cosmic).
+    try:
+        import astroscrappy  # type: ignore
+
+        crmask, cleaned = astroscrappy.detect_cosmics(
+            img,
+            sigclip=float(sigclip),
+            sigfrac=float(sigfrac),
+            objlim=float(objlim),
+            niter=int(max(1, niter)),
+            verbose=False,
+        )
+        m = np.asarray(crmask, dtype=bool)
+        if line_protect is not None:
+            m = m & (~line_protect)
+        cleaned = np.asarray(cleaned, dtype=np.float32)
+        engine = "astroscrappy"
+        sigma_lap = float("nan")
+    except Exception:
+        # Fallback: iterative Laplacian threshold + object-likeness discriminator.
+        a = img.astype(np.float32)
+        m = np.zeros_like(a, dtype=bool)
+        sigma_lap = float("nan")
+
+        # Use two-scale "fine structure" proxy to reject object/line-like features.
+        # (In original L.A.Cosmic this is based on median filters.)
+        def _fine_structure(x: np.ndarray) -> np.ndarray:
+            x1 = _boxcar_mean2d(x, r=1)
+            x3 = _boxcar_mean2d(x, r=3)
+            return (x1 - x3).astype(np.float32)
+
+        thr_seed = float(sigclip)
+        thr_grow = float(sigclip) * float(sigfrac)
+        for _ in range(int(max(1, niter))):
+            # High-frequency component
+            smooth = _boxcar_mean2d(a, r=2)
+            resid = (a - smooth).astype(np.float32)
+            lap = _laplacian4(resid)
+
+            sigma = _robust_sigma_mad_1d(lap)
+            if not np.isfinite(sigma) or sigma <= 0:
+                sigma = float(np.std(lap)) if lap.size else 0.0
+            sigma_lap = float(sigma)
+            if sigma <= 0:
+                break
+
+            fine = _fine_structure(a)
+            # Object-likeness: cosmics are sharp in Laplacian but not supported
+            # by broader fine-structure.
+            denom = np.maximum(np.abs(fine), 1e-3 * sigma).astype(np.float32)
+            ratio = np.abs(lap) / denom
+
+            seed = (np.abs(lap) > (thr_seed * sigma)) & (ratio > float(objlim))
+            if line_protect is not None:
+                seed = seed & (~line_protect)
+            grow = (np.abs(lap) > (thr_grow * sigma)) & (ratio > float(objlim))
+            if line_protect is not None:
+                grow = grow & (~line_protect)
+
+            # Grow around existing mask and new seed.
+            m_new = m | seed
+            if np.any(m_new):
+                m_new = m_new | (grow & _dilate_mask(m_new, r=1))
+            m = m_new
+
+            # Replace masked pixels conservatively using local mean on unmasked.
+            repl = _boxcar_mean2d_masked(a, m, r=int(replace_r))
+            a = a.copy()
+            a[m] = repl[m]
+
+        cleaned = a
+        engine = "fallback"
+
+    # Final small dilation to cover halos.
+    m = _dilate_mask(m, r=int(max(0, dilate)))
+
+    replaced_pixels = int(m.sum())
+    replaced_fraction = float(m.mean()) if m.size else 0.0
+
+    name = Path(path).stem
+    out_f = out_dir / "clean" / f"{name}_clean.fits"
+    h = hdr.copy()
+    h["COSMCLEA"] = (True, "Cosmics cleaned")
+    h["COSM_MD"] = ("la_cosmic", "Cosmics method")
+    h["COSM_ENG"] = (str(engine), "L.A.Cosmic engine")
+    h["COSM_IT"] = (int(max(1, niter)), "L.A.Cosmic iterations")
+    h["COSM_SC"] = (float(sigclip), "L.A.Cosmic sigclip")
+    h["COSM_SF"] = (float(sigfrac), "L.A.Cosmic sigfrac")
+    h["COSM_OL"] = (float(objlim), "L.A.Cosmic objlim")
+    h["HISTORY"] = "scorpio_pipe cosmics: la_cosmic (van Dokkum-like)"
+    fits.writeto(out_f, cleaned.astype(np.float32), header=h, overwrite=True)
+
+    if save_png:
+        _save_png(out_dir / "masks" / f"{name}_mask.png", m.astype(np.uint8), title=f"Cosmic mask: {name}")
+    if save_mask_fits:
+        # Store as uint8 to avoid BZERO/BSCALE scaling keywords.
+        fits.writeto(out_dir / "masks_fits" / f"{name}_mask.fits", m.astype(np.uint8), overwrite=True)
 
     sum_f = out_dir / "sum_excl_cosmics.fits"
     cov_f = out_dir / "coverage.fits"
@@ -391,7 +619,8 @@ def _single_frame_laplacian_clean(
         "clean_dir": str((out_dir / "clean").resolve()),
         "sum_excl_fits": str(sum_f.resolve()),
         "coverage_fits": str(cov_f.resolve()),
-        "sigma_lap": float(sigma),
+        "engine": str(engine),
+        "sigma_lap": float(sigma_lap) if np.isfinite(sigma_lap) else None,
     }
     if save_png:
         outputs["masks_dir"] = str((out_dir / "masks").resolve())
@@ -401,7 +630,7 @@ def _single_frame_laplacian_clean(
     return CosmicsSummary(
         kind="",
         n_frames=1,
-        k=float(k),
+        k=float(sigclip),
         replaced_pixels=replaced_pixels,
         replaced_fraction=float(replaced_fraction),
         per_frame_fraction=[float(replaced_fraction)],
@@ -427,6 +656,132 @@ def _save_png(path: Path, arr: np.ndarray, title: str | None = None) -> None:
     fig.savefig(path)
     plt.close(fig)
 
+
+
+def _mask_u8_to_bool(x: np.ndarray) -> np.ndarray:
+    return np.asarray(x, dtype=np.uint8) > 0
+
+
+def _pad_mask_to_shape(mask: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    """Pad/crop mask to `shape` placing existing pixels at (0,0)."""
+    m = np.asarray(mask, dtype=bool)
+    ny, nx = shape
+    out = np.zeros((ny, nx), dtype=bool)
+    sy = min(ny, m.shape[0])
+    sx = min(nx, m.shape[1])
+    out[:sy, :sx] = m[:sy, :sx]
+    return out
+
+
+def _apply_manual_masks(
+    kind_out: Path,
+    *,
+    replace_r: int,
+    save_png: bool,
+) -> tuple[int, float, list[float]]:
+    """Merge manual masks into the final mask products and re-apply inpainting.
+
+    This is a post-processing step that runs after any automatic method.
+
+    It ensures that:
+      - manual_masks_fits/<base>_manual_mask.fits are persisted
+      - auto masks are snapshotted to auto_masks_fits/<base>_auto_mask.fits
+      - masks_fits/<base>_mask.fits becomes AUTO|MANUAL
+      - clean/<base>_clean.fits gets manual pixels replaced by local mean
+      - sum_excl_cosmics / coverage products match the final masks
+
+    Returns
+    -------
+    replaced_pixels_total, replaced_fraction_total, per_frame_fraction
+    """
+
+    clean_dir = kind_out / 'clean'
+    masks_fits = kind_out / 'masks_fits'
+    masks_png = kind_out / 'masks'
+    auto_masks = kind_out / 'auto_masks_fits'
+    manual_masks = kind_out / 'manual_masks_fits'
+
+    auto_masks.mkdir(parents=True, exist_ok=True)
+    manual_masks.mkdir(parents=True, exist_ok=True)
+    masks_fits.mkdir(parents=True, exist_ok=True)
+    if save_png:
+        masks_png.mkdir(parents=True, exist_ok=True)
+
+    clean_files = sorted(clean_dir.glob('*_clean.fits'))
+    if not clean_files:
+        return 0, 0.0, []
+
+    final_masks: list[np.ndarray] = []
+    clean_datas: list[np.ndarray] = []
+
+    for cf in clean_files:
+        base = cf.stem
+        if base.endswith('_clean'):
+            base = base[:-6]
+
+        with fits.open(cf, memmap=False) as hdul:
+            data = np.asarray(hdul[0].data, dtype=np.float32)
+            hdr = hdul[0].header.copy()
+
+        auto_path = masks_fits / f'{base}_mask.fits'
+        if auto_path.exists():
+            with fits.open(auto_path, memmap=False) as h:
+                auto_m = _mask_u8_to_bool(h[0].data)
+        else:
+            auto_m = np.zeros(data.shape, dtype=bool)
+
+        # snapshot current auto mask for GUI baselining
+        fits.writeto(auto_masks / f'{base}_auto_mask.fits', np.asarray(auto_m, dtype=np.uint8), overwrite=True)
+
+        man_path = manual_masks / f'{base}_manual_mask.fits'
+        if man_path.exists():
+            with fits.open(man_path, memmap=False) as h:
+                man_m = _mask_u8_to_bool(h[0].data)
+        else:
+            man_m = np.zeros(data.shape, dtype=bool)
+
+        auto_m = _pad_mask_to_shape(auto_m, data.shape)
+        man_m = _pad_mask_to_shape(man_m, data.shape)
+
+        final_m = auto_m | man_m
+
+        # Apply manual inpainting on top of the auto-cleaned image.
+        if np.any(man_m):
+            repl = _boxcar_mean2d_masked(data, final_m, r=int(max(0, replace_r)))
+            data = data.copy()
+            data[man_m] = repl[man_m]
+            hdr['MANCR'] = (True, 'Manual cosmics edits applied')
+            hdr['MANCRN'] = (int(man_m.sum()), 'Manual masked pixels')
+            hdr['HISTORY'] = 'scorpio_pipe cosmics: manual inpainting applied'
+
+        fits.writeto(cf, data.astype(np.float32), header=hdr, overwrite=True)
+        fits.writeto(masks_fits / f'{base}_mask.fits', final_m.astype(np.uint8), overwrite=True)
+        if save_png:
+            _save_png(masks_png / f'{base}_mask.png', final_m.astype(np.uint8), title=f'Cosmic mask: {base}')
+
+        final_masks.append(final_m)
+        clean_datas.append(data)
+
+    # Reference products based on final masks and current clean frames.
+    stack = np.stack(clean_datas, axis=0)
+    mstack = np.stack(final_masks, axis=0)
+    sum_excl = np.sum(stack * (~mstack), axis=0)
+    cov = np.sum(~mstack, axis=0).astype(np.int16)
+
+    sum_f = kind_out / 'sum_excl_cosmics.fits'
+    cov_f = kind_out / 'coverage.fits'
+    fits.writeto(sum_f, sum_excl.astype(np.float32), overwrite=True)
+    fits.writeto(cov_f, cov, overwrite=True)
+    if save_png:
+        _save_png(kind_out / 'sum_excl_cosmics.png', sum_excl, title='Sum (cosmics excluded)')
+        _save_png(kind_out / 'coverage.png', cov, title='Coverage (non-cosmic count)')
+
+    replaced_pixels = int(mstack.sum())
+    n_pix_total = int(mstack.size)
+    replaced_fraction = float(replaced_pixels) / float(n_pix_total) if n_pix_total else 0.0
+    per_frame_fraction = [float(m.mean()) for m in final_masks]
+
+    return replaced_pixels, replaced_fraction, per_frame_fraction
 
 def _stack_mad_clean(
     paths: list[Path],
@@ -454,9 +809,7 @@ def _stack_mad_clean(
     names: list[str] = []
 
     for p in paths:
-        with fits.open(p) as hdul:
-            data = np.asarray(hdul[0].data, dtype=np.float32)
-            hdr = hdul[0].header.copy()
+        data, hdr, _info = read_image_smart(p, memmap="auto", dtype=np.float32)
         datas.append(data)
         headers.append(hdr)
         names.append(p.stem)
@@ -548,8 +901,9 @@ def _stack_mad_clean(
 
         if save_mask_fits:
             mf = out_dir / "masks_fits" / f"{name}_mask.fits"
-            # uint16 mask: 1 = cosmic (first reserved bit)
-            fits.writeto(mf, (mask[i].astype(np.uint16)) * 1, overwrite=True)
+            # Store as uint8 to avoid FITS unsigned-int scaling keywords (BZERO/BSCALE)
+            # that may break strict memmap readers.
+            fits.writeto(mf, mask[i].astype(np.uint8), overwrite=True)
 
     # Reference products: sum excluding masked pixels + coverage map
     sum_excl = np.sum(stack * (~mask), axis=0)
@@ -594,9 +948,12 @@ def _stack_mad_clean(
 def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
     """Clean cosmics and write a report.
 
-    Default method is the robust stack-based MAD detection inspired by the user's
-    `SKY_MODEL Object Cosmic.py` workflow: build per-pixel median/MAD across a
-    stack of exposures, mask outliers, and replace them by the median.
+    Default method is `auto`:
+      - 1 frame  -> `la_cosmic` (van Dokkum L.A.Cosmic-like)
+      - 2 frames -> `two_frame_diff`
+      - ≥3       -> `stack_mad`
+
+    `laplacian` remains available as a simple SciPy-free single-frame fallback.
 
     Outputs:
       work_dir/cosmics/<kind>/clean/*.fits
@@ -621,12 +978,12 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
             json.dump({"disabled": True}, f, indent=2, ensure_ascii=False)
         return out_path.resolve()
 
-    method = str(ccfg.get("method", "stack_mad")).strip().lower()
+    method = str(ccfg.get("method", "auto")).strip().lower()
     apply_to = ccfg.get("apply_to", ["obj"]) or ["obj"]
     if isinstance(apply_to, str):
         apply_to = [apply_to]
 
-    # Threshold: prefer explicit k; keep backward compat with older sigma_clip
+    # Threshold: prefer explicit k; keep backward compat with older sigma_clip.
     k = ccfg.get("k", None)
     if k is None:
         k = ccfg.get("sigma_clip", 9.0)
@@ -690,6 +1047,18 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
     if lap_dilate is not None:
         lap_dilate = _as_int(lap_dilate, dilate)
 
+    # L.A.Cosmic knobs (single-frame). Conservative defaults.
+    la_niter = _as_int(ccfg.get("la_niter", 4), 4)
+    la_sigclip = _as_float(ccfg.get("la_sigclip", 4.5), 4.5)
+    la_sigfrac = _as_float(ccfg.get("la_sigfrac", 0.3), 0.3)
+    la_objlim = _as_float(ccfg.get("la_objlim", 5.0), 5.0)
+    la_replace_r = _as_int(ccfg.get("la_replace_r", max(1, local_r)), max(1, local_r))
+    la_dilate = _as_int(ccfg.get("la_dilate", dilate), dilate)
+    la_protect_lines = bool(ccfg.get("la_protect_lines", True))
+    la_protect_half_x = _as_int(ccfg.get("la_protect_half_x", 6), 6)
+    la_protect_half_y = _as_int(ccfg.get("la_protect_half_y", 1), 1)
+    la_protect_k = _as_float(ccfg.get("la_protect_k", 5.0), 5.0)
+
     superbias = _load_superbias(work_dir) if bias_subtract else None
 
     out_root = Path(out_dir) if out_dir is not None else (work_dir / "cosmics")
@@ -717,12 +1086,25 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
         kind_out.mkdir(parents=True, exist_ok=True)
 
         summary: CosmicsSummary
-        if method in ("auto", "stack_mad", "mad_stack", "stack", "two_frame_diff", "laplacian"):
+        if method in (
+            "auto",
+            "la_cosmic",
+            "lacosmic",
+            "stack_mad",
+            "mad_stack",
+            "stack",
+            "two_frame_diff",
+            "diff",
+            "laplacian",
+            "lap",
+        ):
             # Choose best available method for the frame count.
-            if method in ("laplacian",) and len(paths) != 1:
+            if method in ("laplacian", "lap") and len(paths) != 1:
                 log.warning("method=laplacian requires exactly 1 frame; falling back to auto")
-            if method in ("two_frame_diff",) and len(paths) != 2:
+            if method in ("two_frame_diff", "diff") and len(paths) != 2:
                 log.warning("method=two_frame_diff requires exactly 2 frames; falling back to auto")
+            if method in ("la_cosmic", "lacosmic") and len(paths) != 1:
+                log.warning("method=la_cosmic requires exactly 1 frame; falling back to auto")
 
             if len(paths) >= 3 and method in ("auto", "stack_mad", "mad_stack", "stack"):
                 summary = _stack_mad_clean(
@@ -738,7 +1120,7 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
                     save_png=save_png,
                     save_mask_fits=save_mask_fits,
                 )
-            elif len(paths) == 2 and method in ("auto", "stack_mad", "mad_stack", "stack", "two_frame_diff"):
+            elif len(paths) == 2 and method in ("auto", "stack_mad", "mad_stack", "stack", "two_frame_diff", "diff"):
                 summary = _two_frame_diff_clean(
                     paths,
                     out_dir=kind_out,
@@ -754,7 +1136,27 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
                     save_png=save_png,
                     save_mask_fits=save_mask_fits,
                 )
-            elif len(paths) == 1 and method in ("auto", "laplacian"):
+            elif len(paths) == 1 and method in ("auto", "la_cosmic", "lacosmic"):
+                # Single-frame preferred route: LA Cosmic-like detector.
+                summary = _single_frame_lacosmic_clean(
+                    paths[0],
+                    out_dir=kind_out,
+                    superbias=superbias,
+                    bias_subtract=bias_subtract,
+                    save_png=save_png,
+                    save_mask_fits=save_mask_fits,
+                    niter=la_niter,
+                    sigclip=la_sigclip,
+                    sigfrac=la_sigfrac,
+                    objlim=la_objlim,
+                    replace_r=la_replace_r,
+                    dilate=la_dilate,
+                    protect_lines=la_protect_lines,
+                    protect_half_x=la_protect_half_x,
+                    protect_half_y=la_protect_half_y,
+                    protect_k=la_protect_k,
+                )
+            elif len(paths) == 1 and method in ("laplacian", "lap"):
                 summary = _single_frame_laplacian_clean(
                     paths[0],
                     out_dir=kind_out,
@@ -793,6 +1195,31 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
                     per_frame_fraction=summary.per_frame_fraction,
                     outputs=summary.outputs,
                 )
+
+            # --- manual mask post-processing (GUI-driven) ---
+            preserve_manual = bool(ccfg.get("preserve_manual", True))
+            manual_replace_r = _as_int(ccfg.get("manual_replace_r", la_replace_r), la_replace_r)
+            if preserve_manual:
+                try:
+                    repix, refrac, per = _apply_manual_masks(kind_out, replace_r=int(manual_replace_r), save_png=save_png)
+                    # Update summary statistics to reflect final masks (AUTO|MANUAL).
+                    summary = CosmicsSummary(
+                        kind=summary.kind,
+                        n_frames=summary.n_frames,
+                        k=summary.k,
+                        replaced_pixels=int(repix),
+                        replaced_fraction=float(refrac),
+                        per_frame_fraction=list(per),
+                        outputs={
+                            **(summary.outputs or {}),
+                            "auto_masks_fits_dir": str((kind_out / "auto_masks_fits").resolve()),
+                            "manual_masks_fits_dir": str((kind_out / "manual_masks_fits").resolve()),
+                            "sum_excl_fits": str((kind_out / "sum_excl_cosmics.fits").resolve()),
+                            "coverage_fits": str((kind_out / "coverage.fits").resolve()),
+                        },
+                    )
+                except Exception as e:
+                    log.warning("Failed to apply manual cosmics masks for %s: %s", kind, e, exc_info=True)
         else:
             outputs = {"note": f"method={method} not supported"}
             summary = CosmicsSummary(

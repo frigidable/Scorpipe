@@ -16,7 +16,6 @@ The intent is **not** to duplicate all intermediate files. Instead we store:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping

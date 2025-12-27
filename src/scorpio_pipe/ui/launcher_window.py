@@ -22,6 +22,7 @@ from scorpio_pipe.ui.pipeline_runner import (
 )
 from scorpio_pipe.ui.qc_viewer import QCViewer
 from scorpio_pipe.ui.pair_rejector import clean_pairs_interactively
+from scorpio_pipe.ui.cosmics_manual import CosmicsManualDialog
 from scorpio_pipe.ui.frame_browser import SelectedFrame
 from scorpio_pipe.ui.outputs_panel import OutputsPanel
 from scorpio_pipe.ui.run_plan_dialog import RunPlanDialog
@@ -2331,7 +2332,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         )
 
         self.combo_cosmics_method = QtWidgets.QComboBox()
-        self.combo_cosmics_method.addItems(["auto", "stack_mad", "two_frame_diff", "laplacian"])
+        self.combo_cosmics_method.addItems(["auto", "la_cosmic", "stack_mad", "two_frame_diff", "laplacian"])
         bf.addRow(
             self._param_label(
                 "Method",
@@ -2350,16 +2351,14 @@ class LauncherWindow(QtWidgets.QMainWindow):
         apply_row.setContentsMargins(0, 0, 0, 0)
         self.chk_cosmics_obj = QtWidgets.QCheckBox("obj")
         self.chk_cosmics_sky = QtWidgets.QCheckBox("sky")
-        self.chk_cosmics_sunsky = QtWidgets.QCheckBox("sunsky")
-        self.chk_cosmics_neon = QtWidgets.QCheckBox("neon")
-        for cb in (self.chk_cosmics_obj, self.chk_cosmics_sky, self.chk_cosmics_sunsky, self.chk_cosmics_neon):
+        for cb in (self.chk_cosmics_obj, self.chk_cosmics_sky):
             apply_row.addWidget(cb)
         apply_row.addStretch(1)
         bf.addRow(
             self._param_label(
                 "Apply to",
                 "К каким типам кадров применять очистку.\n"
-                "Типично: obj + sky; sunsky — если наблюдался; neon — обычно не нужно.",
+                "Типично: obj + sky.",
             ),
             apply_row_w,
         )
@@ -2609,10 +2608,13 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_run_cosmics = QtWidgets.QPushButton("Run: Clean cosmics")
         self.btn_run_cosmics.setProperty("primary", True)
         self.btn_qc_cosmics = QtWidgets.QPushButton("QC")
+        self.btn_manual_cosmics = QtWidgets.QPushButton("Manual…")
+        self.btn_manual_cosmics.setToolTip("Manual cleanup after automatic cosmics (rectangle → Enter, Ctrl+Z undo)")
         self.btn_frames_cosmics = QtWidgets.QPushButton("Frames…")
         self.btn_frames_cosmics.setToolTip("Open Frames Browser for the Cosmics stage")
         row.addWidget(self.btn_run_cosmics)
         row.addWidget(self.btn_qc_cosmics)
+        row.addWidget(self.btn_manual_cosmics)
         row.addWidget(self.btn_frames_cosmics)
         row.addStretch(1)
         gl.addLayout(row)
@@ -2635,6 +2637,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         self.btn_run_cosmics.clicked.connect(self._do_run_cosmics)
         self.btn_qc_cosmics.clicked.connect(self._open_qc_viewer)
+        self.btn_manual_cosmics.clicked.connect(self._do_manual_cosmics)
         self.btn_frames_cosmics.clicked.connect(lambda: self._open_frames_window('cosmics'))
         self.btn_to_flatfield.clicked.connect(lambda: self.steps.setCurrentRow(4))
 
@@ -2646,16 +2649,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 out.append("obj")
             if self.chk_cosmics_sky.isChecked():
                 out.append("sky")
-            if self.chk_cosmics_sunsky.isChecked():
-                out.append("sunsky")
-            if self.chk_cosmics_neon.isChecked():
-                out.append("neon")
             return out
 
         def _on_apply_to(*_):
             self._stage_set_pending("cosmics", "cosmics.apply_to", _apply_to_from_ui())
 
-        for cb in (self.chk_cosmics_obj, self.chk_cosmics_sky, self.chk_cosmics_sunsky, self.chk_cosmics_neon):
+        for cb in (self.chk_cosmics_obj, self.chk_cosmics_sky):
             cb.toggled.connect(_on_apply_to)
         self.chk_cosmics_enabled.toggled.connect(
             lambda v: self._stage_set_pending("cosmics", "cosmics.enabled", bool(v))
@@ -2734,6 +2733,25 @@ class LauncherWindow(QtWidgets.QMainWindow):
         except Exception as e:
             self._set_step_status(3, "fail")
             self._log_exception(e)
+
+    
+    def _do_manual_cosmics(self) -> None:
+        # Manual is only meaningful after automatic cosmics produced clean frames.
+        try:
+            if not self._ensure_cfg_saved():
+                return
+            dlg = CosmicsManualDialog(self._cfg_path, parent=self)
+            dlg.exec()
+            # Refresh outputs panel (masks/clean may have changed)
+            try:
+                if hasattr(self, 'outputs_cosmics'):
+                    self.outputs_cosmics.set_context(self._cfg, stage='cosmics')
+            except Exception:
+                pass
+            self._maybe_auto_qc()
+        except Exception as e:
+            self._log_exception(e)
+
 
     # --------------------------- page: flatfield ---------------------------
 

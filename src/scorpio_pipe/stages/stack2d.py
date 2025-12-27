@@ -277,7 +277,9 @@ def _take_block_yshift_mask(mask: np.ndarray, y0: int, y1: int, shift: int) -> n
 
 def _open_mef(path: Path) -> tuple[np.ndarray, fits.Header, np.ndarray | None, np.ndarray | None]:
     """Return (sci, hdr, var, mask) from a MEF or simple FITS."""
-    with open_fits_smart(path, prefer_memmap=True) as hdul:
+    # Use memmap='auto' to avoid Astropy strict_memmap failures when the file
+    # declares BZERO/BSCALE/BLANK (common for unsigned MASK extensions).
+    with open_fits_smart(path, memmap="auto") as hdul:
         hdr = hdul[0].header.copy()
         sci = hdul[0].data
         if sci is None:
@@ -366,7 +368,9 @@ def run_stack2d(cfg: dict[str, Any], *, inputs: Iterable[Path], out_dir: Path | 
     out_cov = np.zeros((ny, nx), dtype=np.int16)
 
     # Keep HDUs open (memmap) for slicing.
-    hduls = [open_fits_smart(p, prefer_memmap=True) for p in files]
+    # Use memmap='auto' to avoid Astropy strict_memmap failures when any HDU
+    # declares BZERO/BSCALE/BLANK (typical for unsigned MASK bitmasks).
+    hduls = [open_fits_smart(p, memmap="auto") for p in files]
     try:
         # Precompute per-exposure y offsets (subpixel) if requested.
         y_shifts = [0.0 for _ in files]

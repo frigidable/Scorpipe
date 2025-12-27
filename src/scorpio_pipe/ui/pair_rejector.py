@@ -225,7 +225,6 @@ class PairRejectorDialog(QtWidgets.QDialog):
             return
 
         x_use = x_all[active]
-        lam_use = lam_all[active]
         if x_use.size < deg + 1:
             self.lbl_stats.setText(f"Need ≥{deg+1} active pairs for deg={deg} (now {x_use.size})")
             # still show which points are active

@@ -5,10 +5,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+pytest.importorskip("astropy")
 fits = pytest.importorskip("astropy.io.fits")
 
-pytest.importorskip("astropy")
-from scorpio_pipe.fits_utils import read_image_smart
+from scorpio_pipe.fits_utils import read_image_smart  # noqa: E402
 
 
 def test_read_image_smart_handles_scaled_int(tmp_path: Path):

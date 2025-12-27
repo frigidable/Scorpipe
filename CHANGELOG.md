@@ -1,3 +1,11 @@
+## v5.36.2
+
+### Cosmics (step 2.1) + memmap-safe stack2d
+- **Cosmics**: `method=auto` now uses an L.A.Cosmic-like single-frame detector (`la_cosmic`) when only one exposure is available; keeps 2-frame diff for N=2 and stack-MAD for N≥3.
+- **Cosmics**: added optional **line protection** heuristics for long-slit sky/emission lines to reduce the risk of “eating” real spectral structure.
+- **Cosmics**: ensured FITS I/O for science frames uses the smart loader (`read_image_smart`) and stores per-frame mask FITS as `uint8` to avoid FITS scaling surprises.
+- **Stack2D**: switched MEF loading to `memmap="auto"` to avoid Astropy strict-memmap failures when MASK extensions carry scaling keywords (BZERO/BSCALE/BLANK).
+
 ## v5.36.1
 
 ### Stage contract + QC metrics skeleton + FITS I/O hardening

@@ -166,13 +166,15 @@ class CosmicsBlock(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     enabled: bool = True
-    # auto | stack_mad | two_frame_diff | laplacian
-    method: str = "stack_mad"
+    # auto | la_cosmic | stack_mad | two_frame_diff | laplacian
+    method: str = "auto"
     # Global detection threshold (see method-specific notes).
     k: float = 9.0
     bias_subtract: bool = True
     save_png: bool = True
     save_mask_fits: bool = True
+    preserve_manual: bool = True
+    manual_replace_r: int = 2
     apply_to: List[str] = Field(default_factory=lambda: ["obj", "sky"])  # obj|sky|sunsky|neon
 
     # --- Common tuning knobs ---
@@ -207,6 +209,21 @@ class CosmicsBlock(BaseModel):
     lap_k_scale: float = 0.8
     lap_k_min: float = 5.0
     lap_dilate: Optional[int] = None
+
+    # --- la_cosmic tuning (single-frame; van Dokkum 2001-inspired) ---
+    la_niter: int = 4
+    la_sigclip: float = 4.5
+    la_sigfrac: float = 0.3
+    la_objlim: float = 5.0
+    la_replace_r: int = 2
+    la_dilate: int = 1
+
+    # Safeguard for long-slit sky/emission lines: try to avoid flagging
+    # strong line structures as cosmics.
+    la_protect_lines: bool = True
+    la_protect_half_x: int = 6
+    la_protect_half_y: int = 1
+    la_protect_k: float = 5.0
 
 
 class FlatfieldBlock(BaseModel):
