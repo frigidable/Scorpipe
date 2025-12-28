@@ -80,13 +80,13 @@ jobs:
           if (-not (Test-Path "dist/scorpipe")) { throw "PyInstaller dist not found: dist/scorpipe" }
           Compress-Archive -Path "dist/scorpipe/*" -DestinationPath "release/Scorpipe-Windows-x64.zip" -Force
 
-          $files = @("release/ScorpioPipe-Setup-x64.exe","release/Scorpipe-Windows-x64.zip")
           $out = "release/SHA256SUMS.txt"
           Remove-Item $out -ErrorAction SilentlyContinue
+          $files = Get-ChildItem -Path release -File | Where-Object { $_.Name -ne "SHA256SUMS.txt" } | Sort-Object Name
+          if (-not $files) { throw "No release files found in release/ for checksum generation" }
           foreach ($f in $files) {
-            $h = (Get-FileHash -Algorithm SHA256 $f).Hash.ToLower()
-            $n = Split-Path -Leaf $f
-            "$h  $n" | Out-File -FilePath $out -Append -Encoding ascii
+            $h = (Get-FileHash -Algorithm SHA256 $f.FullName).Hash.ToLower()
+            "$h  $($f.Name)" | Out-File -FilePath $out -Append -Encoding ascii
           }
 
       - name: Upload release artifacts
@@ -114,6 +114,32 @@ jobs:
           name: windows-release-assets
           path: release
 
+      - name: Detect extra release artifacts (wheel/sdist)
+        id: py_dist
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          w=(release/*.whl)
+          s=(release/*.tar.gz)
+          if [ ${#w[@]} -gt 0 ]; then
+            echo "wheel=${w[0]}" >> "$GITHUB_OUTPUT"
+            echo "wheel_sbom=${w[0]}.sbom.spdx.json" >> "$GITHUB_OUTPUT"
+          fi
+          if [ ${#s[@]} -gt 0 ]; then
+            echo "sdist=${s[0]}" >> "$GITHUB_OUTPUT"
+            echo "sdist_sbom=${s[0]}.sbom.spdx.json" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate SBOM (installer)
+        uses: anchore/sbom-action@a930d0ac434e3182448fe678398ba5713717112a # v0.21.0
+        with:
+          file: release/ScorpioPipe-Setup-x64.exe
+          format: spdx-json
+          output-file: release/ScorpioPipe-Setup-x64.sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
       - name: Generate SBOM (portable bundle)
         uses: anchore/sbom-action@a930d0ac434e3182448fe678398ba5713717112a # v0.21.0
         with:
@@ -123,17 +149,61 @@ jobs:
           upload-artifact: false
           upload-release-assets: false
 
-      - name: Add SBOM to checksums
+      - name: Generate SBOM (wheel)
+        if: ${{ steps.py_dist.outputs.wheel != '' }}
+        uses: anchore/sbom-action@a930d0ac434e3182448fe678398ba5713717112a # v0.21.0
+        with:
+          file: ${{ steps.py_dist.outputs.wheel }}
+          format: spdx-json
+          output-file: ${{ steps.py_dist.outputs.wheel_sbom }}
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Generate SBOM (sdist)
+        if: ${{ steps.py_dist.outputs.sdist != '' }}
+        uses: anchore/sbom-action@a930d0ac434e3182448fe678398ba5713717112a # v0.21.0
+        with:
+          file: ${{ steps.py_dist.outputs.sdist }}
+          format: spdx-json
+          output-file: ${{ steps.py_dist.outputs.sdist_sbom }}
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Add SBOMs to checksums
         shell: bash
         run: |
+          set -euo pipefail
           cd release
-          sha256sum Scorpipe-Windows-x64.sbom.spdx.json >> SHA256SUMS.txt
+          shopt -s nullglob
+          for f in *.sbom.spdx.json; do
+            sha256sum "$f" >> SHA256SUMS.txt
+          done
 
-      - name: Attest SBOM
+      - name: Attest SBOM (installer)
+        uses: actions/attest-sbom@4651f806c01d8637787e274ac3bdf724ef169f34 # v3.0.0
+        with:
+          subject-path: release/ScorpioPipe-Setup-x64.exe
+          sbom-path: release/ScorpioPipe-Setup-x64.sbom.spdx.json
+
+      - name: Attest SBOM (portable bundle)
         uses: actions/attest-sbom@4651f806c01d8637787e274ac3bdf724ef169f34 # v3.0.0
         with:
           subject-path: release/Scorpipe-Windows-x64.zip
           sbom-path: release/Scorpipe-Windows-x64.sbom.spdx.json
+
+      - name: Attest SBOM (wheel)
+        if: ${{ steps.py_dist.outputs.wheel != '' }}
+        uses: actions/attest-sbom@4651f806c01d8637787e274ac3bdf724ef169f34 # v3.0.0
+        with:
+          subject-path: ${{ steps.py_dist.outputs.wheel }}
+          sbom-path: ${{ steps.py_dist.outputs.wheel_sbom }}
+
+      - name: Attest SBOM (sdist)
+        if: ${{ steps.py_dist.outputs.sdist != '' }}
+        uses: actions/attest-sbom@4651f806c01d8637787e274ac3bdf724ef169f34 # v3.0.0
+        with:
+          subject-path: ${{ steps.py_dist.outputs.sdist }}
+          sbom-path: ${{ steps.py_dist.outputs.sdist_sbom }}
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@00014ed6ed5efc5b1ab7f7f34a39eb55d41aa4f8 # v3.1.0
@@ -144,7 +214,9 @@ jobs:
         uses: softprops/action-gh-release@a06a81a0d0ce0ef6c9f2ce57b1b89e4f563b6993 # v2.5.0
         with:
           files: |
-            release/ScorpioPipe-Setup-x64.exe
-            release/Scorpipe-Windows-x64.zip
-            release/Scorpipe-Windows-x64.sbom.spdx.json
+            release/*.exe
+            release/*.zip
+            release/*.whl
+            release/*.tar.gz
+            release/*.sbom.spdx.json
             release/SHA256SUMS.txt
