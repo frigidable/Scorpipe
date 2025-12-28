@@ -130,6 +130,14 @@ def list_products(cfg: dict[str, Any]) -> list[Product]:
         Product("lambda_map", "wavesol", wsol / "lambda_map.fits", "fits", optional=True),
         Product("wavelength_matrix_png", "wavesol", wsol / "wavelength_matrix.png", "png", optional=True),
         Product("residuals_2d_png", "wavesol", wsol / "residuals_2d.png", "png", optional=True),
+        Product("residuals_2d_audit_png", "wavesol", wsol / "residuals_2d_audit.png", "png", optional=True),
+        Product("control_points_2d_csv", "wavesol", wsol / "control_points_2d.csv", "csv", optional=True),
+        Product("residuals_1d_csv", "wavesol", wsol / "residuals_1d.csv", "csv", optional=True),
+        Product("residuals_2d_csv", "wavesol", wsol / "residuals_2d.csv", "csv", optional=True),
+        Product("residuals_vs_lambda_png", "wavesol", wsol / "residuals_vs_lambda.png", "png", optional=True),
+        Product("residuals_vs_y_png", "wavesol", wsol / "residuals_vs_y.png", "png", optional=True),
+        Product("residuals_hist_png", "wavesol", wsol / "residuals_hist.png", "png", optional=True),
+        Product("wavesolution_report_txt", "wavesol", wsol / "wavesolution_report.txt", "txt", optional=True),
 
         # Core science (quicklook + canonical endpoints)
         Product("lin_preview_fits", "linearize", lin / "lin_preview.fits", "fits", optional=True),

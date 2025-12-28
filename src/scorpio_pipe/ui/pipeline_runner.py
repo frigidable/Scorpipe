@@ -188,13 +188,15 @@ def _task_lineid_prepare(cfg: dict[str, Any], out_dir: Path, *, cancel_token: Ca
     return prepare_lineid(cfg)
 
 
-def _task_wavesolution(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> None:
+def _task_wavesolution(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> dict[str, Any]:
     # build_wavesolution writes into the work_dir-derived wavesolution directory
     # (it does not need out_dir, but we keep the signature consistent for the runner).
     from scorpio_pipe.stages.wavesolution import build_wavesolution
 
+    _ = out_dir
     _ = cancel_token  # currently unused inside wavesolution
-    build_wavesolution(cfg)
+    res = build_wavesolution(cfg)
+    return res.as_dict()
 
 
 def _task_qc_report(cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None) -> Path:
@@ -494,7 +496,18 @@ def run_sequence(
             try:
                 from scorpio_pipe.qc.metrics_store import mirror_qc_to_products, update_after_stage
 
-                update_after_stage(cfg, stage=t, status="ok", stage_hash=stage_hash)
+                stage_metrics = None
+                if isinstance(res, dict):
+                    stage_metrics = {}
+                    for k, v in res.items():
+                        # Store numeric scalars (+ a few small categorical values), but skip file paths.
+                        if k.endswith(("_fits", "_png", "_csv", "_json", "_txt", "_dir")):
+                            continue
+                        if isinstance(v, (int, float, bool)):
+                            stage_metrics[k] = v
+                        elif isinstance(v, str) and k in {"model2d_kind"}:
+                            stage_metrics[k] = v
+                update_after_stage(cfg, stage=t, status="ok", stage_hash=stage_hash, stage_metrics=stage_metrics)
                 if t in ("manifest", "qc_report"):
                     mirror_qc_to_products(out_dir)
             except Exception:

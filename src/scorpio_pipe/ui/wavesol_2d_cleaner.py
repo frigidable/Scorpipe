@@ -61,7 +61,15 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
             raise RuntimeError("No control points in CSV")
 
         # state: per-line include/exclude
-        self._unique_lines = np.array(sorted(set(self._lam.tolist())), dtype=float)
+        # Group control points into spectral lines using rounded wavelength keys
+        lam_key = np.round(self._lam, 3)
+        keys, inv = np.unique(lam_key, return_inverse=True)
+        centers = np.array([float(np.nanmedian(self._lam[inv == j])) for j in range(len(keys))], dtype=float)
+        order = np.argsort(centers)
+        rev = np.empty_like(order)
+        rev[order] = np.arange(order.size)
+        self._line_id = rev[inv]
+        self._unique_lines = centers[order]
         self._active = {float(l0): (not any(abs(float(l0) - r) <= 0.25 for r in self._rejected0)) for l0 in self._unique_lines}
 
         # UI
@@ -156,8 +164,8 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
     def save_plots(self, outdir: Path, stem: str = 'wavesol2d_clean') -> list[Path]:
         """Save two diagnostic PNGs to `outdir`.
 
-        1) `*_with_rejected.png` — rejected lines shown in grey (best for audit).
-        2) `*_final.png` — rejected lines hidden (best for final report).
+        1) `*_audit.png` — all points shown; rejected lines stay grey (best for audit).
+        2) `*_final.png` — fit-consistent view: active lines show only inliers.
 
         Returns list of saved paths.
         """
@@ -167,20 +175,20 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
         saved: list[Path] = []
         prev_hide = bool(self.chk_hide_rejected.isChecked())
 
-        # with rejected visible
+        # audit view (all points)
         try:
-            self.chk_hide_rejected.setChecked(True)
+            self.chk_hide_rejected.setChecked(False)
             self._recompute_and_plot()
         except Exception:
             pass
-        p1 = outdir / f"{stem}_with_rejected.png"
+        p1 = outdir / f"{stem}_audit.png"
         try:
             self.fig.savefig(p1, dpi=180, bbox_inches='tight')
             saved.append(p1)
         except Exception:
             pass
 
-        # final view (rejected hidden)
+        # final view (inliers only for active lines)
         try:
             self.chk_hide_rejected.setChecked(True)
             self._recompute_and_plot()
@@ -345,33 +353,58 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
         pred_all = model_fn(self._x, self._y)
         dlam_all = pred_all - self._lam
 
-        # IDL-like plot: each line is a curve Δλ(y), stacked with vertical offsets.
+        # Plot must match the stage QC plot (residuals_2d.png) exactly:
+        # x-axis is Δλ, y-axis is Y (stacked with offsets).
         final_view = bool(self.chk_hide_rejected.isChecked())
 
-        _np = np  # readability: keep the plotting section close to the stage plotter
+        _np = np
         import matplotlib.transforms as mtransforms
         from matplotlib.colors import LinearSegmentedColormap
 
-        uniq_all = _np.asarray(self._unique_lines, float)
-        uniq = uniq_all
-
+        uniq = _np.asarray(self._unique_lines, float)
         cmap = LinearSegmentedColormap.from_list("blue_to_red", ["blue", "red"])
         colors = cmap(_np.linspace(0.0, 1.0, max(1, len(uniq))))
 
-        # Choose a pleasant offset: ~ (3–4)×RMS, but not too small.
-        # Keep consistent with the stage plotter.
-        y_offset_step = float(max(0.5, min(2.5, 4.0 * (rms if _np.isfinite(rms) else 1.0))))
+        # Offset step: same heuristic as the stage plotter (based on Y sampling).
+        y_steps: list[float] = []
+        for lam0 in uniq:
+            m_line = _np.abs(self._lam - float(lam0)) < 1e-6
+            ys = _np.sort(self._y[m_line])
+            if ys.size > 3:
+                dy = _np.diff(ys)
+                dy = dy[dy > 0]
+                if dy.size:
+                    y_steps.append(float(_np.median(dy)))
+        y_step = float(_np.median(y_steps)) if y_steps else 1.0
+        y_offset_step = float(0.9 * max(1.0, y_step))
+
+        # QC-like global stats (on inliers used by the robust fit).
+        resid_used = dlam_all[used_all & _np.isfinite(dlam_all)]
+        rms_used = float(_np.sqrt(_np.mean(resid_used ** 2))) if resid_used.size else float("nan")
+        w_used = _np.asarray(self._score, float)[used_all & _np.isfinite(dlam_all)]
+        wrms_used = (
+            float(_np.sqrt(_np.sum(w_used * (resid_used ** 2)) / _np.sum(w_used)))
+            if resid_used.size and _np.sum(w_used) > 0
+            else float("nan")
+        )
+        if resid_used.size:
+            med = float(_np.median(resid_used))
+            mad = float(_np.median(_np.abs(resid_used - med)))
+            sig_mad = float(1.4826 * mad)
+        else:
+            sig_mad = float("nan")
 
         with self._mpl_style():
             self.fig.clear()
             ax = self.fig.add_subplot(111)
-            ax.set_xlabel("Y [px]")
-            ax.set_ylabel("Δλ [Å]")
+            ax.set_xlabel("Δλ [Å]")
+            ax.set_ylabel("Y [px] (stacked)")
             ax.set_title(
-                f"2D wavesolution residuals (RMS={rms:.3f} Å) — click a curve/point to toggle a line"
+                f"2D residuals (RMS={rms_used:.3f} Å, σ_MAD={sig_mad:.3f} Å) — click to toggle a line"
             )
+            ax.axvline(0.0, color="0.6", lw=1.0, alpha=0.6)
 
-            text_rows: list[tuple[float, tuple, float, float, float]] = []  # (y_text, color, lam, mu, sd)
+            text_rows: list[tuple[float, tuple, float, float, float]] = []
             click_x: list[float] = []
             click_y: list[float] = []
             click_l: list[float] = []
@@ -383,53 +416,43 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
                     continue
 
                 is_on = bool(self._active.get(lam0, True))
+                line_rej = not is_on
 
-                # Select points to display.
-                # - In fit-consistent view: active lines show only robust-fit inliers (used_all).
-                #   Rejected lines are still shown (grey) to make manual cleaning transparent.
-                # - In audit view: show all points for all lines.
-                if final_view:
-                    if is_on:
-                        m_disp = m_line & used_all
-                        # If the robust fit kept too few points, fall back to all points
-                        # so the line remains visible for manual inspection.
-                        if int(_np.count_nonzero(m_disp)) < 3:
-                            m_disp = m_line
-                    else:
+                if final_view and (not line_rej):
+                    m_disp = m_line & used_all
+                    if int(_np.count_nonzero(m_disp)) < 3:
                         m_disp = m_line
                 else:
                     m_disp = m_line
 
-                yk = self._y[m_disp]
-                dlam = dlam_all[m_disp]
-                if yk.size < 3:
+                ys = self._y[m_disp]
+                ds = dlam_all[m_disp]
+                if ys.size < 3:
                     continue
+                ordy = _np.argsort(ys)
+                y_sorted = ys[ordy]
+                d_sorted = ds[ordy]
+                y_disp = y_sorted + float(k) * y_offset_step
 
-                ordy = _np.argsort(yk)
-                y_sorted = yk[ordy]
-                dlam_sorted = dlam[ordy]
-                off = k * y_offset_step
-
-                # Stable color by line index; rejected lines are grey.
                 col = colors[k % len(colors)]
-                if not is_on:
+                if line_rej:
                     col = (0.65, 0.65, 0.65, 0.9)
 
-                ax.plot(y_sorted, dlam_sorted + off, lw=1.2, color=col)
+                ax.plot(d_sorted, y_disp, lw=1.2, color=col)
 
-                step_pts = max(1, len(y_sorted) // 150)
-                ys_s = y_sorted[::step_pts]
-                ds_s = (dlam_sorted + off)[::step_pts]
-                ax.scatter(ys_s, ds_s, s=3, color=col, alpha=0.85, linewidths=0.0)
-                # for click-to-toggle
-                click_x.extend(ys_s.tolist())
-                click_y.extend(ds_s.tolist())
-                click_l.extend([lam0] * len(ys_s))
+                step_pts = max(1, len(y_disp) // 150)
+                xs_s = d_sorted[::step_pts]
+                ys_s = y_disp[::step_pts]
+                ax.scatter(xs_s, ys_s, s=3, color=col, alpha=0.85, linewidths=0.0)
 
-                # Stats: prefer robust-fit inliers if available (stable / QC-consistent).
+                click_x.extend(xs_s.tolist())
+                click_y.extend(ys_s.tolist())
+                click_l.extend([lam0] * len(xs_s))
+
+                # per-line stats (prefer inliers)
                 d_stat = dlam_all[m_line & used_all]
                 if d_stat.size < 2:
-                    d_stat = dlam
+                    d_stat = ds
                 good = _np.isfinite(d_stat)
                 if int(_np.count_nonzero(good)) >= 2:
                     mu = float(_np.mean(d_stat[good]))
@@ -437,10 +460,9 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
                 else:
                     mu, sd = _np.nan, _np.nan
 
-                y_text = off + (float(_np.nanmean(d_stat)) if _np.any(_np.isfinite(d_stat)) else 0.0)
+                y_text = float(_np.nanmedian(y_disp))
                 text_rows.append((y_text, col, lam0, mu, sd))
 
-            # baseline helpers at the label heights
             for y_text, col, *_ in text_rows:
                 ax.axhline(y=y_text, xmin=0.0, xmax=1.0, color=col, linestyle=":", linewidth=0.9, alpha=0.35, zorder=0)
 
@@ -467,9 +489,11 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
 
         self.canvas.draw()
 
-        n_used = int(_np.sum(used_fit))
+        n_fit_total = int(_np.count_nonzero(mask_fit))
+        n_used_total = int(_np.count_nonzero(used_all & _np.isfinite(dlam_all)))
         self.lbl_rms.setText(
-            f"Model: {kind}   |   RMS: {rms:.4f} Å   |   Points used: {n_used}/{x.size}   |   Lines rejected: {len(self.rejected_lines())}"
+            f"Model: {kind}   |   RMS: {rms_used:.4f} Å   |   wRMS: {wrms_used:.4f} Å   |   σ_MAD: {sig_mad:.4f} Å\n"
+            f"Points used: {n_used_total}/{n_fit_total}   |   Lines rejected: {len(self.rejected_lines())}/{len(uniq)}"
         )
         self.lbl_info.setText(
             "Tip: uncheck a wavelength (line) to exclude it from the 2D fit.\n"

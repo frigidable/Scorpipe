@@ -331,7 +331,15 @@ def _iter_slices(ny: int, chunk: int) -> Iterable[slice]:
 def run_stack2d(cfg: dict[str, Any], *, inputs: Iterable[Path], out_dir: Path | None = None) -> dict[str, Any]:
     st_cfg = (cfg.get("stack2d") or {}) if isinstance(cfg.get("stack2d"), dict) else {}
     if not bool(st_cfg.get("enabled", True)):
-        return {"skipped": True, "reason": "stack2d.enabled=false"}
+        # Keep a stable payload shape even when skipped.
+        # Downstream code/tests may still expect keys like "stacked2d_fits".
+        return {
+            "skipped": True,
+            "reason": "stack2d.enabled=false",
+            "stacked2d_fits": None,
+            "stacked2d_png": None,
+            "qc_png": None,
+        }
 
     wd = resolve_work_dir(cfg)
     if out_dir is None:
@@ -591,6 +599,11 @@ def run_stack2d(cfg: dict[str, Any], *, inputs: Iterable[Path], out_dir: Path | 
         "shape": [int(ny), int(nx)],
         "method": "variance-weighted mean + sigma-clip",
         "n_inputs": len(files),
+        # Contract keys used by tests/UI.
+        "stacked2d_fits": str(out_fits),
+        "coverage_png": str(out_png) if out_png.exists() else None,
+        "stack2d_done_json": str(done),
+        # Backwards-compat aliases (older UI/tests):
         "output_fits": str(out_fits),
         "output_png": str(out_png) if out_png.exists() else None,
         "sigma_clip": sigma_clip,

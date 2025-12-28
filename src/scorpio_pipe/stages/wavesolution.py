@@ -20,7 +20,7 @@ def _ensure_dir(p: Path) -> Path:
     return p
 
 
-def _read_hand_pairs(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _read_hand_pairs(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Read `hand_pairs.txt` written by LineID GUI.
 
     Returns
@@ -28,21 +28,34 @@ def _read_hand_pairs(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     x : (N,) float
     lam : (N,) float
     is_blend : (N,) bool
+    is_disabled : (N,) bool
     """
     xs: list[float] = []
     lams: list[float] = []
     blends: list[bool] = []
+    disabled: list[bool] = []
     if not path.exists():
-        return np.array([]), np.array([]), np.array([], bool)
+        return np.array([]), np.array([]), np.array([], bool), np.array([], bool)
 
     for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
         s = line.strip()
-        if not s or s.startswith("#"):
+        if not s:
             continue
+
+        s_low = s.lower()
+        blend = ("blend" in s_low)
+        is_dis = ("disabled" in s_low) or ("reject" in s_low) or ("rejected" in s_low)
+
+        # Allow disabled pairs to be kept as commented numeric records, e.g.:
+        #   # 123.4  5461.2  # disabled
+        if s.startswith("#") and not is_dis:
+            continue
+
+        # Strip leading comment marker for numeric parsing.
+        s_num = s.lstrip("#").strip()
         # allow inline comments
-        blend = ("# blend" in s.lower())
-        s = s.split("#", 1)[0].strip()
-        parts = s.split()
+        s_num = s_num.split("#", 1)[0].strip()
+        parts = s_num.split()
         if len(parts) < 2:
             continue
         try:
@@ -53,11 +66,13 @@ def _read_hand_pairs(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         xs.append(x0)
         lams.append(lam)
         blends.append(blend)
+        disabled.append(bool(is_dis))
 
     x = np.asarray(xs, float)
     lam = np.asarray(lams, float)
     is_blend = np.asarray(blends, bool)
-    return x, lam, is_blend
+    is_disabled = np.asarray(disabled, bool)
+    return x, lam, is_blend, is_disabled
 
 
 # --------------------------- 1D solution ---------------------------
@@ -110,11 +125,14 @@ def _plot_wavesol_1d(
     lam: np.ndarray,
     coeffs: np.ndarray,
     used_mask: np.ndarray,
+    disabled_mask: np.ndarray | None,
     outpng: Path,
     title: str,
 ) -> float:
     import matplotlib.pyplot as plt
     from scorpio_pipe.plot_style import mpl_style
+
+    disabled_mask = disabled_mask if disabled_mask is not None else np.zeros_like(used_mask, dtype=bool)
 
     x_used = x[used_mask]
     lam_used = lam[used_mask]
@@ -127,10 +145,16 @@ def _plot_wavesol_1d(
         ax1 = fig.add_subplot(gs[0])
         ax2 = fig.add_subplot(gs[1], sharex=ax1)
 
-        ax1.set_title(f"{title}  (deg={len(coeffs)-1}, N={len(x_used)}, RMS={rms:.3f} Å)")
+        n_dis = int(np.sum(disabled_mask))
+        ax1.set_title(
+            f"{title}  (deg={len(coeffs)-1}, N_used={len(x_used)}, N_disabled={n_dis}, RMS={rms:.3f} Å)"
+        )
         ax1.scatter(x_used, lam_used, s=26, label="pairs (used)")
-        if (~used_mask).any():
-            ax1.scatter(x[~used_mask], lam[~used_mask], s=22, marker="x", label="clipped")
+        clipped_mask = (~used_mask) & (~disabled_mask)
+        if np.any(clipped_mask):
+            ax1.scatter(x[clipped_mask], lam[clipped_mask], s=22, marker="x", label="clipped")
+        if np.any(disabled_mask):
+            ax1.scatter(x[disabled_mask], lam[disabled_mask], s=22, marker="o", alpha=0.5, label="disabled")
         xx = np.linspace(float(np.nanmin(x)), float(np.nanmax(x)), 1200)
         ax1.plot(xx, np.polyval(coeffs, xx), lw=1.6, label="model")
         ax1.set_ylabel("Wavelength [Å]")
@@ -491,68 +515,119 @@ def _plot_wavelength_matrix(lam_map: np.ndarray, outpng: Path, title: str) -> No
         plt.close(fig)
 
 
-def _plot_residuals_2d(ys: np.ndarray, lams: np.ndarray, resid: np.ndarray, outpng: Path, title: str) -> float:
-    """IDL-like 2D residual plot: one curve per line, stacked by vertical offsets.
+def _plot_residuals_2d(
+    ys_pix_all: np.ndarray,
+    lams_all: np.ndarray,
+    dlam_all: np.ndarray,
+    used_mask: np.ndarray,
+    rejected_lines_A: list[float] | None,
+    outpng: Path,
+    title: str,
+    *,
+    final_view: bool,
+) -> float:
+    """2D residuals diagnostic: stacked curves per line (ESO/IDL-like), with a stable convention.
 
-    Parameters
-    ----------
-    ys : array
-        Y positions of control points.
-    lams : array
-        Laboratory wavelengths [Å] for each control point.
-    resid : array
-        Residuals (lambda_obs - lambda_model) [Å].
+    Convention:
+        Δλ = λ_model − λ_lab
+
+    The interactive 2D cleaner uses the same convention; this function is the single
+    source of truth for the plot used in both the stage page and QC.
     """
     import matplotlib.pyplot as plt
     import matplotlib.transforms as mtransforms
     from matplotlib.colors import LinearSegmentedColormap
     from scorpio_pipe.plot_style import mpl_style
 
-    ys = np.asarray(ys, float)
-    lams = np.asarray(lams, float)
-    resid = np.asarray(resid, float)
+    ys_pix_all = np.asarray(ys_pix_all, float)
+    lams_all = np.asarray(lams_all, float)
+    dlam_all = np.asarray(dlam_all, float)
+    used_mask = np.asarray(used_mask, bool)
 
-    m = np.isfinite(ys) & np.isfinite(lams) & np.isfinite(resid)
-    ys = ys[m]
-    lams = lams[m]
-    resid = resid[m]
+    m = np.isfinite(ys_pix_all) & np.isfinite(lams_all) & np.isfinite(dlam_all)
+    ys_pix_all = ys_pix_all[m]
+    lams_all = lams_all[m]
+    dlam_all = dlam_all[m]
+    used_mask = used_mask[m]
 
-    # prefer the same sign as the reference script: Δλ = λ_model - λ_lab
-    dlam = -resid
+    rejected_lines_A = rejected_lines_A or []
 
-    rms = float(np.sqrt(np.mean(dlam**2))) if dlam.size else float("nan")
-    y_offset_step = float(max(0.5, min(2.5, 4.0 * (rms if np.isfinite(rms) else 1.0))))
+    # Group by rounded λ to keep grouping stable across float formatting.
+    lam_key = np.round(lams_all, 3)
+    uniq_keys = np.array(sorted(np.unique(lam_key)), dtype=float)
+    uniq_lams = []
+    for k in uniq_keys:
+        mm = lam_key == k
+        if np.any(mm):
+            uniq_lams.append(float(np.median(lams_all[mm])))
+    uniq = np.array(uniq_lams, dtype=float)
 
-    uniq = np.array(sorted(np.unique(lams)), dtype=float)
+    # Estimate typical Y sampling step for offset spacing.
+    dy_steps: list[float] = []
+    for lam0 in uniq:
+        mm = np.abs(lams_all - lam0) < 1e-2
+        y_u = np.unique(ys_pix_all[mm])
+        if y_u.size >= 3:
+            dy = np.diff(np.sort(y_u))
+            dy = dy[dy > 0]
+            if dy.size:
+                dy_steps.append(float(np.median(dy)))
+    y_step = float(np.median(dy_steps)) if dy_steps else 1.0
+    y_offset_step = 0.9 * max(1.0, y_step)
+
+    def _is_rejected_line(lam0: float) -> bool:
+        return any(abs(float(lam0) - float(r)) <= 0.25 for r in rejected_lines_A)
+
+    # RMS over used points of *active* lines (rejected lines excluded) in the final-view.
+    active_point = np.ones_like(dlam_all, dtype=bool)
+    if rejected_lines_A:
+        for r in rejected_lines_A:
+            active_point &= np.abs(lams_all - float(r)) > 0.25
+    m_rms = used_mask & active_point
+    rms = float(np.sqrt(np.mean(dlam_all[m_rms] ** 2))) if np.any(m_rms) else float("nan")
+
     cmap = LinearSegmentedColormap.from_list("blue_to_red", ["blue", "red"])
     colors = cmap(np.linspace(0.0, 1.0, max(1, len(uniq))))
 
     with mpl_style():
         fig, ax = plt.subplots(figsize=(9.0, 7.8))
-        ax.set_xlabel("Y [px]")
-        ax.set_ylabel("Δλ [Å]")
+        ax.set_xlabel("Δλ [Å]")
+        ax.set_ylabel("Y [px] (stacked)")
         ax.set_title(f"{title}  (RMS={rms:.3f} Å)")
 
         text_rows: list[tuple[float, tuple, float, float, float]] = []
 
         for k, lam0 in enumerate(uniq):
-            mm = np.abs(lams - lam0) < 1e-6
-            if not np.any(mm):
+            mm_line = np.abs(lams_all - lam0) < 1e-2
+            if not np.any(mm_line):
                 continue
-            yk = ys[mm]
-            dk = dlam[mm]
-            if yk.size < 3:
+            line_rej = _is_rejected_line(float(lam0))
+            if final_view and (not line_rej):
+                mm_plot = mm_line & used_mask
+            else:
+                # in audit view: show everything; in final-view: show rejected lines in grey
+                mm_plot = mm_line
+            if not np.any(mm_plot):
+                continue
+
+            yk = ys_pix_all[mm_plot]
+            dk = dlam_all[mm_plot]
+            if yk.size < 2:
                 continue
 
             ordy = np.argsort(yk)
             y_sorted = yk[ordy]
             d_sorted = dk[ordy]
-            off = k * y_offset_step
-            col = colors[k % len(colors)]
 
-            ax.plot(y_sorted, d_sorted + off, lw=1.2, color=col)
-            step_pts = max(1, len(y_sorted) // 150)
-            ax.scatter(y_sorted[::step_pts], (d_sorted + off)[::step_pts], s=3, color=col, alpha=0.85, linewidths=0.0)
+            off = k * y_offset_step
+            y_disp = y_sorted + off
+            col = colors[k % len(colors)]
+            if line_rej:
+                col = (0.5, 0.5, 0.5, 1.0)
+
+            ax.plot(d_sorted, y_disp, lw=1.1, color=col)
+            step_pts = max(1, len(y_disp) // 160)
+            ax.scatter(d_sorted[::step_pts], y_disp[::step_pts], s=3, color=col, alpha=0.85, linewidths=0.0)
 
             good = np.isfinite(dk)
             if int(np.count_nonzero(good)) >= 2:
@@ -560,7 +635,8 @@ def _plot_residuals_2d(ys: np.ndarray, lams: np.ndarray, resid: np.ndarray, outp
                 sd = float(np.std(dk[good], ddof=1))
             else:
                 mu, sd = np.nan, np.nan
-            y_text = off + (float(np.nanmean(dk)) if np.any(np.isfinite(dk)) else 0.0)
+
+            y_text = off + (float(np.nanmedian(yk)) if np.any(np.isfinite(yk)) else 0.0)
             text_rows.append((y_text, col, float(lam0), mu, sd))
 
         # helper lines at label heights
@@ -571,7 +647,7 @@ def _plot_residuals_2d(ys: np.ndarray, lams: np.ndarray, resid: np.ndarray, outp
         trans = mtransforms.blended_transform_factory(ax.transAxes, ax.transData)
         y_top = ax.get_ylim()[1]
         x_col1 = 1.02
-        x_col2 = 1.02 + 0.18
+        x_col2 = 1.02 + 0.22
         ax.text(x_col1, y_top + 0.1, "λ", transform=trans, ha="left", va="bottom", fontsize=11)
         ax.text(x_col2, y_top + 0.1, "Δλ [Å]", transform=trans, ha="left", va="bottom", fontsize=11)
 
@@ -587,18 +663,212 @@ def _plot_residuals_2d(ys: np.ndarray, lams: np.ndarray, resid: np.ndarray, outp
     return rms
 
 
+def _mad_sigma(x: np.ndarray) -> float:
+    x = np.asarray(x, dtype=float)
+    x = x[np.isfinite(x)]
+    if x.size == 0:
+        return float("nan")
+    med = float(np.median(x))
+    mad = float(np.median(np.abs(x - med)))
+    return 1.4826 * mad
+
+
+def _weighted_rms(x: np.ndarray, w: np.ndarray) -> float:
+    x = np.asarray(x, dtype=float)
+    w = np.asarray(w, dtype=float)
+    m = np.isfinite(x) & np.isfinite(w) & (w > 0)
+    if not np.any(m):
+        return float("nan")
+    return float(np.sqrt(np.sum(w[m] * x[m] ** 2) / np.sum(w[m])))
+
+
+def _plot_residuals_vs_lambda(
+    lam_all: np.ndarray,
+    dlam_all: np.ndarray,
+    used_mask: np.ndarray,
+    rejected_lines_A: list[float] | None,
+    outpng: Path,
+    title: str,
+) -> None:
+    lam_all = np.asarray(lam_all, dtype=float)
+    dlam_all = np.asarray(dlam_all, dtype=float)
+    used_mask = np.asarray(used_mask, dtype=bool)
+    rej = rejected_lines_A or []
+    # per-line medians
+    lam_key = np.round(lam_all, 3)
+    uniq = np.unique(lam_key[np.isfinite(lam_key)])
+    xs: list[float] = []
+    ys: list[float] = []
+    for lk in uniq:
+        m_line = (lam_key == lk)
+        lam0 = float(np.median(lam_all[m_line])) if np.any(m_line) else float(lk)
+        line_rej = any(abs(lam0 - float(r)) <= 0.25 for r in rej)
+        m = m_line & used_mask
+        if not np.any(m):
+            continue
+        xs.append(lam0)
+        ys.append(float(np.median(dlam_all[m])))
+
+    with mpl_style():
+        fig, ax = plt.subplots(figsize=(8.5, 3.2))
+        if xs:
+            ax.scatter(xs, ys)
+            # simple trend
+            if len(xs) >= 2:
+                p = np.polyfit(xs, ys, deg=1)
+                xg = np.linspace(min(xs), max(xs), 200)
+                ax.plot(xg, np.polyval(p, xg))
+        ax.axhline(0.0, lw=1.0)
+        ax.set_xlabel("λ [Å]")
+        ax.set_ylabel("median Δλ [Å]")
+        ax.set_title(title)
+        fig.tight_layout()
+        fig.savefig(outpng, dpi=150)
+        plt.close(fig)
+
+
+def _plot_residuals_vs_y(
+    y_pix_all: np.ndarray,
+    dlam_all: np.ndarray,
+    used_mask: np.ndarray,
+    outpng: Path,
+    title: str,
+    *,
+    n_bins: int = 32,
+) -> None:
+    y = np.asarray(y_pix_all, dtype=float)
+    d = np.asarray(dlam_all, dtype=float)
+    used_mask = np.asarray(used_mask, dtype=bool)
+    m = np.isfinite(y) & np.isfinite(d) & used_mask
+    if not np.any(m):
+        return
+    y0, y1 = float(np.min(y[m])), float(np.max(y[m]))
+    if y1 <= y0:
+        return
+    edges = np.linspace(y0, y1, n_bins + 1)
+    yc: list[float] = []
+    med: list[float] = []
+    for i in range(n_bins):
+        mi = m & (y >= edges[i]) & (y < edges[i + 1])
+        if not np.any(mi):
+            continue
+        yc.append(float(0.5 * (edges[i] + edges[i + 1])))
+        med.append(float(np.median(d[mi])))
+
+    with mpl_style():
+        fig, ax = plt.subplots(figsize=(8.5, 3.2))
+        if yc:
+            ax.plot(yc, med)
+        ax.axhline(0.0, lw=1.0)
+        ax.set_xlabel("Y [px]")
+        ax.set_ylabel("median Δλ [Å]")
+        ax.set_title(title)
+        fig.tight_layout()
+        fig.savefig(outpng, dpi=150)
+        plt.close(fig)
+
+
+def _plot_residual_hist(
+    dlam_all: np.ndarray,
+    used_mask: np.ndarray,
+    outpng: Path,
+    title: str,
+) -> None:
+    d = np.asarray(dlam_all, dtype=float)
+    used_mask = np.asarray(used_mask, dtype=bool)
+    m = np.isfinite(d) & used_mask
+    if not np.any(m):
+        return
+    sigma = _mad_sigma(d[m])
+    z = d[m] / sigma if np.isfinite(sigma) and sigma > 0 else d[m]
+    with mpl_style():
+        fig, ax = plt.subplots(figsize=(6.8, 3.2))
+        ax.hist(z, bins=40)
+        ax.set_xlabel("Δλ / σ_MAD")
+        ax.set_ylabel("count")
+        ax.set_title(title)
+        fig.tight_layout()
+        fig.savefig(outpng, dpi=150)
+        plt.close(fig)
+
+
 # --------------------------- public stage ---------------------------
 
 @dataclass
 class WaveSolutionResult:
-    poly1d_png: Path
-    poly1d_json: Path
-    poly1d_resid_csv: Path
-    cheb2d_json: Path
-    cheb2d_resid_csv: Path
+    """Outputs + QC metrics for the *entire* wavelength-solution stage.
+
+    This is what the GUI/QC uses as a single source of truth.
+    All paths are relative to the work_dir/wavesol/<disperser>/ directory.
+    """
+
+    # Paths / artifacts
+    wavesol_dir: Path
     lambda_map_fits: Path
-    lambda_map_png: Path
-    resid2d_png: Path
+    wavesolution_1d_png: Path
+    wavesolution_1d_json: Path
+    wavesolution_2d_json: Path
+    control_points_csv: Path
+    residuals_1d_csv: Path
+    residuals_2d_csv: Path
+    residuals_2d_png: Path
+    residuals_2d_audit_png: Path
+    residuals_vs_lambda_png: Path
+    residuals_vs_y_png: Path
+    residuals_hist_png: Path
+    report_txt: Path
+
+    # QC metrics (duplicated in JSON/report)
+    rms1d_A: float
+    rms1d_px: float
+    wrms1d_A: float
+    sigma1d_mad_A: float
+    dispersion_A_per_px: float
+    n_pairs_total: int
+    n_pairs_used: int
+    n_pairs_disabled: int
+
+    model2d_kind: str
+    rms2d_A: float
+    wrms2d_A: float
+    sigma2d_mad_A: float
+    n_lines_total: int
+    n_lines_used: int
+    n_lines_rejected: int
+
+    def as_dict(self) -> dict[str, object]:
+        """JSON-safe representation used by the GUI runner."""
+        return {
+            "wavesol_dir": str(self.wavesol_dir),
+            "lambda_map_fits": str(self.lambda_map_fits),
+            "wavesolution_1d_png": str(self.wavesolution_1d_png),
+            "wavesolution_1d_json": str(self.wavesolution_1d_json),
+            "wavesolution_2d_json": str(self.wavesolution_2d_json),
+            "control_points_csv": str(self.control_points_csv),
+            "residuals_1d_csv": str(self.residuals_1d_csv),
+            "residuals_2d_csv": str(self.residuals_2d_csv),
+            "residuals_2d_png": str(self.residuals_2d_png),
+            "residuals_2d_audit_png": str(self.residuals_2d_audit_png),
+            "residuals_vs_lambda_png": str(self.residuals_vs_lambda_png),
+            "residuals_vs_y_png": str(self.residuals_vs_y_png),
+            "residuals_hist_png": str(self.residuals_hist_png),
+            "report_txt": str(self.report_txt),
+            "rms1d_A": float(self.rms1d_A),
+            "rms1d_px": float(self.rms1d_px),
+            "wrms1d_A": float(self.wrms1d_A),
+            "sigma1d_mad_A": float(self.sigma1d_mad_A),
+            "dispersion_A_per_px": float(self.dispersion_A_per_px),
+            "n_pairs_total": int(self.n_pairs_total),
+            "n_pairs_used": int(self.n_pairs_used),
+            "n_pairs_disabled": int(self.n_pairs_disabled),
+            "model2d_kind": str(self.model2d_kind),
+            "rms2d_A": float(self.rms2d_A),
+            "wrms2d_A": float(self.wrms2d_A),
+            "sigma2d_mad_A": float(self.sigma2d_mad_A),
+            "n_lines_total": int(self.n_lines_total),
+            "n_lines_used": int(self.n_lines_used),
+            "n_lines_rejected": int(self.n_lines_rejected),
+        }
 
 
 def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
@@ -636,37 +906,86 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
     if not hand_pairs.exists():
         raise FileNotFoundError(f"Missing: {hand_pairs} (run LineID first)")
 
-    x, lam, is_blend = _read_hand_pairs(hand_pairs)
-    if x.size < 5:
-        raise RuntimeError(f"Not enough pairs in {hand_pairs} (need >=5, got {x.size})")
+    x_all, lam_all, is_blend_all, is_disabled_all = _read_hand_pairs(hand_pairs)
+    active_pairs = (~is_disabled_all).astype(bool)
+    if int(np.sum(active_pairs)) < 5:
+        raise RuntimeError(
+            f"Not enough ACTIVE pairs in {hand_pairs} (need >=5, got {int(np.sum(active_pairs))}; total {x_all.size})"
+        )
 
     # 1D poly fit
     deg1d = int(wcfg.get("poly_deg_1d", 4))
-    w_blend = np.where(is_blend, float(wcfg.get("blend_weight", 0.3)), 1.0)
-    coeffs1d, used_mask = robust_polyfit_1d(
-        x, lam, deg1d,
-        weights=w_blend,
+    w_blend_all = np.where(is_blend_all, float(wcfg.get("blend_weight", 0.3)), 1.0)
+    x_fit = x_all[active_pairs]
+    lam_fit = lam_all[active_pairs]
+    w_fit = w_blend_all[active_pairs]
+
+    coeffs1d, used_fit = robust_polyfit_1d(
+        x_fit, lam_fit, deg1d,
+        weights=w_fit,
         sigma_clip=float(wcfg.get("poly_sigma_clip", 3.0)),
         maxiter=int(wcfg.get("poly_maxiter", 10)),
     )
 
-    poly1d_png = outdir / "wavesolution_1d.png"
-    rms1d = _plot_wavesol_1d(x, lam, coeffs1d, used_mask, poly1d_png, title="1D dispersion solution")
+    used_mask = np.zeros_like(x_all, dtype=bool)
+    used_mask[active_pairs] = used_fit
 
-    poly1d_json = outdir / "wavesolution_1d.json"
-    poly1d_json.write_text(json.dumps({
+    poly1d_png = outdir / "wavesolution_1d.png"
+    rms1d = _plot_wavesol_1d(
+        x_all,
+        lam_all,
+        coeffs1d,
+        used_mask,
+        is_disabled_all,
+        poly1d_png,
+        title="1D dispersion solution",
+    )
+
+    wavesol1d_json = outdir / "wavesolution_1d.json"
+    resid_all = lam_all - np.polyval(coeffs1d, x_all)
+    resid_used = resid_all[used_mask]
+    # dispersion estimate (Å/px) from derivative of the fitted polynomial
+    if np.any(used_mask):
+        dlamdx = np.polyval(np.polyder(coeffs1d), x_all[used_mask])
+        dlamdx_med = float(np.median(np.abs(dlamdx)))
+    else:
+        dlamdx_med = float("nan")
+    rms1d_px = float(rms1d / dlamdx_med) if np.isfinite(dlamdx_med) and dlamdx_med > 0 else float("nan")
+    # robust sigma estimate (MAD → σ)
+    if resid_used.size:
+        med = float(np.median(resid_used))
+        mad = float(np.median(np.abs(resid_used - med)))
+        sig_mad = 1.4826 * mad
+    else:
+        sig_mad = float("nan")
+    # weighted RMS (blend-weight aware)
+    w_used = w_blend_all[used_mask]
+    wrms1d = float(np.sqrt(np.sum(w_used * (resid_used**2)) / np.sum(w_used))) if resid_used.size and np.sum(w_used) > 0 else float("nan")
+
+    wavesol1d_json.write_text(json.dumps({
         "deg": int(deg1d),
         "coeffs_polyval": [float(c) for c in coeffs1d],  # highest order first
         "rms_A": float(rms1d),
-        "n_pairs": int(x.size),
+        "rms_px": float(rms1d_px),
+        "wrms_A": float(wrms1d),
+        "sigma_mad_A": float(sig_mad),
+        "dispersion_A_per_px": float(dlamdx_med),
+        "n_pairs": int(x_all.size),
         "n_used": int(np.sum(used_mask)),
+        "n_disabled": int(np.sum(is_disabled_all)),
     }, indent=2, ensure_ascii=False), encoding="utf-8")
 
     poly1d_resid_csv = outdir / "residuals_1d.csv"
-    resid_all = lam - np.polyval(coeffs1d, x)
-    rows = np.column_stack([x, lam, resid_all, used_mask.astype(int), is_blend.astype(int)])
+    rows = np.column_stack([
+        x_all,
+        lam_all,
+        resid_all,
+        used_mask.astype(int),
+        is_blend_all.astype(int),
+        is_disabled_all.astype(int),
+    ])
     np.savetxt(poly1d_resid_csv, rows, delimiter=",",
-               header="x_pix,lambda_A,delta_lambda_A,used,blend",
+               header="x_pix,lambda_A,delta_lambda_A,used,blend,disabled",
                comments="", fmt="%.6f")
 
     # 2D: trace lines and fit a 2D model (power + Chebyshev, like the reference program)
@@ -684,19 +1003,51 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
                     pass
     rej = sorted(set(rej))
 
-    # Trace all lines; apply manual rejection at the *fit* stage (not here),
-    # so the interactive cleaner can still display rejected lines in grey.
-    xs_cp, ys_cp, lams_cp, scores = trace_lines_2d_cc(
-        img2d,
-        lambda_list=lam,
-        x_guesses=x,
-        template_hw=int(wcfg.get("trace_template_hw", 6)),
-        avg_half=int(wcfg.get("trace_avg_half", 3)),
-        search_rad=int(wcfg.get("trace_search_rad", 12)),
-        y_step=int(wcfg.get("trace_y_step", 1)),
-        amp_thresh=float(wcfg.get("trace_amp_thresh", 20.0)),
-        y0=(None if y0 is None else int(y0)),
-    )
+    # Control points are the *contract* between the interactive 2D cleaner and
+    # the final stage run.  To ensure the "Final Run" produces results that
+    # match what the user saw in the 2D cleaning view, we optionally reuse the
+    # previously saved control points.
+    control_points_csv = outdir / "control_points_2d.csv"
+
+    def _load_control_points_csv(p: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+        try:
+            arr = np.genfromtxt(p, delimiter=",", names=True, dtype=float)
+            x = np.asarray(arr["x_pix"], float)
+            y = np.asarray(arr["y_pix"], float)
+            lam = np.asarray(arr["lambda_A"], float)
+            score = np.asarray(arr["score"], float)
+        except Exception:
+            try:
+                a = np.loadtxt(p, delimiter=",", dtype=float)
+                if a.ndim == 1:
+                    a = a[None, :]
+                x, y, lam, score = a[:, 0], a[:, 1], a[:, 2], a[:, 3]
+            except Exception:
+                return None
+        m = np.isfinite(x) & np.isfinite(y) & np.isfinite(lam) & np.isfinite(score)
+        x, y, lam, score = x[m], y[m], lam[m], score[m]
+        if x.size < 50:
+            return None
+        return x, y, lam, score
+
+    use_cached_cp = bool(wcfg.get("use_cached_control_points", True))
+    cached = _load_control_points_csv(control_points_csv) if (use_cached_cp and control_points_csv.exists()) else None
+    if cached is not None:
+        xs_cp, ys_cp, lams_cp, scores = cached
+    else:
+        # Trace all lines; apply manual rejection at the *fit* stage (not here),
+        # so the interactive cleaner can still display rejected lines in grey.
+        xs_cp, ys_cp, lams_cp, scores = trace_lines_2d_cc(
+            img2d,
+            lambda_list=lam_fit,
+            x_guesses=x_fit,
+            template_hw=int(wcfg.get("trace_template_hw", 6)),
+            avg_half=int(wcfg.get("trace_avg_half", 3)),
+            search_rad=int(wcfg.get("trace_search_rad", 12)),
+            y_step=int(wcfg.get("trace_y_step", 1)),
+            amp_thresh=float(wcfg.get("trace_amp_thresh", 20.0)),
+            y0=(None if y0 is None else int(y0)),
+        )
 
     # basic filtering: remove short traces per line
     min_pts = int(wcfg.get("trace_min_pts", 120))
@@ -723,11 +1074,18 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
         xs_cp, ys_cp, lams_cp, scores = xs_cp[m_edge], ys_cp[m_edge], lams_cp[m_edge], scores[m_edge]
 
     # Save control points for QC / interactive cleanup (after all basic filtering).
-    control_points_csv = outdir / "control_points_2d.csv"
+    # This file is the *single source of truth* for the interactive 2D cleaner.
+    # Always write it so that the GUI and the final stage outputs stay in lockstep.
     if xs_cp.size:
         rows_cp = np.column_stack([xs_cp, ys_cp, lams_cp, scores])
-        np.savetxt(control_points_csv, rows_cp, delimiter=",",
-                   header="x_pix,y_pix,lambda_A,score", comments="", fmt="%.6f")
+        np.savetxt(
+            control_points_csv,
+            rows_cp,
+            delimiter=",",
+            header="x_pix,y_pix,lambda_A,score",
+            comments="",
+            fmt="%.6f",
+        )
 
     if xs_cp.size < 50:
         raise RuntimeError("Too few 2D control points after filtering; try lowering trace_min_pts / amp_thresh.")
@@ -759,7 +1117,7 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
         maxiter=int(wcfg.get("power_maxiter", wcfg.get("cheb_maxiter", 10))),
     )
     pow_pred_fit = polyval2d_power(xs_fit, ys_fit, pow_coeff, pow_meta)
-    pow_resid_fit = lams_fit - pow_pred_fit
+    pow_resid_fit = pow_pred_fit - lams_fit
     pow_rms = float(np.sqrt(np.mean(pow_resid_fit[pow_used_fit] ** 2))) if np.any(pow_used_fit) else float("nan")
 
     # Chebyshev
@@ -772,7 +1130,7 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
         maxiter=int(wcfg.get("cheb_maxiter", 10)),
     )
     cheb_pred_fit = polyval2d_cheb(xs_fit, ys_fit, cheb_C, cheb_meta)
-    cheb_resid_fit = lams_fit - cheb_pred_fit
+    cheb_resid_fit = cheb_pred_fit - lams_fit
     cheb_rms = float(np.sqrt(np.mean(cheb_resid_fit[cheb_used_fit] ** 2))) if np.any(cheb_used_fit) else float("nan")
 
     # Expand used masks to all control points (rejected lines → used=0)
@@ -783,9 +1141,9 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
 
     # Residuals for all points (for CSV / optional plotting)
     pow_pred = polyval2d_power(xs_cp, ys_cp, pow_coeff, pow_meta)
-    pow_resid = lams_cp - pow_pred
+    pow_resid = pow_pred - lams_cp
     cheb_pred = polyval2d_cheb(xs_cp, ys_cp, cheb_C, cheb_meta)
-    cheb_resid = lams_cp - cheb_pred
+    cheb_resid = cheb_pred - lams_cp
 
     model2d = str(wcfg.get("model2d", "auto")).strip().lower()
     if model2d in ("cheb", "chebyshev"):
@@ -838,16 +1196,171 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
     lambda_map_png = outdir / "wavelength_matrix.png"
     _plot_wavelength_matrix(lam_map, lambda_map_png, title="2D wavelength map λ(x,y)")
 
-    resid2d_png = outdir / "residuals_2d.png"
-    _plot_residuals_2d(ys_cp[used2d], lams_cp[used2d], resid2d[used2d], resid2d_png, title=f"2D fit residuals (kind={kind})")
+    # --- 2D QC (ESO-like) ---
+    mask_active_line = np.ones_like(lams_cp, dtype=bool)
+    for r in rej:
+        mask_active_line &= np.abs(lams_cp - r) > 0.25
+    used_active = used2d & mask_active_line & np.isfinite(resid2d)
+    resid_used = resid2d[used_active]
 
+    rms2d_A = float(np.sqrt(np.mean(resid_used ** 2))) if resid_used.size else float("nan")
+    wrms2d_A = _weighted_rms(resid2d[used_active], scores[used_active])
+    sig_mad_2d_A = _mad_sigma(resid_used)
+
+    disp2d_A_per_px = float("nan")
+    if lam_map.shape[1] > 1:
+        gx = np.diff(lam_map.astype(float), axis=1)
+        gx = gx[np.isfinite(gx)]
+        if gx.size:
+            disp2d_A_per_px = float(np.median(np.abs(gx)))
+
+    rms2d_px = float(rms2d_A / disp2d_A_per_px) if np.isfinite(disp2d_A_per_px) and disp2d_A_per_px > 0 else float("nan")
+    sig_mad_2d_px = float(sig_mad_2d_A / disp2d_A_per_px) if np.isfinite(disp2d_A_per_px) and disp2d_A_per_px > 0 else float("nan")
+
+    resid2d_png = outdir / "residuals_2d.png"
+    resid2d_audit_png = outdir / "residuals_2d_audit.png"
+    resid_vs_lambda_png = outdir / "residuals_vs_lambda.png"
+    resid_vs_y_png = outdir / "residuals_vs_y.png"
+    resid_hist_png = outdir / "residuals_hist.png"
+    report_txt = outdir / "wavesolution_report.txt"
+
+    _plot_residuals_2d(
+        ys_pix_all=ys_cp,
+        lams_all=lams_cp,
+        dlam_all=resid2d,
+        used_mask=used2d,
+        rejected_lines_A=rej,
+        outpng=resid2d_png,
+        title=f"2D residuals (kind={kind})",
+        final_view=True,
+    )
+    _plot_residuals_2d(
+        ys_pix_all=ys_cp,
+        lams_all=lams_cp,
+        dlam_all=resid2d,
+        used_mask=used2d,
+        rejected_lines_A=rej,
+        outpng=resid2d_audit_png,
+        title=f"2D residuals — audit (kind={kind})",
+        final_view=False,
+    )
+    _plot_residuals_vs_lambda(
+        lams_all=lams_cp,
+        dlam_all=resid2d,
+        used_mask=used2d,
+        rejected_lines_A=rej,
+        outpng=resid_vs_lambda_png,
+        title="Δλ vs λ (per-line medians)",
+    )
+    _plot_residuals_vs_y(
+        ys_pix_all=ys_cp,
+        dlam_all=resid2d,
+        used_mask=used2d,
+        outpng=resid_vs_y_png,
+        title="Δλ vs Y (diagnostic)",
+    )
+    _plot_residual_hist(
+        dlam_all=resid2d,
+        used_mask=used2d,
+        outpng=resid_hist_png,
+        title="Normalised residuals histogram",
+    )
+
+    # Update JSON report with metrics, and write a human-readable report.
+    try:
+        d2 = json.loads(wavesol2d_json.read_text(encoding="utf-8"))
+    except Exception:
+        d2 = {}
+    # per-line counts
+    lam_keys = np.round(lams_cp.astype(float), 3)
+    uniq = np.unique(lam_keys)
+    n_lines = int(uniq.size)
+    n_rejected_lines = 0
+    for lk in uniq:
+        if any(abs(float(lk) - float(r)) <= 0.25 for r in rej):
+            n_rejected_lines += 1
+    d2.update({
+        "qc": {
+            "rms_A": rms2d_A,
+            "wrms_A": wrms2d_A,
+            "robust_sigma_A": sig_mad_2d_A,
+            "rms_px": rms2d_px,
+            "robust_sigma_px": sig_mad_2d_px,
+            "dispersion_A_per_px": disp2d_A_per_px,
+            "n_lines": n_lines,
+            "n_rejected_lines": int(n_rejected_lines),
+            "n_active_lines": int(n_lines - n_rejected_lines),
+            "n_points": int(lams_cp.size),
+            "n_used_points": int(np.sum(used_active)),
+        }
+    })
+    wavesol2d_json.write_text(json.dumps(d2, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    # Text report (for papers / traceability)
+    lines: list[str] = []
+    lines.append("Wavelength solution report")
+    lines.append(f"kind: {kind}")
+    lines.append("")
+    lines.append("2D QC metrics")
+    lines.append(f"  RMS: {rms2d_A:.6g} Å  ({rms2d_px:.6g} px)")
+    lines.append(f"  wRMS: {wrms2d_A:.6g} Å")
+    lines.append(f"  robust σ(MAD): {sig_mad_2d_A:.6g} Å  ({sig_mad_2d_px:.6g} px)")
+    lines.append(f"  dispersion (median |dλ/dx|): {disp2d_A_per_px:.6g} Å/px")
+    lines.append(f"  lines: total={n_lines} active={n_lines-n_rejected_lines} rejected={n_rejected_lines}")
+    lines.append(f"  points: total={int(lams_cp.size)} used={int(np.sum(used_active))}")
+    if rej:
+        lines.append("  rejected_lines_A:")
+        for r in sorted(rej):
+            lines.append(f"    - {r}")
+    lines.append("")
+    # per-line table
+    lines.append("Per-line stats (λ, status, N_used/N_total, median Δλ, RMS Δλ)")
+    for lk in sorted(uniq):
+        lam0 = float(lk)
+        m_line = np.abs(lam_keys - lk) < 0.001
+        is_rej = any(abs(lam0 - float(r)) <= 0.25 for r in rej)
+        m_used = used2d & m_line & mask_active_line
+        rr = resid2d[m_used]
+        med = float(np.median(rr)) if rr.size else float("nan")
+        rms_line = float(np.sqrt(np.mean(rr ** 2))) if rr.size else float("nan")
+        lines.append(f"  {lam0:.3f}  {'REJECT' if is_rej else 'OK':6s}  {int(np.sum(m_used))}/{int(np.sum(m_line))}  {med:+.3g}  {rms_line:.3g}")
+    report_txt.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    # finalize counts / robust stats for 2D
+    n_lines_total = int(n_lines)
+    n_lines_rejected = int(n_rejected_lines)
+    n_lines_used = int(n_lines_total - n_lines_rejected)
+    
     return WaveSolutionResult(
-        poly1d_png=poly1d_png,
-        poly1d_json=poly1d_json,
-        poly1d_resid_csv=poly1d_resid_csv,
-        cheb2d_json=wavesol2d_json,
-        cheb2d_resid_csv=resid2d_csv,
+        wavesol_dir=outdir,
         lambda_map_fits=lambda_map_fits,
-        lambda_map_png=lambda_map_png,
-        resid2d_png=resid2d_png,
+        wavesolution_1d_png=poly1d_png,
+        wavesolution_1d_json=wavesol1d_json,
+        wavesolution_2d_json=wavesol2d_json,
+        control_points_csv=control_points_csv,
+        residuals_1d_csv=poly1d_resid_csv,
+        residuals_2d_csv=resid2d_csv,
+        residuals_2d_png=resid2d_png,
+        residuals_2d_audit_png=resid2d_audit_png,
+        residuals_vs_lambda_png=resid_vs_lambda_png,
+        residuals_vs_y_png=resid_vs_y_png,
+        residuals_hist_png=resid_hist_png,
+        report_txt=report_txt,
+        # 1D metrics
+        rms1d_A=float(rms1d),
+        rms1d_px=float(rms1d_px),
+        wrms1d_A=float(wrms1d),
+        sigma1d_mad_A=float(sig_mad),
+        dispersion_A_per_px=float(dlamdx_med),
+        n_pairs_total=int(x_all.size),
+        n_pairs_used=int(np.sum(used_mask)),
+        n_pairs_disabled=int(np.sum(is_disabled_all)),
+        # 2D metrics
+        model2d_kind=str(kind),
+        rms2d_A=float(rms2d_A),
+        wrms2d_A=float(wrms2d_A),
+        sigma2d_mad_A=float(sig_mad_2d_A),
+        n_lines_total=n_lines_total,
+        n_lines_used=n_lines_used,
+        n_lines_rejected=n_lines_rejected,
     )

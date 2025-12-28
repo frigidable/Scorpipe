@@ -8,29 +8,59 @@ import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
 
-def _read_pairs(path: Path) -> list[tuple[float, float, bool]]:
+def _read_pairs(path: Path) -> list[tuple[float, float, bool, bool]]:
     if not path.exists():
         return []
-    out: list[tuple[float, float, bool]] = []
+    out: list[tuple[float, float, bool, bool]] = []
     for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
         s = line.strip()
-        if not s or s.startswith("#"):
+        if not s:
             continue
-        blend = ("blend" in s.lower())
+
+        s_low = s.lower()
+        blend = ("blend" in s_low)
+        disabled = ("disabled" in s_low) or ("reject" in s_low) or ("rejected" in s_low)
+
+        # Allow keeping disabled pairs in the file as commented lines, e.g.:
+        #   # 123.4  5461.2  # disabled
+        # Plain comments without numbers are ignored.
+        if s.startswith("#") and not disabled:
+            continue
         nums = re.findall(r"[-+]?\d+(?:\.\d+)?", s)
         if len(nums) >= 2:
-            out.append((float(nums[0]), float(nums[1]), blend))
+            out.append((float(nums[0]), float(nums[1]), blend, bool(disabled)))
     return out
 
 
-def _save_pairs(path: Path, pairs: list[tuple[float, float, bool]], *, header_note: str = "") -> None:
+def _save_pairs(
+    path: Path,
+    pairs: list[tuple[float, float, bool]],
+    active: list[bool] | None = None,
+    *,
+    header_note: str = "",
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
-        f.write("# manual pairs: x  lambda   (# blend if marked)\n")
+        f.write("# manual pairs: x  lambda   (# blend, # disabled supported)\n")
         if header_note:
             f.write(f"# {header_note}\n")
-        for x0, lam, blend in sorted(pairs, key=lambda t: t[0]):
-            f.write(f"{x0:.6f}  {lam:.4f}{'   # blend' if blend else ''}\n")
+
+        rows: list[tuple[float, float, bool, bool]] = []
+        if active is None:
+            rows = [(x0, lam, blend, False) for (x0, lam, blend) in pairs]
+        else:
+            for (x0, lam, blend), on in zip(pairs, active, strict=False):
+                rows.append((x0, lam, blend, not bool(on)))
+
+        for x0, lam, blend, is_disabled in sorted(rows, key=lambda t: t[0]):
+            suffix = ""
+            if blend:
+                suffix += "   # blend"
+            if is_disabled:
+                # keep the numeric record readable and parseable
+                f.write(f"# {x0:.6f}  {lam:.4f}{suffix}   # disabled\n")
+            else:
+                f.write(f"{x0:.6f}  {lam:.4f}{suffix}\n")
 
 
 def _polyfit(x: np.ndarray, y: np.ndarray, deg: int) -> np.ndarray:
@@ -63,8 +93,11 @@ class PairRejectorDialog(QtWidgets.QDialog):
         self.pairs_path = Path(pairs_path)
         self.poly_deg = int(poly_deg)
 
-        self._pairs = _read_pairs(self.pairs_path)
-        self._active = [True] * len(self._pairs)
+        pairs_full = _read_pairs(self.pairs_path)
+        # Keep the data model simple: store pairs and a separate active mask.
+        # Disabled pairs can be persisted in the same file as commented records.
+        self._pairs = [(x0, lam, blend) for (x0, lam, blend, _disabled) in pairs_full]
+        self._active = [not bool(_disabled) for (_x0, _lam, _blend, _disabled) in pairs_full]
 
         # --- layout ---
         lay = QtWidgets.QVBoxLayout(self)
@@ -344,16 +377,26 @@ class PairRejectorDialog(QtWidgets.QDialog):
         if not fn:
             return
         out = Path(fn)
-        clean = self._current_clean_pairs()
-        _save_pairs(out, clean, header_note=f"cleaned from {self.pairs_path.name}, kept {len(clean)}/{len(self._pairs)}")
+        n_keep = int(sum(bool(a) for a in self._active))
+        _save_pairs(
+            out,
+            self._pairs,
+            active=self._active,
+            header_note=f"cleaned from {self.pairs_path.name}, kept {n_keep}/{len(self._pairs)} (disabled preserved)",
+        )
         self.pairs_path = out
         self.lbl_path.setText(str(self.pairs_path))
 
     def _overwrite(self) -> None:
         if not self._pairs:
             return
-        clean = self._current_clean_pairs()
-        _save_pairs(self.pairs_path, clean, header_note=f"cleaned in-place, kept {len(clean)}/{len(self._pairs)}")
+        n_keep = int(sum(bool(a) for a in self._active))
+        _save_pairs(
+            self.pairs_path,
+            self._pairs,
+            active=self._active,
+            header_note=f"cleaned in-place, kept {n_keep}/{len(self._pairs)} (disabled preserved)",
+        )
         self.accept()
 
 

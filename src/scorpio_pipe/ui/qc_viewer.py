@@ -68,6 +68,11 @@ def _collect_dynamic_items(work_dir: Path) -> list[QCItem]:
             ("1D", sub / "wavesolution_1d.png", "image"),
             ("2D map", sub / "wavelength_matrix.png", "image"),
             ("2D resid", sub / "residuals_2d.png", "image"),
+            ("2D resid (audit)", sub / "residuals_2d_audit.png", "image"),
+            ("Residuals vs λ", sub / "residuals_vs_lambda.png", "image"),
+            ("Residuals vs Y", sub / "residuals_vs_y.png", "image"),
+            ("Residuals histogram", sub / "residuals_hist.png", "image"),
+            ("Wave report", sub / "wavesolution_report.txt", "text"),
             ("Lambda map", sub / "lambda_map.fits", "fits"),
         ]
         for title, p, kind in candidates:
