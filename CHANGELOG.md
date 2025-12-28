@@ -1,3 +1,13 @@
+## v5.36.4
+
+### GitHub / Release process hardening
+- **Dependabot**: configuration is now expected at `.github/dependabot.yml` (GitHub standard path).
+- **Issue templates**: cleaned up to keep only YAML issue forms; removed duplicate legacy templates.
+- **PR template**: fixed Markdown escaping so checklists and headings render correctly.
+- **Docs**: added `docs/RELEASING.md`; refreshed `docs/RUNBOOK.md` and `docs/AUDIT.md` titles to avoid stale version tags.
+- **Repo meta**: added `CONTRIBUTING.md` and `SECURITY.md`.
+- **CI**: added a **build_check** job (build sdist/wheel, install from wheel, smoke) to prevent broken releases.
+
 ## v5.36.2
 
 ### Cosmics (step 2.1) + memmap-safe stack2d

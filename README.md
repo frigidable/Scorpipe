@@ -112,7 +112,7 @@ scorpio-pipe run --data-dir <PATH_TO_NIGHT> --object "<OBJECT_NAME>" --execute
 
 Важно: **Code → Download ZIP** на GitHub скачивает *исходники* и **не** содержит `setup.exe`.
 
-Подробности: [`INSTALL.md`](INSTALL.md), [`GET_SETUP_EXE.md`](GET_SETUP_EXE.md).
+Подробности: [`INSTALL.md`](INSTALL.md), [`GET_SETUP_EXE.md`](docs/GET_SETUP_EXE.md).
 
 ### Вариант B (разработчик): установка из исходников (Python)
 Требования: **Python ≥ 3.10**.
@@ -228,7 +228,7 @@ work/
 ## Диагностика и типовые проблемы
 
 - **“setup.bat мигнул и исчез”** → используйте `setup_debug.bat` (пишет `setup_debug.log`).  
-  См. [`SETUP_TROUBLESHOOTING.md`](SETUP_TROUBLESHOOTING.md).
+  См. [`SETUP_TROUBLESHOOTING.md`](docs/SETUP_TROUBLESHOOTING.md).
 
 - **Проблемы с ресурсами/путями/параметрами** →  
   `scorpio-pipe doctor --config <...> --fix`
@@ -260,10 +260,10 @@ setup.bat --installer
 - **SCORPIO / SCORPIO‑1: руководство 2013** — полезно для исторической совместимости и понимания эволюции instrument‑режимов.
 
 Внутренние документы проекта:
-- [`MANUAL.md`](MANUAL.md) — руководство пользователя
-- [`RUNBOOK.md`](RUNBOOK.md) — шпаргалка “как прогнать пайплайн”
+- [`MANUAL.md`](docs/MANUAL.md) — руководство пользователя
+- [`RUNBOOK.md`](docs/RUNBOOK.md) — шпаргалка “как прогнать пайплайн”
 - [`CHANGELOG.md`](CHANGELOG.md) — заметки релизов и hotfix‑ов
-- [`AUDIT.md`](AUDIT.md) — честный аудит стадий и статуса “заглушек/готового”
+- [`AUDIT.md`](docs/AUDIT.md) — честный аудит стадий и статуса “заглушек/готового”
 
 ---
 

@@ -10,8 +10,37 @@ on:
         required: false
         type: string
 
+
 jobs:
+  build_check:
+    name: build_check (sdist/wheel install)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+
+      - name: Build sdist/wheel
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -U build
+          python -m build
+
+      - name: Install from wheel + smoke
+        run: |
+          python -m pip install dist/*.whl
+          scorpio-pipe --help
+          python -c "import importlib.metadata as m; print('scorpio-pipe', m.version('scorpio-pipe')); import scorpio_pipe; print('import ok')"
+
   build:
+    needs: [build_check]
+
     runs-on: windows-latest
     permissions:
       contents: write
