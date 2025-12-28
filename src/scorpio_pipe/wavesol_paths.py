@@ -1,5 +1,6 @@
 from __future__ import annotations
 from scorpio_pipe.paths import resolve_work_dir
+from scorpio_pipe.workspace_paths import stage_dir
 
 import re
 from pathlib import Path
@@ -42,19 +43,33 @@ def get_selected_disperser(cfg: dict[str, Any]) -> str:
 def wavesol_dir(cfg: dict[str, Any]) -> Path:
     """Return a disperser-specific wavesolution directory.
 
-    New convention (v2.1+):
-      work_dir/wavesol/<disperser_slug>/...
+    New convention (v5.38+):
+      work_dir/products/07_wavesol/<disperser_slug>/...
 
     Backward-compatible fallback:
       if work_dir/wavesol exists and the subdir doesn't, we still allow reading
       from the legacy flat layout.
     """
     wd = resolve_work_dir(cfg)
-    base = wd / "wavesol"
+    base = stage_dir(wd, "wavesolution")
     slug = slugify_disperser(get_selected_disperser(cfg))
     sub = base / slug
 
-    # Legacy compatibility: if legacy files exist directly in wavesol/, keep it usable.
-    if (base / "superneon.fits").exists() and not sub.exists():
-        return base
+    # Legacy compatibility:
+    # - old base: work_dir/wavesol/
+    # - old per-disperser: work_dir/wavesol/<slug>/
+    legacy_base = wd / "wavesol"
+    legacy_sub = legacy_base / slug
+
+    # If new location has files, prefer it.
+    if sub.exists() or any((sub / n).exists() for n in ("lambda_map.fits", "superneon.fits")):
+        return sub
+
+    # If old files exist directly in wavesol/, keep it usable.
+    if (legacy_base / "superneon.fits").exists() and not legacy_sub.exists():
+        return legacy_base
+    # Prefer per-disperser legacy if present.
+    if legacy_sub.exists():
+        return legacy_sub
+    # Default to new target (even if it doesn't exist yet).
     return sub

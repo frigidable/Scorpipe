@@ -8,9 +8,12 @@ from pathlib import Path
 class WorkLayout:
     work_dir: Path
     raw: Path
+    products: Path
+    manifest: Path
+
+    # Legacy/compatibility roots. These are *not* created by default.
     calibs: Path
     science: Path
-    products: Path
     qc: Path
 
     # legacy compatibility
@@ -19,13 +22,14 @@ class WorkLayout:
 
 
 def ensure_work_layout(work_dir: str | Path) -> WorkLayout:
-    """Create (if needed) standard subdirectories inside work_dir.
+    """Create (if needed) the *minimal* workspace root.
 
-    Standard (v5.17+):
-      raw/ calibs/ science/ products/ qc/
+    Canonical (v5.38+):
+      raw/ products/ manifest/
 
-    Legacy:
-      calib/ report/ are still created to keep older code/UI stable.
+    We intentionally do *not* create legacy directories (calib/, report/) nor
+    older roots (calibs/, science/, qc/) here. Stages may create additional
+    directories when they actually need to write outputs.
 
     Returns
     -------
@@ -34,35 +38,27 @@ def ensure_work_layout(work_dir: str | Path) -> WorkLayout:
     """
     wd = Path(work_dir).expanduser().resolve()
     raw = wd / "raw"
+    products = wd / "products"
+    manifest = wd / "manifest"
+
+    # Legacy/compatibility paths (not created here)
     calibs = wd / "calibs"
     science = wd / "science"
-    products = wd / "products"
     qc = wd / "qc"
-
-    # v5.36+: canonical "products/qc" mirror for QC artifacts.
-    products_qc = products / "qc"
 
     calib_legacy = wd / "calib"
     report_legacy = wd / "report"
 
-    for p in [
-        raw,
-        calibs,
-        science,
-        products,
-        qc,
-        products_qc,
-        calib_legacy,
-        report_legacy,
-    ]:
+    for p in [raw, products, manifest]:
         p.mkdir(parents=True, exist_ok=True)
 
     return WorkLayout(
         work_dir=wd,
         raw=raw,
+        products=products,
+        manifest=manifest,
         calibs=calibs,
         science=science,
-        products=products,
         qc=qc,
         calib_legacy=calib_legacy,
         report_legacy=report_legacy,

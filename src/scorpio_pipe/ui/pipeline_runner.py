@@ -27,6 +27,7 @@ from scorpio_pipe.stage_state import (
 from scorpio_pipe.paths import resolve_work_dir
 from scorpio_pipe.wavesol_paths import wavesol_dir
 from scorpio_pipe.work_layout import ensure_work_layout
+from scorpio_pipe.workspace_paths import stage_dir, per_exp_dir, resolve_input_path
 
 log = logging.getLogger(__name__)
 
@@ -153,20 +154,38 @@ def _task_manifest(
 ) -> Path:
     from scorpio_pipe.manifest import write_manifest
 
-    layout = ensure_work_layout(out_dir)
-    # Canonical location (work/qc). Keep a legacy mirror for older tooling.
+    _ = ensure_work_layout(out_dir)
+
+    # Canonical location (products/00_manifest).
     p = write_manifest(
-        out_path=layout.qc / "manifest.json", cfg=cfg, cfg_path=config_path
+        out_path=stage_dir(out_dir, "manifest") / "manifest.json",
+        cfg=cfg,
+        cfg_path=config_path,
     )
+
+    # Legacy mirrors: write only if legacy roots already exist (do not create them).
     try:
-        write_manifest(
-            out_path=layout.report_legacy / "manifest.json",
-            cfg=cfg,
-            cfg_path=config_path,
-        )
+        qc_legacy = Path(out_dir) / "qc"
+        if qc_legacy.exists():
+            write_manifest(
+                out_path=qc_legacy / "manifest.json",
+                cfg=cfg,
+                cfg_path=config_path,
+            )
     except Exception:
-        # Legacy mirror should never break science.
         pass
+
+    try:
+        rep_legacy = Path(out_dir) / "report"
+        if rep_legacy.exists():
+            write_manifest(
+                out_path=rep_legacy / "manifest.json",
+                cfg=cfg,
+                cfg_path=config_path,
+            )
+    except Exception:
+        pass
+
     return p
 
 
@@ -193,7 +212,7 @@ def _task_flatfield(
 ) -> Path:
     from scorpio_pipe.stages.flatfield import run_flatfield
 
-    return run_flatfield(cfg=cfg, out_dir=Path(out_dir) / "flatfield")
+    return run_flatfield(cfg=cfg, out_dir=stage_dir(out_dir, "flatfield"))
 
 
 def _task_cosmics(
@@ -201,7 +220,7 @@ def _task_cosmics(
 ) -> Path:
     from scorpio_pipe.stages.cosmics import clean_cosmics
 
-    return clean_cosmics(cfg, out_dir=Path(out_dir) / "cosmics")
+    return clean_cosmics(cfg, out_dir=stage_dir(out_dir, "cosmics"))
 
 
 def _task_superneon(
@@ -243,11 +262,12 @@ def _task_qc_report(
     from scorpio_pipe.qc_report import build_qc_report
 
     _ = cancel_token
-    layout = ensure_work_layout(out_dir)
-    res = build_qc_report(cfg, out_dir=layout.qc)
+    _ = ensure_work_layout(out_dir)
+    out_p = stage_dir(out_dir, "qc_report")
+    res = build_qc_report(cfg, out_dir=out_p)
     # build_qc_report historically returned Path; keep compatibility if it returns a dict
     if isinstance(res, dict):
-        return Path(res.get("qc_html", layout.qc / "index.html"))
+        return Path(res.get("qc_html", out_p / "index.html"))
     return Path(res)
 
 
@@ -256,14 +276,9 @@ def _task_linearize(
 ) -> Path:
     from scorpio_pipe.stages.linearize import run_linearize
 
-    res = run_linearize(
-        cfg, out_dir=Path(out_dir) / "products" / "lin", cancel_token=cancel_token
-    )
-    return Path(
-        res.get("products", {}).get(
-            "preview_fits", Path(out_dir) / "products" / "lin" / "lin_preview.fits"
-        )
-    )
+    out_p = stage_dir(out_dir, "linearize")
+    res = run_linearize(cfg, out_dir=out_p, cancel_token=cancel_token)
+    return Path(res.get("products", {}).get("preview_fits", out_p / "lin_preview.fits"))
 
 
 def _task_sky(
@@ -272,9 +287,9 @@ def _task_sky(
     from scorpio_pipe.stages.sky_sub import run_sky_sub
 
     _ = cancel_token
-    # v5.12+: canonical output lives in products/sky (legacy is mirrored).
-    run_sky_sub(cfg, out_dir=Path(out_dir) / "products" / "sky")
-    return Path(out_dir) / "products" / "sky" / "sky_sub_done.json"
+    out_p = stage_dir(out_dir, "sky")
+    run_sky_sub(cfg, out_dir=out_p)
+    return out_p / "sky_sub_done.json"
 
 
 def _task_stack2d(
@@ -284,15 +299,30 @@ def _task_stack2d(
 
     _ = cancel_token
     wd = resolve_work_dir(cfg)
-    per_dir = wd / "products" / "sky" / "per_exp"
-    if not per_dir.exists():
-        per_dir = wd / "sky" / "per_exp"
-    inputs = sorted(per_dir.glob("*_sky_sub.fits"))
+
+    # Canonical (new): products/09_sky/<stem>/*_sky_sub.fits
+    sky_stage = stage_dir(wd, "sky")
+    inputs = sorted(p for p in sky_stage.rglob("*_sky_sub.fits") if p.is_file())
+
+    # Legacy: products/sky/per_exp and sky/per_exp, and also stage_dir/"per_exp".
+    if not inputs:
+        legacy_dirs = [
+            sky_stage / "per_exp",
+            wd / "products" / "sky" / "per_exp",
+            wd / "sky" / "per_exp",
+        ]
+        for d in legacy_dirs:
+            if d.exists():
+                inputs = sorted(d.glob("*_sky_sub.fits"))
+                if inputs:
+                    break
+
     if not inputs:
         raise FileNotFoundError(
-            f"No per-exposure sky-subtracted frames found in {per_dir}"
+            f"No per-exposure sky-subtracted frames found (tried {sky_stage} and legacy locations)"
         )
-    out_p = Path(out_dir) / "products" / "stack"
+
+    out_p = stage_dir(out_dir, "stack2d")
     res = run_stack2d(cfg, inputs=inputs, out_dir=out_p)
     return Path(res.get("stacked2d", out_p / "stacked2d.fits"))
 
@@ -303,8 +333,9 @@ def _task_extract1d(
     from scorpio_pipe.stages.extract1d import run_extract1d
 
     _ = cancel_token
-    res = run_extract1d(cfg, out_dir=Path(out_dir) / "products" / "spec")
-    return Path(res.get("spec1d", Path(out_dir) / "products" / "spec" / "spec1d.fits"))
+    out_p = stage_dir(out_dir, "extract1d")
+    res = run_extract1d(cfg, out_dir=out_p)
+    return Path(res.get("spec1d", out_p / "spec1d.fits"))
 
 
 TASKS: dict[str, TaskFn] = {
@@ -409,11 +440,11 @@ def _input_paths_for_hash(cfg: dict[str, Any], task: str, out_dir: Path) -> list
 
     sb_cfg = _resolve_cfg_path(calib_cfg.get("superbias_path"))
     sf_cfg = _resolve_cfg_path(calib_cfg.get("superflat_path"))
-    sb = sb_cfg or _first_existing(
-        layout.calibs / "superbias.fits", layout.calib_legacy / "superbias.fits"
+    sb = sb_cfg or resolve_input_path(
+        "superbias_fits", wd, "superbias", relpath="superbias.fits"
     )
-    sf = sf_cfg or _first_existing(
-        layout.calibs / "superflat.fits", layout.calib_legacy / "superflat.fits"
+    sf = sf_cfg or resolve_input_path(
+        "superflat_fits", wd, "superflat", relpath="superflat.fits"
     )
 
     if task == "manifest":
@@ -440,20 +471,49 @@ def _input_paths_for_hash(cfg: dict[str, Any], task: str, out_dir: Path) -> list
     if task == "linearize":
         return _frame_list("obj") + [wsol / "lambda_map.fits"]
     if task in ("sky", "sky_sub"):
-        p = layout.products / "lin" / "lin_preview.fits"
-        legacy = wd / "lin" / "obj_sum_lin.fits"
-        return [_first_existing(p, legacy)]
+        p = resolve_input_path(
+            "lin_preview_fits",
+            wd,
+            "linearize",
+            relpath="lin_preview.fits",
+            extra_candidates=[wd / "lin" / "obj_sum_lin.fits", wd / "products" / "lin" / "lin_preview.fits"],
+        )
+        return [p]
     if task in ("stack2d", "stack"):
-        per_exp = layout.products / "sky" / "per_exp"
-        inputs = [layout.products / "sky" / "sky_sub_done.json"]
-        # include per-exp FITS signatures if directory exists
-        if per_exp.is_dir():
-            inputs.extend(sorted(per_exp.glob("*.fits")))
+        inputs: list[Path] = []
+        inputs.append(
+            resolve_input_path(
+                "sky_sub_done_json",
+                wd,
+                "sky",
+                relpath="sky_sub_done.json",
+                extra_candidates=[wd / "products" / "sky" / "sky_sub_done.json", wd / "sky" / "sky_sub_done.json"],
+            )
+        )
+
+        sky_stage = stage_dir(wd, "sky")
+        # New per-exp layout: products/09_sky/<stem>/*.fits
+        if sky_stage.exists():
+            inputs.extend(sorted(p for p in sky_stage.rglob("*.fits") if p.is_file()))
         else:
-            inputs.append(per_exp)
+            inputs.append(sky_stage)
+
+        # Legacy per-exp folder.
+        legacy_per = wd / "products" / "sky" / "per_exp"
+        if legacy_per.exists():
+            inputs.extend(sorted(legacy_per.glob("*.fits")))
+
         return inputs
     if task == "extract1d":
-        return [layout.products / "stack" / "stacked2d.fits"]
+        return [
+            resolve_input_path(
+                "stacked2d_fits",
+                wd,
+                "stack2d",
+                relpath="stacked2d.fits",
+                extra_candidates=[wd / "products" / "stack" / "stacked2d.fits", wd / "stack" / "stacked2d.fits"],
+            )
+        ]
     if task in ("qc_report", "qc"):
         # QC report should refresh when the stage state changes (proxy for upstream outputs).
         return [wd / "manifest" / "stage_state.json"]

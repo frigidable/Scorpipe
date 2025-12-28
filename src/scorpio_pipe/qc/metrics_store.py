@@ -24,6 +24,7 @@ from scorpio_pipe.products import list_products, products_by_stage
 from scorpio_pipe.paths import resolve_work_dir
 from scorpio_pipe.version import PIPELINE_VERSION
 from scorpio_pipe.work_layout import ensure_work_layout
+from scorpio_pipe.workspace_paths import stage_dir
 
 
 def _utc_now() -> str:
@@ -131,7 +132,7 @@ def update_after_stage(
 
 
 def mirror_qc_to_products(work_dir: str | Path) -> None:
-    """Mirror files from work/qc to work/products/qc.
+    """Best-effort mirror from legacy work/qc into canonical products/NN_qc.
 
     Windows-friendly (no symlinks). Best-effort; never raises.
     """
@@ -140,7 +141,7 @@ def mirror_qc_to_products(work_dir: str | Path) -> None:
         wd = Path(work_dir)
         layout = ensure_work_layout(wd)
         src = layout.qc
-        dst = layout.products / "qc"
+        dst = stage_dir(layout.work_dir, "qc_report")
         dst.mkdir(parents=True, exist_ok=True)
         if not src.is_dir():
             return

@@ -20,11 +20,23 @@ def _write_calib_done(work_dir: Path, name: str, payload: dict) -> Path:
     builders did not have them, but we add them for transparency/debugging.
     """
     from scorpio_pipe.work_layout import ensure_work_layout
+    from scorpio_pipe.workspace_paths import stage_dir
 
     layout = ensure_work_layout(work_dir)
-    p = layout.calibs / f"{name}_done.json"
+    p = stage_dir(work_dir, name) / f"{name}_done.json"
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    txt = json.dumps(payload, indent=2, ensure_ascii=False)
+    p.write_text(txt, encoding="utf-8")
+
+    # Optional legacy mirrors (do not create directories automatically).
+    for legacy_root in (layout.calibs, layout.calib_legacy):
+        if legacy_root.is_dir():
+            try:
+                lp = legacy_root / f"{name}_done.json"
+                lp.write_text(txt, encoding="utf-8")
+            except Exception:
+                pass
+
     return p
 
 
@@ -111,8 +123,6 @@ def _read_fits_data(path: Path) -> Tuple[np.ndarray, fits.Header]:
 def _resolve_superbias_path(c: Dict, work_dir: Path) -> Path:
     """Resolve superbias path with backward-compatible fallbacks."""
 
-    from scorpio_pipe.work_layout import ensure_work_layout
-
     calib_cfg = c.get("calib", {}) or {}
     p = calib_cfg.get("superbias_path")
     if p:
@@ -121,15 +131,11 @@ def _resolve_superbias_path(c: Dict, work_dir: Path) -> Path:
             pp = (work_dir / pp).resolve()
         return pp
 
-    from scorpio_pipe.work_layout import ensure_work_layout
+    from scorpio_pipe.workspace_paths import resolve_input_path
 
-    layout = ensure_work_layout(work_dir)
-    cand = [layout.calibs / "superbias.fits", layout.calib_legacy / "superbias.fits"]
-    for cp in cand:
-        if cp.exists():
-            return cp
-    # default (canonical) location even if it does not exist yet
-    return cand[0]
+    return resolve_input_path(
+        "superbias_fits", work_dir, "superbias", relpath="superbias.fits"
+    )
 
 
 def _robust_median_finite(a: np.ndarray) -> float:
@@ -385,21 +391,26 @@ def build_superbias(cfg: Any, out_path: str | Path | None = None) -> Path:
 
         superbias = (acc / n_used).astype(np.float32)
 
-    # output paths
-    if out_path is None:
-        from scorpio_pipe.work_layout import ensure_work_layout
+    # output paths (canonical + legacy mirroring)
+    from scorpio_pipe.work_layout import ensure_work_layout
+    from scorpio_pipe.workspace_paths import stage_dir
 
-        layout = ensure_work_layout(work_dir)
-        out_path = layout.calibs / "superbias.fits"
-        legacy_path = layout.calib_legacy / "superbias.fits"
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        legacy_path.parent.mkdir(parents=True, exist_ok=True)
+    layout = ensure_work_layout(work_dir)
+    canonical = (stage_dir(work_dir, "superbias") / "superbias.fits").resolve()
+    legacy_candidates = [
+        (layout.calibs / "superbias.fits").resolve(),
+        (layout.calib_legacy / "superbias.fits").resolve(),
+    ]
+
+    legacy_path = None
+    if out_path is None:
+        out_path = canonical
     else:
-        legacy_path = None
         out_path = Path(out_path)
         if not out_path.is_absolute():
             out_path = (work_dir / out_path).resolve()
-        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
 
 
@@ -513,10 +524,14 @@ def build_superflat(cfg: Any, out_path: str | Path | None = None) -> Path:
 
     # output paths (canonical + legacy mirroring)
     from scorpio_pipe.work_layout import ensure_work_layout
+    from scorpio_pipe.workspace_paths import stage_dir
 
     layout = ensure_work_layout(work_dir)
-    canonical = (layout.calibs / "superflat.fits").resolve()
-    legacy = (layout.calib_legacy / "superflat.fits").resolve()
+    canonical = (stage_dir(work_dir, "superflat") / "superflat.fits").resolve()
+    legacy_candidates = [
+        (layout.calibs / "superflat.fits").resolve(),
+        (layout.calib_legacy / "superflat.fits").resolve(),
+    ]
 
     if out_path is None:
         out_path = canonical
@@ -525,20 +540,8 @@ def build_superflat(cfg: Any, out_path: str | Path | None = None) -> Path:
         if not out_path.is_absolute():
             out_path = (work_dir / out_path).resolve()
 
-    # Decide whether we should mirror into the other location.
-    legacy_path: Path | None = None
-    try:
-        out_res = out_path.resolve()
-        if out_res == canonical:
-            legacy_path = legacy
-        elif out_res == legacy:
-            legacy_path = canonical
-    except Exception:
-        legacy_path = None
-
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    if legacy_path is not None:
-        legacy_path.parent.mkdir(parents=True, exist_ok=True)
+    out_res = out_path.resolve()
 
     # keep a few extra bits for traceability
     hdr["SB_PATH"] = (superbias_path.name, "Superbias path (basename)")
@@ -547,13 +550,20 @@ def build_superflat(cfg: Any, out_path: str | Path | None = None) -> Path:
     fits.writeto(out_path, superflat, hdr, overwrite=True)
     log.info("Wrote superflat: %s", out_path)
 
-    if legacy_path is not None:
-        try:
-            if legacy_path.resolve() != out_path.resolve():
-                shutil.copy2(out_path, legacy_path)
-        except Exception:
-            # legacy mirror is best-effort
-            pass
+    # Mirror policy:
+    #  - Always keep canonical populated.
+    #  - Only mirror into legacy locations if their parent directories already exist.
+    try:
+        if out_res != canonical:
+            canonical.parent.mkdir(parents=True, exist_ok=True)
+            if canonical != out_res:
+                shutil.copy2(out_path, canonical)
+        else:
+            for lp in legacy_candidates:
+                if lp.parent.is_dir() and lp.resolve() != out_res:
+                    shutil.copy2(out_path, lp)
+    except Exception:
+        pass
 
     # done marker with signature used
     try:

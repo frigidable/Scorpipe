@@ -17,8 +17,8 @@ import subprocess
 import sys
 
 
-__version__ = "5.37.10"
-PIPELINE_VERSION = "v5.37.10"
+__version__ = "5.38.1"
+PIPELINE_VERSION = "v5.38.1"
 
 
 @dataclass(frozen=True)

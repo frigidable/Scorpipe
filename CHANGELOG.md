@@ -1,4 +1,12 @@
 
+## v5.38.1
+
+### Block 1 — Canonical workspace paths + backward compatibility
+- Stage Registry (single source of truth): introduced `stage_registry.py` with 1:1 mapping **GUI ↔ stage_id ↔ products/NN_slug**.
+- Canonical workspace paths: added `workspace_paths.py` helpers (`products_dir`, `stage_dir`, `per_exp_dir`) and a universal **new → legacy** reader resolver (`resolve_input_path`, `legacy_candidates`).
+- Minimal workspace layout: `ensure_work_layout()` now creates only `raw/`, `products/`, `manifest/` by default (no auto-created legacy `calib/` / `report/`).
+- Backward compatibility: reading stages now prefer canonical `products/NN_*` but can fall back to legacy locations without writing there (unless legacy dirs already exist).
+
 ## v5.37.10
 
 - QC report: `build_qc_report()` now returns a mapping with output paths (`{"json": ..., "html": ...}`) while remaining backward-compatible as a Path-like HTML return value.

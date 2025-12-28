@@ -22,6 +22,7 @@ from typing import Any
 
 from scorpio_pipe.work_layout import ensure_work_layout
 from scorpio_pipe.paths import resolve_work_dir
+from scorpio_pipe.workspace_paths import stage_dir
 
 
 def _rel(work_dir: Path, path: Path | str | None) -> str | None:
@@ -39,7 +40,7 @@ def build_products_manifest(cfg: dict[str, Any]) -> dict[str, Any]:
     layout = ensure_work_layout(work_dir)
 
     prod = layout.products
-    qc = layout.qc
+    qc_stage = stage_dir(work_dir, "qc_report")
 
     def _stage_tree(stage_dir: Path) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -55,45 +56,51 @@ def build_products_manifest(cfg: dict[str, Any]) -> dict[str, Any]:
             for p in sorted(stage_dir.glob(ext)):
                 out["files"].append(_rel(work_dir, p))
 
-        per = stage_dir / "per_exp"
-        if per.exists():
-            # Group per-exposure artifacts by tag (prefix before first underscore)
+        # New convention: per-exposure directories are direct children NN_slug/<raw_stem>/
+        # Legacy: NN_slug/per_exp/*.fits (and older products/sky/per_exp, etc.).
+        per_legacy = stage_dir / "per_exp"
+        if per_legacy.exists():
             tags: set[str] = set()
-            for p in per.glob("*_*.fits"):
+            for p in per_legacy.glob("*_*.fits"):
                 tags.add(p.name.split("_", 1)[0])
-            for p in per.glob("*_*.png"):
-                tags.add(p.name.split("_", 1)[0])
-            for p in per.glob("*_*.json"):
-                tags.add(p.name.split("_", 1)[0])
-
             for tag in sorted(tags):
                 files: list[str] = []
                 for ext in ("*.fits", "*.png", "*.json", "*.csv", "*.txt"):
-                    for p in sorted(per.glob(f"{tag}_" + ext[1:])):
+                    for p in sorted(per_legacy.glob(f"{tag}_" + ext[1:])):
                         files.append(_rel(work_dir, p))
                 if files:
                     out["per_exposure"].append({"tag": tag, "files": files})
+        else:
+            for d in sorted(p for p in stage_dir.iterdir() if p.is_dir()):
+                if d.name.startswith("."):
+                    continue
+                files: list[str] = []
+                for ext in ("*.fits", "*.png", "*.json", "*.csv", "*.txt"):
+                    for p in sorted(d.glob(ext)):
+                        files.append(_rel(work_dir, p))
+                if files:
+                    out["per_exposure"].append({"stem": d.name, "files": files})
         return out
 
     payload: dict[str, Any] = {
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "work_dir": str(work_dir),
         "products_root": _rel(work_dir, prod),
-        "qc_root": _rel(work_dir, qc),
+        "qc_root": _rel(work_dir, qc_stage),
         "stages": {
-            "linearize": _stage_tree(prod / "lin"),
-            "sky": _stage_tree(prod / "sky"),
-            "stack": _stage_tree(prod / "stack"),
-            "spec": _stage_tree(prod / "spec"),
+            "linearize": _stage_tree(stage_dir(work_dir, "linearize")),
+            "sky": _stage_tree(stage_dir(work_dir, "sky")),
+            "stack2d": _stage_tree(stage_dir(work_dir, "stack2d")),
+            "extract1d": _stage_tree(stage_dir(work_dir, "extract1d")),
         },
     }
 
     # helpful pointers if present
-    grid = prod / "lin" / "wave_grid.json"
+    grid = stage_dir(work_dir, "linearize") / "wave_grid.json"
     if grid.exists():
         payload["stages"]["linearize"]["wave_grid_json"] = _rel(work_dir, grid)
 
-    lin_qc = qc / "linearize_qc.json"
+    lin_qc = qc_stage / "linearize_qc.json"
     if lin_qc.exists():
         payload["stages"]["linearize"]["qc_json"] = _rel(work_dir, lin_qc)
 
