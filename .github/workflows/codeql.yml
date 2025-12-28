@@ -45,7 +45,7 @@ jobs:
           while IFS= read -r f; do
             [[ -z "$f" ]] && continue
             case "$f" in
-              .github/*|docs/*|*.md|LICENSE|CITATION.cff|CHANGELOG.md|INSTALL.md|CONTRIBUTING.md|SECURITY.md)
+              .github/*|docs/*|LICENSE|CITATION.cff|CHANGELOG.md|INSTALL.md|CONTRIBUTING.md|SECURITY.md|*.md)
                 ;;
               *)
                 run=true

@@ -46,14 +46,23 @@ jobs:
           # If auto-merge is disabled in repo settings, this will fail; keep the workflow green.
           PR_NODE_ID=$(gh pr view "$PR_URL" --json id --jq .id)
 
+                    QUERY=$(cat <<'GRAPHQL'
+          mutation($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!) {
+            enablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId, mergeMethod: $mergeMethod}) {
+              pullRequest { number }
+            }
+          }
+          GRAPHQL
+          )
+
           gh api graphql \
-            -f query='mutation($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!) { enablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId, mergeMethod: $mergeMethod}) { pullRequest { number } } }' \
+            -f query="$QUERY" \
             -f pullRequestId="$PR_NODE_ID" \
-            -f mergeMethod='SQUASH' \
+            -f mergeMethod="SQUASH" \
             || {
               echo "::warning::Could not enable auto-merge. Ensure 'Allow auto-merge' is enabled in repository settings.";
               exit 0;
             }
-        env:
+env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
