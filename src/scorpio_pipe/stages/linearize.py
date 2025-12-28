@@ -28,7 +28,7 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 from astropy.io import fits
 
-from scorpio_pipe.io.mef import WaveGrid, write_sci_var_mask, try_read_grid, read_sci_var_mask
+from scorpio_pipe.io.mef import WaveGrid, read_sci_var_mask, write_sci_var_mask
 from scorpio_pipe.maskbits import (
     BADPIX,
     COSMIC,
@@ -46,6 +46,105 @@ from scorpio_pipe.paths import resolve_work_dir
 from scorpio_pipe.wavesol_paths import wavesol_dir
 
 log = get_logger(__name__)
+
+
+def _infer_lambda_unit(hdr: fits.Header, lam_map: np.ndarray) -> str:
+    """Infer wavelength unit string for output WCS.
+
+    We prefer explicit FITS WCS metadata if present. Otherwise, we fall back
+    to a lightweight heuristic based on typical long-slit spectroscopic
+    ranges.
+
+    Returns FITS-like unit strings (e.g. 'Angstrom', 'nm').
+    """
+
+    # 1) Explicit header values
+    for key in ("SCORP_LU", "CUNIT1", "WUNIT", "WAT1_001"):
+        try:
+            v = hdr.get(key, None)
+            if v is None:
+                continue
+            s = str(v).strip()
+            if not s:
+                continue
+            # Normalize a few common spellings
+            s_low = s.lower()
+            if s_low in {"a", "aa", "angstrom", "ang", "angs", "Å"}:
+                return "Angstrom"
+            if s_low in {"nm", "nanometer", "nanometers"}:
+                return "nm"
+            return s
+        except Exception:
+            continue
+
+    # 2) Heuristic by scale of values
+    try:
+        med = float(np.nanmedian(lam_map[np.isfinite(lam_map)]))
+        # Typical optical spectra: 3500-10000 Angstrom ~ 350-1000 nm
+        if 50.0 <= med <= 2000.0:
+            return "nm"
+    except Exception:
+        pass
+    return "Angstrom"
+
+
+def _set_linear_wcs(hdr: fits.Header, wave0: float, dw: float, *, unit: str = "Angstrom") -> fits.Header:
+    """Return a copy of header with a simple linear wavelength WCS.
+
+    Note: we intentionally do not try to set NAXIS-related keywords here.
+    """
+    ohdr = fits.Header(hdr)
+    ohdr["CRVAL1"] = float(wave0)
+    ohdr["CDELT1"] = float(dw)
+    ohdr["CRPIX1"] = 1.0
+    ohdr["CTYPE1"] = "WAVE"
+    ohdr["CUNIT1"] = str(unit)
+    return ohdr
+
+
+def _write_mef(
+    path: Path,
+    sci: np.ndarray,
+    hdr: fits.Header,
+    var: np.ndarray | None,
+    mask: np.ndarray | None,
+    cov: np.ndarray | None,
+    *,
+    wave0: float | None = None,
+    dw: float | None = None,
+    unit: str = "Angstrom",
+) -> None:
+    """Write a MEF product with SCI/VAR/MASK and optional COV.
+
+    Uses the common writer from :mod:`scorpio_pipe.io.mef` and adds a COV
+    extension for coverage / weights bookkeeping.
+    """
+    extra = []
+    if cov is not None:
+        try:
+            extra.append(fits.ImageHDU(data=np.asarray(cov, dtype=np.float32), name="COV"))
+        except Exception:
+            pass
+
+    grid = None
+    if wave0 is not None and dw is not None:
+        try:
+            grid = WaveGrid(lambda0=float(wave0), dlambda=float(dw), nlam=int(np.asarray(sci).shape[1]), unit=str(unit))
+        except Exception:
+            grid = None
+
+    # Provide primary data for legacy tooling (fits.getdata reads primary).
+    write_sci_var_mask(
+        path,
+        np.asarray(sci, dtype=np.float32),
+        var=(None if var is None else np.asarray(var, dtype=np.float32)),
+        mask=(None if mask is None else np.asarray(mask, dtype=np.uint16)),
+        header=fits.Header(hdr),
+        grid=grid,
+        extra_hdus=extra if extra else None,
+        primary_data=np.asarray(sci, dtype=np.float32),
+        overwrite=True,
+    )
 
 
 
@@ -671,7 +770,7 @@ def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel
 
         # Per-exposure output
         if per_exp_dir is not None:
-            ohdr = _set_linear_wcs(hdr, wave0, dw)
+            ohdr = _set_linear_wcs(hdr, wave0, dw, unit=unit)
             # Saturation metadata (if used)
             if sat_level is not None and mask_saturation:
                 try:
@@ -684,7 +783,7 @@ def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel
             # Canonical v5.18+ naming: *_rectified.fits (keep *_lin.fits as a compatibility alias)
             out_rect = per_exp_dir / f"{base_for_mask}_rectified.fits"
             out_lin_alias = per_exp_dir / f"{base_for_mask}_lin.fits"
-            _write_mef(out_rect, rect, ohdr, rect_var, rect_mask, rect_cov)
+            _write_mef(out_rect, rect, ohdr, rect_var, rect_mask, rect_cov, wave0=wave0, dw=dw, unit=unit)
             try:
                 if out_lin_alias.resolve() != out_rect.resolve():
                     import shutil
@@ -717,10 +816,10 @@ def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel
     preview_fits = out_dir / "lin_preview.fits"
     done_json = out_dir / "linearize_done.json"
 
-    hdr0 = _set_linear_wcs(lam_hdr, wave0, dw)
+    hdr0 = _set_linear_wcs(lam_hdr, wave0, dw, unit=unit)
     hdr0["BUNIT"] = ("ADU", "Data unit")
     hdr0 = add_provenance(hdr0, cfg, stage="linearize")
-    _write_mef(preview_fits, out_sci, hdr0, out_var, out_mask, coverage)
+    _write_mef(preview_fits, out_sci, hdr0, out_var, out_mask, coverage, wave0=wave0, dw=dw, unit=unit)
 
     # Quicklook PNG
     preview_png = out_dir / "lin_preview.png"
@@ -771,7 +870,7 @@ def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel
         wave_grid_json.write_text(
             json.dumps(
                 {
-                    "unit": "Angstrom",
+                    "unit": str(unit),
                     "wave0": float(wave0),
                     "dw": float(dw),
                     "nlam": int(nlam),

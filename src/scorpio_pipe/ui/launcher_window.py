@@ -1444,11 +1444,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._update_enables()
         self._refresh_statusbar()
 
-        if idx == 7:
-            try:
+        try:
+            if hasattr(self, "stack") and int(self.stack.currentIndex()) == 7:
                 self._update_wavesol_stepper()
-            except Exception:
-                pass
+        except Exception:
+            pass
 
         # refresh derived UI state
         try:
@@ -1607,11 +1607,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._update_enables()
         self._refresh_statusbar()
 
-        if idx == 7:
-            try:
+        try:
+            if hasattr(self, "stack") and int(self.stack.currentIndex()) == 7:
                 self._update_wavesol_stepper()
-            except Exception:
-                pass
+        except Exception:
+            pass
 
     def _get_cfg_value(self, dotted: str, default: Any | None = None) -> Any:
         cfg = self._cfg or {}
@@ -4137,6 +4137,16 @@ class LauncherWindow(QtWidgets.QMainWindow):
             v.addWidget(t)
             return fr, v
 
+        def _mk_reason_label() -> QtWidgets.QLabel:
+            r = QtWidgets.QLabel("")
+            r.setWordWrap(True)
+            r.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+            try:
+                r.setStyleSheet("color: #a33;")
+            except Exception:
+                pass
+            return r
+
         # 3.1 SuperNeon
         fr31, v31 = _mk_step_frame("3.1 SuperNeon")
         self.lbl_ws31_status = QtWidgets.QLabel("—")
@@ -4145,6 +4155,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_ws_go_superneon = QtWidgets.QPushButton("Go: SuperNeon")
         self.btn_ws_go_superneon.setCursor(QtCore.Qt.PointingHandCursor)
         v31.addWidget(self.btn_ws_go_superneon)
+        self.lbl_ws31_reason = _mk_reason_label()
+        v31.addWidget(self.lbl_ws31_reason)
         fl.addWidget(fr31, 1, 0)
 
         # 3.2 Line ID + pairs library (mini)
@@ -4159,6 +4171,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_ws_open_lineid = QtWidgets.QPushButton("Open LineID GUI")
         self.btn_ws_open_lineid.setCursor(QtCore.Qt.PointingHandCursor)
         v32.addWidget(self.btn_ws_open_lineid)
+        self.lbl_ws32_reason = _mk_reason_label()
+        v32.addWidget(self.lbl_ws32_reason)
 
         row32 = QtWidgets.QHBoxLayout()
         self.combo_pair_sets_ws = QtWidgets.QComboBox()
@@ -4184,6 +4198,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_ws_run_wavesol = QtWidgets.QPushButton("Run: Wavesolution")
         self.btn_ws_run_wavesol.setCursor(QtCore.Qt.PointingHandCursor)
         v33.addWidget(self.btn_ws_run_wavesol)
+        self.lbl_ws33_reason = _mk_reason_label()
+        v33.addWidget(self.lbl_ws33_reason)
         fl.addWidget(fr33, 1, 2)
 
         # 3.4 Clean pairs
@@ -4194,6 +4210,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_ws_clean_pairs = QtWidgets.QPushButton("Open: Pairs cleaner…")
         self.btn_ws_clean_pairs.setCursor(QtCore.Qt.PointingHandCursor)
         v34.addWidget(self.btn_ws_clean_pairs)
+        self.lbl_ws34_reason = _mk_reason_label()
+        v34.addWidget(self.lbl_ws34_reason)
         fl.addWidget(fr34, 2, 0)
 
         # 3.5 Clean 2D lines
@@ -4204,6 +4222,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_ws_clean_2d = QtWidgets.QPushButton("Open: 2D line cleaner…")
         self.btn_ws_clean_2d.setCursor(QtCore.Qt.PointingHandCursor)
         v35.addWidget(self.btn_ws_clean_2d)
+        self.lbl_ws35_reason = _mk_reason_label()
+        v35.addWidget(self.lbl_ws35_reason)
         fl.addWidget(fr35, 2, 1)
 
         # 3.6 QC / Frames
@@ -4219,7 +4239,17 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_ws_open_frames.setCursor(QtCore.Qt.PointingHandCursor)
         row36.addWidget(self.btn_ws_open_frames)
         v36.addLayout(row36)
+        self.lbl_ws36_reason = _mk_reason_label()
+        v36.addWidget(self.lbl_ws36_reason)
         fl.addWidget(fr36, 2, 2)
+
+        # Backward-compatible attribute aliases (older patches may refer to these names)
+        self.lbl_ws_step_31 = self.lbl_ws31_status
+        self.lbl_ws_step_32 = self.lbl_ws32_status
+        self.lbl_ws_step_33 = self.lbl_ws33_status
+        self.lbl_ws_step_34 = self.lbl_ws34_status
+        self.lbl_ws_step_35 = self.lbl_ws35_status
+        self.lbl_ws_step_36 = self.lbl_ws36_status
 
 
         # ---------------- parameters ----------------
@@ -4638,23 +4668,40 @@ class LauncherWindow(QtWidgets.QMainWindow):
         cpts = _p("control_points_2d.csv")
         resid = _p("residuals_2d.png")
 
+        def _set_reason(lbl, missing: list[str]) -> None:
+            if lbl is None:
+                return
+            try:
+                if missing:
+                    lbl.setText("\n".join(["Причина:"] + [f"• {m}" for m in missing]))
+                else:
+                    lbl.setText("")
+            except Exception:
+                pass
+
         # Step 3.1
         sn_ready = bool(superneon and superneon.exists())
         if sn_ready:
             _set(self.lbl_ws_step_31, "ok", "SuperNeon готов")
+            _set_reason(getattr(self, "lbl_ws31_reason", None), [])
         else:
             _set(self.lbl_ws_step_31, "lock", "Нужен SuperNeon")
-        try:
-            self.btn_ws_run_wavesol.setEnabled(sn_ready and bool(pairs and pairs.exists()))
-        except Exception:
-            pass
+            _set_reason(
+                getattr(self, "lbl_ws31_reason", None),
+                [f"не найден {superneon.name}" if superneon is not None else "не найден superneon.fits"],
+            )
 
         # Step 3.2
         pairs_ready = bool(pairs and pairs.exists())
         if pairs_ready:
             _set(self.lbl_ws_step_32, "ok", "Пары линий готовы")
+            _set_reason(getattr(self, "lbl_ws32_reason", None), [])
         else:
             _set(self.lbl_ws_step_32, "lock", "Нужен LineID (hand_pairs)")
+            _set_reason(
+                getattr(self, "lbl_ws32_reason", None),
+                ["не задан или не найден hand_pairs (CSV)"],
+            )
         try:
             if hasattr(self, "lbl_pairs_file_ws"):
                 self.lbl_pairs_file_ws.setText("hand pairs: —" if not pairs else f"hand pairs: {pairs}")
@@ -4676,18 +4723,34 @@ class LauncherWindow(QtWidgets.QMainWindow):
         else:
             _set(self.lbl_ws_step_33, "warn", "Решение ещё не построено")
 
+        # Enable/disable main 'Run' button + show concrete missing artefacts
+        try:
+            miss = []
+            if not sn_ready:
+                miss.append("нет superneon.fits")
+            if not pairs_ready:
+                miss.append("нет hand_pairs (CSV)")
+            self.btn_ws_run_wavesol.setEnabled(sn_ready and pairs_ready)
+            _set_reason(getattr(self, "lbl_ws33_reason", None), miss if not (sn_ready and pairs_ready) else [])
+        except Exception:
+            pass
+
         # Step 3.4
         if pairs_ready:
             _set(self.lbl_ws_step_34, "ok", "Можно чистить пары")
+            _set_reason(getattr(self, "lbl_ws34_reason", None), [])
         else:
             _set(self.lbl_ws_step_34, "lock", "Нечего чистить без hand_pairs")
+            _set_reason(getattr(self, "lbl_ws34_reason", None), ["нет hand_pairs (CSV)"])
 
         # Step 3.5
         cpts_ready = bool(cpts and cpts.exists())
         if cpts_ready:
             _set(self.lbl_ws_step_35, "ok", "2D контрольные точки готовы")
+            _set_reason(getattr(self, "lbl_ws35_reason", None), [])
         else:
             _set(self.lbl_ws_step_35, "lock", "Нужны control_points_2d.csv")
+            _set_reason(getattr(self, "lbl_ws35_reason", None), ["нет control_points_2d.csv (сначала Run: Wavesolution)"])
         try:
             self.btn_ws_clean_2d.setEnabled(cpts_ready)
         except Exception:
@@ -4697,10 +4760,13 @@ class LauncherWindow(QtWidgets.QMainWindow):
         qc_ready = bool(resid and resid.exists())
         if qc_ready:
             _set(self.lbl_ws_step_36, "ok", "QC графики готовы")
+            _set_reason(getattr(self, "lbl_ws36_reason", None), [])
         elif has_map:
             _set(self.lbl_ws_step_36, "warn", "λ-map есть, QC ещё не найден")
+            _set_reason(getattr(self, "lbl_ws36_reason", None), ["нет residuals_2d.png (перезапустите Wavesolution/QC)"])
         else:
             _set(self.lbl_ws_step_36, "lock", "Сначала постройте λ-map")
+            _set_reason(getattr(self, "lbl_ws36_reason", None), ["нет lambda_map.fits"])
 
         # Minor nicety: show small hint if peaks file exists
         try:
@@ -6043,11 +6109,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
             pass
         self._refresh_statusbar()
 
-        if idx == 7:
-            try:
+        try:
+            if hasattr(self, "stack") and int(self.stack.currentIndex()) == 7:
                 self._update_wavesol_stepper()
-            except Exception:
-                pass
+        except Exception:
+            pass
 
     # --------------------------- statusbar / shortcuts ---------------------------
 
@@ -6083,11 +6149,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         self._refresh_statusbar()
 
-        if idx == 7:
-            try:
+        try:
+            if hasattr(self, "stack") and int(self.stack.currentIndex()) == 7:
                 self._update_wavesol_stepper()
-            except Exception:
-                pass
+        except Exception:
+            pass
 
     def _short_path(self, p: Path | None) -> str:
         if not p:

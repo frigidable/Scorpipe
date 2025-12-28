@@ -1,5 +1,13 @@
 # CODEOWNERS
 #
-# This file is used together with branch protection / rulesets option
-# “Require review from Code Owners”.
-* frigidable
+# This file allows you to require reviews from designated owners when files
+# matching specific patterns are changed.
+#
+# IMPORTANT:
+# - If you enable "Require review from Code Owners" in branch protection / rulesets,
+#   make sure the owners you list here EXIST, otherwise PRs may be blocked.
+# - By default we keep this file empty to avoid accidental blocking.
+#
+# Example (uncomment and replace):
+# * @octocat
+# /docs/ @octocat

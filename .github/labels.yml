@@ -1,0 +1,55 @@
+# Label set for Scorpipe (kept in sync by .github/workflows/labels-sync.yml)
+# Colors are GitHub-compatible hex strings.
+
+- name: "breaking"
+  color: "#b60205"
+  description: "Breaking change (major bump)"
+
+- name: "major"
+  color: "#d93f0b"
+  description: "Major change (may require release note emphasis)"
+
+- name: "feature"
+  color: "#0e8a16"
+  description: "New feature or enhancement"
+
+- name: "bugfix"
+  color: "#d73a4a"
+  description: "Bug fix"
+
+- name: "docs"
+  color: "#0075ca"
+  description: "Documentation changes"
+
+- name: "ci"
+  color: "#cfd3d7"
+  description: "CI / build system changes"
+
+- name: "chore"
+  color: "#fef2c0"
+  description: "Maintenance chore (no user-facing change)"
+
+- name: "security"
+  color: "#b60205"
+  description: "Security-related change"
+
+- name: "dependencies"
+  color: "#0366d6"
+  description: "Dependency updates (Dependabot, etc.)"
+
+# Path / area labels (auto-applied by .github/workflows/pr-labeler.yml)
+- name: "ui"
+  color: "#5319e7"
+  description: "UI changes (src/scorpio_pipe/ui/**)"
+
+- name: "pipeline"
+  color: "#1d76db"
+  description: "Pipeline/stages changes (src/scorpio_pipe/stages/**)"
+
+- name: "good first issue"
+  color: "#7057ff"
+  description: "Good for newcomers"
+
+- name: "help wanted"
+  color: "#008672"
+  description: "Extra attention is needed"

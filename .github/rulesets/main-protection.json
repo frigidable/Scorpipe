@@ -4,7 +4,9 @@
   "enforcement": "active",
   "conditions": {
     "ref_name": {
-      "include": ["~DEFAULT_BRANCH"],
+      "include": [
+        "~DEFAULT_BRANCH"
+      ],
       "exclude": []
     }
   },
@@ -12,7 +14,9 @@
     {
       "type": "pull_request",
       "parameters": {
-        "allowed_merge_methods": ["squash"],
+        "allowed_merge_methods": [
+          "squash"
+        ],
         "dismiss_stale_reviews_on_push": true,
         "require_code_owner_review": true,
         "require_last_push_approval": true,
@@ -25,12 +29,23 @@
       "parameters": {
         "strict_required_status_checks_policy": true,
         "required_status_checks": [
-          { "context": "CI / gate" },
-          { "context": "CodeQL / analyze" }
+          {
+            "context": "CI / gate"
+          },
+          {
+            "context": "CI / dependency_review"
+          },
+          {
+            "context": "CodeQL / analyze"
+          }
         ]
       }
     },
-    { "type": "required_linear_history" },
-    { "type": "non_fast_forward" }
+    {
+      "type": "required_linear_history"
+    },
+    {
+      "type": "non_fast_forward"
+    }
   ]
 }
