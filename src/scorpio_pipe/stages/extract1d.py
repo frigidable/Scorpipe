@@ -48,21 +48,46 @@ def _roi_from_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
 
 
 def _read_mef(path: Path) -> Tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray], fits.Header]:
+    """Read a MEF product.
+
+    Historically some stages wrote the science image into the PRIMARY HDU,
+    while newer stages use EXTNAME=SCI (with PRIMARY header carrying
+    provenance/WCS). We support both.
+    """
+
     with fits.open(path, memmap=False) as hdul:
-        sci = np.array(hdul[0].data, dtype=float)
         hdr = hdul[0].header.copy()
+
+        sci = hdul[0].data
+        # If PRIMARY has no data (common for our MEF writer), NumPy would turn
+        # it into a 0-d array (shape=()) which breaks downstream expectations.
+        if sci is None or np.asarray(sci).ndim < 2:
+            if "SCI" in hdul and hdul["SCI"].data is not None:
+                sci = hdul["SCI"].data
+                # Ensure wavelength WCS keywords are available in hdr for
+                # _linear_wave_axis(). Prefer existing primary cards.
+                shdr = hdul["SCI"].header
+                for k in ("CRVAL1", "CDELT1", "CD1_1", "CRPIX1", "CTYPE1", "CUNIT1"):
+                    if k not in hdr and k in shdr:
+                        hdr[k] = shdr[k]
+            else:
+                raise ValueError(f"No SCI data found in {path}")
+
+        sci = np.asarray(sci, dtype=float)
+
         var = None
         mask = None
         if "VAR" in hdul:
             try:
-                var = np.array(hdul["VAR"].data, dtype=float)
+                var = np.asarray(hdul["VAR"].data, dtype=float)
             except Exception:
                 var = None
         if "MASK" in hdul:
             try:
-                mask = np.array(hdul["MASK"].data, dtype=np.uint16)
+                mask = np.asarray(hdul["MASK"].data, dtype=np.uint16)
             except Exception:
                 mask = None
+
     return sci, var, mask, hdr
 
 

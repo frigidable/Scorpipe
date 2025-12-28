@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scorpio-pipe"
-version = "5.36.4"
+version = "5.36.7"
 requires-python = ">=3.10"
 readme = "README.md"
 # NOTE: setuptools (as used in CI) validates PEP 621 `license` as a string.
