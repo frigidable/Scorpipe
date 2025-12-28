@@ -527,6 +527,10 @@ def run_extract1d(
     payload = {
         "ok": True,
         "input_fits": str(in_fits),
+        # Backward-compatible keys used by tests/older callers.
+        "spec1d_fits": str(out_fits),
+        "spec1d_png": str(out_png) if out_png.exists() else None,
+        # Canonical keys (v5.3x+)
         "output_fits": str(out_fits),
         "output_png": str(out_png) if out_png.exists() else None,
         "trace_json": str(trace_json),
