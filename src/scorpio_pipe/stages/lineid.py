@@ -4,7 +4,6 @@ This stage is currently implemented as an interactive GUI (PySide6) that writes
 `hand_pairs.txt`.
 """
 
-
 from __future__ import annotations
 
 

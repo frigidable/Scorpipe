@@ -13,6 +13,7 @@ from scorpio_pipe.fits_utils import read_image_smart
 
 log = logging.getLogger(__name__)
 
+
 @dataclass(frozen=True)
 class CosmicsSummary:
     kind: str
@@ -56,7 +57,7 @@ def _resolve_path(p: Path, *, data_dir: Path, work_dir: Path, base_dir: Path) ->
 def _load_superbias(work_dir: Path) -> np.ndarray | None:
     # New layout (v5+): work_dir/calibs/*.fits, but keep legacy fallback too.
     for rel in (Path("calibs") / "superbias.fits", Path("calib") / "superbias.fits"):
-        p = (work_dir / rel)
+        p = work_dir / rel
         if not p.is_file():
             continue
         try:
@@ -105,12 +106,7 @@ def _boxcar_mean2d(img: np.ndarray, r: int) -> np.ndarray:
     s = s.cumsum(axis=0).cumsum(axis=1)
 
     k = 2 * pad + 1
-    total = (
-        s[k:, k:]
-        - s[:-k, k:]
-        - s[k:, :-k]
-        + s[:-k, :-k]
-    )
+    total = s[k:, k:] - s[:-k, k:] - s[k:, :-k] + s[:-k, :-k]
     # `total` now has the same shape as the original `a`.
     return (total / float(k * k)).astype(np.float32)
 
@@ -144,8 +140,16 @@ def _boxcar_mean2d_masked(img: np.ndarray, mask_bad: np.ndarray, r: int) -> np.n
     gp = np.pad(good, ((pad, pad), (pad, pad)), mode="reflect")
 
     # Integral images with leading 0 row/col.
-    s = np.pad(ap, ((1, 0), (1, 0)), mode="constant", constant_values=0.0).cumsum(axis=0).cumsum(axis=1)
-    c = np.pad(gp, ((1, 0), (1, 0)), mode="constant", constant_values=0.0).cumsum(axis=0).cumsum(axis=1)
+    s = (
+        np.pad(ap, ((1, 0), (1, 0)), mode="constant", constant_values=0.0)
+        .cumsum(axis=0)
+        .cumsum(axis=1)
+    )
+    c = (
+        np.pad(gp, ((1, 0), (1, 0)), mode="constant", constant_values=0.0)
+        .cumsum(axis=0)
+        .cumsum(axis=1)
+    )
 
     k = 2 * pad + 1
     total = s[k:, k:] - s[:-k, k:] - s[k:, :-k] + s[:-k, :-k]
@@ -242,13 +246,20 @@ def _two_frame_diff_clean(
     ny = min(s[0] for s in shapes)
     nx = min(s[1] for s in shapes)
     if any(s != (ny, nx) for s in shapes):
-        log.warning("Cosmics(two_frame_diff): input shapes differ %s; cropping to (%d, %d)", shapes, ny, nx)
+        log.warning(
+            "Cosmics(two_frame_diff): input shapes differ %s; cropping to (%d, %d)",
+            shapes,
+            ny,
+            nx,
+        )
         datas = [d[:ny, :nx] for d in datas]
         for hdr, s in zip(headers, shapes):
             if s != (ny, nx):
                 hdr["CROPY"] = (ny, "Cropped to common height")
                 hdr["CROPX"] = (nx, "Cropped to common width")
-                hdr["HISTORY"] = f"scorpio_pipe cosmics: cropped from {s} to {(ny, nx)} for geometry match"
+                hdr["HISTORY"] = (
+                    f"scorpio_pipe cosmics: cropped from {s} to {(ny, nx)} for geometry match"
+                )
 
     # Apply superbias after cropping if requested.
     if bias_subtract and superbias is not None:
@@ -257,7 +268,9 @@ def _two_frame_diff_clean(
             datas = [d - sb for d in datas]
             for hdr in headers:
                 hdr["BIASSUB"] = (True, "Superbias subtracted")
-                hdr["HISTORY"] = "scorpio_pipe cosmics: bias subtracted using superbias.fits"
+                hdr["HISTORY"] = (
+                    "scorpio_pipe cosmics: bias subtracted using superbias.fits"
+                )
         else:
             log.warning(
                 "Cosmics(two_frame_diff): superbias shape %s is smaller than cropped science (%d, %d); skipping bias subtraction",
@@ -280,7 +293,9 @@ def _two_frame_diff_clean(
     k2 = max(float(k2_min), float(k2_scale) * float(k))
     thr_global = float(k2 * sigma)
     # require also locally deviant (spike-like)
-    thr_local = (float(thr_local_a) * loc + float(thr_local_b) * sigma).astype(np.float32)
+    thr_local = (float(thr_local_a) * loc + float(thr_local_b) * sigma).astype(
+        np.float32
+    )
 
     cand = absdiff > np.maximum(thr_global, thr_local)
 
@@ -317,7 +332,11 @@ def _two_frame_diff_clean(
         out_files[name] = str(out_f)
 
         if save_png:
-            _save_png(out_dir / "masks" / f"{name}_mask.png", m.astype(np.uint8), title=f"Cosmic mask: {name}")
+            _save_png(
+                out_dir / "masks" / f"{name}_mask.png",
+                m.astype(np.uint8),
+                title=f"Cosmic mask: {name}",
+            )
 
         if save_mask_fits:
             mf = out_dir / "masks_fits" / f"{name}_mask.fits"
@@ -332,7 +351,9 @@ def _two_frame_diff_clean(
     fits.writeto(sum_f, sum_excl, overwrite=True)
     fits.writeto(cov_f, cov, overwrite=True)
     if save_png:
-        _save_png(out_dir / "sum_excl_cosmics.png", sum_excl, title="Sum (cosmics excluded)")
+        _save_png(
+            out_dir / "sum_excl_cosmics.png", sum_excl, title="Sum (cosmics excluded)"
+        )
         _save_png(out_dir / "coverage.png", cov, title="Coverage (non-cosmic count)")
 
     outputs = {
@@ -423,16 +444,29 @@ def _single_frame_laplacian_clean(
     fits.writeto(out_f, cleaned.astype(np.float32), header=h, overwrite=True)
 
     if save_png:
-        _save_png(out_dir / "masks" / f"{name}_mask.png", m.astype(np.uint8), title=f"Cosmic mask: {name}")
+        _save_png(
+            out_dir / "masks" / f"{name}_mask.png",
+            m.astype(np.uint8),
+            title=f"Cosmic mask: {name}",
+        )
     if save_mask_fits:
         # Store as uint8 to avoid FITS unsigned-int scaling keywords (BZERO/BSCALE)
         # that may break strict memmap readers.
-        fits.writeto(out_dir / "masks_fits" / f"{name}_mask.fits", m.astype(np.uint8), overwrite=True)
+        fits.writeto(
+            out_dir / "masks_fits" / f"{name}_mask.fits",
+            m.astype(np.uint8),
+            overwrite=True,
+        )
 
     # Reference QC products for single frame
     sum_excl = cleaned * (~m)
     cov = (~m).astype(np.int16)
-    fits.writeto(out_dir / "sum_excl_cosmics.fits", sum_excl.astype(np.float32), header=h, overwrite=True)
+    fits.writeto(
+        out_dir / "sum_excl_cosmics.fits",
+        sum_excl.astype(np.float32),
+        header=h,
+        overwrite=True,
+    )
     fits.writeto(out_dir / "coverage.fits", cov, overwrite=True)
     if save_png:
         _save_png(out_dir / "sum_excl_cosmics.png", sum_excl, title="Sum excl. cosmics")
@@ -444,7 +478,9 @@ def _single_frame_laplacian_clean(
         "masks_fits_dir": str((out_dir / "masks_fits").resolve()),
         "sum_excl_fits": str((out_dir / "sum_excl_cosmics.fits").resolve()),
         "coverage_fits": str((out_dir / "coverage.fits").resolve()),
-        "sum_excl_png": str((out_dir / "sum_excl_cosmics.png").resolve()) if save_png else None,
+        "sum_excl_png": str((out_dir / "sum_excl_cosmics.png").resolve())
+        if save_png
+        else None,
         "coverage_png": str((out_dir / "coverage.png").resolve()) if save_png else None,
     }
     return CosmicsSummary(
@@ -456,7 +492,6 @@ def _single_frame_laplacian_clean(
         per_frame_fraction=[replaced_fraction],
         outputs=outputs,
     )
-
 
 
 def _single_frame_lacosmic_clean(
@@ -510,7 +545,9 @@ def _single_frame_lacosmic_clean(
         sy = _robust_sigma_mad_1d(ry)
         if np.isfinite(sx) and np.isfinite(sy) and sx > 0 and sy > 0:
             # Sky/arc lines: sharp in X, but extended/consistent in Y.
-            line_protect = (np.abs(rx) > float(protect_k) * sx) & (np.abs(ry) < 0.8 * float(protect_k) * sy)
+            line_protect = (np.abs(rx) > float(protect_k) * sx) & (
+                np.abs(ry) < 0.8 * float(protect_k) * sy
+            )
 
     # Try astroscrappy first (closest to van Dokkum L.A.Cosmic).
     try:
@@ -605,10 +642,18 @@ def _single_frame_lacosmic_clean(
     fits.writeto(out_f, cleaned.astype(np.float32), header=h, overwrite=True)
 
     if save_png:
-        _save_png(out_dir / "masks" / f"{name}_mask.png", m.astype(np.uint8), title=f"Cosmic mask: {name}")
+        _save_png(
+            out_dir / "masks" / f"{name}_mask.png",
+            m.astype(np.uint8),
+            title=f"Cosmic mask: {name}",
+        )
     if save_mask_fits:
         # Store as uint8 to avoid BZERO/BSCALE scaling keywords.
-        fits.writeto(out_dir / "masks_fits" / f"{name}_mask.fits", m.astype(np.uint8), overwrite=True)
+        fits.writeto(
+            out_dir / "masks_fits" / f"{name}_mask.fits",
+            m.astype(np.uint8),
+            overwrite=True,
+        )
 
     sum_f = out_dir / "sum_excl_cosmics.fits"
     cov_f = out_dir / "coverage.fits"
@@ -657,7 +702,6 @@ def _save_png(path: Path, arr: np.ndarray, title: str | None = None) -> None:
     plt.close(fig)
 
 
-
 def _mask_u8_to_bool(x: np.ndarray) -> np.ndarray:
     return np.asarray(x, dtype=np.uint8) > 0
 
@@ -695,11 +739,11 @@ def _apply_manual_masks(
     replaced_pixels_total, replaced_fraction_total, per_frame_fraction
     """
 
-    clean_dir = kind_out / 'clean'
-    masks_fits = kind_out / 'masks_fits'
-    masks_png = kind_out / 'masks'
-    auto_masks = kind_out / 'auto_masks_fits'
-    manual_masks = kind_out / 'manual_masks_fits'
+    clean_dir = kind_out / "clean"
+    masks_fits = kind_out / "masks_fits"
+    masks_png = kind_out / "masks"
+    auto_masks = kind_out / "auto_masks_fits"
+    manual_masks = kind_out / "manual_masks_fits"
 
     auto_masks.mkdir(parents=True, exist_ok=True)
     manual_masks.mkdir(parents=True, exist_ok=True)
@@ -707,7 +751,7 @@ def _apply_manual_masks(
     if save_png:
         masks_png.mkdir(parents=True, exist_ok=True)
 
-    clean_files = sorted(clean_dir.glob('*_clean.fits'))
+    clean_files = sorted(clean_dir.glob("*_clean.fits"))
     if not clean_files:
         return 0, 0.0, []
 
@@ -716,14 +760,14 @@ def _apply_manual_masks(
 
     for cf in clean_files:
         base = cf.stem
-        if base.endswith('_clean'):
+        if base.endswith("_clean"):
             base = base[:-6]
 
         with fits.open(cf, memmap=False) as hdul:
             data = np.asarray(hdul[0].data, dtype=np.float32)
             hdr = hdul[0].header.copy()
 
-        auto_path = masks_fits / f'{base}_mask.fits'
+        auto_path = masks_fits / f"{base}_mask.fits"
         if auto_path.exists():
             with fits.open(auto_path, memmap=False) as h:
                 auto_m = _mask_u8_to_bool(h[0].data)
@@ -731,9 +775,13 @@ def _apply_manual_masks(
             auto_m = np.zeros(data.shape, dtype=bool)
 
         # snapshot current auto mask for GUI baselining
-        fits.writeto(auto_masks / f'{base}_auto_mask.fits', np.asarray(auto_m, dtype=np.uint8), overwrite=True)
+        fits.writeto(
+            auto_masks / f"{base}_auto_mask.fits",
+            np.asarray(auto_m, dtype=np.uint8),
+            overwrite=True,
+        )
 
-        man_path = manual_masks / f'{base}_manual_mask.fits'
+        man_path = manual_masks / f"{base}_manual_mask.fits"
         if man_path.exists():
             with fits.open(man_path, memmap=False) as h:
                 man_m = _mask_u8_to_bool(h[0].data)
@@ -750,14 +798,20 @@ def _apply_manual_masks(
             repl = _boxcar_mean2d_masked(data, final_m, r=int(max(0, replace_r)))
             data = data.copy()
             data[man_m] = repl[man_m]
-            hdr['MANCR'] = (True, 'Manual cosmics edits applied')
-            hdr['MANCRN'] = (int(man_m.sum()), 'Manual masked pixels')
-            hdr['HISTORY'] = 'scorpio_pipe cosmics: manual inpainting applied'
+            hdr["MANCR"] = (True, "Manual cosmics edits applied")
+            hdr["MANCRN"] = (int(man_m.sum()), "Manual masked pixels")
+            hdr["HISTORY"] = "scorpio_pipe cosmics: manual inpainting applied"
 
         fits.writeto(cf, data.astype(np.float32), header=hdr, overwrite=True)
-        fits.writeto(masks_fits / f'{base}_mask.fits', final_m.astype(np.uint8), overwrite=True)
+        fits.writeto(
+            masks_fits / f"{base}_mask.fits", final_m.astype(np.uint8), overwrite=True
+        )
         if save_png:
-            _save_png(masks_png / f'{base}_mask.png', final_m.astype(np.uint8), title=f'Cosmic mask: {base}')
+            _save_png(
+                masks_png / f"{base}_mask.png",
+                final_m.astype(np.uint8),
+                title=f"Cosmic mask: {base}",
+            )
 
         final_masks.append(final_m)
         clean_datas.append(data)
@@ -768,20 +822,25 @@ def _apply_manual_masks(
     sum_excl = np.sum(stack * (~mstack), axis=0)
     cov = np.sum(~mstack, axis=0).astype(np.int16)
 
-    sum_f = kind_out / 'sum_excl_cosmics.fits'
-    cov_f = kind_out / 'coverage.fits'
+    sum_f = kind_out / "sum_excl_cosmics.fits"
+    cov_f = kind_out / "coverage.fits"
     fits.writeto(sum_f, sum_excl.astype(np.float32), overwrite=True)
     fits.writeto(cov_f, cov, overwrite=True)
     if save_png:
-        _save_png(kind_out / 'sum_excl_cosmics.png', sum_excl, title='Sum (cosmics excluded)')
-        _save_png(kind_out / 'coverage.png', cov, title='Coverage (non-cosmic count)')
+        _save_png(
+            kind_out / "sum_excl_cosmics.png", sum_excl, title="Sum (cosmics excluded)"
+        )
+        _save_png(kind_out / "coverage.png", cov, title="Coverage (non-cosmic count)")
 
     replaced_pixels = int(mstack.sum())
     n_pix_total = int(mstack.size)
-    replaced_fraction = float(replaced_pixels) / float(n_pix_total) if n_pix_total else 0.0
+    replaced_fraction = (
+        float(replaced_pixels) / float(n_pix_total) if n_pix_total else 0.0
+    )
     per_frame_fraction = [float(m.mean()) for m in final_masks]
 
     return replaced_pixels, replaced_fraction, per_frame_fraction
+
 
 def _stack_mad_clean(
     paths: list[Path],
@@ -819,13 +878,20 @@ def _stack_mad_clean(
     ny = min(s[0] for s in shapes)
     nx = min(s[1] for s in shapes)
     if any(s != (ny, nx) for s in shapes):
-        log.warning("Cosmics(stack_mad): input shapes differ %s; cropping to (%d, %d)", shapes, ny, nx)
+        log.warning(
+            "Cosmics(stack_mad): input shapes differ %s; cropping to (%d, %d)",
+            shapes,
+            ny,
+            nx,
+        )
         datas = [d[:ny, :nx] for d in datas]
         for hdr, s in zip(headers, shapes):
             if s != (ny, nx):
                 hdr["CROPY"] = (ny, "Cropped to common height")
                 hdr["CROPX"] = (nx, "Cropped to common width")
-                hdr["HISTORY"] = f"scorpio_pipe cosmics: cropped from {s} to {(ny, nx)} for geometry match"
+                hdr["HISTORY"] = (
+                    f"scorpio_pipe cosmics: cropped from {s} to {(ny, nx)} for geometry match"
+                )
 
     if bias_subtract and superbias is not None:
         if superbias.shape[0] >= ny and superbias.shape[1] >= nx:
@@ -833,7 +899,9 @@ def _stack_mad_clean(
             datas = [d - sb for d in datas]
             for hdr in headers:
                 hdr["BIASSUB"] = (True, "Superbias subtracted")
-                hdr["HISTORY"] = "scorpio_pipe cosmics: bias subtracted using superbias.fits"
+                hdr["HISTORY"] = (
+                    "scorpio_pipe cosmics: bias subtracted using superbias.fits"
+                )
         else:
             log.warning(
                 "Cosmics(stack_mad): superbias shape %s is smaller than cropped science (%d, %d); skipping bias subtraction",
@@ -915,7 +983,9 @@ def _stack_mad_clean(
     fits.writeto(cov_f, cov, overwrite=True)
 
     if save_png:
-        _save_png(out_dir / "sum_excl_cosmics.png", sum_excl, title="Sum (cosmics excluded)")
+        _save_png(
+            out_dir / "sum_excl_cosmics.png", sum_excl, title="Sum (cosmics excluded)"
+        )
         _save_png(out_dir / "coverage.png", cov, title="Coverage (non-cosmic count)")
 
     outputs = {
@@ -1076,7 +1146,12 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
         if not isinstance(rel_paths, (list, tuple)):
             continue
 
-        paths = [_resolve_path(_as_path(pp), data_dir=data_dir, work_dir=work_dir, base_dir=base_dir) for pp in rel_paths]
+        paths = [
+            _resolve_path(
+                _as_path(pp), data_dir=data_dir, work_dir=work_dir, base_dir=base_dir
+            )
+            for pp in rel_paths
+        ]
         paths = [p for p in paths if p.is_file()]
 
         if len(paths) == 0:
@@ -1100,13 +1175,24 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
         ):
             # Choose best available method for the frame count.
             if method in ("laplacian", "lap") and len(paths) != 1:
-                log.warning("method=laplacian requires exactly 1 frame; falling back to auto")
+                log.warning(
+                    "method=laplacian requires exactly 1 frame; falling back to auto"
+                )
             if method in ("two_frame_diff", "diff") and len(paths) != 2:
-                log.warning("method=two_frame_diff requires exactly 2 frames; falling back to auto")
+                log.warning(
+                    "method=two_frame_diff requires exactly 2 frames; falling back to auto"
+                )
             if method in ("la_cosmic", "lacosmic") and len(paths) != 1:
-                log.warning("method=la_cosmic requires exactly 1 frame; falling back to auto")
+                log.warning(
+                    "method=la_cosmic requires exactly 1 frame; falling back to auto"
+                )
 
-            if len(paths) >= 3 and method in ("auto", "stack_mad", "mad_stack", "stack"):
+            if len(paths) >= 3 and method in (
+                "auto",
+                "stack_mad",
+                "mad_stack",
+                "stack",
+            ):
                 summary = _stack_mad_clean(
                     paths,
                     out_dir=kind_out,
@@ -1120,14 +1206,25 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
                     save_png=save_png,
                     save_mask_fits=save_mask_fits,
                 )
-            elif len(paths) == 2 and method in ("auto", "stack_mad", "mad_stack", "stack", "two_frame_diff", "diff"):
+            elif len(paths) == 2 and method in (
+                "auto",
+                "stack_mad",
+                "mad_stack",
+                "stack",
+                "two_frame_diff",
+                "diff",
+            ):
                 summary = _two_frame_diff_clean(
                     paths,
                     out_dir=kind_out,
                     superbias=superbias,
                     k=k,
-                    dilate=int(two_diff_dilate if two_diff_dilate is not None else dilate),
-                    local_r=int(two_diff_local_r if two_diff_local_r is not None else local_r),
+                    dilate=int(
+                        two_diff_dilate if two_diff_dilate is not None else dilate
+                    ),
+                    local_r=int(
+                        two_diff_local_r if two_diff_local_r is not None else local_r
+                    ),
                     k2_scale=two_diff_k2_scale,
                     k2_min=two_diff_k2_min,
                     thr_local_a=two_diff_thr_local_a,
@@ -1173,7 +1270,9 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
             else:
                 # Nothing to do
                 (kind_out / "clean").mkdir(parents=True, exist_ok=True)
-                outputs = {"note": f"not enough frames for cosmics cleaning (n={len(paths)})"}
+                outputs = {
+                    "note": f"not enough frames for cosmics cleaning (n={len(paths)})"
+                }
                 summary = CosmicsSummary(
                     kind=kind,
                     n_frames=len(paths),
@@ -1198,10 +1297,14 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
 
             # --- manual mask post-processing (GUI-driven) ---
             preserve_manual = bool(ccfg.get("preserve_manual", True))
-            manual_replace_r = _as_int(ccfg.get("manual_replace_r", la_replace_r), la_replace_r)
+            manual_replace_r = _as_int(
+                ccfg.get("manual_replace_r", la_replace_r), la_replace_r
+            )
             if preserve_manual:
                 try:
-                    repix, refrac, per = _apply_manual_masks(kind_out, replace_r=int(manual_replace_r), save_png=save_png)
+                    repix, refrac, per = _apply_manual_masks(
+                        kind_out, replace_r=int(manual_replace_r), save_png=save_png
+                    )
                     # Update summary statistics to reflect final masks (AUTO|MANUAL).
                     summary = CosmicsSummary(
                         kind=summary.kind,
@@ -1212,14 +1315,27 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
                         per_frame_fraction=list(per),
                         outputs={
                             **(summary.outputs or {}),
-                            "auto_masks_fits_dir": str((kind_out / "auto_masks_fits").resolve()),
-                            "manual_masks_fits_dir": str((kind_out / "manual_masks_fits").resolve()),
-                            "sum_excl_fits": str((kind_out / "sum_excl_cosmics.fits").resolve()),
-                            "coverage_fits": str((kind_out / "coverage.fits").resolve()),
+                            "auto_masks_fits_dir": str(
+                                (kind_out / "auto_masks_fits").resolve()
+                            ),
+                            "manual_masks_fits_dir": str(
+                                (kind_out / "manual_masks_fits").resolve()
+                            ),
+                            "sum_excl_fits": str(
+                                (kind_out / "sum_excl_cosmics.fits").resolve()
+                            ),
+                            "coverage_fits": str(
+                                (kind_out / "coverage.fits").resolve()
+                            ),
                         },
                     )
                 except Exception as e:
-                    log.warning("Failed to apply manual cosmics masks for %s: %s", kind, e, exc_info=True)
+                    log.warning(
+                        "Failed to apply manual cosmics masks for %s: %s",
+                        kind,
+                        e,
+                        exc_info=True,
+                    )
         else:
             outputs = {"note": f"method={method} not supported"}
             summary = CosmicsSummary(
@@ -1259,11 +1375,15 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
         "stack": {
             "mad_scale": float(mad_scale),
             "min_mad": float(min_mad),
-            "max_frac_per_frame": (float(max_frac_per_frame) if max_frac_per_frame is not None else None),
+            "max_frac_per_frame": (
+                float(max_frac_per_frame) if max_frac_per_frame is not None else None
+            ),
             "dilate": int(stack_dilate if stack_dilate is not None else dilate),
         },
         "two_frame_diff": {
-            "local_r": int(two_diff_local_r if two_diff_local_r is not None else local_r),
+            "local_r": int(
+                two_diff_local_r if two_diff_local_r is not None else local_r
+            ),
             "k2_scale": float(two_diff_k2_scale),
             "k2_min": float(two_diff_k2_min),
             "thr_local_a": float(two_diff_thr_local_a),

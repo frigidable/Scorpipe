@@ -8,7 +8,6 @@ Keeps key context on-screen:
 No heavy computations are performed here.
 """
 
-
 from __future__ import annotations
 
 
@@ -57,7 +56,9 @@ class RunPlanWidget(QtWidgets.QWidget):
         bar.addWidget(self.btn_refresh)
 
         self.table = QtWidgets.QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["Task", "Decision", "Reason", "Key outputs"])
+        self.table.setHorizontalHeaderLabels(
+            ["Task", "Decision", "Reason", "Key outputs"]
+        )
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
@@ -80,9 +81,15 @@ class RunPlanWidget(QtWidgets.QWidget):
         resume = bool(self.chk_resume.isChecked())
         force = bool(self.chk_force.isChecked())
 
-        ok_icon = self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogApplyButton)
-        skip_icon = self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ArrowRight)
-        warn_icon = self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning)
+        ok_icon = self.style().standardIcon(
+            QtWidgets.QStyle.StandardPixmap.SP_DialogApplyButton
+        )
+        skip_icon = self.style().standardIcon(
+            QtWidgets.QStyle.StandardPixmap.SP_ArrowRight
+        )
+        warn_icon = self.style().standardIcon(
+            QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning
+        )
 
         for name in DEFAULT_TASK_ORDER:
             if name not in TASKS:
@@ -94,7 +101,11 @@ class RunPlanWidget(QtWidgets.QWidget):
             ps = products_for_task(self._cfg, name)
             outs = ", ".join([p.key for p in ps]) if ps else "—"
 
-            reason = "products exist" if will_skip else ("forced" if force and complete else "")
+            reason = (
+                "products exist"
+                if will_skip
+                else ("forced" if force and complete else "")
+            )
             decision = "SKIP" if will_skip else "RUN"
 
             r = self.table.rowCount()
@@ -174,7 +185,9 @@ class QCAlertsWidget(QtWidgets.QWidget):
         try:
             payload = json.loads(qc_json.read_text(encoding="utf-8", errors="replace"))
         except Exception as e:
-            self.lbl_counts.setText(f"Failed to read qc_report.json: {type(e).__name__}")
+            self.lbl_counts.setText(
+                f"Failed to read qc_report.json: {type(e).__name__}"
+            )
             return
 
         qc = payload.get("qc", {}) if isinstance(payload, dict) else {}
@@ -206,7 +219,9 @@ class QCAlertsWidget(QtWidgets.QWidget):
             sev = str(a.get("severity", ""))
             msg = str(a.get("message", ""))
             stage = str(a.get("stage", ""))
-            it = QtWidgets.QListWidgetItem(f"[{sev}] {stage}: {msg}" if stage else f"[{sev}] {msg}")
+            it = QtWidgets.QListWidgetItem(
+                f"[{sev}] {stage}: {msg}" if stage else f"[{sev}] {msg}"
+            )
             it.setData(QtCore.Qt.ItemDataRole.UserRole, sev)
             self.list.addItem(it)
 
@@ -241,7 +256,13 @@ class InspectorPanel(QtWidgets.QWidget):
         self.tabs.addTab(self.plan, "Plan")
         self.tabs.addTab(self.qc, "QC")
 
-    def set_context(self, cfg: dict[str, Any] | None, *, stage: str | None = None, work_dir: Path | None = None) -> None:
+    def set_context(
+        self,
+        cfg: dict[str, Any] | None,
+        *,
+        stage: str | None = None,
+        work_dir: Path | None = None,
+    ) -> None:
         self._cfg = cfg
         self._stage = stage
         self.outputs.set_context(cfg, stage=stage)
@@ -255,7 +276,9 @@ class InspectorDock(QtWidgets.QDockWidget):
     def __init__(self, parent: QtWidgets.QMainWindow):
         super().__init__("Inspector", parent)
         self.setObjectName("dock_inspector")
-        self.setAllowedAreas(QtCore.Qt.RightDockWidgetArea | QtCore.Qt.LeftDockWidgetArea)
+        self.setAllowedAreas(
+            QtCore.Qt.RightDockWidgetArea | QtCore.Qt.LeftDockWidgetArea
+        )
         self.setFeatures(
             QtWidgets.QDockWidget.DockWidgetMovable
             | QtWidgets.QDockWidget.DockWidgetFloatable

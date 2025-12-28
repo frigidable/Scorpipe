@@ -83,7 +83,14 @@ class SkyRoiDialog(QDialog):
         self.roi = ROI()
         if roi:
             # tolerate partial dict
-            for k in ("obj_y0", "obj_y1", "sky_top_y0", "sky_top_y1", "sky_bot_y0", "sky_bot_y1"):
+            for k in (
+                "obj_y0",
+                "obj_y1",
+                "sky_top_y0",
+                "sky_top_y1",
+                "sky_bot_y0",
+                "sky_bot_y1",
+            ):
                 if k in roi and roi[k] is not None:
                     setattr(self.roi, k, int(roi[k]))
 
@@ -95,7 +102,14 @@ class SkyRoiDialog(QDialog):
 
         self.ny, self.nx = self.img.shape
         # if ROI is empty, suggest a sane default
-        if (self.roi.obj_y0, self.roi.obj_y1, self.roi.sky_top_y0, self.roi.sky_top_y1, self.roi.sky_bot_y0, self.roi.sky_bot_y1) == (0, 0, 0, 0, 0, 0):
+        if (
+            self.roi.obj_y0,
+            self.roi.obj_y1,
+            self.roi.sky_top_y0,
+            self.roi.sky_top_y1,
+            self.roi.sky_bot_y0,
+            self.roi.sky_bot_y1,
+        ) == (0, 0, 0, 0, 0, 0):
             ymid = self.ny // 2
             self.roi.obj_y0 = max(0, ymid - 20)
             self.roi.obj_y1 = min(self.ny - 1, ymid + 20)
@@ -176,7 +190,9 @@ class SkyRoiDialog(QDialog):
         controls.addWidget(btns_box, 0, 2, 2, 1)
 
         # dialog buttons
-        self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.button_box = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
         root.addWidget(self.button_box)
@@ -213,15 +229,28 @@ class SkyRoiDialog(QDialog):
                 vmin, vmax = np.nanpercentile(finite, [5, 99])
             else:
                 vmin, vmax = None, None
-            self.ax.imshow(self.img, origin="lower", aspect="auto", cmap="gray", vmin=vmin, vmax=vmax)
+            self.ax.imshow(
+                self.img,
+                origin="lower",
+                aspect="auto",
+                cmap="gray",
+                vmin=vmin,
+                vmax=vmax,
+            )
             self.ax.set_title("Linearized stack: select regions")
             self.ax.set_xlabel("X (wavelength bins)")
             self.ax.set_ylabel("Y (pixels)")
 
             # overlays
-            self._patch_obj = self.ax.axhspan(self.roi.obj_y0, self.roi.obj_y1, color="#00aa00", alpha=0.18)
-            self._patch_top = self.ax.axhspan(self.roi.sky_top_y0, self.roi.sky_top_y1, color="#cc0000", alpha=0.14)
-            self._patch_bot = self.ax.axhspan(self.roi.sky_bot_y0, self.roi.sky_bot_y1, color="#cc0000", alpha=0.14)
+            self._patch_obj = self.ax.axhspan(
+                self.roi.obj_y0, self.roi.obj_y1, color="#00aa00", alpha=0.18
+            )
+            self._patch_top = self.ax.axhspan(
+                self.roi.sky_top_y0, self.roi.sky_top_y1, color="#cc0000", alpha=0.14
+            )
+            self._patch_bot = self.ax.axhspan(
+                self.roi.sky_bot_y0, self.roi.sky_bot_y1, color="#cc0000", alpha=0.14
+            )
 
         self.canvas.draw_idle()
 

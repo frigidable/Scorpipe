@@ -32,7 +32,9 @@ def _robust_median(x: np.ndarray) -> float:
     return float(np.nanmedian(x))
 
 
-def build_superflat(flat_paths: Iterable[Path], superbias_path: Path, out_path: Path) -> Path:
+def build_superflat(
+    flat_paths: Iterable[Path], superbias_path: Path, out_path: Path
+) -> Path:
     """Build a normalized superflat (median ~ 1) from flat frames.
 
     Steps:
@@ -69,7 +71,9 @@ def build_superflat(flat_paths: Iterable[Path], superbias_path: Path, out_path: 
         stack.append((data / med).astype(np.float32))
 
     if not stack:
-        raise ValueError("All flats became invalid after normalization (median=0 or NaN)")
+        raise ValueError(
+            "All flats became invalid after normalization (median=0 or NaN)"
+        )
 
     superflat = np.nanmedian(np.stack(stack, axis=0), axis=0).astype(np.float32)
 
@@ -79,10 +83,15 @@ def build_superflat(flat_paths: Iterable[Path], superbias_path: Path, out_path: 
         superflat = (superflat / med_sf).astype(np.float32)
 
     hdr = (first_hdr or fits.Header()).copy()
-    hdr["HISTORY"] = "scorpio_pipe flatfield: superbias-subtracted flats, median-combined"
+    hdr["HISTORY"] = (
+        "scorpio_pipe flatfield: superbias-subtracted flats, median-combined"
+    )
     hdr["BIASSUB"] = (True, "Superbias subtracted")
     hdr["SFLAT"] = (True, "Superflat created")
-    hdr["SFLATMED"] = (float(_robust_median(superflat)), "Superflat median (after norm)")
+    hdr["SFLATMED"] = (
+        float(_robust_median(superflat)),
+        "Superflat median (after norm)",
+    )
 
     _write_fits(out_path, superflat, hdr)
     return out_path
@@ -168,11 +177,15 @@ def run_flatfield(cfg: dict, *, out_dir: Path | None = None) -> Path:
     frames = cfg.get("frames", {}) or {}
 
     superbias_path = _resolve_path(
-        (cfg.get("calib", {}) or {}).get("superbias_path", work_dir / "calib" / "superbias.fits"),
+        (cfg.get("calib", {}) or {}).get(
+            "superbias_path", work_dir / "calib" / "superbias.fits"
+        ),
         work_dir,
     )
     superflat_path = _resolve_path(
-        (cfg.get("calib", {}) or {}).get("superflat_path", work_dir / "calib" / "superflat.fits"),
+        (cfg.get("calib", {}) or {}).get(
+            "superflat_path", work_dir / "calib" / "superflat.fits"
+        ),
         work_dir,
     )
 
@@ -184,7 +197,9 @@ def run_flatfield(cfg: dict, *, out_dir: Path | None = None) -> Path:
     ensure_dir(superflat_path.parent)
     build_superflat(flat_paths, superbias_path, superflat_path)
 
-    apply_to = list(block.get("apply_to") or ["obj", "sky", "sunsky"])  # + optional 'neon'
+    apply_to = list(
+        block.get("apply_to") or ["obj", "sky", "sunsky"]
+    )  # + optional 'neon'
 
     cosmics_bias_sub = bool((cfg.get("cosmics", {}) or {}).get("bias_subtract", True))
     do_bias_sub_flat = bool(block.get("bias_subtract", True))
@@ -216,7 +231,13 @@ def run_flatfield(cfg: dict, *, out_dir: Path | None = None) -> Path:
                 do_bias_subtract = False
 
             dst = kind_out / f"{src0.stem}_flat.fits"
-            apply_flat(src, superflat_path, superbias_path, dst, do_bias_subtract=do_bias_subtract)
+            apply_flat(
+                src,
+                superflat_path,
+                superbias_path,
+                dst,
+                do_bias_subtract=do_bias_subtract,
+            )
             outputs.append(str(dst))
 
     done = {
@@ -229,5 +250,7 @@ def run_flatfield(cfg: dict, *, out_dir: Path | None = None) -> Path:
         "n_outputs": len(outputs),
     }
 
-    done_path.write_text(json.dumps(done, indent=2, ensure_ascii=False), encoding="utf-8")
+    done_path.write_text(
+        json.dumps(done, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
     return done_path.resolve()

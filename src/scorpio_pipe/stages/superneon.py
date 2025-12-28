@@ -15,6 +15,7 @@ log = logging.getLogger(__name__)
 
 # --------------------------- helpers ---------------------------
 
+
 def _project_root() -> Path:
     """Project root in source layout and PyInstaller (onefile) builds."""
     meipass = getattr(sys, "_MEIPASS", None)
@@ -22,13 +23,16 @@ def _project_root() -> Path:
         return Path(str(meipass)).resolve()
     return Path(__file__).resolve().parents[3]
 
+
 def _resolve_from_root(p: str | Path) -> Path:
     p = Path(p)
     return p if p.is_absolute() else (_project_root() / p).resolve()
 
+
 def _ensure_dir(p: Path) -> Path:
     p.mkdir(parents=True, exist_ok=True)
     return p
+
 
 def _load_fits(path: Path) -> tuple[np.ndarray, fits.Header]:
     # Важно: ignore_missing_end спасает "подуставшие" .fts
@@ -37,15 +41,18 @@ def _load_fits(path: Path) -> tuple[np.ndarray, fits.Header]:
         hdr = hdul[0].header
     return data, hdr
 
+
 def _save_fits(path: Path, data: np.ndarray, header: fits.Header | None = None) -> None:
     hdu = fits.PrimaryHDU(data=data.astype(np.float32), header=header)
     hdu.writeto(path, overwrite=True)
+
 
 def _percentile_stretch(img: np.ndarray, p1=1.0, p2=99.7) -> tuple[float, float]:
     v = img[np.isfinite(img)]
     if v.size == 0:
         return 0.0, 1.0
     return float(np.percentile(v, p1)), float(np.percentile(v, p2))
+
 
 def _save_png(path: Path, img: np.ndarray, title: str) -> None:
     import matplotlib.pyplot as plt
@@ -55,13 +62,17 @@ def _save_png(path: Path, img: np.ndarray, title: str) -> None:
     with mpl_style():
         fig = plt.figure(figsize=(10, 4.6))
         ax = fig.add_subplot(111)
-        im = ax.imshow(img, origin="lower", cmap="gray", aspect="auto", vmin=vmin, vmax=vmax)
+        im = ax.imshow(
+            img, origin="lower", cmap="gray", aspect="auto", vmin=vmin, vmax=vmax
+        )
         ax.set_title(title)
         ax.set_xlabel("X [px]")
         ax.set_ylabel("Y [px]")
         fig.colorbar(im, ax=ax, label="counts")
         fig.savefig(path)
         plt.close(fig)
+
+
 def _median_stack(frames: list[np.ndarray]) -> np.ndarray:
     """NaN-aware median stack.
 
@@ -71,12 +82,14 @@ def _median_stack(frames: list[np.ndarray]) -> np.ndarray:
     arr = np.stack(frames, axis=0)
     return np.nanmedian(arr, axis=0)
 
+
 def _profile_x(img2d: np.ndarray, y0: int, y1: int) -> np.ndarray:
     y0 = max(0, int(y0))
     y1 = min(img2d.shape[0], int(y1))
     if y1 <= y0:
         y0, y1 = 0, img2d.shape[0]
     return np.nanmedian(img2d[y0:y1, :], axis=0)
+
 
 def _xcorr_shift_1d(ref: np.ndarray, cur: np.ndarray, max_abs: int = 6) -> int:
     """
@@ -103,6 +116,7 @@ def _xcorr_shift_1d(ref: np.ndarray, cur: np.ndarray, max_abs: int = 6) -> int:
     shift = int(signed[m][idx])
     return shift
 
+
 def _shift_x_int(img: np.ndarray, dx: int) -> np.ndarray:
     """
     Сдвиг по X на dx (целый), с заполнением NaN по краям.
@@ -113,13 +127,14 @@ def _shift_x_int(img: np.ndarray, dx: int) -> np.ndarray:
         out[:] = img
         return out
     if dx > 0:
-        out[:, dx:] = img[:, :W - dx]
+        out[:, dx:] = img[:, : W - dx]
     else:
-        out[:, :W + dx] = img[:, -dx:]
+        out[:, : W + dx] = img[:, -dx:]
     return out
 
 
 # --------------------------- peaks ---------------------------
+
 
 def _find_peaks_simple(
     y: np.ndarray,
@@ -137,6 +152,7 @@ def _find_peaks_simple(
 
     try:
         from scipy.signal import find_peaks  # type: ignore
+
         kwargs = {"prominence": prominence, "distance": distance}
         if min_height is not None:
             kwargs["height"] = float(min_height)
@@ -155,7 +171,9 @@ def _find_peaks_simple(
         return np.array(pk, dtype=int)
 
 
-def _robust_sigma(y: np.ndarray, n_iter: int = 4, clip: float = 3.5) -> tuple[float, float]:
+def _robust_sigma(
+    y: np.ndarray, n_iter: int = 4, clip: float = 3.5
+) -> tuple[float, float]:
     """Robust background sigma estimate for 1D spectra.
 
     Iteratively excludes strong emission lines.
@@ -181,6 +199,7 @@ def _robust_sigma(y: np.ndarray, n_iter: int = 4, clip: float = 3.5) -> tuple[fl
     mad = float(np.median(np.abs(keep - np.median(keep))))
     sigma = 1.4826 * mad
     return float(sigma), float(np.median(keep))
+
 
 def _estimate_baseline_bins(
     y: np.ndarray,
@@ -273,7 +292,10 @@ def _robust_sigma_quasi_empty(
     sigma = 1.4826 * mad
     return float(sigma), float(med)
 
-def _refine_peak_centroid(x: np.ndarray, y: np.ndarray, i0: int, hw: int = 4) -> tuple[float, float, float]:
+
+def _refine_peak_centroid(
+    x: np.ndarray, y: np.ndarray, i0: int, hw: int = 4
+) -> tuple[float, float, float]:
     """
     Быстрое субпиксельное уточнение: центр масс (взвешенный) в окне.
     Возвращает (x_center, amp, fwhm_rough).
@@ -295,11 +317,13 @@ def _refine_peak_centroid(x: np.ndarray, y: np.ndarray, i0: int, hw: int = 4) ->
 
 # --------------------------- main stage ---------------------------
 
+
 @dataclass
 class SuperNeonResult:
     superneon_fits: Path
     peaks_csv: Path
     superneon_png: Path
+
 
 def build_superneon(cfg: dict[str, Any]) -> SuperNeonResult:
     """
@@ -319,11 +343,14 @@ def build_superneon(cfg: dict[str, Any]) -> SuperNeonResult:
         work_dir = work_dir.resolve()
     # disperser-specific layout (so multiple gratings can live in one work_dir)
     from scorpio_pipe.wavesol_paths import wavesol_dir
+
     outdir = _ensure_dir(wavesol_dir(cfg))
 
     neon_list = [Path(p) for p in cfg["frames"].get("neon", [])]
     if not neon_list:
-        raise RuntimeError("Нет neon кадров в cfg['frames']['neon']. Inspect видит neon — значит autoconfig должен их записать.")
+        raise RuntimeError(
+            "Нет neon кадров в cfg['frames']['neon']. Inspect видит neon — значит autoconfig должен их записать."
+        )
 
     # --- bias subtraction control ---
     superneon_cfg = cfg.get("superneon") or {}
@@ -408,8 +435,8 @@ def build_superneon(cfg: dict[str, Any]) -> SuperNeonResult:
 
     # выходные файлы
     superneon_fits = outdir / "superneon.fits"
-    superneon_png  = outdir / "superneon.png"
-    peaks_csv      = outdir / "peaks_candidates.csv"
+    superneon_png = outdir / "superneon.png"
+    peaks_csv = outdir / "peaks_candidates.csv"
 
     # header: минимально полезные ключи
     hdr = fits.Header()
@@ -498,7 +525,12 @@ def build_superneon(cfg: dict[str, Any]) -> SuperNeonResult:
 
     log.info(
         "task=superneon peaks sigma=%.3g snr=%.3g height=%.3g prom=%.3g distance=%d n_peaks=%d",
-        sigma, used_snr, min_height, prominence, distance, int(len(pk)),
+        sigma,
+        used_snr,
+        min_height,
+        prominence,
+        distance,
+        int(len(pk)),
     )
 
     hdr["PKSIG"] = (float(sigma), "Robust background sigma used for peak thresholds")
@@ -515,8 +547,12 @@ def build_superneon(cfg: dict[str, Any]) -> SuperNeonResult:
     if rows:
         arr = np.array(rows, dtype=float)
         hdr_csv = "x_pix,amp,snr,fwhm_pix,profile_I"
-        np.savetxt(peaks_csv, arr, delimiter=",", header=hdr_csv, comments="", fmt="%.6f")
+        np.savetxt(
+            peaks_csv, arr, delimiter=",", header=hdr_csv, comments="", fmt="%.6f"
+        )
     else:
         peaks_csv.write_text("x_pix,amp,snr,fwhm_pix,profile_I\n", encoding="utf-8")
 
-    return SuperNeonResult(superneon_fits=superneon_fits, peaks_csv=peaks_csv, superneon_png=superneon_png)
+    return SuperNeonResult(
+        superneon_fits=superneon_fits, peaks_csv=peaks_csv, superneon_png=superneon_png
+    )

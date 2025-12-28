@@ -3,7 +3,6 @@
 This is used on the "Project & data" page after Inspect.
 """
 
-
 from __future__ import annotations
 
 
@@ -47,7 +46,9 @@ class FrameBrowser(QtWidgets.QWidget):
         self.edit_search = QtWidgets.QLineEdit()
         self.edit_search.setPlaceholderText("Search object/path…")
         self.combo_kind = QtWidgets.QComboBox()
-        self.combo_kind.addItems(["all", "obj", "sky", "sunsky", "neon", "flat", "bias"])
+        self.combo_kind.addItems(
+            ["all", "obj", "sky", "sunsky", "neon", "flat", "bias"]
+        )
         self.combo_disperser = QtWidgets.QComboBox()
         self.combo_disperser.addItem("all")
         self.combo_slit = QtWidgets.QComboBox()
@@ -126,7 +127,9 @@ class FrameBrowser(QtWidgets.QWidget):
         self.combo_slit.currentTextChanged.connect(self._apply_filters)
         self.combo_binning.currentTextChanged.connect(self._apply_filters)
         self.btn_reset.clicked.connect(self._reset_filters)
-        self.table.selectionModel().selectionChanged.connect(lambda *_: self._on_selection_changed())
+        self.table.selectionModel().selectionChanged.connect(
+            lambda *_: self._on_selection_changed()
+        )
         self.btn_open_file.clicked.connect(self._open_selected)
         self.btn_use_setup.clicked.connect(self._emit_use_setup)
 
@@ -235,7 +238,9 @@ class FrameBrowser(QtWidgets.QWidget):
             "fid",
             "path",
         ]
-        cols = [c for c in preferred if c in out.columns] + [c for c in out.columns if c not in preferred]
+        cols = [c for c in preferred if c in out.columns] + [
+            c for c in out.columns if c not in preferred
+        ]
         out = out[cols]
 
         self._df = out

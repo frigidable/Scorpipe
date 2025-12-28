@@ -11,7 +11,9 @@ from astropy.io import fits
 _SCALE_KEYS = ("BZERO", "BSCALE", "BLANK")
 
 
-def _pick_first_image_hdu(hdul: fits.HDUList) -> tuple[int, fits.ImageHDU | fits.PrimaryHDU | Any]:
+def _pick_first_image_hdu(
+    hdul: fits.HDUList,
+) -> tuple[int, fits.ImageHDU | fits.PrimaryHDU | Any]:
     """Return (index, hdu) for the first image-like HDU.
 
     Some SCORPIO products may be MEF-like, with the image stored in extension 1.

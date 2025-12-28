@@ -1,6 +1,5 @@
 """UI widget to show expected products and their existence."""
 
-
 from __future__ import annotations
 
 
@@ -38,10 +37,16 @@ class OutputsPanel(QtWidgets.QWidget):
         self.tree.setAlternatingRowColors(True)
         self.tree.setRootIsDecorated(False)
         self.tree.header().setStretchLastSection(False)
-        self.tree.header().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
-        self.tree.header().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
+        self.tree.header().setSectionResizeMode(
+            0, QtWidgets.QHeaderView.ResizeToContents
+        )
+        self.tree.header().setSectionResizeMode(
+            1, QtWidgets.QHeaderView.ResizeToContents
+        )
         self.tree.header().setSectionResizeMode(2, QtWidgets.QHeaderView.Stretch)
-        self.tree.header().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeToContents)
+        self.tree.header().setSectionResizeMode(
+            3, QtWidgets.QHeaderView.ResizeToContents
+        )
         lay.addWidget(self.tree, 1)
 
         self.btn_refresh.clicked.connect(self.refresh)
@@ -63,9 +68,15 @@ class OutputsPanel(QtWidgets.QWidget):
         if self._stage:
             prods = [p for p in prods if p.stage == self._stage]
 
-        ok_icon = self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogApplyButton)
-        miss_icon = self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogCancelButton)
-        opt_icon = self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning)
+        ok_icon = self.style().standardIcon(
+            QtWidgets.QStyle.StandardPixmap.SP_DialogApplyButton
+        )
+        miss_icon = self.style().standardIcon(
+            QtWidgets.QStyle.StandardPixmap.SP_DialogCancelButton
+        )
+        opt_icon = self.style().standardIcon(
+            QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning
+        )
 
         for p in prods:
             it = QtWidgets.QTreeWidgetItem()
@@ -73,7 +84,14 @@ class OutputsPanel(QtWidgets.QWidget):
             it.setText(1, p.key)
             it.setText(2, str(p.path))
             sz = p.size()
-            it.setText(3, "" if sz is None else f"{sz/1024:.1f} KB" if sz < 1024**2 else f"{sz/1024**2:.2f} MB")
+            it.setText(
+                3,
+                ""
+                if sz is None
+                else f"{sz / 1024:.1f} KB"
+                if sz < 1024**2
+                else f"{sz / 1024**2:.2f} MB",
+            )
             if p.exists():
                 it.setIcon(0, ok_icon)
             else:
@@ -101,6 +119,8 @@ class OutputsPanel(QtWidgets.QWidget):
             else:
                 # open parent folder when file missing but parent exists
                 if p.parent.exists():
-                    QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(p.parent)))
+                    QtGui.QDesktopServices.openUrl(
+                        QtCore.QUrl.fromLocalFile(str(p.parent))
+                    )
         except Exception:
             pass

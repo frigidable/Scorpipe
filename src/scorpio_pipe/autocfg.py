@@ -28,7 +28,9 @@ class AutoConfig:
 
         The GUI uses this to populate the in-app config editor.
         """
-        setup = self.frames.get("__setup__", {}) if isinstance(self.frames, dict) else {}
+        setup = (
+            self.frames.get("__setup__", {}) if isinstance(self.frames, dict) else {}
+        )
         if not isinstance(setup, dict):
             setup = {}
 
@@ -94,10 +96,8 @@ class AutoConfig:
                 # y-range for 1D profile extraction from superneon; if None, use central band.
                 "profile_y": None,
                 "y_half": 20,
-
                 # alignment: how far frames can be shifted (pixels)
                 "xshift_max_abs": 6,
-
                 # --- robust background/noise estimation (for peak detection) ---
                 "noise": {
                     "baseline_bin_size": 32,
@@ -107,14 +107,12 @@ class AutoConfig:
                     "clip": 3.5,
                     "n_iter": 3,
                 },
-
                 # peak detection (thresholds are in units of robust sigma)
                 "peak_snr": 5.0,
                 "peak_prom_snr": 4.0,
                 "peak_floor_snr": 3.0,
                 "peak_distance": 3,
                 "gauss_half_win": 4,
-
                 # Autotune threshold if too few/many lines were found (helps across gratings)
                 "peak_autotune": True,
                 "peak_target_min": 0,
@@ -124,33 +122,26 @@ class AutoConfig:
                 "peak_snr_relax": 0.85,
                 "peak_snr_boost": 1.15,
                 "peak_autotune_max_tries": 10,
-
                 # GUI: auto min amplitude = median(noise peaks) + k*MAD
                 "gui_min_amp_sigma_k": 5.0,
                 # Optional manual override (ADU). If None/empty/0 -> auto mode
                 "gui_min_amp": None,
-
                 # 1D polynomial degree for lambda(x) from hand pairs
                 "poly_deg_1d": 4,
                 "blend_weight": 0.3,
                 "poly_sigma_clip": 3.0,
                 "poly_maxiter": 10,
-
                 # Optional override for hand pairs file. If empty, the pipeline uses
                 # wavesol/<setup>/hand_pairs.txt
                 "hand_pairs_path": "",
-
                 # list of laboratory wavelengths
                 "neon_lines_csv": "neon_lines.csv",
-
                 # HeNeAr atlas (optional, used by GUI button "Атлас")
                 "atlas_pdf": "HeNeAr_atlas.pdf",
-
                 # 2D fit / tracing defaults (can be fine-tuned in the GUI)
                 "model2d": "auto",  # auto|power|cheb
                 "edge_crop_x": 12,
                 "edge_crop_y": 12,
-
                 "trace_template_hw": 6,
                 "trace_avg_half": 3,
                 "trace_search_rad": 12,
@@ -158,16 +149,13 @@ class AutoConfig:
                 "trace_amp_thresh": 20.0,
                 "trace_min_pts": 120,
                 "trace_y0": None,
-
                 "power_deg": 5,
                 "power_sigma_clip": 3.0,
                 "power_maxiter": 10,
-
                 "cheb_degx": 5,
                 "cheb_degy": 3,
                 "cheb_sigma_clip": 3.0,
                 "cheb_maxiter": 10,
-
                 # optional manual rejection list (in Angstrom)
                 "rejected_lines_A": [],
             },
@@ -203,21 +191,27 @@ def _pick_setup_for_object(
         if "disperser" in sci.columns:
             sci = sci[sci["disperser"].astype(str).map(_norm_setup_str) == disp]
         if sci.empty:
-            raise ValueError(f"No science frames for object='{object_name}' with disperser='{disperser}'")
+            raise ValueError(
+                f"No science frames for object='{object_name}' with disperser='{disperser}'"
+            )
 
     if slit:
         sl = _norm_setup_str(slit)
         if "slit" in sci.columns:
             sci = sci[sci["slit"].astype(str).map(_norm_setup_str) == sl]
         if sci.empty:
-            raise ValueError(f"No science frames for object='{object_name}' with slit='{slit}'")
+            raise ValueError(
+                f"No science frames for object='{object_name}' with slit='{slit}'"
+            )
 
     if binning:
         bn = _norm_setup_str(binning)
         if "binning" in sci.columns:
             sci = sci[sci["binning"].astype(str).map(_norm_setup_str) == bn]
         if sci.empty:
-            raise ValueError(f"No science frames for object='{object_name}' with binning='{binning}'")
+            raise ValueError(
+                f"No science frames for object='{object_name}' with binning='{binning}'"
+            )
 
     # priority: Spectra (if present)
     if "mode" in sci.columns and (sci["mode"] == "Spectra").any():
@@ -265,7 +259,9 @@ def build_autoconfig(
     slit: str | None = None,
     binning: str | None = None,
 ) -> AutoConfig:
-    setup = _pick_setup_for_object(df, object_name, disperser=disperser, slit=slit, binning=binning)
+    setup = _pick_setup_for_object(
+        df, object_name, disperser=disperser, slit=slit, binning=binning
+    )
 
     frames: dict[str, list[str] | dict] = {}
 
@@ -280,7 +276,9 @@ def build_autoconfig(
     # Flats are often taken specifically for the target; prefer OBJECT-matched flats when available.
     obj_n = _norm(object_name)
     if "object_norm" in df.columns:
-        flat_df_obj = df[(df["kind"] == "flat") & (df["object_norm"].astype(str) == obj_n)]
+        flat_df_obj = df[
+            (df["kind"] == "flat") & (df["object_norm"].astype(str) == obj_n)
+        ]
     else:
         flat_df_obj = df.iloc[0:0]
     if len(flat_df_obj) > 0:
@@ -304,7 +302,10 @@ def build_autoconfig(
     # attach setup as an internal field
     frames["__setup__"] = setup
 
-    calib = {"superbias_path": "calibs/superbias.fits", "superflat_path": "calibs/superflat.fits"}
+    calib = {
+        "superbias_path": "calibs/superbias.fits",
+        "superflat_path": "calibs/superflat.fits",
+    }
     return AutoConfig(
         data_dir=str(data_dir),
         object_name=object_name,

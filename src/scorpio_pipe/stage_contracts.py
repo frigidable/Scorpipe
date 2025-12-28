@@ -170,4 +170,6 @@ def validate_contracts(cfg: Mapping[str, Any]) -> None:
             raise ValueError(f"Contract key '{st}' != contract.stage '{c.stage}'")
         missing = [k for k in c.outputs if k not in product_keys]
         if missing:
-            raise ValueError(f"Contract '{st}' refers to unknown product keys: {missing}")
+            raise ValueError(
+                f"Contract '{st}' refers to unknown product keys: {missing}"
+            )

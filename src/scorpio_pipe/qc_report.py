@@ -52,7 +52,10 @@ def _fmt_seconds(s: float) -> str:
 def _metrics_wavesol(work_dir: Path, products: list[Product]) -> dict[str, Any]:
     m: dict[str, Any] = {}
 
-    p1 = next((p.path for p in products if p.key == "wavesol_1d_json" and p.path.exists()), None)
+    p1 = next(
+        (p.path for p in products if p.key == "wavesol_1d_json" and p.path.exists()),
+        None,
+    )
     if p1:
         js = _read_json(p1) or {}
         m["wavesol_1d"] = {
@@ -62,7 +65,10 @@ def _metrics_wavesol(work_dir: Path, products: list[Product]) -> dict[str, Any]:
             "n_used": js.get("n_used"),
         }
 
-    p2 = next((p.path for p in products if p.key == "wavesol_2d_json" and p.path.exists()), None)
+    p2 = next(
+        (p.path for p in products if p.key == "wavesol_2d_json" and p.path.exists()),
+        None,
+    )
     if p2:
         js = _read_json(p2) or {}
         m2 = {
@@ -79,7 +85,9 @@ def _metrics_wavesol(work_dir: Path, products: list[Product]) -> dict[str, Any]:
         m["wavesol_2d"] = m2
 
     # quick residual stats
-    pres = next((p.path for p in products if p.key == "residuals_2d" and p.path.exists()), None)
+    pres = next(
+        (p.path for p in products if p.key == "residuals_2d" and p.path.exists()), None
+    )
     if pres:
         arr = _read_csv_cols(pres, 4)
         if arr is not None and arr.size:
@@ -96,7 +104,10 @@ def _metrics_wavesol(work_dir: Path, products: list[Product]) -> dict[str, Any]:
 
 
 def _metrics_cosmics(products: list[Product]) -> dict[str, Any]:
-    p = next((p.path for p in products if p.key == "cosmics_summary" and p.path.exists()), None)
+    p = next(
+        (p.path for p in products if p.key == "cosmics_summary" and p.path.exists()),
+        None,
+    )
     if not p:
         return {}
     js = _read_json(p) or {}
@@ -144,14 +155,26 @@ def _metrics_timings(work_dir: Path) -> dict[str, Any]:
         }
         for st, v in by_stage.items()
     }
-    total_last = float(sum(v["last_s"] for v in agg.values() if isinstance(v.get("last_s"), (int, float)))) if agg else 0.0
+    total_last = (
+        float(
+            sum(
+                v["last_s"]
+                for v in agg.values()
+                if isinstance(v.get("last_s"), (int, float))
+            )
+        )
+        if agg
+        else 0.0
+    )
     return {"stages": agg, "total_last_s": total_last}
 
 
 def _metrics_sky(products: list[Product]) -> dict[str, Any]:
     """Sky-subtraction QC, aggregated from sky_sub_done.json."""
 
-    p = next((p.path for p in products if p.key == "sky_done" and p.path.exists()), None)
+    p = next(
+        (p.path for p in products if p.key == "sky_done" and p.path.exists()), None
+    )
     if not p:
         return {}
     js = _read_json(p) or {}
@@ -182,25 +205,35 @@ def _metrics_sky(products: list[Product]) -> dict[str, Any]:
             continue
     out: dict[str, Any] = {"n_frames": int(len(per))}
     if rms:
-        out.update({
-            "rms_sky_median": float(np.median(rms)),
-            "rms_sky_p90": float(np.percentile(rms, 90)),
-        })
+        out.update(
+            {
+                "rms_sky_median": float(np.median(rms)),
+                "rms_sky_p90": float(np.percentile(rms, 90)),
+            }
+        )
         if sh_pix:
-            out.update({
-                "flexure_shift_pix_median": float(np.median(sh_pix)),
-                "flexure_shift_pix_p90_abs": float(np.percentile(np.abs(sh_pix), 90)),
-            })
+            out.update(
+                {
+                    "flexure_shift_pix_median": float(np.median(sh_pix)),
+                    "flexure_shift_pix_p90_abs": float(
+                        np.percentile(np.abs(sh_pix), 90)
+                    ),
+                }
+            )
         if sh_A:
-            out.update({
-                "flexure_shift_A_median": float(np.median(sh_A)),
-                "flexure_shift_A_p90_abs": float(np.percentile(np.abs(sh_A), 90)),
-            })
+            out.update(
+                {
+                    "flexure_shift_A_median": float(np.median(sh_A)),
+                    "flexure_shift_A_p90_abs": float(np.percentile(np.abs(sh_A), 90)),
+                }
+            )
     return out
 
 
 def _metrics_stack(products: list[Product]) -> dict[str, Any]:
-    p = next((p.path for p in products if p.key == "stack2d_done" and p.path.exists()), None)
+    p = next(
+        (p.path for p in products if p.key == "stack2d_done" and p.path.exists()), None
+    )
     if not p:
         return {}
     js = _read_json(p) or {}
@@ -212,13 +245,19 @@ def _metrics_stack(products: list[Product]) -> dict[str, Any]:
     }
     offs = js.get("y_offsets") or []
     try:
-        vals = [float(o.get("y_shift_pix")) for o in offs if o and (o.get("y_shift_pix") is not None)]
+        vals = [
+            float(o.get("y_shift_pix"))
+            for o in offs
+            if o and (o.get("y_shift_pix") is not None)
+        ]
         vals = [v for v in vals if np.isfinite(v)]
         if vals:
-            out.update({
-                "y_shift_pix_median": float(np.median(vals)),
-                "y_shift_pix_p90_abs": float(np.percentile(np.abs(vals), 90)),
-            })
+            out.update(
+                {
+                    "y_shift_pix_median": float(np.median(vals)),
+                    "y_shift_pix_p90_abs": float(np.percentile(np.abs(vals), 90)),
+                }
+            )
     except Exception:
         pass
     return out
@@ -227,7 +266,9 @@ def _metrics_stack(products: list[Product]) -> dict[str, Any]:
 def _metrics_spec(products: list[Product]) -> dict[str, Any]:
     """Compute rough S/N from spec1d (median of |flux|/sqrt(var) in good pixels)."""
 
-    p = next((p.path for p in products if p.key == "spec1d_fits" and p.path.exists()), None)
+    p = next(
+        (p.path for p in products if p.key == "spec1d_fits" and p.path.exists()), None
+    )
     if not p:
         return {}
     try:
@@ -241,7 +282,7 @@ def _metrics_spec(products: list[Product]) -> dict[str, Any]:
             return {}
         good = np.isfinite(flux) & np.isfinite(var) & (var > 0)
         if msk is not None:
-            good &= (msk == 0)
+            good &= msk == 0
         if not np.any(good):
             return {}
         snr = np.abs(flux[good]) / np.sqrt(var[good])
@@ -297,7 +338,13 @@ def _render_products_table(work_dir: Path, products: list[Product]) -> str:
         ex = p.exists()
         cls = "ok" if ex else ("req" if not p.optional else "miss")
         size = p.size()
-        size_s = "" if size is None else f"{size/1024:.1f} KB" if size < 1024 * 1024 else f"{size/1024/1024:.2f} MB"
+        size_s = (
+            ""
+            if size is None
+            else f"{size / 1024:.1f} KB"
+            if size < 1024 * 1024
+            else f"{size / 1024 / 1024:.2f} MB"
+        )
         rows.append(
             f"<tr class='{cls}'>"
             f"<td>{_html_escape(p.stage)}</td>"
@@ -369,14 +416,14 @@ def _render_alerts(alerts: list[dict[str, Any]]) -> str:
         return "<p class='muted'>(No alerts)</p>"
 
     def _sev(a: dict[str, Any]) -> str:
-        s = str(a.get('severity', 'info')).lower().strip()
-        return s if s in {'ok','info','warn','bad'} else 'info'
+        s = str(a.get("severity", "info")).lower().strip()
+        return s if s in {"ok", "info", "warn", "bad"} else "info"
 
     items = []
     for a in alerts:
         sev = _sev(a)
-        msg = _html_escape(str(a.get('message', a.get('code', 'alert'))))
-        code = _html_escape(str(a.get('code', '')))
+        msg = _html_escape(str(a.get("message", a.get("code", "alert"))))
+        code = _html_escape(str(a.get("code", "")))
         items.append(
             f"<div class='alert {sev}'>"
             f"<div class='acode'>{code}</div>"
@@ -386,7 +433,12 @@ def _render_alerts(alerts: list[dict[str, Any]]) -> str:
     return "<div class='alerts'>" + "".join(items) + "</div>"
 
 
-def build_qc_report(cfg: dict[str, Any], *, out_dir: str | Path | None = None, config_dir: Path | None = None) -> Path:
+def build_qc_report(
+    cfg: dict[str, Any],
+    *,
+    out_dir: str | Path | None = None,
+    config_dir: Path | None = None,
+) -> Path:
     """Build a lightweight QC report (JSON + HTML).
 
     Writes:
@@ -413,7 +465,9 @@ def build_qc_report(cfg: dict[str, Any], *, out_dir: str | Path | None = None, c
         layout = ensure_work_layout(work_dir)
         write_products_manifest(cfg=cfg, out_path=layout.qc / "products_manifest.json")
         # legacy mirror
-        write_products_manifest(cfg=cfg, out_path=layout.report_legacy / "products_manifest.json")
+        write_products_manifest(
+            cfg=cfg, out_path=layout.report_legacy / "products_manifest.json"
+        )
     except Exception:
         pass
 
@@ -497,12 +551,16 @@ def build_qc_report(cfg: dict[str, Any], *, out_dir: str | Path | None = None, c
     }
 
     out_json = out_dir / "qc_report.json"
-    out_json.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    out_json.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
 
     # --- HTML ---
     timings_total = None
     try:
-        timings_total = payload.get("metrics", {}).get("timings", {}).get("total_last_s")
+        timings_total = (
+            payload.get("metrics", {}).get("timings", {}).get("total_last_s")
+        )
     except Exception:
         timings_total = None
 
@@ -557,18 +615,18 @@ def build_qc_report(cfg: dict[str, Any], *, out_dir: str | Path | None = None, c
     <div class='top'>
       <div>
         <h1>Scorpio Pipe — QC report <span class='pill'>{_html_escape(PIPELINE_VERSION)}</span></h1>
-        <div class='meta'>Generated: {_html_escape(payload['generated_utc'])} · Work dir: <code>{_html_escape(str(work_dir))}</code></div>
+        <div class='meta'>Generated: {_html_escape(payload["generated_utc"])} · Work dir: <code>{_html_escape(str(work_dir))}</code></div>
       </div>
-      <div class='meta'>{'' if timings_total is None else 'Last run total: ' + _html_escape(_fmt_seconds(float(timings_total)))}</div>
+      <div class='meta'>{"" if timings_total is None else "Last run total: " + _html_escape(_fmt_seconds(float(timings_total)))}</div>
     </div>
 
     <div class='box' style='margin-top:14px'>
       <h2>Alerts</h2>
       {_render_alerts(alerts)}
-      <div class='meta' style='margin-top:10px'>Bad: <code>{alert_counts['bad']}</code> · Warn: <code>{alert_counts['warn']}</code> · Total: <code>{alert_counts['total']}</code></div>
+      <div class='meta' style='margin-top:10px'>Bad: <code>{alert_counts["bad"]}</code> · Warn: <code>{alert_counts["warn"]}</code> · Total: <code>{alert_counts["total"]}</code></div>
       <details>
         <summary>Show thresholds</summary>
-        <pre style='white-space:pre-wrap; color:#cfe2ff; margin:10px 0 0'>{_html_escape(json.dumps(qc.get('thresholds', {}), indent=2, ensure_ascii=False))}</pre>
+        <pre style='white-space:pre-wrap; color:#cfe2ff; margin:10px 0 0'>{_html_escape(json.dumps(qc.get("thresholds", {}), indent=2, ensure_ascii=False))}</pre>
       </details>
     </div>
 
@@ -585,14 +643,14 @@ def build_qc_report(cfg: dict[str, Any], *, out_dir: str | Path | None = None, c
       <div class='box'>
         <h2>Key metrics</h2>
         <div class='kv'>
-          <div class='k'>Wavesol 1D RMS</div><div>{_html_escape(str(metrics.get('wavesol_1d', {}).get('rms_A', '—')))} Å</div>
-          <div class='k'>Wavesol 2D RMS</div><div>{_html_escape(str(metrics.get('wavesol_2d', {}).get('rms_A', '—')))} Å</div>
-          <div class='k'>2D model</div><div>{_html_escape(str(metrics.get('wavesol_2d', {}).get('kind', '—')))}</div>
-          <div class='k'>Cosmics replaced</div><div>{_html_escape(str(metrics.get('cosmics', {}).get('replaced_fraction', '—')))}</div>
-          <div class='k'>Residuals p95 |Δλ|</div><div>{_html_escape(str(metrics.get('residuals_2d', {}).get('p95_abs_A', '—')))} Å</div>
-          <div class='k'>Sky RMS (median)</div><div>{_html_escape(str(metrics.get('sky', {}).get('rms_sky_median', '—')))}</div>
-          <div class='k'>Stack N inputs</div><div>{_html_escape(str(metrics.get('stack', {}).get('n_inputs', '—')))}</div>
-          <div class='k'>Spec S/N (median)</div><div>{_html_escape(str(metrics.get('spec', {}).get('snr_median', '—')))}</div>
+          <div class='k'>Wavesol 1D RMS</div><div>{_html_escape(str(metrics.get("wavesol_1d", {}).get("rms_A", "—")))} Å</div>
+          <div class='k'>Wavesol 2D RMS</div><div>{_html_escape(str(metrics.get("wavesol_2d", {}).get("rms_A", "—")))} Å</div>
+          <div class='k'>2D model</div><div>{_html_escape(str(metrics.get("wavesol_2d", {}).get("kind", "—")))}</div>
+          <div class='k'>Cosmics replaced</div><div>{_html_escape(str(metrics.get("cosmics", {}).get("replaced_fraction", "—")))}</div>
+          <div class='k'>Residuals p95 |Δλ|</div><div>{_html_escape(str(metrics.get("residuals_2d", {}).get("p95_abs_A", "—")))} Å</div>
+          <div class='k'>Sky RMS (median)</div><div>{_html_escape(str(metrics.get("sky", {}).get("rms_sky_median", "—")))}</div>
+          <div class='k'>Stack N inputs</div><div>{_html_escape(str(metrics.get("stack", {}).get("n_inputs", "—")))}</div>
+          <div class='k'>Spec S/N (median)</div><div>{_html_escape(str(metrics.get("spec", {}).get("snr_median", "—")))}</div>
         </div>
         <details>
           <summary>Show full metrics (JSON)</summary>
@@ -618,8 +676,12 @@ def build_qc_report(cfg: dict[str, Any], *, out_dir: str | Path | None = None, c
     try:
         legacy_dir = work_dir / "report"
         legacy_dir.mkdir(parents=True, exist_ok=True)
-        (legacy_dir / "qc_report.json").write_text(out_json.read_text(encoding="utf-8"), encoding="utf-8")
-        (legacy_dir / "index.html").write_text(out_html.read_text(encoding="utf-8"), encoding="utf-8")
+        (legacy_dir / "qc_report.json").write_text(
+            out_json.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        (legacy_dir / "index.html").write_text(
+            out_html.read_text(encoding="utf-8"), encoding="utf-8"
+        )
     except Exception:
         pass
 

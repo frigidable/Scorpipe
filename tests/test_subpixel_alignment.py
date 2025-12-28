@@ -1,6 +1,11 @@
 import numpy as np
 
-from scorpio_pipe.shift_utils import xcorr_shift_subpix, shift2d_subpix_x, shift2d_subpix_x_var, shift2d_subpix_x_mask
+from scorpio_pipe.shift_utils import (
+    xcorr_shift_subpix,
+    shift2d_subpix_x,
+    shift2d_subpix_x_var,
+    shift2d_subpix_x_mask,
+)
 
 
 def _shift_1d_linear(x: np.ndarray, shift: float, *, fill: float = 0.0) -> np.ndarray:
@@ -35,7 +40,9 @@ def test_xcorr_shift_subpix_zero_shift() -> None:
     assert abs(est.shift_pix) < 1e-6
 
 
-def _shift2d_linear_reference(a2d: np.ndarray, shifts: np.ndarray, *, fill: float = 0.0) -> np.ndarray:
+def _shift2d_linear_reference(
+    a2d: np.ndarray, shifts: np.ndarray, *, fill: float = 0.0
+) -> np.ndarray:
     """Slow reference 2D shifter using np.interp per row."""
     a2d = np.asarray(a2d, dtype=float)
     ny, nx = a2d.shape
@@ -84,11 +91,13 @@ def test_shift2d_subpix_x_var_kernel_propagation() -> None:
         acc2 += x * x
     mc_var = acc2 / nmc - (acc / nmc) ** 2
 
-    out_var, filled = shift2d_subpix_x_var(var, shifts, fill=float('inf'))
+    out_var, filled = shift2d_subpix_x_var(var, shifts, fill=float("inf"))
     good = ~filled
 
     # MC is noisy; allow a loose tolerance.
-    rel = np.median(np.abs(mc_var[good] - out_var[good]) / np.maximum(out_var[good], 1e-12))
+    rel = np.median(
+        np.abs(mc_var[good] - out_var[good]) / np.maximum(out_var[good], 1e-12)
+    )
     assert rel < 0.12
 
 

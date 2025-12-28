@@ -77,13 +77,17 @@ def _collect_dynamic_items(work_dir: Path) -> list[QCItem]:
         ]
         for title, p, kind in candidates:
             if p.exists():
-                out.append(QCItem(f"[{slug}] {title}", str(p.relative_to(work_dir)), kind))
+                out.append(
+                    QCItem(f"[{slug}] {title}", str(p.relative_to(work_dir)), kind)
+                )
 
         # any alternative pair files
         for p in sorted(sub.glob("hand_pairs*.txt")):
             if p.name == "hand_pairs.txt":
                 continue
-            out.append(QCItem(f"[{slug}] {p.name}", str(p.relative_to(work_dir)), "text"))
+            out.append(
+                QCItem(f"[{slug}] {p.name}", str(p.relative_to(work_dir)), "text")
+            )
 
     return out
 
@@ -105,12 +109,21 @@ def _fits_to_qpixmap(path: Path, *, w: int = 1200, h: int = 600) -> QtGui.QPixma
     # percentile stretch
     lo, hi = np.percentile(data, [1.0, 99.7])
     if hi <= lo:
-        lo, hi = float(np.min(data)), float(np.max(data) if np.max(data) != np.min(data) else np.min(data) + 1.0)
+        lo, hi = (
+            float(np.min(data)),
+            float(np.max(data) if np.max(data) != np.min(data) else np.min(data) + 1.0),
+        )
     norm = np.clip((data - lo) / (hi - lo), 0.0, 1.0)
     img8 = (norm * 255.0).astype(np.uint8)
 
     # grayscale QImage
-    qimg = QtGui.QImage(img8.data, img8.shape[1], img8.shape[0], img8.strides[0], QtGui.QImage.Format_Grayscale8)
+    qimg = QtGui.QImage(
+        img8.data,
+        img8.shape[1],
+        img8.shape[0],
+        img8.strides[0],
+        QtGui.QImage.Format_Grayscale8,
+    )
     qimg = qimg.copy()  # detach from numpy memory
     pm = QtGui.QPixmap.fromImage(qimg)
     return pm.scaled(w, h, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
@@ -281,4 +294,8 @@ class QCViewer(QtWidgets.QMainWindow):
         else:
             self.stack.setCurrentWidget(self.img_label)
             pm = QtGui.QPixmap(str(p))
-            self.img_label.setPixmap(pm.scaled(1200, 650, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+            self.img_label.setPixmap(
+                pm.scaled(
+                    1200, 650, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation
+                )
+            )

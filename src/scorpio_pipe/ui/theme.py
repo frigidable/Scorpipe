@@ -67,8 +67,14 @@ def apply_theme(app: QtWidgets.QApplication, *, mode: str = "dark") -> None:
     pal.setColor(QtGui.QPalette.ColorRole.HighlightedText, hl_text)
     pal.setColor(QtGui.QPalette.ColorRole.BrightText, QtGui.QColor(255, 0, 0))
 
-    pal.setColor(QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.Text, disabled)
-    pal.setColor(QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.ButtonText, disabled)
+    pal.setColor(
+        QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.Text, disabled
+    )
+    pal.setColor(
+        QtGui.QPalette.ColorGroup.Disabled,
+        QtGui.QPalette.ColorRole.ButtonText,
+        disabled,
+    )
     app.setPalette(pal)
 
     # Global font: keep defaults, but encourage consistent sizing.
@@ -106,7 +112,7 @@ def apply_theme(app: QtWidgets.QApplication, *, mode: str = "dark") -> None:
     QComboBox::down-arrow {{
         width: 10px;
         height: 10px;
-        image: url(data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path d='M2 3l3 3 3-3' fill='none' stroke='%23{('ECECEC' if mode=="dark" else '666666')}' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/></svg>);
+        image: url(data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path d='M2 3l3 3 3-3' fill='none' stroke='%23{("ECECEC" if mode == "dark" else "666666")}' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/></svg>);
     }}
 
     QPushButton, QToolButton {{
@@ -123,7 +129,7 @@ def apply_theme(app: QtWidgets.QApplication, *, mode: str = "dark") -> None:
     QPushButton[primary="true"], QToolButton[primary="true"] {{
         background: {accent.name()};
         border-color: {accent.name()};
-        color: {hl_text.name() if mode=="dark" else "#ffffff"};
+        color: {hl_text.name() if mode == "dark" else "#ffffff"};
         font-weight: 600;
     }}
     QPushButton[primary="true"]:hover, QToolButton[primary="true"]:hover {{

@@ -16,7 +16,6 @@ UI
 - FITS preview: more robust image-HDU discovery + better diagnostics; stage frame browsers also recognize *.fts.
 """
 
-
 from __future__ import annotations
 
 
@@ -85,80 +84,320 @@ def list_products(cfg: dict[str, Any]) -> list[Product]:
 
     out: list[Product] = [
         # QC (canonical + legacy mirrors)
-        Product("manifest", "qc", qc / "manifest.json", "json", optional=False, description="Reproducibility manifest"),
-        Product("products_manifest", "qc", qc / "products_manifest.json", "json", optional=True, description="Products manifest (incl. per-exposure trees)"),
-        Product("qc_json", "qc", qc / "qc_report.json", "json", optional=True, description="QC summary (machine-readable)"),
-        Product("qc_html", "qc", qc / "index.html", "html", optional=True, description="QC report (human-readable)"),
-        Product("timings", "qc", qc / "timings.json", "json", optional=True, description="Stage timings"),
-
-        Product("linearize_qc", "linearize", qc / "linearize_qc.json", "json", optional=True, description="Linearize QC metrics (S/N, coverage, mask fractions)"),
-
-        Product("manifest_legacy", "report", rep / "manifest.json", "json", optional=True),
-        Product("products_manifest_legacy", "report", rep / "products_manifest.json", "json", optional=True),
-        Product("qc_json_legacy", "report", rep / "qc_report.json", "json", optional=True),
+        Product(
+            "manifest",
+            "qc",
+            qc / "manifest.json",
+            "json",
+            optional=False,
+            description="Reproducibility manifest",
+        ),
+        Product(
+            "products_manifest",
+            "qc",
+            qc / "products_manifest.json",
+            "json",
+            optional=True,
+            description="Products manifest (incl. per-exposure trees)",
+        ),
+        Product(
+            "qc_json",
+            "qc",
+            qc / "qc_report.json",
+            "json",
+            optional=True,
+            description="QC summary (machine-readable)",
+        ),
+        Product(
+            "qc_html",
+            "qc",
+            qc / "index.html",
+            "html",
+            optional=True,
+            description="QC report (human-readable)",
+        ),
+        Product(
+            "timings",
+            "qc",
+            qc / "timings.json",
+            "json",
+            optional=True,
+            description="Stage timings",
+        ),
+        Product(
+            "linearize_qc",
+            "linearize",
+            qc / "linearize_qc.json",
+            "json",
+            optional=True,
+            description="Linearize QC metrics (S/N, coverage, mask fractions)",
+        ),
+        Product(
+            "manifest_legacy", "report", rep / "manifest.json", "json", optional=True
+        ),
+        Product(
+            "products_manifest_legacy",
+            "report",
+            rep / "products_manifest.json",
+            "json",
+            optional=True,
+        ),
+        Product(
+            "qc_json_legacy", "report", rep / "qc_report.json", "json", optional=True
+        ),
         Product("qc_html_legacy", "report", rep / "index.html", "html", optional=True),
-        Product("timings_legacy", "report", rep / "timings.json", "json", optional=True),
-
-        Product("linearize_qc_legacy", "linearize", rep / "linearize_qc.json", "json", optional=True),
-
+        Product(
+            "timings_legacy", "report", rep / "timings.json", "json", optional=True
+        ),
+        Product(
+            "linearize_qc_legacy",
+            "linearize",
+            rep / "linearize_qc.json",
+            "json",
+            optional=True,
+        ),
         # Calibrations (canonical + legacy)
-        Product("superbias_fits", "superbias", calibs / "superbias.fits", "fits", optional=True),
-        Product("superflat_fits", "superflat", calibs / "superflat.fits", "fits", optional=True),
-        Product("superbias_fits_legacy", "superbias", calib_legacy / "superbias.fits", "fits", optional=True),
-        Product("superflat_fits_legacy", "superflat", calib_legacy / "superflat.fits", "fits", optional=True),
-
+        Product(
+            "superbias_fits",
+            "superbias",
+            calibs / "superbias.fits",
+            "fits",
+            optional=True,
+        ),
+        Product(
+            "superflat_fits",
+            "superflat",
+            calibs / "superflat.fits",
+            "fits",
+            optional=True,
+        ),
+        Product(
+            "superbias_fits_legacy",
+            "superbias",
+            calib_legacy / "superbias.fits",
+            "fits",
+            optional=True,
+        ),
+        Product(
+            "superflat_fits_legacy",
+            "superflat",
+            calib_legacy / "superflat.fits",
+            "fits",
+            optional=True,
+        ),
         # Flatfield stage (done marker)
-        Product("flatfield_done", "flatfield", flatfield / "flatfield_done.json", "json", optional=True),
-
+        Product(
+            "flatfield_done",
+            "flatfield",
+            flatfield / "flatfield_done.json",
+            "json",
+            optional=True,
+        ),
         # Cosmics stage
-        Product("cosmics_summary", "cosmics", cosm / "summary.json", "json", optional=True),
-
+        Product(
+            "cosmics_summary", "cosmics", cosm / "summary.json", "json", optional=True
+        ),
         # SuperNeon + LineID preparation (wavesol dir)
-        Product("superneon_fits", "superneon", wsol / "superneon.fits", "fits", optional=True),
-        Product("superneon_png", "superneon", wsol / "superneon.png", "png", optional=True),
-        Product("peaks_candidates_csv", "superneon", wsol / "peaks_candidates.csv", "csv", optional=True),
-
-        Product("lineid_template_csv", "lineid_prepare", wsol / "manual_pairs_template.csv", "csv", optional=True),
-        Product("lineid_auto_csv", "lineid_prepare", wsol / "manual_pairs_auto.csv", "csv", optional=True),
-        Product("lineid_report_txt", "lineid_prepare", wsol / "lineid_report.txt", "txt", optional=True),
-        Product("hand_pairs_txt", "lineid", wsol / "hand_pairs.txt", "txt", optional=True, description="Manual line pairs (x_pix, lambda)"),
-
+        Product(
+            "superneon_fits",
+            "superneon",
+            wsol / "superneon.fits",
+            "fits",
+            optional=True,
+        ),
+        Product(
+            "superneon_png", "superneon", wsol / "superneon.png", "png", optional=True
+        ),
+        Product(
+            "peaks_candidates_csv",
+            "superneon",
+            wsol / "peaks_candidates.csv",
+            "csv",
+            optional=True,
+        ),
+        Product(
+            "lineid_template_csv",
+            "lineid_prepare",
+            wsol / "manual_pairs_template.csv",
+            "csv",
+            optional=True,
+        ),
+        Product(
+            "lineid_auto_csv",
+            "lineid_prepare",
+            wsol / "manual_pairs_auto.csv",
+            "csv",
+            optional=True,
+        ),
+        Product(
+            "lineid_report_txt",
+            "lineid_prepare",
+            wsol / "lineid_report.txt",
+            "txt",
+            optional=True,
+        ),
+        Product(
+            "hand_pairs_txt",
+            "lineid",
+            wsol / "hand_pairs.txt",
+            "txt",
+            optional=True,
+            description="Manual line pairs (x_pix, lambda)",
+        ),
         # Wavesolution key artifacts
-        Product("wavesolution_1d_png", "wavesol", wsol / "wavesolution_1d.png", "png", optional=True),
-        Product("wavesolution_1d_json", "wavesol", wsol / "wavesolution_1d.json", "json", optional=True),
-        Product("wavesolution_2d_json", "wavesol", wsol / "wavesolution_2d.json", "json", optional=True),
-        Product("lambda_map", "wavesol", wsol / "lambda_map.fits", "fits", optional=True),
-        Product("wavelength_matrix_png", "wavesol", wsol / "wavelength_matrix.png", "png", optional=True),
-        Product("residuals_2d_png", "wavesol", wsol / "residuals_2d.png", "png", optional=True),
-        Product("residuals_2d_audit_png", "wavesol", wsol / "residuals_2d_audit.png", "png", optional=True),
-        Product("control_points_2d_csv", "wavesol", wsol / "control_points_2d.csv", "csv", optional=True),
-        Product("residuals_1d_csv", "wavesol", wsol / "residuals_1d.csv", "csv", optional=True),
-        Product("residuals_2d_csv", "wavesol", wsol / "residuals_2d.csv", "csv", optional=True),
-        Product("residuals_vs_lambda_png", "wavesol", wsol / "residuals_vs_lambda.png", "png", optional=True),
-        Product("residuals_vs_y_png", "wavesol", wsol / "residuals_vs_y.png", "png", optional=True),
-        Product("residuals_hist_png", "wavesol", wsol / "residuals_hist.png", "png", optional=True),
-        Product("wavesolution_report_txt", "wavesol", wsol / "wavesolution_report.txt", "txt", optional=True),
-
+        Product(
+            "wavesolution_1d_png",
+            "wavesol",
+            wsol / "wavesolution_1d.png",
+            "png",
+            optional=True,
+        ),
+        Product(
+            "wavesolution_1d_json",
+            "wavesol",
+            wsol / "wavesolution_1d.json",
+            "json",
+            optional=True,
+        ),
+        Product(
+            "wavesolution_2d_json",
+            "wavesol",
+            wsol / "wavesolution_2d.json",
+            "json",
+            optional=True,
+        ),
+        Product(
+            "lambda_map", "wavesol", wsol / "lambda_map.fits", "fits", optional=True
+        ),
+        Product(
+            "wavelength_matrix_png",
+            "wavesol",
+            wsol / "wavelength_matrix.png",
+            "png",
+            optional=True,
+        ),
+        Product(
+            "residuals_2d_png",
+            "wavesol",
+            wsol / "residuals_2d.png",
+            "png",
+            optional=True,
+        ),
+        Product(
+            "residuals_2d_audit_png",
+            "wavesol",
+            wsol / "residuals_2d_audit.png",
+            "png",
+            optional=True,
+        ),
+        Product(
+            "control_points_2d_csv",
+            "wavesol",
+            wsol / "control_points_2d.csv",
+            "csv",
+            optional=True,
+        ),
+        Product(
+            "residuals_1d_csv",
+            "wavesol",
+            wsol / "residuals_1d.csv",
+            "csv",
+            optional=True,
+        ),
+        Product(
+            "residuals_2d_csv",
+            "wavesol",
+            wsol / "residuals_2d.csv",
+            "csv",
+            optional=True,
+        ),
+        Product(
+            "residuals_vs_lambda_png",
+            "wavesol",
+            wsol / "residuals_vs_lambda.png",
+            "png",
+            optional=True,
+        ),
+        Product(
+            "residuals_vs_y_png",
+            "wavesol",
+            wsol / "residuals_vs_y.png",
+            "png",
+            optional=True,
+        ),
+        Product(
+            "residuals_hist_png",
+            "wavesol",
+            wsol / "residuals_hist.png",
+            "png",
+            optional=True,
+        ),
+        Product(
+            "wavesolution_report_txt",
+            "wavesol",
+            wsol / "wavesolution_report.txt",
+            "txt",
+            optional=True,
+        ),
         # Core science (quicklook + canonical endpoints)
-        Product("lin_preview_fits", "linearize", lin / "lin_preview.fits", "fits", optional=True),
-        Product("lin_preview_png", "linearize", lin / "lin_preview.png", "png", optional=True),
-
+        Product(
+            "lin_preview_fits",
+            "linearize",
+            lin / "lin_preview.fits",
+            "fits",
+            optional=True,
+        ),
+        Product(
+            "lin_preview_png",
+            "linearize",
+            lin / "lin_preview.png",
+            "png",
+            optional=True,
+        ),
         # Sky subtraction artifacts
-        Product("sky_done", "sky", sky / "sky_sub_done.json", "json", optional=True, description="Sky stage summary (per exposure)")
-        ,
-        Product("qc_sky_json", "sky", sky / "qc_sky.json", "json", optional=True, description="Sky QC (residual metrics + diag paths)")
-        ,
+        Product(
+            "sky_done",
+            "sky",
+            sky / "sky_sub_done.json",
+            "json",
+            optional=True,
+            description="Sky stage summary (per exposure)",
+        ),
+        Product(
+            "qc_sky_json",
+            "sky",
+            sky / "qc_sky.json",
+            "json",
+            optional=True,
+            description="Sky QC (residual metrics + diag paths)",
+        ),
         Product("sky_preview_fits", "sky", sky / "preview.fits", "fits", optional=True),
         Product("sky_preview_png", "sky", sky / "preview.png", "png", optional=True),
-
-        Product("stack2d_done", "stack2d", stack / "stack2d_done.json", "json", optional=True, description="Stacking summary")
-        ,
-        Product("stacked2d_fits", "stack2d", stack / "stacked2d.fits", "fits", optional=True),
-        Product("coverage_png", "stack2d", stack / "coverage.png", "png", optional=True),
-
-        Product("extract1d_done", "extract1d", spec / "extract1d_done.json", "json", optional=True, description="Extraction summary")
-        ,
-        Product("spec1d_fits", "extract1d", spec / "spec1d.fits", "fits", optional=True),
+        Product(
+            "stack2d_done",
+            "stack2d",
+            stack / "stack2d_done.json",
+            "json",
+            optional=True,
+            description="Stacking summary",
+        ),
+        Product(
+            "stacked2d_fits", "stack2d", stack / "stacked2d.fits", "fits", optional=True
+        ),
+        Product(
+            "coverage_png", "stack2d", stack / "coverage.png", "png", optional=True
+        ),
+        Product(
+            "extract1d_done",
+            "extract1d",
+            spec / "extract1d_done.json",
+            "json",
+            optional=True,
+            description="Extraction summary",
+        ),
+        Product(
+            "spec1d_fits", "extract1d", spec / "spec1d.fits", "fits", optional=True
+        ),
         Product("spec1d_png", "extract1d", spec / "spec1d.png", "png", optional=True),
     ]
 

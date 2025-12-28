@@ -8,7 +8,6 @@ Design goals:
 This widget is meant to be used inside larger dialogs (e.g. LineID GUI).
 """
 
-
 from __future__ import annotations
 
 
@@ -36,7 +35,13 @@ class PdfViewer(QtWidgets.QWidget):
       2) PyMuPDF (fitz) rendered into QGraphicsView (still full mouse/keyboard)
     """
 
-    def __init__(self, pdf_path: str | Path, *, state: Optional[PdfViewerState] = None, parent=None):
+    def __init__(
+        self,
+        pdf_path: str | Path,
+        *,
+        state: Optional[PdfViewerState] = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.pdf_path = Path(pdf_path)
         self.state = state or PdfViewerState()
@@ -69,7 +74,9 @@ class PdfViewer(QtWidgets.QWidget):
 
         self.lbl_zoom = QtWidgets.QLabel(f"{int(self.state.zoom_pct)}%")
         self.lbl_zoom.setMinimumWidth(44)
-        self.lbl_zoom.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        self.lbl_zoom.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
+        )
 
         tb.addWidget(self.btn_prev)
         tb.addWidget(self.btn_next)
@@ -133,7 +140,11 @@ class PdfViewer(QtWidgets.QWidget):
         lbl.setWordWrap(True)
         v.addWidget(lbl)
         btn = QtWidgets.QPushButton("Открыть PDF во внешнем просмотрщике")
-        btn.clicked.connect(lambda: QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(self.pdf_path))))
+        btn.clicked.connect(
+            lambda: QtGui.QDesktopServices.openUrl(
+                QtCore.QUrl.fromLocalFile(str(self.pdf_path))
+            )
+        )
         v.addWidget(btn)
         v.addStretch(1)
         self.container.addWidget(msg)
@@ -204,10 +215,24 @@ class PdfViewer(QtWidgets.QWidget):
 
     def _connect_shortcuts(self) -> None:
         # navigation
-        QtGui.QShortcut(QtGui.QKeySequence("PgUp"), self, activated=lambda: self.go_page(self.page0 - 1))
-        QtGui.QShortcut(QtGui.QKeySequence("PgDown"), self, activated=lambda: self.go_page(self.page0 + 1))
-        QtGui.QShortcut(QtGui.QKeySequence("Home"), self, activated=lambda: self.go_page(0))
-        QtGui.QShortcut(QtGui.QKeySequence("End"), self, activated=lambda: self.go_page(self.page_count - 1))
+        QtGui.QShortcut(
+            QtGui.QKeySequence("PgUp"),
+            self,
+            activated=lambda: self.go_page(self.page0 - 1),
+        )
+        QtGui.QShortcut(
+            QtGui.QKeySequence("PgDown"),
+            self,
+            activated=lambda: self.go_page(self.page0 + 1),
+        )
+        QtGui.QShortcut(
+            QtGui.QKeySequence("Home"), self, activated=lambda: self.go_page(0)
+        )
+        QtGui.QShortcut(
+            QtGui.QKeySequence("End"),
+            self,
+            activated=lambda: self.go_page(self.page_count - 1),
+        )
 
         # zoom
         QtGui.QShortcut(QtGui.QKeySequence("Ctrl++"), self, activated=self.zoom_in)
@@ -382,11 +407,13 @@ class _MuPdfGraphicsView(QtWidgets.QGraphicsView):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setRenderHints(
-            QtGui.QPainter.RenderHint.Antialiasing |
-            QtGui.QPainter.RenderHint.SmoothPixmapTransform
+            QtGui.QPainter.RenderHint.Antialiasing
+            | QtGui.QPainter.RenderHint.SmoothPixmapTransform
         )
         self.setDragMode(QtWidgets.QGraphicsView.DragMode.ScrollHandDrag)
-        self.setTransformationAnchor(QtWidgets.QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setTransformationAnchor(
+            QtWidgets.QGraphicsView.ViewportAnchor.AnchorUnderMouse
+        )
         self.setResizeAnchor(QtWidgets.QGraphicsView.ViewportAnchor.AnchorViewCenter)
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
 
@@ -489,7 +516,9 @@ class _MuPdfBackend(_BackendBase):
                 fmt = QtGui.QImage.Format.Format_RGBA8888
             else:
                 fmt = QtGui.QImage.Format.Format_RGB888
-            qimg = QtGui.QImage(pix.samples, pix.width, pix.height, pix.stride, fmt).copy()
+            qimg = QtGui.QImage(
+                pix.samples, pix.width, pix.height, pix.stride, fmt
+            ).copy()
             pm = QtGui.QPixmap.fromImage(qimg)
             try:
                 pm.setDevicePixelRatio(float(dpr))

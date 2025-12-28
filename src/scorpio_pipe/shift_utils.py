@@ -101,7 +101,7 @@ def xcorr_shift_subpix(ref: np.ndarray, cur: np.ndarray, max_shift: int) -> XCor
         y1 = float(scores[imax - 1])
         y2 = float(scores[imax])
         y3 = float(scores[imax + 1])
-        denom = (y1 - 2.0 * y2 + y3)
+        denom = y1 - 2.0 * y2 + y3
         if np.isfinite(denom) and abs(denom) > 1e-12:
             delta = 0.5 * (y1 - y3) / denom
             if np.isfinite(delta):
@@ -114,6 +114,7 @@ def xcorr_shift_subpix(ref: np.ndarray, cur: np.ndarray, max_shift: int) -> XCor
 
 # ------------------------- 2D subpixel shifters -------------------------
 
+
 def _coerce_shift_per_row(shift_pix_y: np.ndarray | float, ny: int) -> np.ndarray:
     s = np.asarray(shift_pix_y, dtype=float).reshape(-1)
     if s.size == 1:
@@ -123,7 +124,9 @@ def _coerce_shift_per_row(shift_pix_y: np.ndarray | float, ny: int) -> np.ndarra
     return s
 
 
-def shift2d_subpix_x(arr: np.ndarray, shift_pix_y: np.ndarray | float, *, fill: float = float('nan')) -> tuple[np.ndarray, np.ndarray]:
+def shift2d_subpix_x(
+    arr: np.ndarray, shift_pix_y: np.ndarray | float, *, fill: float = float("nan")
+) -> tuple[np.ndarray, np.ndarray]:
     """Shift a 2D array along X by a *per-row* subpixel shift.
 
     Sign convention is consistent with :func:`xcorr_shift_subpix`:
@@ -152,7 +155,7 @@ def shift2d_subpix_x(arr: np.ndarray, shift_pix_y: np.ndarray | float, *, fill: 
 
     a = np.asarray(arr)
     if a.ndim != 2:
-        raise ValueError('arr must be 2D')
+        raise ValueError("arr must be 2D")
     ny, nx = a.shape
     s = _coerce_shift_per_row(shift_pix_y, ny)
 
@@ -179,7 +182,9 @@ def shift2d_subpix_x(arr: np.ndarray, shift_pix_y: np.ndarray | float, *, fill: 
     return out, filled
 
 
-def shift2d_subpix_x_var(var: np.ndarray, shift_pix_y: np.ndarray | float, *, fill: float = float('inf')) -> tuple[np.ndarray, np.ndarray]:
+def shift2d_subpix_x_var(
+    var: np.ndarray, shift_pix_y: np.ndarray | float, *, fill: float = float("inf")
+) -> tuple[np.ndarray, np.ndarray]:
     """Shift a variance image along X with kernel propagation.
 
     For linear interpolation ``out = w0*a0 + w1*a1``, this uses:
@@ -190,7 +195,7 @@ def shift2d_subpix_x_var(var: np.ndarray, shift_pix_y: np.ndarray | float, *, fi
 
     v = np.asarray(var)
     if v.ndim != 2:
-        raise ValueError('var must be 2D')
+        raise ValueError("var must be 2D")
     ny, nx = v.shape
     s = _coerce_shift_per_row(shift_pix_y, ny)
 
@@ -219,7 +224,13 @@ def shift2d_subpix_x_var(var: np.ndarray, shift_pix_y: np.ndarray | float, *, fi
     return out, filled
 
 
-def shift2d_subpix_x_mask(mask: np.ndarray, shift_pix_y: np.ndarray | float, *, no_cov: int = 1, no_coverage_bit: int | None = None) -> tuple[np.ndarray, np.ndarray]:
+def shift2d_subpix_x_mask(
+    mask: np.ndarray,
+    shift_pix_y: np.ndarray | float,
+    *,
+    no_cov: int = 1,
+    no_coverage_bit: int | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
     """Shift a uint16 mask along X; filled pixels get ``no_cov`` bit.
 
     Compatibility: older callers may pass ``no_coverage_bit=...``.
@@ -230,7 +241,7 @@ def shift2d_subpix_x_mask(mask: np.ndarray, shift_pix_y: np.ndarray | float, *, 
 
     m = np.asarray(mask)
     if m.ndim != 2:
-        raise ValueError('mask must be 2D')
+        raise ValueError("mask must be 2D")
     ny, nx = m.shape
     s = _coerce_shift_per_row(shift_pix_y, ny)
 

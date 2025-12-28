@@ -20,7 +20,9 @@ def _default_cache_dir() -> Path:
     return ensure_dir(user_cache_root("Scorpipe") / "resources")
 
 
-def _materialize_package_file(name: str, *, cache_dir: Path | None = None) -> Path | None:
+def _materialize_package_file(
+    name: str, *, cache_dir: Path | None = None
+) -> Path | None:
     """Return a stable on-disk path for a packaged resource.
 
     If the package is installed as a zip, importlib may expose resources via a

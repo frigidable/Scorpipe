@@ -9,7 +9,6 @@ Goals ("DS9-like" baseline, without trying to re-implement DS9):
 This widget is intentionally self-contained so the GUI stays responsive.
 """
 
-
 from __future__ import annotations
 
 
@@ -74,7 +73,12 @@ def _choose_image_hdu(hdul: fits.HDUList) -> tuple[int, np.ndarray]:
                 a = np.asarray(data)
             except Exception as e:
                 msg = str(e)
-                if ("memory-mapped" in msg) or ("BZERO" in msg) or ("BSCALE" in msg) or ("BLANK" in msg):
+                if (
+                    ("memory-mapped" in msg)
+                    or ("BZERO" in msg)
+                    or ("BSCALE" in msg)
+                    or ("BLANK" in msg)
+                ):
                     raise
                 last_err = e
                 continue
@@ -95,7 +99,12 @@ def _choose_image_hdu(hdul: fits.HDUList) -> tuple[int, np.ndarray]:
 
         except Exception as e:
             msg = str(e)
-            if ("memory-mapped" in msg) or ("BZERO" in msg) or ("BSCALE" in msg) or ("BLANK" in msg):
+            if (
+                ("memory-mapped" in msg)
+                or ("BZERO" in msg)
+                or ("BSCALE" in msg)
+                or ("BLANK" in msg)
+            ):
                 raise
             last_err = e
             continue
@@ -284,8 +293,12 @@ class _ImageView(QtWidgets.QGraphicsView):
         if self._dragging and self._last_pos is not None:
             delta = event.pos() - self._last_pos
             self._last_pos = event.pos()
-            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
-            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
+            self.horizontalScrollBar().setValue(
+                self.horizontalScrollBar().value() - delta.x()
+            )
+            self.verticalScrollBar().setValue(
+                self.verticalScrollBar().value() - delta.y()
+            )
             event.accept()
         else:
             super().mouseMoveEvent(event)

@@ -6,7 +6,13 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 
 class ConfigDiffDialog(QtWidgets.QDialog):
-    def __init__(self, title: str, old_text: str, new_text: str, parent: QtWidgets.QWidget | None = None):
+    def __init__(
+        self,
+        title: str,
+        old_text: str,
+        new_text: str,
+        parent: QtWidgets.QWidget | None = None,
+    ):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.resize(980, 640)

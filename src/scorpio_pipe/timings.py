@@ -47,7 +47,9 @@ def append_timing(
     try:
         legacy = Path(work_dir).expanduser().resolve() / "report"
         legacy.mkdir(parents=True, exist_ok=True)
-        (legacy / "timings.json").write_text(p.read_text(encoding="utf-8"), encoding="utf-8")
+        (legacy / "timings.json").write_text(
+            p.read_text(encoding="utf-8"), encoding="utf-8"
+        )
     except Exception:
         pass
     return p
@@ -75,6 +77,8 @@ def timed_stage(
     finally:
         dt = time.perf_counter() - t0
         try:
-            append_timing(work_dir=work_dir, stage=stage, seconds=dt, ok=ok, extra=extra)
+            append_timing(
+                work_dir=work_dir, stage=stage, seconds=dt, ok=ok, extra=extra
+            )
         except Exception:
             pass

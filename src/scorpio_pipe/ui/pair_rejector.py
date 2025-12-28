@@ -18,7 +18,7 @@ def _read_pairs(path: Path) -> list[tuple[float, float, bool, bool]]:
             continue
 
         s_low = s.lower()
-        blend = ("blend" in s_low)
+        blend = "blend" in s_low
         disabled = ("disabled" in s_low) or ("reject" in s_low) or ("rejected" in s_low)
 
         # Allow keeping disabled pairs in the file as commented lines, e.g.:
@@ -67,7 +67,9 @@ def _polyfit(x: np.ndarray, y: np.ndarray, deg: int) -> np.ndarray:
     x = np.asarray(x, float)
     y = np.asarray(y, float)
     if x.size < deg + 1:
-        raise RuntimeError(f"Need at least {deg+1} points for deg={deg}, got {x.size}")
+        raise RuntimeError(
+            f"Need at least {deg + 1} points for deg={deg}, got {x.size}"
+        )
     return np.polyfit(x, y, deg)
 
 
@@ -97,7 +99,9 @@ class PairRejectorDialog(QtWidgets.QDialog):
         # Keep the data model simple: store pairs and a separate active mask.
         # Disabled pairs can be persisted in the same file as commented records.
         self._pairs = [(x0, lam, blend) for (x0, lam, blend, _disabled) in pairs_full]
-        self._active = [not bool(_disabled) for (_x0, _lam, _blend, _disabled) in pairs_full]
+        self._active = [
+            not bool(_disabled) for (_x0, _lam, _blend, _disabled) in pairs_full
+        ]
 
         # --- layout ---
         lay = QtWidgets.QVBoxLayout(self)
@@ -113,7 +117,9 @@ class PairRejectorDialog(QtWidgets.QDialog):
         self.spin_deg = QtWidgets.QSpinBox()
         self.spin_deg.setRange(2, 10)
         self.spin_deg.setValue(self.poly_deg)
-        self.spin_deg.setToolTip("Polynomial degree for quick 1D fit used in this QC tool")
+        self.spin_deg.setToolTip(
+            "Polynomial degree for quick 1D fit used in this QC tool"
+        )
         head.addWidget(QtWidgets.QLabel("deg:"))
         head.addWidget(self.spin_deg)
 
@@ -197,8 +203,14 @@ class PairRejectorDialog(QtWidgets.QDialog):
             self.table.insertRow(i)
 
             chk = QtWidgets.QTableWidgetItem("")
-            chk.setFlags(QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
-            chk.setCheckState(QtCore.Qt.Checked if self._active[i] else QtCore.Qt.Unchecked)
+            chk.setFlags(
+                QtCore.Qt.ItemIsUserCheckable
+                | QtCore.Qt.ItemIsEnabled
+                | QtCore.Qt.ItemIsSelectable
+            )
+            chk.setCheckState(
+                QtCore.Qt.Checked if self._active[i] else QtCore.Qt.Unchecked
+            )
             self.table.setItem(i, 0, chk)
 
             def _it(v: str) -> QtWidgets.QTableWidgetItem:
@@ -221,7 +233,7 @@ class PairRejectorDialog(QtWidgets.QDialog):
         it = self.table.item(row, 0)
         if it is None:
             return
-        self._active[row] = (it.checkState() == QtCore.Qt.Checked)
+        self._active[row] = it.checkState() == QtCore.Qt.Checked
         self.recalculate()
 
     def _restore_all(self) -> None:
@@ -242,8 +254,16 @@ class PairRejectorDialog(QtWidgets.QDialog):
 
     def recalculate(self) -> None:
         deg = int(self.spin_deg.value())
-        x_all = np.array([p[0] for p in self._pairs], float) if self._pairs else np.array([])
-        lam_all = np.array([p[1] for p in self._pairs], float) if self._pairs else np.array([])
+        x_all = (
+            np.array([p[0] for p in self._pairs], float)
+            if self._pairs
+            else np.array([])
+        )
+        lam_all = (
+            np.array([p[1] for p in self._pairs], float)
+            if self._pairs
+            else np.array([])
+        )
         active = np.array(self._active, bool) if self._pairs else np.array([], bool)
 
         self.fig.clear()
@@ -259,7 +279,9 @@ class PairRejectorDialog(QtWidgets.QDialog):
 
         x_use = x_all[active]
         if x_use.size < deg + 1:
-            self.lbl_stats.setText(f"Need ≥{deg+1} active pairs for deg={deg} (now {x_use.size})")
+            self.lbl_stats.setText(
+                f"Need ≥{deg + 1} active pairs for deg={deg} (now {x_use.size})"
+            )
             # still show which points are active
             ax.scatter(x_use, np.zeros_like(x_use), s=28)
             self.canvas.draw()
@@ -314,7 +336,11 @@ class PairRejectorDialog(QtWidgets.QDialog):
                     cell.setForeground(QtGui.QBrush(QtGui.QColor(220, 220, 220)))
         self.table.blockSignals(False)
 
-        rms = float(np.sqrt(np.mean(resid_all[used_all] ** 2))) if np.any(used_all) else float("nan")
+        rms = (
+            float(np.sqrt(np.mean(resid_all[used_all] ** 2)))
+            if np.any(used_all)
+            else float("nan")
+        )
         self.lbl_stats.setText(
             f"Active: {int(active.sum())}/{len(active)}   Used(inliers): {int(np.sum(used_all))}   deg={deg}   RMS={rms:.3f} Å"
         )
@@ -322,9 +348,13 @@ class PairRejectorDialog(QtWidgets.QDialog):
         ax.scatter(x_all[used_all], resid_all[used_all], s=34, label="used (inliers)")
         m_clip = active & (~used_all)
         if m_clip.any():
-            ax.scatter(x_all[m_clip], resid_all[m_clip], s=28, marker="o", label="clipped")
+            ax.scatter(
+                x_all[m_clip], resid_all[m_clip], s=28, marker="o", label="clipped"
+            )
         if (~active).any():
-            ax.scatter(x_all[~active], resid_all[~active], s=28, marker="x", label="disabled")
+            ax.scatter(
+                x_all[~active], resid_all[~active], s=28, marker="x", label="disabled"
+            )
         ax.legend(frameon=False, loc="best")
         self.fig.tight_layout()
         self.canvas.draw()
@@ -349,7 +379,9 @@ class PairRejectorDialog(QtWidgets.QDialog):
 
         try:
             _, used_local = robust_polyfit_1d(
-                x_act, lam_act, deg,
+                x_act,
+                lam_act,
+                deg,
                 weights=w_act,
                 sigma_clip=3.0,
                 maxiter=10,
@@ -373,7 +405,9 @@ class PairRejectorDialog(QtWidgets.QDialog):
         if not self._pairs:
             return
         default = self.pairs_path.with_name(self.pairs_path.stem + ".cleaned.txt")
-        fn, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save cleaned pairs", str(default), "Text files (*.txt)")
+        fn, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save cleaned pairs", str(default), "Text files (*.txt)"
+        )
         if not fn:
             return
         out = Path(fn)

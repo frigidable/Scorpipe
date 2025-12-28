@@ -45,7 +45,16 @@ def ensure_work_layout(work_dir: str | Path) -> WorkLayout:
     calib_legacy = wd / "calib"
     report_legacy = wd / "report"
 
-    for p in [raw, calibs, science, products, qc, products_qc, calib_legacy, report_legacy]:
+    for p in [
+        raw,
+        calibs,
+        science,
+        products,
+        qc,
+        products_qc,
+        calib_legacy,
+        report_legacy,
+    ]:
         p.mkdir(parents=True, exist_ok=True)
 
     return WorkLayout(

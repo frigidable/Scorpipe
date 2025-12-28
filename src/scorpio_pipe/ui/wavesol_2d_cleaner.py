@@ -64,13 +64,19 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
         # Group control points into spectral lines using rounded wavelength keys
         lam_key = np.round(self._lam, 3)
         keys, inv = np.unique(lam_key, return_inverse=True)
-        centers = np.array([float(np.nanmedian(self._lam[inv == j])) for j in range(len(keys))], dtype=float)
+        centers = np.array(
+            [float(np.nanmedian(self._lam[inv == j])) for j in range(len(keys))],
+            dtype=float,
+        )
         order = np.argsort(centers)
         rev = np.empty_like(order)
         rev[order] = np.arange(order.size)
         self._line_id = rev[inv]
         self._unique_lines = centers[order]
-        self._active = {float(l0): (not any(abs(float(l0) - r) <= 0.25 for r in self._rejected0)) for l0 in self._unique_lines}
+        self._active = {
+            float(l0): (not any(abs(float(l0) - r) <= 0.25 for r in self._rejected0))
+            for l0 in self._unique_lines
+        }
 
         # UI
         root = QtWidgets.QHBoxLayout(self)
@@ -98,7 +104,9 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
         # plotting
         from matplotlib.figure import Figure
         from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-        from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
+        from matplotlib.backends.backend_qtagg import (
+            NavigationToolbar2QT as NavigationToolbar,
+        )
         from scorpio_pipe.plot_style import mpl_style
 
         self._mpl_style = mpl_style
@@ -110,7 +118,9 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
         # View toggle: in "final" mode we hide rejected lines AND show only the
         # points actually used by the robust fit. This makes the plot visually
         # consistent with the stage's residuals_2d.png (QC).
-        self.chk_hide_rejected = QtWidgets.QCheckBox("Fit-consistent view (inliers only)")
+        self.chk_hide_rejected = QtWidgets.QCheckBox(
+            "Fit-consistent view (inliers only)"
+        )
         self.chk_hide_rejected.setChecked(True)
         right.addWidget(self.chk_hide_rejected)
 
@@ -121,7 +131,9 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
         right.addWidget(self.lbl_rms)
 
         # buttons
-        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        bb = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        )
         right.addWidget(bb)
 
         bb.accepted.connect(self.accept)
@@ -160,8 +172,7 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
         m = np.isfinite(x) & np.isfinite(y) & np.isfinite(lam) & np.isfinite(score)
         return x[m], y[m], lam[m], score[m]
 
-
-    def save_plots(self, outdir: Path, stem: str = 'wavesol2d_clean') -> list[Path]:
+    def save_plots(self, outdir: Path, stem: str = "wavesol2d_clean") -> list[Path]:
         """Save two diagnostic PNGs to `outdir`.
 
         1) `*_audit.png` — all points shown; rejected lines stay grey (best for audit).
@@ -183,7 +194,7 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
             pass
         p1 = outdir / f"{stem}_audit.png"
         try:
-            self.fig.savefig(p1, dpi=180, bbox_inches='tight')
+            self.fig.savefig(p1, dpi=180, bbox_inches="tight")
             saved.append(p1)
         except Exception:
             pass
@@ -196,7 +207,7 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
             pass
         p2 = outdir / f"{stem}_final.png"
         try:
-            self.fig.savefig(p2, dpi=180, bbox_inches='tight')
+            self.fig.savefig(p2, dpi=180, bbox_inches="tight")
             saved.append(p2)
         except Exception:
             pass
@@ -225,7 +236,9 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
             n = int(np.sum(np.abs(self._lam - l0) < 1e-6))
             it = QtWidgets.QListWidgetItem(f"{l0:9.2f} Å   (N={n})")
             it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
-            it.setCheckState(QtCore.Qt.Checked if self._active.get(l0, True) else QtCore.Qt.Unchecked)
+            it.setCheckState(
+                QtCore.Qt.Checked if self._active.get(l0, True) else QtCore.Qt.Unchecked
+            )
             it.setData(QtCore.Qt.UserRole, l0)
             self.list_lines.addItem(it)
         self.list_lines.blockSignals(False)
@@ -244,7 +257,7 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
 
     def _on_item_changed(self, item: QtWidgets.QListWidgetItem) -> None:
         l0 = float(item.data(QtCore.Qt.UserRole))
-        self._active[l0] = (item.checkState() == QtCore.Qt.Checked)
+        self._active[l0] = item.checkState() == QtCore.Qt.Checked
         self._recompute_and_redraw()
 
     def _on_plot_click(self, event) -> None:
@@ -304,7 +317,10 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
 
         # fit both quickly
         pow_coeff, pow_meta, pow_used = robust_polyfit_2d_power(
-            x, y, lam, int(self._cfg.power_deg),
+            x,
+            y,
+            lam,
+            int(self._cfg.power_deg),
             weights=w,
             sigma_clip=float(self._cfg.power_sigma_clip),
             maxiter=int(self._cfg.power_maxiter),
@@ -314,7 +330,11 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
         pow_rms = float(np.sqrt(np.mean(pow_dlam[pow_used] ** 2)))
 
         cheb_C, cheb_meta, cheb_used = robust_polyfit_2d_cheb(
-            x, y, lam, int(self._cfg.cheb_degx), int(self._cfg.cheb_degy),
+            x,
+            y,
+            lam,
+            int(self._cfg.cheb_degx),
+            int(self._cfg.cheb_degy),
             weights=w,
             sigma_clip=float(self._cfg.cheb_sigma_clip),
             maxiter=int(self._cfg.cheb_maxiter),
@@ -378,10 +398,14 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
 
         # QC-like global stats (on inliers used by the robust fit).
         resid_used = dlam_all[used_all & _np.isfinite(dlam_all)]
-        rms_used = float(_np.sqrt(_np.mean(resid_used ** 2))) if resid_used.size else float("nan")
+        rms_used = (
+            float(_np.sqrt(_np.mean(resid_used**2)))
+            if resid_used.size
+            else float("nan")
+        )
         w_used = _np.asarray(self._score, float)[used_all & _np.isfinite(dlam_all)]
         wrms_used = (
-            float(_np.sqrt(_np.sum(w_used * (resid_used ** 2)) / _np.sum(w_used)))
+            float(_np.sqrt(_np.sum(w_used * (resid_used**2)) / _np.sum(w_used)))
             if resid_used.size and _np.sum(w_used) > 0
             else float("nan")
         )
@@ -462,21 +486,64 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
                 text_rows.append((y_text, col, lam0, mu, sd))
 
             for y_text, col, *_ in text_rows:
-                ax.axhline(y=y_text, xmin=0.0, xmax=1.0, color=col, linestyle=":", linewidth=0.9, alpha=0.35, zorder=0)
+                ax.axhline(
+                    y=y_text,
+                    xmin=0.0,
+                    xmax=1.0,
+                    color=col,
+                    linestyle=":",
+                    linewidth=0.9,
+                    alpha=0.35,
+                    zorder=0,
+                )
 
             self.fig.canvas.draw()
             trans = mtransforms.blended_transform_factory(ax.transAxes, ax.transData)
             y_top = ax.get_ylim()[1]
             x_col1 = 1.02
             x_col2 = 1.02 + 0.18
-            ax.text(x_col1, y_top + 0.1, "λ", transform=trans, ha="left", va="bottom", fontsize=11)
-            ax.text(x_col2, y_top + 0.1, "Δλ [Å]", transform=trans, ha="left", va="bottom", fontsize=11)
+            ax.text(
+                x_col1,
+                y_top + 0.1,
+                "λ",
+                transform=trans,
+                ha="left",
+                va="bottom",
+                fontsize=11,
+            )
+            ax.text(
+                x_col2,
+                y_top + 0.1,
+                "Δλ [Å]",
+                transform=trans,
+                ha="left",
+                va="bottom",
+                fontsize=11,
+            )
 
             for y_text, col, lam0, mu, sd in text_rows:
-                ax.text(x_col1, y_text, f"{lam0:7.2f} Å", color=col, transform=trans, ha="left", va="center", fontsize=10)
+                ax.text(
+                    x_col1,
+                    y_text,
+                    f"{lam0:7.2f} Å",
+                    color=col,
+                    transform=trans,
+                    ha="left",
+                    va="center",
+                    fontsize=10,
+                )
                 s = f"{mu:+.2f} ± {sd:.2f}" if _np.isfinite(mu) else "—"
                 s = s.replace("-", "−")
-                ax.text(x_col2, y_text, s, color=col, transform=trans, ha="left", va="center", fontsize=10)
+                ax.text(
+                    x_col2,
+                    y_text,
+                    s,
+                    color=col,
+                    transform=trans,
+                    ha="left",
+                    va="center",
+                    fontsize=10,
+                )
 
             self.fig.tight_layout()
 

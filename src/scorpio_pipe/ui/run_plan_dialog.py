@@ -3,7 +3,6 @@
 Shows what tasks will run and which will be skipped in resume mode.
 """
 
-
 from __future__ import annotations
 
 
@@ -54,7 +53,9 @@ class RunPlanDialog(QtWidgets.QDialog):
         bar.addWidget(self.btn_refresh)
 
         self.table = QtWidgets.QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["Task", "Decision", "Reason", "Key outputs"]) 
+        self.table.setHorizontalHeaderLabels(
+            ["Task", "Decision", "Reason", "Key outputs"]
+        )
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
@@ -76,9 +77,15 @@ class RunPlanDialog(QtWidgets.QDialog):
         resume = bool(self.chk_resume.isChecked())
         force = bool(self.chk_force.isChecked())
 
-        ok_icon = self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogApplyButton)
-        skip_icon = self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ArrowRight)
-        warn_icon = self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning)
+        ok_icon = self.style().standardIcon(
+            QtWidgets.QStyle.StandardPixmap.SP_DialogApplyButton
+        )
+        skip_icon = self.style().standardIcon(
+            QtWidgets.QStyle.StandardPixmap.SP_ArrowRight
+        )
+        warn_icon = self.style().standardIcon(
+            QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning
+        )
 
         for name in DEFAULT_TASK_ORDER:
             if name not in TASKS:
@@ -90,7 +97,11 @@ class RunPlanDialog(QtWidgets.QDialog):
             ps = products_for_task(self._cfg, name)
             outs = ", ".join([p.key for p in ps]) if ps else "—"
 
-            reason = "products exist" if will_skip else ("forced" if force and complete else "")
+            reason = (
+                "products exist"
+                if will_skip
+                else ("forced" if force and complete else "")
+            )
             decision = "SKIP" if will_skip else "RUN"
 
             r = self.table.rowCount()

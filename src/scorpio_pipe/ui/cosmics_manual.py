@@ -69,7 +69,7 @@ def _load_mask(path: Path, shape: tuple[int, int]) -> np.ndarray:
         ny = min(shape[0], m.shape[0])
         nx = min(shape[1], m.shape[1])
         out = np.zeros(shape, dtype=bool)
-        out[:ny, :nx] = (m[:ny, :nx] != 0)
+        out[:ny, :nx] = m[:ny, :nx] != 0
         return out
     except Exception:
         return np.zeros(shape, dtype=bool)
@@ -80,7 +80,13 @@ def _write_mask(path: Path, mask: np.ndarray) -> None:
     fits.writeto(path, np.asarray(mask, dtype=np.uint8), overwrite=True)
 
 
-def _write_clean(path: Path, data: np.ndarray, *, hdr: Optional[fits.Header] = None, history: Optional[str] = None) -> None:
+def _write_clean(
+    path: Path,
+    data: np.ndarray,
+    *,
+    hdr: Optional[fits.Header] = None,
+    history: Optional[str] = None,
+) -> None:
     h = hdr.copy() if hdr is not None else fits.Header()
     if history:
         h["HISTORY"] = history
@@ -120,7 +126,11 @@ class CosmicsManualDialog(QtWidgets.QDialog):
         self.cfg = load_config_any(cfg)
         self.work_dir = _work_dir_from_cfg(self.cfg)
 
-        c = self.cfg.get("cosmics", {}) if isinstance(self.cfg.get("cosmics"), dict) else {}
+        c = (
+            self.cfg.get("cosmics", {})
+            if isinstance(self.cfg.get("cosmics"), dict)
+            else {}
+        )
         self.replace_r = int(c.get("manual_replace_r", c.get("la_replace_r", 2)))
         self.replace_r = max(1, min(25, self.replace_r))
 
@@ -253,13 +263,19 @@ class CosmicsManualDialog(QtWidgets.QDialog):
                 self._hdr = hdul[0].header.copy()
             self._img = np.asarray(read_image_smart(p), dtype=np.float32)
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Manual Cosmics", f"Failed to read FITS: {p}\n\n{e}")
+            QtWidgets.QMessageBox.critical(
+                self, "Manual Cosmics", f"Failed to read FITS: {p}\n\n{e}"
+            )
             self._img = None
             self._hdr = None
             return
 
         if self._img.ndim != 2:
-            QtWidgets.QMessageBox.critical(self, "Manual Cosmics", f"Expected 2D image, got shape={self._img.shape}")
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Manual Cosmics",
+                f"Expected 2D image, got shape={self._img.shape}",
+            )
             self._img = None
             return
 
@@ -295,11 +311,19 @@ class CosmicsManualDialog(QtWidgets.QDialog):
             return
         p = self._paths[self.frame_idx]
         base = p.name
-        auto_frac = float(self._auto_mask.mean()) if self._auto_mask is not None else 0.0
-        man_frac = float(self._manual_mask.mean()) if self._manual_mask is not None else 0.0
-        fin = float(((self._auto_mask | self._manual_mask).mean()) if (self._auto_mask is not None and self._manual_mask is not None) else 0.0)
+        auto_frac = (
+            float(self._auto_mask.mean()) if self._auto_mask is not None else 0.0
+        )
+        man_frac = (
+            float(self._manual_mask.mean()) if self._manual_mask is not None else 0.0
+        )
+        fin = float(
+            ((self._auto_mask | self._manual_mask).mean())
+            if (self._auto_mask is not None and self._manual_mask is not None)
+            else 0.0
+        )
         self.lbl_info.setText(
-            f"{self.kind} | frame {self.frame_idx+1}/{len(self._paths)} | {base} | "
+            f"{self.kind} | frame {self.frame_idx + 1}/{len(self._paths)} | {base} | "
             f"auto={auto_frac:.4f}, manual={man_frac:.4f}, final={fin:.4f}"
         )
 
@@ -313,18 +337,31 @@ class CosmicsManualDialog(QtWidgets.QDialog):
                 vmin, vmax = np.nanpercentile(finite, [5, 99])
             else:
                 vmin, vmax = None, None
-            self.ax.imshow(self._img, origin="lower", aspect="auto", cmap="gray", vmin=vmin, vmax=vmax)
-            self.ax.set_title("Manual cosmics: draw rectangle → Enter apply, Ctrl+Z undo")
+            self.ax.imshow(
+                self._img,
+                origin="lower",
+                aspect="auto",
+                cmap="gray",
+                vmin=vmin,
+                vmax=vmax,
+            )
+            self.ax.set_title(
+                "Manual cosmics: draw rectangle → Enter apply, Ctrl+Z undo"
+            )
             self.ax.set_xlabel("X (pix)")
             self.ax.set_ylabel("Y (pix)")
 
             # overlay masks
             if self._auto_mask is not None:
                 m = np.ma.masked_where(~self._auto_mask, self._auto_mask)
-                self.ax.imshow(m, origin="lower", aspect="auto", cmap="Reds", alpha=0.22)
+                self.ax.imshow(
+                    m, origin="lower", aspect="auto", cmap="Reds", alpha=0.22
+                )
             if self._manual_mask is not None:
                 m = np.ma.masked_where(~self._manual_mask, self._manual_mask)
-                self.ax.imshow(m, origin="lower", aspect="auto", cmap="Oranges", alpha=0.30)
+                self.ax.imshow(
+                    m, origin="lower", aspect="auto", cmap="Oranges", alpha=0.30
+                )
 
         self.canvas.draw_idle()
 
@@ -339,8 +376,12 @@ class CosmicsManualDialog(QtWidgets.QDialog):
         def _on_select(eclick, erelease):
             if self._img is None:
                 return
-            x0, x1 = _safe_int_bounds(eclick.xdata or 0, erelease.xdata or 0, lo=0, hi=self._img.shape[1] - 1)
-            y0, y1 = _safe_int_bounds(eclick.ydata or 0, erelease.ydata or 0, lo=0, hi=self._img.shape[0] - 1)
+            x0, x1 = _safe_int_bounds(
+                eclick.xdata or 0, erelease.xdata or 0, lo=0, hi=self._img.shape[1] - 1
+            )
+            y0, y1 = _safe_int_bounds(
+                eclick.ydata or 0, erelease.ydata or 0, lo=0, hi=self._img.shape[0] - 1
+            )
             self._last_rect = (y0, y1, x0, x1)
 
         self._selector = RectangleSelector(
@@ -381,7 +422,9 @@ class CosmicsManualDialog(QtWidgets.QDialog):
         # inpaint pixels in the rectangle that are newly manual
         try:
             mean_map = _boxcar_mean2d_masked(self._img, m_final, r=int(self.replace_r))
-            self._img[rect][self._manual_mask[rect]] = mean_map[rect][self._manual_mask[rect]]
+            self._img[rect][self._manual_mask[rect]] = mean_map[rect][
+                self._manual_mask[rect]
+            ]
         except Exception:
             # fallback: replace by median of unmasked pixels in rect
             rr = self._img[rect]
@@ -468,5 +511,9 @@ class CosmicsManualDialog(QtWidgets.QDialog):
         h["MANCR"] = (True, "Manual cosmics edits applied")
         h["MANCRR"] = (int(self.replace_r), "Manual replace radius")
         h["MANCRPX"] = (int(self._manual_mask.sum()), "Manual masked pixels")
-        _write_clean(p, self._img, hdr=h, history="scorpio_pipe manual cosmics: replaced pixels in user rectangles")
-
+        _write_clean(
+            p,
+            self._img,
+            hdr=h,
+            history="scorpio_pipe manual cosmics: replaced pixels in user rectangles",
+        )

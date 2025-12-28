@@ -15,12 +15,15 @@ log = logging.getLogger(__name__)
 
 # --------------------------- IO helpers ---------------------------
 
+
 def _ensure_dir(p: Path) -> Path:
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 
-def _read_hand_pairs(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def _read_hand_pairs(
+    path: Path,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Read `hand_pairs.txt` written by LineID GUI.
 
     Returns
@@ -43,7 +46,7 @@ def _read_hand_pairs(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np
             continue
 
         s_low = s.lower()
-        blend = ("blend" in s_low)
+        blend = "blend" in s_low
         is_dis = ("disabled" in s_low) or ("reject" in s_low) or ("rejected" in s_low)
 
         # Allow disabled pairs to be kept as commented numeric records, e.g.:
@@ -77,6 +80,7 @@ def _read_hand_pairs(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np
 
 # --------------------------- 1D solution ---------------------------
 
+
 def robust_polyfit_1d(
     x: np.ndarray,
     y: np.ndarray,
@@ -95,11 +99,15 @@ def robust_polyfit_1d(
     mask = np.isfinite(x) & np.isfinite(y)
 
     xw, yw = x[mask].copy(), y[mask].copy()
-    ww = (np.ones_like(xw) if weights is None else np.asarray(weights, float)[mask].copy())
+    ww = (
+        np.ones_like(xw) if weights is None else np.asarray(weights, float)[mask].copy()
+    )
     ww = np.where(np.isfinite(ww) & (ww > 0), ww, 0.0)
 
     if xw.size < deg + 1:
-        raise RuntimeError(f"Need at least {deg+1} points for deg={deg}, got {xw.size}")
+        raise RuntimeError(
+            f"Need at least {deg + 1} points for deg={deg}, got {xw.size}"
+        )
 
     used = np.ones_like(xw, bool)
     for _ in range(maxiter):
@@ -108,7 +116,7 @@ def robust_polyfit_1d(
         s = float(np.std(resid[used]))
         if not np.isfinite(s) or s <= 0:
             break
-        new_used = (np.abs(resid) <= sigma_clip * s)
+        new_used = np.abs(resid) <= sigma_clip * s
         if new_used.sum() == used.sum():
             break
         used = new_used
@@ -132,7 +140,11 @@ def _plot_wavesol_1d(
     import matplotlib.pyplot as plt
     from scorpio_pipe.plot_style import mpl_style
 
-    disabled_mask = disabled_mask if disabled_mask is not None else np.zeros_like(used_mask, dtype=bool)
+    disabled_mask = (
+        disabled_mask
+        if disabled_mask is not None
+        else np.zeros_like(used_mask, dtype=bool)
+    )
 
     x_used = x[used_mask]
     lam_used = lam[used_mask]
@@ -147,14 +159,23 @@ def _plot_wavesol_1d(
 
         n_dis = int(np.sum(disabled_mask))
         ax1.set_title(
-            f"{title}  (deg={len(coeffs)-1}, N_used={len(x_used)}, N_disabled={n_dis}, RMS={rms:.3f} Å)"
+            f"{title}  (deg={len(coeffs) - 1}, N_used={len(x_used)}, N_disabled={n_dis}, RMS={rms:.3f} Å)"
         )
         ax1.scatter(x_used, lam_used, s=26, label="pairs (used)")
         clipped_mask = (~used_mask) & (~disabled_mask)
         if np.any(clipped_mask):
-            ax1.scatter(x[clipped_mask], lam[clipped_mask], s=22, marker="x", label="clipped")
+            ax1.scatter(
+                x[clipped_mask], lam[clipped_mask], s=22, marker="x", label="clipped"
+            )
         if np.any(disabled_mask):
-            ax1.scatter(x[disabled_mask], lam[disabled_mask], s=22, marker="o", alpha=0.5, label="disabled")
+            ax1.scatter(
+                x[disabled_mask],
+                lam[disabled_mask],
+                s=22,
+                marker="o",
+                alpha=0.5,
+                label="disabled",
+            )
         xx = np.linspace(float(np.nanmin(x)), float(np.nanmax(x)), 1200)
         ax1.plot(xx, np.polyval(coeffs, xx), lw=1.6, label="model")
         ax1.set_ylabel("Wavelength [Å]")
@@ -173,12 +194,13 @@ def _plot_wavesol_1d(
 
 # --------------------------- 2D tracing (xcorr) ---------------------------
 
+
 def _parabolic_subpix(v: np.ndarray, i: int) -> float:
     """Sub-pixel parabola peak position around i."""
     if i <= 0 or i >= len(v) - 1:
         return 0.0
     y0, y1, y2 = float(v[i - 1]), float(v[i]), float(v[i + 1])
-    denom = (y0 - 2.0 * y1 + y2)
+    denom = y0 - 2.0 * y1 + y2
     if denom == 0.0:
         return 0.0
     return 0.5 * (y0 - y2) / denom
@@ -309,6 +331,7 @@ def trace_lines_2d_cc(
 
 # --------------------------- 2D fit (power + Chebyshev) ---------------------------
 
+
 def _scale_to_unit(v: np.ndarray) -> tuple[np.ndarray, tuple[float, float]]:
     v = np.asarray(v, float)
     vmin, vmax = float(np.nanmin(v)), float(np.nanmax(v))
@@ -347,7 +370,9 @@ def robust_polyfit_2d_cheb(
     lam = lam[m0]
 
     if x.size < (degx + 1) * (degy + 1):
-        raise RuntimeError(f"Not enough control points for degx={degx},degy={degy}: N={x.size}")
+        raise RuntimeError(
+            f"Not enough control points for degx={degx},degy={degy}: N={x.size}"
+        )
 
     xs, (xo, xscl) = _scale_to_unit(x)
     ys, (yo, yscl) = _scale_to_unit(y)
@@ -371,7 +396,7 @@ def robust_polyfit_2d_cheb(
         s = float(np.std(resid[used]))
         if not np.isfinite(s) or s <= 0:
             break
-        new_used = (np.abs(resid) <= sigma_clip * s)
+        new_used = np.abs(resid) <= sigma_clip * s
         if new_used.sum() == used.sum():
             break
         used = new_used
@@ -385,15 +410,24 @@ def robust_polyfit_2d_cheb(
     C = coeff_vec.reshape((degx + 1, degy + 1))
     # keep both short and "program style" keys for compatibility
     meta = {
-        "xo": float(xo), "xscl": float(xscl), "yo": float(yo), "yscl": float(yscl),
-        "x_off": float(xo), "x_s": float(xscl), "y_off": float(yo), "y_s": float(yscl),
-        "degx": int(degx), "degy": int(degy),
+        "xo": float(xo),
+        "xscl": float(xscl),
+        "yo": float(yo),
+        "yscl": float(yscl),
+        "x_off": float(xo),
+        "x_s": float(xscl),
+        "y_off": float(yo),
+        "y_s": float(yscl),
+        "degx": int(degx),
+        "degy": int(degy),
         "kind": "chebyshev",
     }
     return C, meta, used
 
 
-def polyval2d_cheb(x: np.ndarray, y: np.ndarray, C: np.ndarray, meta: dict[str, float]) -> np.ndarray:
+def polyval2d_cheb(
+    x: np.ndarray, y: np.ndarray, C: np.ndarray, meta: dict[str, float]
+) -> np.ndarray:
     """Evaluate Chebyshev 2D model with stored scaling."""
     xs = (np.asarray(x, float) - float(meta["x_off"])) / float(meta["x_s"])
     ys = (np.asarray(y, float) - float(meta["y_off"])) / float(meta["y_s"])
@@ -438,13 +472,15 @@ def robust_polyfit_2d_power(
     terms = _terms_total_degree(deg)
     npar = len(terms)
     if x.size < npar:
-        raise RuntimeError(f"Not enough control points for power deg={deg}: N={x.size}, npar={npar}")
+        raise RuntimeError(
+            f"Not enough control points for power deg={deg}: N={x.size}, npar={npar}"
+        )
 
     xs, (xo, xscl) = _scale_to_unit(x)
     ys, (yo, yscl) = _scale_to_unit(y)
 
     # Vandermonde
-    A = np.vstack([(xs ** i) * (ys ** j) for (i, j) in terms]).T  # (N, npar)
+    A = np.vstack([(xs**i) * (ys**j) for (i, j) in terms]).T  # (N, npar)
     if weights is None:
         ww = np.ones_like(lam)
     else:
@@ -463,7 +499,7 @@ def robust_polyfit_2d_power(
         s = float(np.std(resid[used]))
         if not np.isfinite(s) or s <= 0:
             break
-        new_used = (np.abs(resid) <= float(sigma_clip) * s)
+        new_used = np.abs(resid) <= float(sigma_clip) * s
         if new_used.sum() == used.sum():
             break
         used = new_used
@@ -475,8 +511,10 @@ def robust_polyfit_2d_power(
     coeff, *_ = np.linalg.lstsq(Aw, bw, rcond=None)
 
     meta: dict[str, float | int | list] = {
-        "x_off": float(xo), "x_s": float(xscl),
-        "y_off": float(yo), "y_s": float(yscl),
+        "x_off": float(xo),
+        "x_s": float(xscl),
+        "y_off": float(yo),
+        "y_s": float(yscl),
         "deg": int(deg),
         "terms": [(int(i), int(j)) for (i, j) in terms],
         "kind": "power",
@@ -484,7 +522,9 @@ def robust_polyfit_2d_power(
     return coeff, meta, used
 
 
-def polyval2d_power(x: np.ndarray, y: np.ndarray, coeff: np.ndarray, meta: dict[str, float | int | list]) -> np.ndarray:
+def polyval2d_power(
+    x: np.ndarray, y: np.ndarray, coeff: np.ndarray, meta: dict[str, float | int | list]
+) -> np.ndarray:
     """Evaluate total-degree 2D polynomial model with stored scaling."""
     xs = (np.asarray(x, float) - float(meta["x_off"])) / float(meta["x_s"])
     ys = (np.asarray(y, float) - float(meta["y_off"])) / float(meta["y_s"])
@@ -495,7 +535,7 @@ def polyval2d_power(x: np.ndarray, y: np.ndarray, coeff: np.ndarray, meta: dict[
     out = np.zeros_like(xs, dtype=float)
     for c, ij in zip(np.asarray(coeff, float), terms):
         i, j = int(ij[0]), int(ij[1])
-        out += float(c) * (xs ** i) * (ys ** j)
+        out += float(c) * (xs**i) * (ys**j)
     return out
 
 
@@ -584,7 +624,9 @@ def _plot_residuals_2d(
         for r in rejected_lines_A:
             active_point &= np.abs(lams_all - float(r)) > 0.25
     m_rms = used_mask & active_point
-    rms = float(np.sqrt(np.mean(dlam_all[m_rms] ** 2))) if np.any(m_rms) else float("nan")
+    rms = (
+        float(np.sqrt(np.mean(dlam_all[m_rms] ** 2))) if np.any(m_rms) else float("nan")
+    )
 
     cmap = LinearSegmentedColormap.from_list("blue_to_red", ["blue", "red"])
     colors = cmap(np.linspace(0.0, 1.0, max(1, len(uniq))))
@@ -627,7 +669,14 @@ def _plot_residuals_2d(
 
             ax.plot(d_sorted, y_disp, lw=1.1, color=col)
             step_pts = max(1, len(y_disp) // 160)
-            ax.scatter(d_sorted[::step_pts], y_disp[::step_pts], s=3, color=col, alpha=0.85, linewidths=0.0)
+            ax.scatter(
+                d_sorted[::step_pts],
+                y_disp[::step_pts],
+                s=3,
+                color=col,
+                alpha=0.85,
+                linewidths=0.0,
+            )
 
             good = np.isfinite(dk)
             if int(np.count_nonzero(good)) >= 2:
@@ -641,21 +690,64 @@ def _plot_residuals_2d(
 
         # helper lines at label heights
         for y_text, col, *_ in text_rows:
-            ax.axhline(y=y_text, xmin=0.0, xmax=1.0, color=col, linestyle=":", linewidth=0.9, alpha=0.35, zorder=0)
+            ax.axhline(
+                y=y_text,
+                xmin=0.0,
+                xmax=1.0,
+                color=col,
+                linestyle=":",
+                linewidth=0.9,
+                alpha=0.35,
+                zorder=0,
+            )
 
         fig.canvas.draw()
         trans = mtransforms.blended_transform_factory(ax.transAxes, ax.transData)
         y_top = ax.get_ylim()[1]
         x_col1 = 1.02
         x_col2 = 1.02 + 0.22
-        ax.text(x_col1, y_top + 0.1, "λ", transform=trans, ha="left", va="bottom", fontsize=11)
-        ax.text(x_col2, y_top + 0.1, "Δλ [Å]", transform=trans, ha="left", va="bottom", fontsize=11)
+        ax.text(
+            x_col1,
+            y_top + 0.1,
+            "λ",
+            transform=trans,
+            ha="left",
+            va="bottom",
+            fontsize=11,
+        )
+        ax.text(
+            x_col2,
+            y_top + 0.1,
+            "Δλ [Å]",
+            transform=trans,
+            ha="left",
+            va="bottom",
+            fontsize=11,
+        )
 
         for y_text, col, lam0, mu, sd in text_rows:
-            ax.text(x_col1, y_text, f"{lam0:7.2f} Å", color=col, transform=trans, ha="left", va="center", fontsize=10)
+            ax.text(
+                x_col1,
+                y_text,
+                f"{lam0:7.2f} Å",
+                color=col,
+                transform=trans,
+                ha="left",
+                va="center",
+                fontsize=10,
+            )
             s = f"{mu:+.2f} ± {sd:.2f}" if np.isfinite(mu) else "—"
             s = s.replace("-", "−")
-            ax.text(x_col2, y_text, s, color=col, transform=trans, ha="left", va="center", fontsize=10)
+            ax.text(
+                x_col2,
+                y_text,
+                s,
+                color=col,
+                transform=trans,
+                ha="left",
+                va="center",
+                fontsize=10,
+            )
 
         fig.tight_layout()
         fig.savefig(outpng, dpi=150, bbox_inches="tight", pad_inches=0.05)
@@ -768,6 +860,7 @@ def _plot_residuals_vs_lambda(
         fig.savefig(outpng, dpi=150)
         plt.close(fig)
 
+
 def _plot_residuals_vs_y(
     y_all: np.ndarray,
     dlam_all: np.ndarray,
@@ -806,6 +899,7 @@ def _plot_residuals_vs_y(
         fig.savefig(outpng, dpi=150)
         plt.close(fig)
 
+
 def _plot_residual_hist(
     dlam_all: np.ndarray,
     used_mask: np.ndarray,
@@ -836,7 +930,9 @@ def _plot_residual_hist(
         fig.savefig(outpng, dpi=150)
         plt.close(fig)
 
+
 # --------------------------- public stage ---------------------------
+
 
 @dataclass
 class WaveSolutionResult:
@@ -965,7 +1061,9 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
     w_fit = w_blend_all[active_pairs]
 
     coeffs1d, used_fit = robust_polyfit_1d(
-        x_fit, lam_fit, deg1d,
+        x_fit,
+        lam_fit,
+        deg1d,
         weights=w_fit,
         sigma_clip=float(wcfg.get("poly_sigma_clip", 3.0)),
         maxiter=int(wcfg.get("poly_maxiter", 10)),
@@ -994,7 +1092,11 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
         dlamdx_med = float(np.median(np.abs(dlamdx)))
     else:
         dlamdx_med = float("nan")
-    rms1d_px = float(rms1d / dlamdx_med) if np.isfinite(dlamdx_med) and dlamdx_med > 0 else float("nan")
+    rms1d_px = (
+        float(rms1d / dlamdx_med)
+        if np.isfinite(dlamdx_med) and dlamdx_med > 0
+        else float("nan")
+    )
     # robust sigma estimate (MAD → σ)
     if resid_used.size:
         med = float(np.median(resid_used))
@@ -1004,33 +1106,51 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
         sig_mad = float("nan")
     # weighted RMS (blend-weight aware)
     w_used = w_blend_all[used_mask]
-    wrms1d = float(np.sqrt(np.sum(w_used * (resid_used**2)) / np.sum(w_used))) if resid_used.size and np.sum(w_used) > 0 else float("nan")
+    wrms1d = (
+        float(np.sqrt(np.sum(w_used * (resid_used**2)) / np.sum(w_used)))
+        if resid_used.size and np.sum(w_used) > 0
+        else float("nan")
+    )
 
-    wavesol1d_json.write_text(json.dumps({
-        "deg": int(deg1d),
-        "coeffs_polyval": [float(c) for c in coeffs1d],  # highest order first
-        "rms_A": float(rms1d),
-        "rms_px": float(rms1d_px),
-        "wrms_A": float(wrms1d),
-        "sigma_mad_A": float(sig_mad),
-        "dispersion_A_per_px": float(dlamdx_med),
-        "n_pairs": int(x_all.size),
-        "n_used": int(np.sum(used_mask)),
-        "n_disabled": int(np.sum(is_disabled_all)),
-    }, indent=2, ensure_ascii=False), encoding="utf-8")
+    wavesol1d_json.write_text(
+        json.dumps(
+            {
+                "deg": int(deg1d),
+                "coeffs_polyval": [float(c) for c in coeffs1d],  # highest order first
+                "rms_A": float(rms1d),
+                "rms_px": float(rms1d_px),
+                "wrms_A": float(wrms1d),
+                "sigma_mad_A": float(sig_mad),
+                "dispersion_A_per_px": float(dlamdx_med),
+                "n_pairs": int(x_all.size),
+                "n_used": int(np.sum(used_mask)),
+                "n_disabled": int(np.sum(is_disabled_all)),
+            },
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
 
     poly1d_resid_csv = outdir / "residuals_1d.csv"
-    rows = np.column_stack([
-        x_all,
-        lam_all,
-        resid_all,
-        used_mask.astype(int),
-        is_blend_all.astype(int),
-        is_disabled_all.astype(int),
-    ])
-    np.savetxt(poly1d_resid_csv, rows, delimiter=",",
-               header="x_pix,lambda_A,delta_lambda_A,used,blend,disabled",
-               comments="", fmt="%.6f")
+    rows = np.column_stack(
+        [
+            x_all,
+            lam_all,
+            resid_all,
+            used_mask.astype(int),
+            is_blend_all.astype(int),
+            is_disabled_all.astype(int),
+        ]
+    )
+    np.savetxt(
+        poly1d_resid_csv,
+        rows,
+        delimiter=",",
+        header="x_pix,lambda_A,delta_lambda_A,used,blend,disabled",
+        comments="",
+        fmt="%.6f",
+    )
 
     # 2D: trace lines and fit a 2D model (power + Chebyshev, like the reference program)
     img2d = fits.getdata(superneon_fits, memmap=False).astype(float)
@@ -1053,7 +1173,9 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
     # previously saved control points.
     control_points_csv = outdir / "control_points_2d.csv"
 
-    def _load_control_points_csv(p: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+    def _load_control_points_csv(
+        p: Path,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
         try:
             arr = np.genfromtxt(p, delimiter=",", names=True, dtype=float)
             x = np.asarray(arr["x_pix"], float)
@@ -1075,7 +1197,11 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
         return x, y, lam, score
 
     use_cached_cp = bool(wcfg.get("use_cached_control_points", True))
-    cached = _load_control_points_csv(control_points_csv) if (use_cached_cp and control_points_csv.exists()) else None
+    cached = (
+        _load_control_points_csv(control_points_csv)
+        if (use_cached_cp and control_points_csv.exists())
+        else None
+    )
     if cached is not None:
         xs_cp, ys_cp, lams_cp, scores = cached
     else:
@@ -1097,7 +1223,7 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
     min_pts = int(wcfg.get("trace_min_pts", 120))
     keep = np.ones_like(xs_cp, bool)
     for lam0 in np.unique(lams_cp):
-        m = (np.abs(lams_cp - lam0) < 1e-6)
+        m = np.abs(lams_cp - lam0) < 1e-6
         if m.sum() < min_pts:
             keep[m] = False
 
@@ -1112,10 +1238,17 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
     crop_y = int(wcfg.get("edge_crop_y", 12))
     if crop_x > 0 or crop_y > 0:
         m_edge = (
-            (xs_cp >= crop_x) & (xs_cp <= (W - 1 - crop_x)) &
-            (ys_cp >= crop_y) & (ys_cp <= (H - 1 - crop_y))
+            (xs_cp >= crop_x)
+            & (xs_cp <= (W - 1 - crop_x))
+            & (ys_cp >= crop_y)
+            & (ys_cp <= (H - 1 - crop_y))
         )
-        xs_cp, ys_cp, lams_cp, scores = xs_cp[m_edge], ys_cp[m_edge], lams_cp[m_edge], scores[m_edge]
+        xs_cp, ys_cp, lams_cp, scores = (
+            xs_cp[m_edge],
+            ys_cp[m_edge],
+            lams_cp[m_edge],
+            scores[m_edge],
+        )
 
     # Save control points for QC / interactive cleanup (after all basic filtering).
     # This file is the *single source of truth* for the interactive 2D cleaner.
@@ -1132,7 +1265,9 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
         )
 
     if xs_cp.size < 50:
-        raise RuntimeError("Too few 2D control points after filtering; try lowering trace_min_pts / amp_thresh.")
+        raise RuntimeError(
+            "Too few 2D control points after filtering; try lowering trace_min_pts / amp_thresh."
+        )
 
     # --------- fit both 2D models and select the best (or forced by config) ---------
     # Apply manual rejection at the *fit* stage, while still keeping all control points
@@ -1140,9 +1275,14 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
     fit_mask = np.ones_like(xs_cp, bool)
     if rej:
         for r in rej:
-            fit_mask &= (np.abs(lams_cp - float(r)) > 0.25)
+            fit_mask &= np.abs(lams_cp - float(r)) > 0.25
 
-    xs_fit, ys_fit, lams_fit, scores_fit = xs_cp[fit_mask], ys_cp[fit_mask], lams_cp[fit_mask], scores[fit_mask]
+    xs_fit, ys_fit, lams_fit, scores_fit = (
+        xs_cp[fit_mask],
+        ys_cp[fit_mask],
+        lams_cp[fit_mask],
+        scores[fit_mask],
+    )
 
     if xs_fit.size < 50:
         raise RuntimeError(
@@ -1153,29 +1293,51 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
     w2 = np.sqrt(np.clip(scores_fit, 0, None))
 
     # Power (total degree)
-    pow_deg = int(wcfg.get("power_deg", max(int(wcfg.get("cheb_degx", 5)), int(wcfg.get("cheb_degy", 3)))))
+    pow_deg = int(
+        wcfg.get(
+            "power_deg",
+            max(int(wcfg.get("cheb_degx", 5)), int(wcfg.get("cheb_degy", 3))),
+        )
+    )
     pow_coeff, pow_meta, pow_used_fit = robust_polyfit_2d_power(
-        xs_fit, ys_fit, lams_fit, pow_deg,
+        xs_fit,
+        ys_fit,
+        lams_fit,
+        pow_deg,
         weights=w2,
-        sigma_clip=float(wcfg.get("power_sigma_clip", wcfg.get("cheb_sigma_clip", 3.0))),
+        sigma_clip=float(
+            wcfg.get("power_sigma_clip", wcfg.get("cheb_sigma_clip", 3.0))
+        ),
         maxiter=int(wcfg.get("power_maxiter", wcfg.get("cheb_maxiter", 10))),
     )
     pow_pred_fit = polyval2d_power(xs_fit, ys_fit, pow_coeff, pow_meta)
     pow_resid_fit = pow_pred_fit - lams_fit
-    pow_rms = float(np.sqrt(np.mean(pow_resid_fit[pow_used_fit] ** 2))) if np.any(pow_used_fit) else float("nan")
+    pow_rms = (
+        float(np.sqrt(np.mean(pow_resid_fit[pow_used_fit] ** 2)))
+        if np.any(pow_used_fit)
+        else float("nan")
+    )
 
     # Chebyshev
     degx = int(wcfg.get("cheb_degx", 5))
     degy = int(wcfg.get("cheb_degy", 3))
     cheb_C, cheb_meta, cheb_used_fit = robust_polyfit_2d_cheb(
-        xs_fit, ys_fit, lams_fit, degx, degy,
+        xs_fit,
+        ys_fit,
+        lams_fit,
+        degx,
+        degy,
         weights=w2,
         sigma_clip=float(wcfg.get("cheb_sigma_clip", 3.0)),
         maxiter=int(wcfg.get("cheb_maxiter", 10)),
     )
     cheb_pred_fit = polyval2d_cheb(xs_fit, ys_fit, cheb_C, cheb_meta)
     cheb_resid_fit = cheb_pred_fit - lams_fit
-    cheb_rms = float(np.sqrt(np.mean(cheb_resid_fit[cheb_used_fit] ** 2))) if np.any(cheb_used_fit) else float("nan")
+    cheb_rms = (
+        float(np.sqrt(np.mean(cheb_resid_fit[cheb_used_fit] ** 2)))
+        if np.any(cheb_used_fit)
+        else float("nan")
+    )
 
     # Expand used masks to all control points (rejected lines → used=0)
     pow_used = np.zeros_like(xs_cp, bool)
@@ -1202,8 +1364,21 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
         resid2d = pow_resid
         model_payload = {
             "kind": "power",
-            "power": {"deg": int(pow_meta.get("deg", pow_deg)), "coeff": [float(c) for c in np.asarray(pow_coeff).tolist()], "meta": pow_meta, "rms_A": float(pow_rms), "n_used": int(np.sum(pow_used))},
-            "chebyshev": {"degx": int(degx), "degy": int(degy), "C": cheb_C.tolist(), "meta": cheb_meta, "rms_A": float(cheb_rms), "n_used": int(np.sum(cheb_used))},
+            "power": {
+                "deg": int(pow_meta.get("deg", pow_deg)),
+                "coeff": [float(c) for c in np.asarray(pow_coeff).tolist()],
+                "meta": pow_meta,
+                "rms_A": float(pow_rms),
+                "n_used": int(np.sum(pow_used)),
+            },
+            "chebyshev": {
+                "degx": int(degx),
+                "degy": int(degy),
+                "C": cheb_C.tolist(),
+                "meta": cheb_meta,
+                "rms_A": float(cheb_rms),
+                "n_used": int(np.sum(cheb_used)),
+            },
         }
         # lambda map with correct (x,y) shape
         YY, XX = np.mgrid[0:H, 0:W]
@@ -1213,26 +1388,55 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
         resid2d = cheb_resid
         model_payload = {
             "kind": "chebyshev",
-            "power": {"deg": int(pow_meta.get("deg", pow_deg)), "coeff": [float(c) for c in np.asarray(pow_coeff).tolist()], "meta": pow_meta, "rms_A": float(pow_rms), "n_used": int(np.sum(pow_used))},
-            "chebyshev": {"degx": int(degx), "degy": int(degy), "C": cheb_C.tolist(), "meta": cheb_meta, "rms_A": float(cheb_rms), "n_used": int(np.sum(cheb_used))},
+            "power": {
+                "deg": int(pow_meta.get("deg", pow_deg)),
+                "coeff": [float(c) for c in np.asarray(pow_coeff).tolist()],
+                "meta": pow_meta,
+                "rms_A": float(pow_rms),
+                "n_used": int(np.sum(pow_used)),
+            },
+            "chebyshev": {
+                "degx": int(degx),
+                "degy": int(degy),
+                "C": cheb_C.tolist(),
+                "meta": cheb_meta,
+                "rms_A": float(cheb_rms),
+                "n_used": int(np.sum(cheb_used)),
+            },
         }
         YY, XX = np.mgrid[0:H, 0:W]
         lam_map = polyval2d_cheb(XX, YY, cheb_C, cheb_meta).astype(np.float32)
 
     wavesol2d_json = outdir / "wavesolution_2d.json"
-    wavesol2d_json.write_text(json.dumps({
-        **model_payload,
-        "n_points": int(xs_cp.size),
-        "n_used": int(np.sum(used2d)),
-        "rms_A": float(np.sqrt(np.mean(resid2d[used2d] ** 2))) if np.any(used2d) else float("nan"),
-        "rejected_lines_A": rej,
-    }, indent=2, ensure_ascii=False), encoding="utf-8")
+    wavesol2d_json.write_text(
+        json.dumps(
+            {
+                **model_payload,
+                "n_points": int(xs_cp.size),
+                "n_used": int(np.sum(used2d)),
+                "rms_A": float(np.sqrt(np.mean(resid2d[used2d] ** 2)))
+                if np.any(used2d)
+                else float("nan"),
+                "rejected_lines_A": rej,
+            },
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
 
     resid2d_csv = outdir / "residuals_2d.csv"
-    rows2 = np.column_stack([xs_cp, ys_cp, lams_cp, resid2d, used2d.astype(int), scores])
-    np.savetxt(resid2d_csv, rows2, delimiter=",",
-               header="x_pix,y_pix,lambda_A,delta_lambda_A,used,score",
-               comments="", fmt="%.6f")
+    rows2 = np.column_stack(
+        [xs_cp, ys_cp, lams_cp, resid2d, used2d.astype(int), scores]
+    )
+    np.savetxt(
+        resid2d_csv,
+        rows2,
+        delimiter=",",
+        header="x_pix,y_pix,lambda_A,delta_lambda_A,used,score",
+        comments="",
+        fmt="%.6f",
+    )
 
     lambda_map_fits = outdir / "lambda_map.fits"
     fits.writeto(lambda_map_fits, lam_map, overwrite=True)
@@ -1247,7 +1451,9 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
     used_active = used2d & mask_active_line & np.isfinite(resid2d)
     resid_used = resid2d[used_active]
 
-    rms2d_A = float(np.sqrt(np.mean(resid_used ** 2))) if resid_used.size else float("nan")
+    rms2d_A = (
+        float(np.sqrt(np.mean(resid_used**2))) if resid_used.size else float("nan")
+    )
     wrms2d_A = _weighted_rms(resid2d[used_active], scores[used_active])
     sig_mad_2d_A = _mad_sigma(resid_used)
 
@@ -1258,8 +1464,16 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
         if gx.size:
             disp2d_A_per_px = float(np.median(np.abs(gx)))
 
-    rms2d_px = float(rms2d_A / disp2d_A_per_px) if np.isfinite(disp2d_A_per_px) and disp2d_A_per_px > 0 else float("nan")
-    sig_mad_2d_px = float(sig_mad_2d_A / disp2d_A_per_px) if np.isfinite(disp2d_A_per_px) and disp2d_A_per_px > 0 else float("nan")
+    rms2d_px = (
+        float(rms2d_A / disp2d_A_per_px)
+        if np.isfinite(disp2d_A_per_px) and disp2d_A_per_px > 0
+        else float("nan")
+    )
+    sig_mad_2d_px = (
+        float(sig_mad_2d_A / disp2d_A_per_px)
+        if np.isfinite(disp2d_A_per_px) and disp2d_A_per_px > 0
+        else float("nan")
+    )
 
     resid2d_png = outdir / "residuals_2d.png"
     resid2d_audit_png = outdir / "residuals_2d_audit.png"
@@ -1323,22 +1537,26 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
     for lk in uniq:
         if any(abs(float(lk) - float(r)) <= 0.25 for r in rej):
             n_rejected_lines += 1
-    d2.update({
-        "qc": {
-            "rms_A": rms2d_A,
-            "wrms_A": wrms2d_A,
-            "robust_sigma_A": sig_mad_2d_A,
-            "rms_px": rms2d_px,
-            "robust_sigma_px": sig_mad_2d_px,
-            "dispersion_A_per_px": disp2d_A_per_px,
-            "n_lines": n_lines,
-            "n_rejected_lines": int(n_rejected_lines),
-            "n_active_lines": int(n_lines - n_rejected_lines),
-            "n_points": int(lams_cp.size),
-            "n_used_points": int(np.sum(used_active)),
+    d2.update(
+        {
+            "qc": {
+                "rms_A": rms2d_A,
+                "wrms_A": wrms2d_A,
+                "robust_sigma_A": sig_mad_2d_A,
+                "rms_px": rms2d_px,
+                "robust_sigma_px": sig_mad_2d_px,
+                "dispersion_A_per_px": disp2d_A_per_px,
+                "n_lines": n_lines,
+                "n_rejected_lines": int(n_rejected_lines),
+                "n_active_lines": int(n_lines - n_rejected_lines),
+                "n_points": int(lams_cp.size),
+                "n_used_points": int(np.sum(used_active)),
+            }
         }
-    })
-    wavesol2d_json.write_text(json.dumps(d2, indent=2, ensure_ascii=False), encoding="utf-8")
+    )
+    wavesol2d_json.write_text(
+        json.dumps(d2, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
 
     # Text report (for papers / traceability)
     lines: list[str] = []
@@ -1350,7 +1568,9 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
     lines.append(f"  wRMS: {wrms2d_A:.6g} Å")
     lines.append(f"  robust σ(MAD): {sig_mad_2d_A:.6g} Å  ({sig_mad_2d_px:.6g} px)")
     lines.append(f"  dispersion (median |dλ/dx|): {disp2d_A_per_px:.6g} Å/px")
-    lines.append(f"  lines: total={n_lines} active={n_lines-n_rejected_lines} rejected={n_rejected_lines}")
+    lines.append(
+        f"  lines: total={n_lines} active={n_lines - n_rejected_lines} rejected={n_rejected_lines}"
+    )
     lines.append(f"  points: total={int(lams_cp.size)} used={int(np.sum(used_active))}")
     if rej:
         lines.append("  rejected_lines_A:")
@@ -1366,15 +1586,17 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
         m_used = used2d & m_line & mask_active_line
         rr = resid2d[m_used]
         med = float(np.median(rr)) if rr.size else float("nan")
-        rms_line = float(np.sqrt(np.mean(rr ** 2))) if rr.size else float("nan")
-        lines.append(f"  {lam0:.3f}  {'REJECT' if is_rej else 'OK':6s}  {int(np.sum(m_used))}/{int(np.sum(m_line))}  {med:+.3g}  {rms_line:.3g}")
+        rms_line = float(np.sqrt(np.mean(rr**2))) if rr.size else float("nan")
+        lines.append(
+            f"  {lam0:.3f}  {'REJECT' if is_rej else 'OK':6s}  {int(np.sum(m_used))}/{int(np.sum(m_line))}  {med:+.3g}  {rms_line:.3g}"
+        )
     report_txt.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     # finalize counts / robust stats for 2D
     n_lines_total = int(n_lines)
     n_lines_rejected = int(n_rejected_lines)
     n_lines_used = int(n_lines_total - n_lines_rejected)
-    
+
     return WaveSolutionResult(
         wavesol_dir=outdir,
         lambda_map_fits=lambda_map_fits,

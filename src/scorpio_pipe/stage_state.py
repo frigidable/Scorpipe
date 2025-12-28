@@ -76,7 +76,9 @@ def compute_stage_hash(
 def is_stage_up_to_date(work_dir: Path, stage: str, expected_hash: str) -> bool:
     state = load_stage_state(work_dir)
     entry = get_stage_entry(state, stage)
-    return bool(entry and entry.get("status") == "ok" and entry.get("hash") == expected_hash)
+    return bool(
+        entry and entry.get("status") == "ok" and entry.get("hash") == expected_hash
+    )
 
 
 def record_stage_result(

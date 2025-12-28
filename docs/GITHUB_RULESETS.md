@@ -11,6 +11,7 @@ For the default branch (`~DEFAULT_BRANCH`) we enforce:
 - Code owner review (only for files that have CODEOWNERS entries)
 - Required status checks:
   - `CI / gate`
+  - `CI / dependency_review`
   - `CodeQL / analyze`
 
 Ruleset payload lives in:

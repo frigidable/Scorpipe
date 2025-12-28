@@ -26,7 +26,9 @@ from scorpio_pipe.stages.extract1d import run_extract1d
 
 def _write(path: Path, data: np.ndarray) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fits.PrimaryHDU(data=data.astype("float32", copy=False)).writeto(path, overwrite=True)
+    fits.PrimaryHDU(data=data.astype("float32", copy=False)).writeto(
+        path, overwrite=True
+    )
 
 
 def test_smoke_synthetic_chain():
@@ -51,8 +53,20 @@ def test_smoke_synthetic_chain():
         cfg = {
             "work_dir": str(work_dir),
             "frames": {"obj": [str(raw)]},
-            "linearize": {"dlambda_A": "auto", "save_per_exposure": True, "save_preview": True},
-            "roi": {"obj_y1": 6, "obj_y2": 9, "sky_y1": 1, "sky_y2": 4, "sky2_y1": 12, "sky2_y2": 15, "units": "px"},
+            "linearize": {
+                "dlambda_A": "auto",
+                "save_per_exposure": True,
+                "save_preview": True,
+            },
+            "roi": {
+                "obj_y1": 6,
+                "obj_y2": 9,
+                "sky_y1": 1,
+                "sky_y2": 4,
+                "sky2_y1": 12,
+                "sky2_y2": 15,
+                "units": "px",
+            },
             "sky_sub": {"save_per_exp_sky_model": False},
             "stack2d": {},
             "extract1d": {"mode": "boxcar", "aperture_half_width": 2},
