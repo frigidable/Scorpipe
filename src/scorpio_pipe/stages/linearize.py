@@ -864,6 +864,11 @@ def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel
         },
     }
 
+    # Backward-compatibility: older code/tests expect preview paths at top-level.
+    payload["preview_fits"] = str(preview_fits)
+    if preview_png.exists():
+        payload["preview_png"] = str(preview_png)
+
     # Wave grid metadata (used by downstream stages & external tooling)
     wave_grid_json = out_dir / "wave_grid.json"
     try:

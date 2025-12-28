@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use Scorpio Pipe (Scorpipe) in your research, please cite it."
+title: "Scorpio Pipe (Scorpipe)"
+type: software
+license: BSD-3-Clause
+version: "5.36.4"
+authors:
+  - name: "Scorpio Pipe contributors"
+abstract: >
+  Scorpio Pipe (Scorpipe) is a primary reduction pipeline for long-slit optical spectra,
+  developed for the SCORPIO family of focal reducer instruments at the 6-m BTA telescope.
+  It provides a GUI-driven workflow for calibration frames, wavelength solution, rectification
+  (linearization), and sky subtraction, with reproducible configuration and logs.
+keywords:
+  - astronomy
+  - spectroscopy
+  - data reduction
+  - long-slit
+  - SCORPIO
+  - BTA
