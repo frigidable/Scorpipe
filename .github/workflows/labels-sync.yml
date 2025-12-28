@@ -2,14 +2,13 @@ name: Labels sync
 
 on:
   workflow_dispatch:
+  schedule:
+    # Weekly maintenance sync
+    - cron: "17 04 * * 1"
   push:
     branches: ["main"]
     paths:
       - ".github/labels.yml"
-      - ".github/workflows/labels-sync.yml"
-  schedule:
-    # Weekly maintenance sync
-    - cron: "17 04 * * 1"
 
 permissions:
   contents: read
