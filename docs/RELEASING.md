@@ -69,9 +69,19 @@ git push origin vX.Y.Z
 
 2) Создай GitHub Release по тегу `vX.Y.Z` и вставь краткие notes из `CHANGELOG.md`.
 
+3) Убедись, что workflow релиза публикует полный набор артефактов:
+- Windows: `*.exe`, `*.zip`
+- Python (если присутствуют): `*.whl`, `*.tar.gz`
+- Доверие: `*.sbom.spdx.json`, `SHA256SUMS.txt` (и соответствующие attestations)
+
 ---
 
 ## 5) После релиза
 
 - Проверь, что артефакты релиза загрузились (setup.exe / zip и т.п.).
+- Проверь “пакет доверия” для артефактов:
+  - в Assets есть `release/*.sbom.spdx.json` и `SHA256SUMS.txt`;
+  - в `SHA256SUMS.txt` присутствуют хэши **и артефактов**, и их **SBOM**;
+  - в workflow релиза успешно прошли шаги **Attest SBOM** и **Attest build provenance** (attestations).
+- Если в релизе присутствуют Python‑дистрибутивы (`*.whl`, `*.tar.gz`), они должны публиковаться вместе с соответствующими SBOM/attestations (по умолчанию это уже поддержано release‑workflow’ом; важно лишь, чтобы файлы лежали в `release/`).
 - Если релиз включает миграции форматов/папок: добавь заметку в `docs/RUNBOOK.md`.

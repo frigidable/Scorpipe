@@ -16,14 +16,30 @@ updates:
         update-types:
           - "minor"
           - "patch"
-
-  - package-ecosystem: "pip"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-    labels:
-      - "dependencies"
-    groups:
-      python-deps:
-        patterns:
-          - "*"
+- package-ecosystem: "pip"
+  directory: "/"
+  schedule:
+    interval: "weekly"
+  # Ensure Dependabot opens *one* grouped PR for Python dependency updates.
+  open-pull-requests-limit: 1
+  labels:
+    - "dependencies"
+  # Default: group patch/minor updates only (avoid surprise breaking changes).
+  ignore:
+    - dependency-name: "*"
+      update-types: ["version-update:semver-major"]
+  groups:
+    python-deps:
+      applies-to: version-updates
+      patterns:
+        - "*"
+      update-types:
+        - "minor"
+        - "patch"
+  # To allow majors as a separate PR group, remove the ignore block above and add:
+  #   python-deps-major:
+  #     applies-to: version-updates
+  #     patterns:
+  #       - "*"
+  #     update-types:
+  #       - "major"
