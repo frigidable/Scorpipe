@@ -37,6 +37,12 @@ class Thresholds:
     cosmics_frac_warn: float = 0.03
     cosmics_frac_bad: float = 0.08
 
+    linearize_cov_nonzero_warn: float = 0.95
+    linearize_cov_nonzero_bad: float = 0.85
+
+    linearize_rejected_frac_warn: float = 0.10
+    linearize_rejected_frac_bad: float = 0.25
+
     def to_dict(self) -> Dict[str, float]:
         return {
             "wavesol_1d_rms_warn": float(self.wavesol_1d_rms_warn),
@@ -47,6 +53,10 @@ class Thresholds:
             "resid_2d_p95_bad": float(self.resid_2d_p95_bad),
             "cosmics_frac_warn": float(self.cosmics_frac_warn),
             "cosmics_frac_bad": float(self.cosmics_frac_bad),
+            "linearize_cov_nonzero_warn": float(self.linearize_cov_nonzero_warn),
+            "linearize_cov_nonzero_bad": float(self.linearize_cov_nonzero_bad),
+            "linearize_rejected_frac_warn": float(self.linearize_rejected_frac_warn),
+            "linearize_rejected_frac_bad": float(self.linearize_rejected_frac_bad),
         }
 
 
@@ -98,6 +108,7 @@ def _auto_scale_from_disperser(disperser: str | None) -> float:
 def compute_thresholds(cfg: Dict[str, Any]) -> Tuple[Thresholds, Dict[str, Any]]:
     """Compute thresholds and return (thresholds, meta)."""
 
+    # --- wavesolution auto-scaling (optional) ---
     w = cfg.get("wavesol") if isinstance(cfg.get("wavesol"), dict) else {}
     qc = (w or {}).get("qc") if isinstance((w or {}).get("qc"), dict) else {}
 
@@ -123,16 +134,28 @@ def compute_thresholds(cfg: Dict[str, Any]) -> Tuple[Thresholds, Dict[str, Any]]
                 resid_2d_p95_bad=thr.resid_2d_p95_bad * scale,
                 cosmics_frac_warn=thr.cosmics_frac_warn,
                 cosmics_frac_bad=thr.cosmics_frac_bad,
+                linearize_cov_nonzero_warn=thr.linearize_cov_nonzero_warn,
+                linearize_cov_nonzero_bad=thr.linearize_cov_nonzero_bad,
+                linearize_rejected_frac_warn=thr.linearize_rejected_frac_warn,
+                linearize_rejected_frac_bad=thr.linearize_rejected_frac_bad,
             )
 
-    overrides = (
-        (qc or {}).get("thresholds")
-        if isinstance((qc or {}).get("thresholds"), dict)
-        else {}
+    # --- user overrides (wavesol.qc.thresholds + linearize.qc.thresholds) ---
+    w_overrides = (
+        (qc or {}).get("thresholds") if isinstance((qc or {}).get("thresholds"), dict) else {}
     )
+
+    l = cfg.get("linearize") if isinstance(cfg.get("linearize"), dict) else {}
+    lqc = (l or {}).get("qc") if isinstance((l or {}).get("qc"), dict) else {}
+    l_overrides = (
+        (lqc or {}).get("thresholds") if isinstance((lqc or {}).get("thresholds"), dict) else {}
+    )
+
+    d = thr.to_dict()
     applied: Dict[str, float] = {}
-    if overrides:
-        d = thr.to_dict()
+    for overrides in (w_overrides, l_overrides):
+        if not overrides:
+            continue
         for k, v in overrides.items():
             kk = str(k).strip()
             try:
@@ -142,7 +165,8 @@ def compute_thresholds(cfg: Dict[str, Any]) -> Tuple[Thresholds, Dict[str, Any]]
             if kk in d:
                 d[kk] = vv
                 applied[kk] = vv
-        thr = Thresholds(**d)
+
+    thr = Thresholds(**d)
 
     meta = {
         "auto": auto,
@@ -281,6 +305,110 @@ def build_alerts(
                 }
             )
 
+
+
+    # Wavesolution: 2D RMS should not get significantly worse than 1D
+    try:
+        v1f = float(v1) if v1 is not None else None
+    except Exception:
+        v1f = None
+    try:
+        v2f = float(v2) if v2 is not None else None
+    except Exception:
+        v2f = None
+
+    if v1f is not None and v2f is not None:
+        if v1f > 0 and v2f > max(v1f * 1.30, thresholds.wavesol_2d_rms_warn):
+            alerts.append(
+                {
+                    "severity": "warn",
+                    "code": "QC_WAVESOL_RMS_INCREASED",
+                    "message": f"2D wavesolution RMS ({v2f:.4g} Å) is notably worse than 1D RMS ({v1f:.4g} Å). This may indicate a too-flexible/unstable 2D model or contaminated line list.",
+                    "value": {"rms_1d_A": v1f, "rms_2d_A": v2f},
+                }
+            )
+
+    # Wavelength-contract (units / reference) missing
+    wc = (metrics.get("wavesol_contract") or {}) if isinstance(metrics.get("wavesol_contract"), dict) else {}
+    if wc:
+        if not bool(wc.get("unit_ok", True)):
+            miss = wc.get("missing") or []
+            alerts.append(
+                {
+                    "severity": "bad",
+                    "code": "QC_WAVEUNIT_MISSING",
+                    "message": f"lambda_map is missing required WAVE header keys ({', '.join(map(str, miss)) if miss else 'unknown'}). Units/ref become ambiguous.",
+                    "missing": miss,
+                }
+            )
+
+    # Signature mismatches (ROI/bin/readout) from manifest
+    sig = (metrics.get("signatures") or {}) if isinstance(metrics.get("signatures"), dict) else {}
+    bad_groups = sig.get("bad_groups") if isinstance(sig.get("bad_groups"), list) else []
+    if bad_groups:
+        alerts.append(
+            {
+                "severity": "bad",
+                "code": "QC_SIGNATURE_MISMATCH",
+                "message": f"Frame signatures are inconsistent in: {', '.join(map(str, bad_groups))}. Masters/products are not physically compatible.",
+                "groups": bad_groups,
+            }
+        )
+
+    # Linearize coverage / rejected fraction (if available)
+    lin = (metrics.get("linearize") or {}) if isinstance(metrics.get("linearize"), dict) else {}
+    cov = (lin.get("coverage") or {}) if isinstance(lin.get("coverage"), dict) else {}
+    nz = cov.get("nonzero_frac")
+    try:
+        nzf = float(nz) if nz is not None else None
+    except Exception:
+        nzf = None
+    if nzf is not None:
+        sev = "ok"
+        if nzf <= thresholds.linearize_cov_nonzero_bad:
+            sev = "bad"
+        elif nzf <= thresholds.linearize_cov_nonzero_warn:
+            sev = "warn"
+        if sev in {"warn", "bad"}:
+            alerts.append(
+                {
+                    "severity": sev,
+                    "code": "QC_LINEARIZE_COVERAGE",
+                    "message": f"Linearize coverage nonzero fraction is {nzf:.4g} (warn≤{thresholds.linearize_cov_nonzero_warn:.3g}, bad≤{thresholds.linearize_cov_nonzero_bad:.3g}). Low coverage often means heavy masking, extrapolation cutoffs, or signature mismatch upstream.",
+                    "value": nzf,
+                }
+            )
+
+    st = (lin.get("stacking") or {}) if isinstance(lin.get("stacking"), dict) else {}
+    rj = st.get("rejected_fraction")
+    try:
+        rjf = float(rj) if rj is not None else None
+    except Exception:
+        rjf = None
+
+    if rjf is not None:
+        sev = _classify(
+            rjf, thresholds.linearize_rejected_frac_warn, thresholds.linearize_rejected_frac_bad
+        )
+        if sev in {"warn", "bad"}:
+            alerts.append(
+                {
+                    "severity": sev,
+                    "code": "QC_LINEARIZE_REJECTED",
+                    "message": f"Linearize stacking rejected fraction is {rjf:.4g} (warn≥{thresholds.linearize_rejected_frac_warn:.3g}, bad≥{thresholds.linearize_rejected_frac_bad:.3g}). Consider tuning sigma-clip parameters.",
+                    "value": rjf,
+                }
+            )
+
+    exp = (lin.get("exptime_policy") or {}) if isinstance(lin.get("exptime_policy"), dict) else {}
+    if exp.get("normalize_exptime") is False:
+        alerts.append(
+            {
+                "severity": "info",
+                "code": "QC_LINEARIZE_EXPTIME_POLICY",
+                "message": "Linearize EXPTIME normalization is disabled (output is not ADU/s). This can be fine, but makes cross-night comparisons harder.",
+            }
+        )
     # If there are no alerts, still include a soft message when metrics are empty.
     if not alerts and (not metrics or metrics == {}):
         alerts.append(

@@ -245,8 +245,10 @@ def _task_qc_report(
     _ = cancel_token
     layout = ensure_work_layout(out_dir)
     res = build_qc_report(cfg, out_dir=layout.qc)
-    # Prefer canonical html output
-    return Path(res.get("qc_html", layout.qc / "index.html"))
+    # build_qc_report historically returned Path; keep compatibility if it returns a dict
+    if isinstance(res, dict):
+        return Path(res.get("qc_html", layout.qc / "index.html"))
+    return Path(res)
 
 
 def _task_linearize(

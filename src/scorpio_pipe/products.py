@@ -215,6 +215,31 @@ def list_products(cfg: dict[str, Any]) -> list[Product]:
             "csv",
             optional=True,
         ),
+Product(
+    "superneon_shifts_csv",
+    "superneon",
+    wsol / "superneon_shifts.csv",
+    "csv",
+    optional=True,
+    description="Per-frame X shifts + basic QC for SuperNeon stacking",
+),
+Product(
+    "superneon_shifts_json",
+    "superneon",
+    wsol / "superneon_shifts.json",
+    "json",
+    optional=True,
+    description="Per-frame X shifts + QC (machine-readable)",
+),
+Product(
+    "superneon_qc_json",
+    "superneon",
+    wsol / "superneon_qc.json",
+    "json",
+    optional=True,
+    description="SuperNeon QC summary (SNR, shifts, saturation, clipping)",
+),
+
         Product(
             "lineid_template_csv",
             "lineid_prepare",

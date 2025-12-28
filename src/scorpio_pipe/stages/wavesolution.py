@@ -8,6 +8,7 @@ import logging
 import json
 import numpy as np
 from astropy.io import fits
+from scorpio_pipe.provenance import add_provenance
 from numpy.polynomial.chebyshev import chebvander2d, chebval2d
 
 log = logging.getLogger(__name__)
@@ -1439,8 +1440,6 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
     )
 
     lambda_map_fits = outdir / "lambda_map.fits"
-    fits.writeto(lambda_map_fits, lam_map, overwrite=True)
-
     lambda_map_png = outdir / "wavelength_matrix.png"
     _plot_wavelength_matrix(lam_map, lambda_map_png, title="2D wavelength map λ(x,y)")
 
@@ -1596,6 +1595,53 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
     n_lines_total = int(n_lines)
     n_lines_rejected = int(n_rejected_lines)
     n_lines_used = int(n_lines_total - n_lines_rejected)
+
+
+    # Write lambda_map FITS with explicit wavelength metadata (no heuristics downstream).
+    # This file is a *lookup image* λ(x,y) and not a rectified spectrum, but we still
+    # store wavelength unit/reference and QC cards for strict downstream behavior.
+    wave_unit_raw = str(wcfg.get("wave_unit", wcfg.get("waveunit", "Angstrom")) or "Angstrom").strip()
+    s = wave_unit_raw.lower().replace("å", "angstrom")
+    if s in {"a", "aa", "ang", "angs", "angstrom", "ångström", "angstroms"}:
+        wave_unit = "Angstrom"
+    elif s in {"nm", "nanometer", "nanometers"}:
+        wave_unit = "nm"
+    else:
+        wave_unit = wave_unit_raw
+
+    waveref = str(wcfg.get("wave_ref", wcfg.get("waveref", "air")) or "air").strip().lower()
+    if waveref not in {"air", "vacuum"}:
+        # keep but normalise to a safe default
+        waveref = "air"
+
+    # Convert internally-Angstrom lambda_map to requested output unit if needed
+    unit_scale = 1.0
+    if wave_unit == "nm":
+        unit_scale = 0.1  # 1 Å = 0.1 nm
+    lam_map_out = (lam_map * unit_scale).astype("float32")
+    rms2d_out = float(rms2d_A) * unit_scale
+    
+
+    lam_hdr = fits.Header()
+    lam_hdr["CTYPE1"] = ("WAVE", "Data are wavelengths (lookup map)")
+    lam_hdr["CUNIT1"] = (wave_unit, "Wavelength unit")
+    lam_hdr["WAVEUNIT"] = (wave_unit, "Wavelength unit (explicit)")
+    lam_hdr["WAVEREF"] = (waveref, "Wavelength reference (air/vacuum)")
+    lam_hdr["BUNIT"] = (wave_unit, "Unit of lambda_map pixel values")
+
+    # QC summary (2D fit)
+    lam_hdr["RMSA"] = (float(rms2d_out), "2D wavesol RMS in wavelength unit")
+    lam_hdr["RMSPX"] = (float(rms2d_px), "2D wavesol RMS in pixels")
+    lam_hdr["NLINE"] = (int(n_lines_used), "Number of active (used) lines")
+    lam_hdr["NREJ"] = (int(n_lines_rejected), "Number of rejected lines")
+    lam_hdr["NPTS"] = (int(lams_cp.size), "Number of traced control points")
+    lam_hdr["NUSED"] = (int(np.sum(used_active)), "Number of used control points")
+
+    lam_hdr = add_provenance(lam_hdr, cfg, stage="wavesolution")
+
+    fits.PrimaryHDU(data=lam_map_out, header=lam_hdr).writeto(
+        lambda_map_fits, overwrite=True
+    )
 
     return WaveSolutionResult(
         wavesol_dir=outdir,

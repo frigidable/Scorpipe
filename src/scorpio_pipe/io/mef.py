@@ -116,6 +116,14 @@ def write_sci_var_mask(
     shdr = fits.Header()
     if grid is not None:
         _apply_cards(shdr, grid.to_wcs_cards())
+    # Propagate key unit metadata to SCI for self-describing products.
+    # (VAR/MASK have different physical units, so we do not copy BUNIT there.)
+    for k in ("BUNIT", "WAVEUNIT", "WAVEREF"):
+        if k in phdr and k not in shdr:
+            try:
+                shdr[k] = phdr[k]
+            except Exception:
+                pass
     sci_hdu = fits.ImageHDU(
         data=np.asarray(sci, dtype=np.float32), header=shdr, name="SCI"
     )

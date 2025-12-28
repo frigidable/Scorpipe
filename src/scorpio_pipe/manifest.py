@@ -8,8 +8,41 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from scorpio_pipe.frame_signature import FrameSignature
 from scorpio_pipe.resource_utils import resolve_resource_maybe
 from scorpio_pipe.version import PIPELINE_VERSION, __version__
+
+
+
+def _signature_summary(paths: list[str]) -> dict[str, object]:
+    """Compute a compact signature summary for a list of FITS frames.
+
+    We intentionally treat missing metadata as 'unknown' and only enforce strict
+    equality when both sides provide a value.
+    """
+    p_list = [Path(p) for p in paths]
+    if not p_list:
+        return {"signature": None, "consistent": True, "mismatches": []}
+
+    sig0 = None
+    mismatches: list[dict[str, object]] = []
+    for p in p_list:
+        try:
+            sig = FrameSignature.from_path(p)
+        except Exception as e:
+            mismatches.append({"path": str(p), "error": f"read_failed: {e}"})
+            continue
+        if sig0 is None:
+            sig0 = sig
+            continue
+        if not sig.is_compatible_with(sig0):
+            mismatches.append({"path": str(p), "signature": sig.to_dict(), "diff": sig.diff(sig0)})
+
+    return {
+        "signature": sig0.to_dict() if sig0 is not None else None,
+        "consistent": len(mismatches) == 0,
+        "mismatches": mismatches[:10],
+    }
 
 
 def _md5_file(path: Path) -> str | None:
@@ -84,9 +117,13 @@ def build_manifest(*, cfg: dict, cfg_path: str | Path | None = None) -> Manifest
             if k == "__setup__":
                 continue
             if isinstance(v, list):
+                sig = _signature_summary([str(x) for x in v])
                 frames_summary[k] = {
                     "n": len(v),
                     "sample": [str(x) for x in v[:5]],
+                    "frame_signature": sig.get("signature"),
+                    "signature_consistent": bool(sig.get("consistent", True)),
+                    "signature_mismatches": sig.get("mismatches", []),
                 }
 
     # resources used by interactive lineid

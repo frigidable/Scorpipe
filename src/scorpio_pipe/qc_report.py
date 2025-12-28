@@ -50,12 +50,21 @@ def _fmt_seconds(s: float) -> str:
 
 
 def _metrics_wavesol(work_dir: Path, products: list[Product]) -> dict[str, Any]:
+    """Wavesolution & residual QC summary.
+
+    This function is intentionally tolerant to legacy product keys.
+    """
+
+    def _first_path(keys: set[str]) -> Path | None:
+        for p in products:
+            if p.key in keys and p.path.exists():
+                return p.path
+        return None
+
     m: dict[str, Any] = {}
 
-    p1 = next(
-        (p.path for p in products if p.key == "wavesol_1d_json" and p.path.exists()),
-        None,
-    )
+    # --- 1D / 2D wavesolution JSON ---
+    p1 = _first_path({"wavesolution_1d_json", "wavesol_1d_json"})
     if p1:
         js = _read_json(p1) or {}
         m["wavesol_1d"] = {
@@ -63,12 +72,10 @@ def _metrics_wavesol(work_dir: Path, products: list[Product]) -> dict[str, Any]:
             "rms_A": js.get("rms_A"),
             "n_pairs": js.get("n_pairs"),
             "n_used": js.get("n_used"),
+            "path": _rel(work_dir, p1),
         }
 
-    p2 = next(
-        (p.path for p in products if p.key == "wavesol_2d_json" and p.path.exists()),
-        None,
-    )
+    p2 = _first_path({"wavesolution_2d_json", "wavesol_2d_json"})
     if p2:
         js = _read_json(p2) or {}
         m2 = {
@@ -77,30 +84,168 @@ def _metrics_wavesol(work_dir: Path, products: list[Product]) -> dict[str, Any]:
             "n_points": js.get("n_points"),
             "n_used": js.get("n_used"),
             "rejected_lines_A": js.get("rejected_lines_A", []),
+            "path": _rel(work_dir, p2),
         }
-        # include both model RMS if present
         for k in ("power", "chebyshev"):
             if isinstance(js.get(k), dict):
                 m2[f"{k}_rms_A"] = js[k].get("rms_A")
         m["wavesol_2d"] = m2
 
-    # quick residual stats
-    pres = next(
-        (p.path for p in products if p.key == "residuals_2d" and p.path.exists()), None
-    )
+    # --- residual statistics from 2D residual CSV ---
+    pres = _first_path({"residuals_2d_csv", "residuals_2d"})
     if pres:
         arr = _read_csv_cols(pres, 4)
         if arr is not None and arr.size:
-            resid = np.asarray(arr[:, 3], float)
+            resid = arr[:, 3].astype(float)
             resid = resid[np.isfinite(resid)]
             if resid.size:
                 m["residuals_2d"] = {
                     "median_A": float(np.median(resid)),
                     "p95_abs_A": float(np.percentile(np.abs(resid), 95)),
                     "p99_abs_A": float(np.percentile(np.abs(resid), 99)),
+                    "path": _rel(work_dir, pres),
                 }
 
     return m
+
+
+
+def _product_path(products: list[Product], key: str) -> Path | None:
+    for p in products:
+        if p.key == key:
+            return p.path
+    return None
+
+
+def _product_path_any(products: list[Product], keys: tuple[str, ...], *, require_exists: bool = True) -> Path | None:
+    for k in keys:
+        p = _product_path(products, k)
+        if not p:
+            continue
+        if (not require_exists) or p.exists():
+            return p
+    return None
+
+
+def _metrics_calibs(work_dir: Path) -> dict[str, Any]:
+    """Calibration masters + signatures (Block 03).
+
+    Note: older done markers used `frame_signature`; newer tooling may expect
+    `used_signature`. We expose both here.
+    """
+    try:
+        from scorpio_pipe.work_layout import ensure_work_layout
+
+        layout = ensure_work_layout(work_dir)
+        out: dict[str, Any] = {}
+        for name in ("superbias", "superflat"):
+            done = layout.calibs / f"{name}_done.json"
+            if not done.exists():
+                continue
+            payload = _read_json(done) or {}
+            used = payload.get("used_signature") or payload.get("frame_signature")
+            exp = payload.get("expected_signature") or payload.get("expected_frame_signature")
+            out[name] = {
+                "done": _rel(work_dir, done),
+                "n_inputs": payload.get("n_inputs"),
+                "used_signature": used,
+                "expected_signature": exp,
+                "method": payload.get("method"),
+                "qc": payload.get("qc"),
+            }
+        return out
+    except Exception:
+        return {}
+
+
+
+def _metrics_superneon(work_dir: Path, products: list[Product]) -> dict[str, Any]:
+    qc_p = _product_path_any(products, ("superneon_qc_json",), require_exists=True)
+    shifts_p = _product_path_any(products, ("superneon_shifts_json",), require_exists=True)
+    out: dict[str, Any] = {}
+    if qc_p and qc_p.exists():
+        out["qc"] = _read_json(qc_p) or {}
+        out["qc"]["path"] = _rel(work_dir, qc_p)
+    if shifts_p and shifts_p.exists():
+        sj = _read_json(shifts_p) or {}
+        out["shifts"] = {
+            "summary": (sj.get("summary") if isinstance(sj, dict) else None),
+            "path": _rel(work_dir, shifts_p),
+        }
+    return out
+
+
+
+def _metrics_wavesol_contract(products: list[Product]) -> dict[str, Any]:
+    """Read unit/ref from lambda_map.fits header (Block 01)."""
+    p = _product_path_any(products, ("lambda_map", "lambda_map_fits"), require_exists=True)
+    if not p or not p.exists():
+        return {}
+    try:
+        from astropy.io import fits
+
+        hdr = fits.getheader(p, 0)
+    except Exception:
+        return {"path": str(p), "error": "failed_to_read_header"}
+
+    wave_unit = hdr.get("WAVEUNIT") or hdr.get("CUNIT1")
+    wave_ref = hdr.get("WAVEREF")
+    ctype1 = hdr.get("CTYPE1")
+    missing = []
+    if not wave_unit:
+        missing.append("WAVEUNIT/CUNIT1")
+    if not wave_ref:
+        missing.append("WAVEREF")
+    if str(ctype1 or "").upper() != "WAVE":
+        missing.append("CTYPE1=WAVE")
+
+    return {
+        "path": str(p),
+        "wave_unit": wave_unit,
+        "wave_ref": wave_ref,
+        "ctype1": ctype1,
+        "unit_ok": (len(missing) == 0),
+        "missing": missing,
+    }
+
+
+
+def _metrics_signatures(products: list[Product]) -> dict[str, Any]:
+    """FrameSignature consistency across input lists (manifest)."""
+    p = _product_path_any(
+        products,
+        (
+            "manifest",
+            "manifest_legacy",
+            "manifest_json",
+            "manifest_legacy_json",
+        ),
+        require_exists=True,
+    )
+    if not p or not p.exists():
+        return {}
+    mj = _read_json(p)
+    if not isinstance(mj, dict):
+        return {}
+
+    frames = mj.get("frames")
+    bad: list[dict[str, Any]] = []
+    if isinstance(frames, dict):
+        for k, v in frames.items():
+            if not isinstance(v, dict):
+                continue
+            if not bool(v.get("signature_consistent", True)):
+                bad.append(
+                    {
+                        "kind": k,
+                        "n": v.get("n"),
+                        "frame_signature": v.get("frame_signature"),
+                        "mismatches": v.get("signature_mismatches"),
+                    }
+                )
+
+    return {"manifest": str(p), "bad_groups": bad}
+
 
 
 def _metrics_cosmics(products: list[Product]) -> dict[str, Any]:
@@ -298,27 +443,38 @@ def _metrics_spec(products: list[Product]) -> dict[str, Any]:
 
 
 def _metrics_linearize(work_dir: Path, products: list[Product]) -> dict[str, Any]:
-    """Load linearize QC metrics if available.
+    """Load linearize QC metrics (Block 05).
 
-    The linearize stage writes work_dir/qc/linearize_qc.json (v5.18+).
+    The linearize stage writes work_dir/qc/linearize_qc.json.
     """
     try:
         p = next((x for x in products if x.key == "linearize_qc" and x.exists()), None)
         if p is None:
             return {}
-        import json
-
         data = json.loads(Path(p.path).read_text(encoding="utf-8"))
-        # keep only summary fields for the main QC report
-        summary = {
-            "grid": data.get("grid"),
-            "preview": data.get("preview"),
-            "per_exposure": data.get("per_exposure"),
-            "critical_ranges": data.get("critical_ranges"),
+        if not isinstance(data, dict):
+            return {}
+
+        # Keep only the stable, report-worthy subset.
+        out: dict[str, Any] = {
+            "preview": _rel(work_dir, Path(str(data.get("preview") or p.path))),
+            "wave0": data.get("wave0"),
+            "dw": data.get("dw"),
+            "nlam": data.get("nlam"),
+            "wave_unit": data.get("wave_unit"),
+            "wave_ref": data.get("wave_ref"),
+            "bunit": data.get("bunit"),
+            "exptime_policy": data.get("exptime_policy"),
+            "stacking": data.get("stacking"),
+            "coverage": data.get("coverage"),
+            "mask_summary": data.get("mask_summary"),
+            "noise": data.get("noise"),
+            "snr_abs": data.get("snr_abs"),
         }
-        return summary
+        return out
     except Exception:
         return {}
+
 
 
 def _html_escape(s: str) -> str:
@@ -491,9 +647,26 @@ def build_qc_report(
     metrics: dict[str, Any] = {}
     metrics.update(_metrics_wavesol(work_dir, products))
 
+    cal = _metrics_calibs(work_dir)
+    if cal:
+        metrics["calibs"] = cal
+
+    sig = _metrics_signatures(products)
+    if sig:
+        metrics["signatures"] = sig
+
+    sn = _metrics_superneon(work_dir, products)
+    if sn:
+        metrics["superneon"] = sn
+
+    wc = _metrics_wavesol_contract(products)
+    if wc:
+        metrics["wavesol_contract"] = wc
+
     lin = _metrics_linearize(work_dir, products)
     if lin:
         metrics["linearize"] = lin
+        metrics["linearize_summary"] = lin
     c = _metrics_cosmics(products)
     if c:
         metrics["cosmics"] = c
@@ -646,6 +819,13 @@ def build_qc_report(
           <div class='k'>Wavesol 1D RMS</div><div>{_html_escape(str(metrics.get("wavesol_1d", {}).get("rms_A", "—")))} Å</div>
           <div class='k'>Wavesol 2D RMS</div><div>{_html_escape(str(metrics.get("wavesol_2d", {}).get("rms_A", "—")))} Å</div>
           <div class='k'>2D model</div><div>{_html_escape(str(metrics.get("wavesol_2d", {}).get("kind", "—")))}</div>
+          <div class='k'>λ unit / ref</div><div>{_html_escape(str(metrics.get("wavesol_contract", {}).get("wave_unit", "—")))} · {_html_escape(str(metrics.get("wavesol_contract", {}).get("wave_ref", "—")))}</div>
+          <div class='k'>Linearize normalize EXPTIME</div><div>{_html_escape(str(metrics.get("linearize", {}).get("exptime_policy", {}).get("normalize_exptime", "—")))}</div>
+          <div class='k'>Linearize coverage (nonzero)</div><div>{_html_escape(str(metrics.get("linearize", {}).get("coverage", {}).get("nonzero_frac", "—")))}</div>
+          <div class='k'>Linearize rejected</div><div>{_html_escape(str(metrics.get("linearize", {}).get("stacking", {}).get("rejected_fraction", "—")))}</div>
+          <div class='k'>Superbias inputs</div><div>{_html_escape(str(metrics.get("calibs", {}).get("superbias", {}).get("n_inputs", "—")))}</div>
+          <div class='k'>Superflat inputs</div><div>{_html_escape(str(metrics.get("calibs", {}).get("superflat", {}).get("n_inputs", "—")))}</div>
+          <div class='k'>Signature mismatches</div><div>{_html_escape(str(len(metrics.get("signatures", {}).get("bad_groups", []))))}</div>
           <div class='k'>Cosmics replaced</div><div>{_html_escape(str(metrics.get("cosmics", {}).get("replaced_fraction", "—")))}</div>
           <div class='k'>Residuals p95 |Δλ|</div><div>{_html_escape(str(metrics.get("residuals_2d", {}).get("p95_abs_A", "—")))} Å</div>
           <div class='k'>Sky RMS (median)</div><div>{_html_escape(str(metrics.get("sky", {}).get("rms_sky_median", "—")))}</div>

@@ -1,3 +1,33 @@
+
+## v5.37.9
+
+- QC report: fixed product-key mismatches, now correctly aggregates wavesolution/linearize/manifest signatures into one JSON+HTML page.
+- Calibration done markers: added `used_signature` alias (keeps `frame_signature`) for consistency with QC tooling.
+
+## v5.37.8
+
+- QC report: unify calibration + wavesolution + linearize metrics into a single JSON/HTML “one page of truth” and add red-flag alerts (unit missing, signature mismatch, low coverage, RMS regression, etc.).
+- SuperNeon: if bias subtraction is enabled, require a valid superbias master (fail-fast, no silent skip).
+- Cosmics (laplacian mode): expose niter and edge protection parameters.
+
+## v5.37.7
+- Cosmics: added explicit `cosmics.method` = `current|laplacian`. The Laplacian mode uses a SciPy-based Laplacian detector and writes per-kind `qc.json` with mask statistics (requires `scorpio-pipe[science]`).
+
+## v5.37.6
+- Variance model: centralized GAIN/RDNOISE handling and made variance propagation physically consistent through flatfielding and linearize.
+
+## v5.37.5
+- Linearize: added EXPTIME normalization (ADU/s), sigma-clipped robust stacking across exposures, and expanded `linearize_qc.json`.
+
+## v5.37.4
+- SuperNeon now produces shift/QC machine-readable artifacts and strict FrameSignature validation.
+## v5.37.3
+
+### P0 — FrameSignature: strict calibration compatibility (ROI / binning / readout)
+- Introduced **FrameSignature** (shape + binning + ROI/window + readout) and added it to the reproducibility **manifest**.
+- Superbias and superflat now require **strictly compatible inputs**: no silent skipping, no implicit pad/crop.
+- Builders write `*_done.json` markers with the signature used to improve transparency and debugging.
+
 ## v5.36.4
 
 ### GitHub / Release process hardening

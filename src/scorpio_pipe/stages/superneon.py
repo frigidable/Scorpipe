@@ -4,12 +4,15 @@ from dataclasses import dataclass
 from pathlib import Path
 import sys
 import os
+import json
 from concurrent.futures import ThreadPoolExecutor
 import logging
 from typing import Any
 
 import numpy as np
 from astropy.io import fits
+
+from scorpio_pipe.frame_signature import FrameSignature
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +48,57 @@ def _load_fits(path: Path) -> tuple[np.ndarray, fits.Header]:
 def _save_fits(path: Path, data: np.ndarray, header: fits.Header | None = None) -> None:
     hdu = fits.PrimaryHDU(data=data.astype(np.float32), header=header)
     hdu.writeto(path, overwrite=True)
+
+def _estimate_saturation_level(hdr: fits.Header) -> float | None:
+    """Best-effort estimate of saturation ADU level.
+
+    SCORPIO FITS often stores unsigned 16-bit data with BZERO=32768.
+    In that case, the physical max is 65535 ADU. If signed 16-bit, max is 32767.
+    Returns None for non-integer formats.
+    """
+    try:
+        bitpix = int(hdr.get("BITPIX"))
+    except Exception:
+        return None
+    if bitpix != 16:
+        return None
+    bzero = hdr.get("BZERO")
+    if bzero is None:
+        return 32767.0
+    try:
+        bz = float(bzero)
+    except Exception:
+        bz = 0.0
+    if bz >= 32768.0:
+        return 65535.0
+    return 32767.0
+
+
+def _saturation_fraction(img: np.ndarray, sat_level: float | None) -> float:
+    if sat_level is None:
+        return 0.0
+    v = img[np.isfinite(img)]
+    if v.size == 0:
+        return 0.0
+    return float(np.mean(v >= (sat_level - 0.5)))
+
+
+def _write_csv(path: Path, header: str, rows: list[list[object]]) -> None:
+    lines = [header]
+    for r in rows:
+        out: list[str] = []
+        for v in r:
+            s = "" if v is None else str(v)
+            if "," in s or '"' in s:
+                s = '"' + s.replace('"', '""') + '"'
+            out.append(s)
+        lines.append(",".join(out))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
 
 
 def _percentile_stretch(img: np.ndarray, p1=1.0, p2=99.7) -> tuple[float, float]:
@@ -91,30 +145,42 @@ def _profile_x(img2d: np.ndarray, y0: int, y1: int) -> np.ndarray:
     return np.nanmedian(img2d[y0:y1, :], axis=0)
 
 
-def _xcorr_shift_1d(ref: np.ndarray, cur: np.ndarray, max_abs: int = 6) -> int:
-    """
-    Целочисленный сдвиг cur относительно ref по максимуму корреляции.
-    Ограничиваем поиск |shift|<=max_abs.
+def _xcorr_shift_1d(
+    ref: np.ndarray, cur: np.ndarray, max_abs: int = 6
+) -> tuple[int, float]:
+    """Integer X-shift cur relative to ref + a quality score.
+
+    The shift is found by maximizing FFT cross-correlation within |shift|<=max_abs.
+    The score is a dimensionless peak-to-RMS ratio of the correlation curve in the search window.
     """
     ref = np.asarray(ref, float)
     cur = np.asarray(cur, float)
-    # нормировка чтобы DC не доминировал
     ref = ref - np.nanmedian(ref)
     cur = cur - np.nanmedian(cur)
-    # корреляция через FFT
-    n = int(2 ** np.ceil(np.log2(ref.size + cur.size)))
+    ref = np.nan_to_num(ref, nan=0.0, posinf=0.0, neginf=0.0)
+    cur = np.nan_to_num(cur, nan=0.0, posinf=0.0, neginf=0.0)
+
+    n = int(2 ** int(np.ceil(np.log2(ref.size + cur.size))))
     fr = np.fft.rfft(ref, n=n)
     fc = np.fft.rfft(cur, n=n)
     cc = np.fft.irfft(fr * np.conj(fc), n=n)
-    # cc индексы: 0..n-1, "нулевой" лаг в 0
-    # переводим к лагам [-n/2..+n/2] удобнее через argmax около 0
+
     lags = np.arange(n)
-    # приведём лаги к signed
     signed = (lags + n // 2) % n - n // 2
     m = np.abs(signed) <= int(max_abs)
-    idx = np.argmax(cc[m])
-    shift = int(signed[m][idx])
-    return shift
+    cc_win = cc[m]
+    signed_win = signed[m]
+    if cc_win.size == 0:
+        return 0, 0.0
+
+    idx = int(np.argmax(cc_win))
+    shift = int(signed_win[idx])
+
+    peak = float(cc_win[idx])
+    rms = float(np.sqrt(np.mean(np.square(cc_win)))) if cc_win.size else 0.0
+    score = float(peak / (rms + 1e-12))
+    return shift, score
+
 
 
 def _shift_x_int(img: np.ndarray, dx: int) -> np.ndarray:
@@ -326,13 +392,15 @@ class SuperNeonResult:
 
 
 def build_superneon(cfg: dict[str, Any]) -> SuperNeonResult:
-    """
-    Требует в cfg:
-      - work_dir (str)
-      - frames.neon (list[str])
-      - calib.superbias_path (str)  [опционально]
-      - wavesol.profile_y (tuple[int,int]) [опционально]
-      - wavesol.xshift_max_abs (int) [опционально]
+    """Build SuperNeon (stacked arc/neon) as a true calibration product.
+
+    Guarantees strict physical compatibility (FrameSignature) between:
+    - all input neon frames
+    - neon frames and superbias (if bias_sub=True and superbias is available)
+
+    Produces, besides superneon.fits/png and peaks_candidates.csv:
+    - superneon_shifts.csv / superneon_shifts.json: per-frame X shifts + basic QC
+    - superneon_qc.json: aggregated QC summary
     """
     # work_dir: allow absolute, or relative to config_dir/cwd
     work_dir = Path(str(cfg["work_dir"]))
@@ -341,6 +409,7 @@ def build_superneon(cfg: dict[str, Any]) -> SuperNeonResult:
         work_dir = (base / work_dir).resolve()
     else:
         work_dir = work_dir.resolve()
+
     # disperser-specific layout (so multiple gratings can live in one work_dir)
     from scorpio_pipe.wavesol_paths import wavesol_dir
 
@@ -358,60 +427,114 @@ def build_superneon(cfg: dict[str, Any]) -> SuperNeonResult:
         superneon_cfg = {}
     bias_sub = bool(superneon_cfg.get("bias_sub", True))
 
-    # --- resolve superbias path robustly ---
-    # Supported conventions:
-    #   - calib/superbias.fits           (relative to work_dir)
-    #   - work/run1/calib/superbias.fits (relative to project root)
-    #   - absolute path
-    sb_raw = str((cfg.get("calib", {}) or {}).get("superbias_path", "")).strip()
-    superbias_path = Path(sb_raw) if sb_raw else Path("")
-    if sb_raw and not superbias_path.is_absolute():
-        base_cfg = Path(str(cfg.get("config_dir", "."))).resolve()
-        candidates = [
-            (work_dir / superbias_path).resolve(),
-            (base_cfg / superbias_path).resolve(),
-            _resolve_from_root(superbias_path),
-        ]
-        superbias_path = next((c for c in candidates if c.is_file()), candidates[0])
+    # Resolve superbias: prefer explicit calib.superbias_path, otherwise use canonical work_dir/calibs.
+    superbias_path_cfg = (cfg.get("calib", {}) or {}).get("superbias_path")
+    superbias_path: Path | None = None
+    if superbias_path_cfg:
+        superbias_path = Path(str(superbias_path_cfg)).expanduser()
+        if not superbias_path.is_absolute():
+            superbias_path = (work_dir / superbias_path).resolve()
+    else:
+        from scorpio_pipe.work_layout import ensure_work_layout
 
-    superbias = None
-    if bias_sub and superbias_path.is_file():
-        superbias, _ = _load_fits(superbias_path)
+        layout = ensure_work_layout(work_dir)
+        for cand in (layout.calibs / "superbias.fits", layout.calib_legacy / "superbias.fits"):
+            if cand.is_file():
+                superbias_path = cand
+                break
 
-    # грузим все neon (с вычитанием superbias, если совпадает shape)
-    frames = []
-    did_sub = False
-    ref_hdr = None
-    n_jobs = int((cfg.get("runtime", {}) or {}).get("n_jobs", 0) or 0)
+    superbias: np.ndarray | None = None
+    superbias_hdr: fits.Header | None = None
+    superbias_sig: FrameSignature | None = None
+    if bias_sub:
+        if superbias_path is None or not superbias_path.is_file():
+            raise FileNotFoundError(
+                "SuperNeon bias_sub=True requires a valid superbias master, but it was not found. "
+                "Run the 'superbias' stage first or set calib.superbias_path in config.yaml."
+            )
+        superbias, superbias_hdr = _load_fits(superbias_path)
+        superbias_sig = FrameSignature.from_fits_primary(superbias_path)
+
+    # --- load all neon frames + strict FrameSignature checks (Block 03) ---
+    frames_raw: list[np.ndarray] = []
+    frames: list[np.ndarray] = []
+    headers: list[fits.Header] = []
+    sigs: list[FrameSignature] = []
+
+    n_jobs = int(superneon_cfg.get("n_jobs", 0))
     if n_jobs <= 0:
         n_jobs = max(1, min(8, os.cpu_count() or 1))
 
-    def _read_and_sub(p: Path):
+    def _read_one(p: Path) -> tuple[Path, np.ndarray, fits.Header, FrameSignature]:
         img, hdr = _load_fits(p)
-        if superbias is not None and superbias.shape == img.shape:
-            return (img - superbias, hdr, True)
-        return (img, hdr, False)
+        sig = FrameSignature.from_header(hdr, shape=img.shape)
+        return p, img, hdr, sig
 
+    items: list[tuple[Path, np.ndarray, fits.Header, FrameSignature]] = []
     if len(neon_list) >= 4 and n_jobs > 1:
         with ThreadPoolExecutor(max_workers=n_jobs) as ex:
-            for img, hdr, did in ex.map(_read_and_sub, neon_list):
-                if ref_hdr is None:
-                    ref_hdr = hdr
-                did_sub = did_sub or bool(did)
-                frames.append(img)
+            for item in ex.map(_read_one, neon_list):
+                items.append(item)
     else:
         for p in neon_list:
-            img, hdr, did = _read_and_sub(p)
-            if ref_hdr is None:
-                ref_hdr = hdr
-            did_sub = did_sub or bool(did)
+            items.append(_read_one(p))
+
+    if not items:
+        raise RuntimeError("No neon frames loaded (unexpected).")
+
+    # strict: all neon frames must match each other
+    ref_sig = items[0][3]
+    for p, img, hdr, sig in items:
+        diffs = ref_sig.diff(sig)
+        if diffs:
+            msg = (
+                "SuperNeon input frames are not physically compatible (FrameSignature mismatch).\n"
+                f"Reference: {ref_sig.to_dict()}\n"
+                f"Current   : {sig.to_dict()}\n"
+                "Differences:\n- " + "\n- ".join(diffs) + "\n"
+                f"Offending frame: {p}"
+            )
+            raise ValueError(msg)
+
+    # strict: superbias must match neon frames if bias_sub is enabled
+    did_sub = False
+    if bias_sub and superbias is not None:
+        if superbias_sig is not None:
+            diffs_sb = superbias_sig.diff(ref_sig)
+            if diffs_sb:
+                msg = (
+                    "SuperNeon requires superbias to match neon frames (strict FrameSignature).\n"
+                    f"Superbias : {superbias_sig.to_dict()}\n"
+                    f"Neon sig  : {ref_sig.to_dict()}\n"
+                    "Differences:\n- " + "\n- ".join(diffs_sb) + "\n"
+                    f"Superbias : {superbias_path}"
+                )
+                raise ValueError(msg)
+
+    # saturation level (best effort from first header)
+    sat_level = _estimate_saturation_level(items[0][2])
+
+    for p, img, hdr, sig in items:
+        frames_raw.append(img)
+        headers.append(hdr)
+        sigs.append(sig)
+
+        if bias_sub and superbias is not None:
+            if superbias.shape != img.shape:
+                raise ValueError(
+                    "SuperNeon requires superbias to match neon frames in shape (strict). "
+                    f"superbias={superbias.shape}, neon={img.shape} ({p})"
+                )
+            frames.append(img - superbias)
+            did_sub = True
+        else:
             frames.append(img)
 
-    # выбираем полосу по Y для построения профиля и x-shift
     H, W = frames[0].shape
-    log.info("SuperNeon: loaded %d frames (bias_sub=%s)", len(frames), did_sub)
+
+    # profile box for x-alignment
     wcfg = cfg.get("wavesol", {}) or {}
-    prof_y = wcfg.get("profile_y")
+    prof_y = wcfg.get("profile_y", None)
     if prof_y is None:
         y_half = int(wcfg.get("y_half", 20))
         y0, y1 = (H // 2 - y_half, H // 2 + y_half)
@@ -424,44 +547,55 @@ def build_superneon(cfg: dict[str, Any]) -> SuperNeonResult:
     ref_prof = _profile_x(frames[0], y0, y1)
     aligned = [frames[0]]
 
-    # выравнивание всех остальных по X
+    dxs: list[int] = [0]
+    scores: list[float] = [1.0]
     for i, img in enumerate(frames[1:], start=1):
         cur_prof = _profile_x(img, y0, y1)
-        dx = _xcorr_shift_1d(ref_prof, cur_prof, max_abs=xshift_max)
-        log.debug("SuperNeon shift frame #%d: dx=%d", i, dx)
-        aligned.append(_shift_x_int(img, dx))
+        dx, score = _xcorr_shift_1d(ref_prof, cur_prof, max_abs=xshift_max)
+        dxs.append(int(dx))
+        scores.append(float(score))
+        log.debug("SuperNeon shift frame #%d: dx=%d score=%.3g", i, dx, score)
+        aligned.append(_shift_x_int(img, int(dx)))
 
     superneon = _median_stack(aligned)
 
-    # выходные файлы
+    # estimated clipping fraction (diagnostic; does NOT affect the stack)
+    clip_k = float(superneon_cfg.get("clip_k", 6.0))
+    clip_frac = 0.0
+    try:
+        stack = np.stack(aligned, axis=0)
+        med = np.nanmedian(stack, axis=0)
+        abs_dev = np.abs(stack - med)
+        mad = np.nanmedian(abs_dev, axis=0)
+        sigma_pix = 1.4826 * mad
+        sigma_pix = np.where(np.isfinite(sigma_pix), sigma_pix, 0.0)
+        sigma_pix = np.maximum(sigma_pix, 1e-6)
+        valid = np.isfinite(stack)
+        out = (abs_dev > (clip_k * sigma_pix)) & valid
+        n_valid = int(np.sum(valid))
+        n_out = int(np.sum(out))
+        clip_frac = float(n_out / n_valid) if n_valid > 0 else 0.0
+    except Exception:
+        clip_frac = 0.0
+
+    # output file paths
     superneon_fits = outdir / "superneon.fits"
     superneon_png = outdir / "superneon.png"
     peaks_csv = outdir / "peaks_candidates.csv"
+    shifts_csv = outdir / "superneon_shifts.csv"
+    shifts_json = outdir / "superneon_shifts.json"
+    qc_json = outdir / "superneon_qc.json"
 
-    # header: минимально полезные ключи
-    hdr = fits.Header()
-    hdr["NNEON"] = len(neon_list)
-    hdr["SB_OK"] = bool(superbias is not None)
-    hdr["SB_SUB"] = bool(did_sub)
-    hdr["Y0PROF"] = y0
-    hdr["Y1PROF"] = y1
-    hdr["XSHMAX"] = xshift_max
-
-    _save_fits(superneon_fits, superneon, header=hdr)
-    _save_png(superneon_png, superneon, title="Super-Neon (stacked)")
-
-    # кандидаты пиков по профилю I(x)
+    # --- peak candidates from I(x) profile ---
     prof = _profile_x(superneon, y0, y1)
     x = np.arange(W, dtype=float)
 
-    wcfg = cfg.get("wavesol", {}) or {}
     noise_cfg = (wcfg.get("noise") or {}) if isinstance(wcfg, dict) else {}
 
     baseline = _estimate_baseline_bins(
         prof,
         bin_size=int(noise_cfg.get("baseline_bin_size", 32)),
-        q=float(noise_cfg.get("baseline_quantile", 0.2)),
-        smooth_bins=int(noise_cfg.get("baseline_smooth_bins", 5)),
+        quantile=float(noise_cfg.get("baseline_quantile", 0.25)),
     )
     residual = prof - baseline
 
@@ -478,81 +612,162 @@ def build_superneon(cfg: dict[str, Any]) -> SuperNeonResult:
     peak_snr = float(wcfg.get("peak_snr", 4.5))
     peak_prom_snr = float(wcfg.get("peak_prom_snr", 3.5))
     floor_k = float(wcfg.get("peak_floor_snr", 3.0))
-    distance = int(wcfg.get("peak_distance", 3))
+    distance = int(wcfg.get("peak_dist", 8))
 
-    # Автоподстройка: если слишком мало/много линий — мягко сдвигаем порог
-    autotune = bool(wcfg.get("peak_autotune", True))
-    target_min = int(wcfg.get("peak_target_min", 0) or 0)
-    target_max = int(wcfg.get("peak_target_max", 0) or 0)
-    snr_min = float(wcfg.get("peak_snr_min", 2.5))
-    snr_max = float(wcfg.get("peak_snr_max", 12.0))
-    relax = float(wcfg.get("peak_snr_relax", 0.85))
-    boost = float(wcfg.get("peak_snr_boost", 1.15))
-    max_tries = int(wcfg.get("peak_autotune_max_tries", 10))
+    min_height = max(float(peak_snr * sigma), float(floor_k * sigma))
+    prominence = float(peak_prom_snr * sigma)
 
-    def _detect(snr_k: float):
-        min_height = wcfg.get("peak_min_amp", None)
-        if min_height is None:
-            min_height = max(floor_k * sigma, float(snr_k) * sigma)
-
-        prominence = wcfg.get("peak_prominence", None)
-        if prominence is None:
-            prominence = max(1.0 * sigma, peak_prom_snr * sigma)
-
-        pk = _find_peaks_simple(
-            residual,
-            min_height=float(min_height),
-            prominence=float(prominence),
-            distance=distance,
-        )
-        return pk, float(min_height), float(prominence)
-
-    used_snr = float(peak_snr)
-    pk, min_height, prominence = _detect(used_snr)
-
-    n_try = 0
-    if autotune and target_min > 0:
-        while len(pk) < target_min and used_snr > snr_min and n_try < max_tries:
-            used_snr *= relax
-            pk, min_height, prominence = _detect(used_snr)
-            n_try += 1
-
-    if autotune and target_max > 0:
-        while len(pk) > target_max and used_snr < snr_max and n_try < max_tries:
-            used_snr *= boost
-            pk, min_height, prominence = _detect(used_snr)
-            n_try += 1
-
-    log.info(
-        "task=superneon peaks sigma=%.3g snr=%.3g height=%.3g prom=%.3g distance=%d n_peaks=%d",
-        sigma,
-        used_snr,
-        min_height,
-        prominence,
-        distance,
-        int(len(pk)),
+    pk = _find_peaks_simple(
+        residual,
+        min_height=min_height,
+        prominence=prominence,
+        distance=distance,
+        max_peaks=int(wcfg.get("peak_max", 80)),
     )
 
+    # header: calibration + QC
+    hdr = fits.Header()
+    hdr["NNEON"] = (len(neon_list), "Number of input neon frames")
+    hdr["NSUB"] = (len(neon_list), "Number of neon frames combined")
+    hdr["BIASSUB"] = (bool(did_sub), "Bias-subtracted before stacking")
+    hdr["SB_OK"] = (bool(superbias is not None), "Superbias file was found")
+    hdr["XSHMAX"] = (int(xshift_max), "Max abs X shift allowed [px]")
+    hdr["SHIFTMTH"] = ("xcorr_int", "X-shift method (integer, xcorr)")
+    hdr["SHIFTMD"] = (float(np.median(dxs)), "Median X shift [px]")
+    hdr["SHIFTMX"] = (int(np.max(np.abs(dxs))), "Max |X shift| [px]")
+    hdr["CCSCMED"] = (float(np.median(scores)), "Median xcorr score (peak/RMS)")
+    hdr["CLIPK"] = (float(clip_k), "Outlier threshold used for CLIPFR estimate")
+    hdr["CLIPFR"] = (float(clip_frac), "Estimated outlier fraction in aligned stack")
+    hdr["PKN"] = (int(len(pk)), "Number of detected peak candidates (pre-refine)")
     hdr["PKSIG"] = (float(sigma), "Robust background sigma used for peak thresholds")
-    hdr["PKHGT"] = (float(min_height), "Peak min height (above median)")
-    hdr["PKPRM"] = (float(prominence), "Peak prominence (above median)")
+    hdr["PKHGT"] = (float(min_height), "Peak min height (above baseline)")
+    hdr["PKPRM"] = (float(prominence), "Peak prominence (above baseline)")
 
-    rows = []
+    if ref_sig is not None:
+        hdr["FSIG"] = (ref_sig.describe(), "FrameSignature of the calibration product")
+
+    # refine peaks (subpixel centroid)
+    rows: list[tuple[float, float, float, float, float]] = []
     hw = int(wcfg.get("gauss_half_win", 4))
     for i0 in pk:
         xc, amp, fwhm = _refine_peak_centroid(x, residual, int(i0), hw=hw)
         snr = float(amp / sigma) if sigma > 0 else 0.0
         rows.append((xc, amp, snr, fwhm, float(np.interp(xc, x, prof))))
 
+    # write peak candidates CSV
     if rows:
         arr = np.array(rows, dtype=float)
         hdr_csv = "x_pix,amp,snr,fwhm_pix,profile_I"
-        np.savetxt(
-            peaks_csv, arr, delimiter=",", header=hdr_csv, comments="", fmt="%.6f"
-        )
+        np.savetxt(peaks_csv, arr, delimiter=",", header=hdr_csv, comments="", fmt="%.6f")
     else:
         peaks_csv.write_text("x_pix,amp,snr,fwhm_pix,profile_I\n", encoding="utf-8")
+
+    # line SNR QC
+    snrs = [float(r[2]) for r in rows] if rows else []
+    snr_med = float(np.median(snrs)) if snrs else 0.0
+    snr_p90 = float(np.percentile(snrs, 90)) if len(snrs) >= 3 else (snr_med if snrs else 0.0)
+    hdr["NPK"] = (int(len(snrs)), "Number of detected peak candidates (refined)")
+    hdr["SNRMED"] = (float(snr_med), "Median line S/N among detected peaks")
+    hdr["SNRP90"] = (float(snr_p90), "90th percentile line S/N among detected peaks")
+
+    # saturation QC (per input; computed on raw frames)
+    sat_fracs = [_saturation_fraction(img, sat_level) for img in frames_raw]
+    sat_med = float(np.median(sat_fracs)) if sat_fracs else 0.0
+    hdr["SATFRAC"] = (float(sat_med), "Median saturated-pixel fraction in inputs")
+    if sat_level is not None:
+        hdr["SATLVL"] = (float(sat_level), "Estimated saturation level [ADU]")
+
+    # save superneon artifacts
+    _save_fits(superneon_fits, superneon, header=hdr)
+    _save_png(superneon_png, superneon, title="Super-Neon (stacked)")
+
+    # --- machine-readable shifts + QC (Block 04) ---
+    shifts_rows = []
+    for i, (p, _img, _hdr, _sig) in enumerate(items):
+        shifts_rows.append(
+            {
+                "path": str(p),
+                "dx": int(dxs[i]),
+                "xcorr_score": float(scores[i]) if i < len(scores) else None,
+                "sat_frac": float(sat_fracs[i]) if i < len(sat_fracs) else 0.0,
+            }
+        )
+
+    _write_csv(
+        shifts_csv,
+        header="path,dx,xcorr_score,sat_frac",
+        rows=[
+            [
+                r["path"],
+                r["dx"],
+                "" if r["xcorr_score"] is None else f"{float(r['xcorr_score']):.6g}",
+                f"{float(r['sat_frac']):.6g}",
+            ]
+            for r in shifts_rows
+        ],
+    )
+    _write_json(
+        shifts_json,
+        payload={
+            "n_frames": int(len(neon_list)),
+            "signature": ref_sig.to_dict(),
+            "shift_method": "xcorr_int",
+            "xshift_max_abs": int(xshift_max),
+            "rows": shifts_rows,
+            "summary": {
+                "shift_median_px": float(np.median(dxs)),
+                "shift_maxabs_px": int(np.max(np.abs(dxs))),
+                "xcorr_score_median": float(np.median(scores)),
+                "sat_frac_median": float(sat_med),
+            },
+        },
+    )
+    _write_json(
+        qc_json,
+        payload={
+            "product": "superneon",
+            "n_frames": int(len(neon_list)),
+            "shape": [int(H), int(W)],
+            "signature": ref_sig.to_dict(),
+            "bias_subtracted": bool(did_sub),
+            "superbias_path": (str(superbias_path) if (superbias_path is not None) else ""),
+            "alignment": {
+                "method": "xcorr_int",
+                "profile_y": [int(y0), int(y1)],
+                "xshift_max_abs": int(xshift_max),
+                "shift_median_px": float(np.median(dxs)),
+                "shift_maxabs_px": int(np.max(np.abs(dxs))),
+                "xcorr_score_median": float(np.median(scores)),
+            },
+            "saturation": {
+                "sat_level_adu": (None if sat_level is None else float(sat_level)),
+                "sat_frac_median": float(sat_med),
+                "sat_fracs": [float(v) for v in sat_fracs],
+            },
+            "clipping": {
+                "clip_k": float(clip_k),
+                "clip_frac": float(clip_frac),
+                "note": "diagnostic estimate vs median stack; does not affect output",
+            },
+            "lines": {
+                "sigma_bg": float(sigma),
+                "n_peaks": int(len(snrs)),
+                "snr_median": float(snr_med),
+                "snr_p90": float(snr_p90),
+            },
+            "files": {
+                "superneon_fits": str(superneon_fits),
+                "superneon_png": str(superneon_png),
+                "peaks_candidates_csv": str(peaks_csv),
+                "superneon_shifts_csv": str(shifts_csv),
+                "superneon_shifts_json": str(shifts_json),
+                "superneon_qc_json": str(qc_json),
+            },
+        },
+    )
 
     return SuperNeonResult(
         superneon_fits=superneon_fits, peaks_csv=peaks_csv, superneon_png=superneon_png
     )
+
+

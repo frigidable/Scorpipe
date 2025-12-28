@@ -2,99 +2,66 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 from astropy.io import fits
 
 from scorpio_pipe.app_paths import ensure_dir
+from scorpio_pipe.fits_utils import open_fits_smart
+from scorpio_pipe.io.mef import write_sci_var_mask
+from scorpio_pipe.noise_model import estimate_variance_adu2, resolve_noise_params
 from scorpio_pipe.paths import resolve_work_dir
 
 
-def _read_fits(path: Path) -> tuple[np.ndarray, fits.Header]:
-    with fits.open(path) as hdul:
-        data = hdul[0].data
-        hdr = hdul[0].header.copy()
-    if data is None:
-        raise ValueError(f"Empty FITS data: {path}")
-    return np.asarray(data), hdr
+def _read_sci_var_mask(path: Path) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None, fits.Header]:
+    """Read SCI (+ optional VAR/MASK) from either a simple FITS or MEF."""
+
+    with open_fits_smart(
+        path,
+        memmap="auto",
+        ignore_missing_end=True,
+        ignore_missing_simple=True,
+        do_not_scale_image_data=False,
+    ) as hdul:
+        hdr = fits.Header(hdul[0].header)
+
+        # Prefer explicit EXTNAME=SCI if present; otherwise fall back to primary.
+        sci: np.ndarray | None = None
+        var: np.ndarray | None = None
+        mask: np.ndarray | None = None
+
+        for h in hdul:
+            extname = str(h.header.get("EXTNAME", "")).strip().upper()
+            if extname == "SCI" and getattr(h, "data", None) is not None:
+                sci = np.asarray(h.data)
+            elif extname == "VAR" and getattr(h, "data", None) is not None:
+                var = np.asarray(h.data)
+            elif extname == "MASK" and getattr(h, "data", None) is not None:
+                mask = np.asarray(h.data)
+
+        if sci is None:
+            data0 = hdul[0].data
+            if data0 is None:
+                raise ValueError(f"Empty FITS data: {path}")
+            sci = np.asarray(data0)
+
+    sci = np.asarray(sci, dtype=np.float32)
+    if var is not None:
+        var = np.asarray(var, dtype=np.float32)
+    if mask is not None:
+        mask = np.asarray(mask)
+        if mask.dtype != np.uint16:
+            mask = np.asarray(mask, dtype=np.uint16)
+    return sci, var, mask, hdr
 
 
-def _write_fits(path: Path, data: np.ndarray, hdr: fits.Header) -> None:
-    ensure_dir(path.parent)
-    fits.PrimaryHDU(data=data, header=hdr).writeto(path, overwrite=True)
-
-
-def _robust_median(x: np.ndarray) -> float:
-    x = x[np.isfinite(x)]
-    if x.size == 0:
-        return float("nan")
-    return float(np.nanmedian(x))
-
-
-def build_superflat(
-    flat_paths: Iterable[Path], superbias_path: Path, out_path: Path
-) -> Path:
-    """Build a normalized superflat (median ~ 1) from flat frames.
-
-    Steps:
-      1) subtract superbias
-      2) normalize each flat by its median
-      3) combine via median
-      4) normalize final superflat to median=1
-    """
-
-    flat_paths = list(flat_paths)
-    if not flat_paths:
-        raise ValueError("No flat frames provided")
-
-    superbias, _ = _read_fits(superbias_path)
-
-    stack: list[np.ndarray] = []
-    first_hdr: fits.Header | None = None
-
-    for p in flat_paths:
-        data, hdr = _read_fits(p)
-        if first_hdr is None:
-            first_hdr = hdr
-
-        if superbias.shape != data.shape:
-            raise ValueError(
-                f"Shape mismatch: flat {p.name} {data.shape} vs superbias {superbias.shape}"
-            )
-
-        data = data.astype(np.float32) - superbias.astype(np.float32)
-
-        med = _robust_median(data)
-        if not np.isfinite(med) or med == 0:
-            continue
-        stack.append((data / med).astype(np.float32))
-
-    if not stack:
-        raise ValueError(
-            "All flats became invalid after normalization (median=0 or NaN)"
-        )
-
-    superflat = np.nanmedian(np.stack(stack, axis=0), axis=0).astype(np.float32)
-
-    # Final normalize
-    med_sf = _robust_median(superflat)
-    if np.isfinite(med_sf) and med_sf != 0:
-        superflat = (superflat / med_sf).astype(np.float32)
-
-    hdr = (first_hdr or fits.Header()).copy()
-    hdr["HISTORY"] = (
-        "scorpio_pipe flatfield: superbias-subtracted flats, median-combined"
-    )
-    hdr["BIASSUB"] = (True, "Superbias subtracted")
-    hdr["SFLAT"] = (True, "Superflat created")
-    hdr["SFLATMED"] = (
-        float(_robust_median(superflat)),
-        "Superflat median (after norm)",
-    )
-
-    _write_fits(out_path, superflat, hdr)
-    return out_path
+# Flatfield stage.
+#
+# Note:
+# This module intentionally does *not* implement its own superflat builder.
+# The canonical implementation lives in ``scorpio_pipe.stages.calib`` and is
+# shared by both the dedicated `superflat` stage and `flatfield` (when it needs
+# to ensure a superflat exists).
 
 
 def apply_flat(
@@ -104,6 +71,8 @@ def apply_flat(
     out_path: Path,
     *,
     do_bias_subtract: bool = True,
+    gain_override: float | None = None,
+    rdnoise_override: float | None = None,
 ) -> Path:
     """Apply flatfield correction to a single frame.
 
@@ -111,13 +80,11 @@ def apply_flat(
     - divide by superflat
     """
 
-    data, hdr = _read_fits(data_path)
-    superflat, _ = _read_fits(superflat_path)
-
-    data = data.astype(np.float32)
+    data, var, mask, hdr = _read_sci_var_mask(data_path)
+    superflat = fits.getdata(superflat_path).astype(np.float32)
 
     if do_bias_subtract and not bool(hdr.get("BIASSUB", False)):
-        superbias, _ = _read_fits(superbias_path)
+        superbias = fits.getdata(superbias_path).astype(np.float32)
         if superbias.shape == data.shape:
             data = data - superbias.astype(np.float32)
             hdr["BIASSUB"] = (True, "Superbias subtracted")
@@ -128,10 +95,49 @@ def apply_flat(
     sf = np.where(np.isfinite(sf) & (sf != 0), sf, np.nan)
 
     corr = (data / sf).astype(np.float32)
+
+    # Variance: if missing, estimate from a simple CCD noise model.
+    if var is None:
+        var, npar = estimate_variance_adu2(
+            data,
+            hdr,
+            gain_override=gain_override,
+            rdnoise_override=rdnoise_override,
+        )
+        hdr.setdefault("HISTORY", "scorpio_pipe flatfield: VAR estimated")
+        # Keep resolved params in the header for downstream stages.
+        hdr.setdefault("GAIN", float(npar.gain_e_per_adu))
+        hdr.setdefault("RDNOISE", float(npar.rdnoise_e))
+        hdr.setdefault("NOISRC", str(npar.source))
+    else:
+        # Still resolve params for header consistency (do not override explicit cards).
+        npar = resolve_noise_params(
+            hdr,
+            gain_override=gain_override,
+            rdnoise_override=rdnoise_override,
+        )
+        hdr.setdefault("GAIN", float(npar.gain_e_per_adu))
+        hdr.setdefault("RDNOISE", float(npar.rdnoise_e))
+        hdr.setdefault("NOISRC", str(npar.source))
+
+    # Multiplicative correction: variance scales as 1/flat^2.
+    var_corr = (var / (sf**2)).astype(np.float32)
     hdr["FLATCOR"] = (True, "Flat-fielding applied")
     hdr["HISTORY"] = "scorpio_pipe flatfield: divided by superflat"
 
-    _write_fits(out_path, corr, hdr)
+    # Keep science units explicit.
+    hdr.setdefault("BUNIT", "ADU")
+
+    ensure_dir(out_path.parent)
+    write_sci_var_mask(
+        out_path,
+        corr,
+        var=var_corr,
+        mask=mask,
+        header=hdr,
+        primary_data=corr,
+        overwrite=True,
+    )
     return out_path
 
 
@@ -194,8 +200,17 @@ def run_flatfield(cfg: dict, *, out_dir: Path | None = None) -> Path:
         raise ValueError("No flat frames selected (frames.flat is empty)")
 
     # Always build / refresh superflat for the current object.
+    # Canonical builder lives in stages.calib (single source of truth).
+    from scorpio_pipe.stages.calib import (
+        build_superflat as _build_superflat,
+        _resolve_superbias_path as _resolve_superbias_path,
+    )
+
     ensure_dir(superflat_path.parent)
-    build_superflat(flat_paths, superbias_path, superflat_path)
+    # Use config-driven builder to avoid diverging behavior between different call paths.
+    superflat_path = _build_superflat(cfg, out_path=superflat_path)
+    # Make sure we use the same superbias file as the superflat builder.
+    superbias_path = _resolve_superbias_path(cfg, work_dir)
 
     apply_to = list(
         block.get("apply_to") or ["obj", "sky", "sunsky"]
@@ -203,6 +218,9 @@ def run_flatfield(cfg: dict, *, out_dir: Path | None = None) -> Path:
 
     cosmics_bias_sub = bool((cfg.get("cosmics", {}) or {}).get("bias_subtract", True))
     do_bias_sub_flat = bool(block.get("bias_subtract", True))
+
+    gain_override = block.get("gain_e_per_adu")
+    rdnoise_override = block.get("read_noise_e")
 
     outputs: list[str] = []
 
@@ -237,6 +255,8 @@ def run_flatfield(cfg: dict, *, out_dir: Path | None = None) -> Path:
                 superbias_path,
                 dst,
                 do_bias_subtract=do_bias_subtract,
+                gain_override=float(gain_override) if gain_override is not None else None,
+                rdnoise_override=float(rdnoise_override) if rdnoise_override is not None else None,
             )
             outputs.append(str(dst))
 

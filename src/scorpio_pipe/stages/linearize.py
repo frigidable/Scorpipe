@@ -29,6 +29,7 @@ import numpy as np
 from astropy.io import fits
 
 from scorpio_pipe.io.mef import WaveGrid, read_sci_var_mask, write_sci_var_mask
+from scorpio_pipe.noise_model import estimate_variance_adu2, resolve_noise_params
 from scorpio_pipe.maskbits import (
     BADPIX,
     COSMIC,
@@ -47,6 +48,63 @@ from scorpio_pipe.wavesol_paths import wavesol_dir
 
 log = get_logger(__name__)
 
+
+
+def _read_lambda_map_meta(hdr: fits.Header, lam_map: np.ndarray) -> tuple[str, str, str]:
+    '''Return (unit, waveref, source) for wavelength metadata.
+
+    We strongly prefer explicit metadata written by :mod:`wavesolution`.
+    If missing, we fall back to a heuristic *with a loud warning*.
+
+    unit is a FITS-like string (e.g. 'Angstrom', 'nm', or 'pix').
+    waveref is 'air' or 'vacuum' (best-effort; defaults to 'air').
+    source describes where unit came from.
+    '''
+
+    def _norm_unit(s: str) -> str:
+        s0 = s.strip()
+        if not s0:
+            return ""
+        s_low = s0.lower().replace("å", "angstrom")
+        if s_low in {"a", "aa", "ang", "angs", "angstrom", "ångström", "angstroms", "Å"}:
+            return "Angstrom"
+        if s_low in {"nm", "nanometer", "nanometers"}:
+            return "nm"
+        if s_low in {"pix", "pixel", "pixels", "px"}:
+            return "pix"
+        return s0
+
+    # Preferred explicit keys
+    for key in ("WAVEUNIT", "SCORP_LU", "CUNIT1", "BUNIT", "WUNIT"):
+        v = hdr.get(key, None)
+        if v is None:
+            continue
+        u = _norm_unit(str(v))
+        if u:
+            # waveref best-effort
+            wr = str(hdr.get("WAVEREF", hdr.get("WAVREF", "air")) or "air").strip().lower()
+            if wr not in {"air", "vacuum"}:
+                wr = "air"
+            return u, wr, f"{key}"
+
+    # Back-compat: some historic products stored WAT1_001 like IRAF
+    for key in ("WAT1_001",):
+        v = hdr.get(key, None)
+        if v is None:
+            continue
+        u = _norm_unit(str(v))
+        if u:
+            wr = str(hdr.get("WAVEREF", hdr.get("WAVREF", "air")) or "air").strip().lower()
+            if wr not in {"air", "vacuum"}:
+                wr = "air"
+            return u, wr, f"{key}"
+
+    # Fallback (heuristic) — keep working for synthetic tests / legacy lambda_map
+    u = _infer_lambda_unit(hdr, lam_map)
+    wr = str(hdr.get("WAVEREF", hdr.get("WAVREF", "air")) or "air").strip().lower()
+    if wr not in {"air", "vacuum"}:
+        wr = "air"
+    return u, wr, "heuristic"
 
 def _infer_lambda_unit(hdr: fits.Header, lam_map: np.ndarray) -> str:
     """Infer wavelength unit string for output WCS.
@@ -213,43 +271,7 @@ def _open_science_with_optional_var_mask(
     return data, None, None, fits.Header(hdr)
 
 
-def _get_gain_e_per_adu(hdr: fits.Header, default: float = 1.0) -> float:
-    for key in ("GAIN", "EGAIN", "CCDGAIN"):
-        if key in hdr:
-            try:
-                v = float(hdr[key])
-                if math.isfinite(v) and v > 0:
-                    return v
-            except Exception:
-                pass
-    return float(default)
-
-
-def _get_read_noise_e(hdr: fits.Header, default: float = 3.0) -> float:
-    for key in ("RDNOISE", "READNOIS", "RON", "RNOISE"):
-        if key in hdr:
-            try:
-                v = float(hdr[key])
-                if math.isfinite(v) and v >= 0:
-                    return v
-            except Exception:
-                pass
-    return float(default)
-
-
-def _estimate_variance_adu(data_adu: np.ndarray, hdr: fits.Header) -> np.ndarray:
-    """First-pass variance in ADU^2 from Poisson + read-noise.
-
-    Assumes data_adu is already bias/flat corrected to a reasonable extent.
-    Negative values are clipped for the Poisson term.
-    """
-    g = _get_gain_e_per_adu(hdr)
-    rn = _get_read_noise_e(hdr)
-    # electrons
-    data_e = np.clip(data_adu * g, 0.0, None)
-    var_e = data_e + rn * rn
-    var_adu = var_e / (g * g)
-    return var_adu.astype(np.float32)
+### Noise / variance helpers live in scorpio_pipe.noise_model
 
 
 def _guess_saturation_level_adu(
@@ -521,6 +543,191 @@ def _compute_output_grid(
     return lo, hi, dw, n
 
 
+
+def _get_exptime_seconds(hdr: fits.Header) -> float:
+    """Extract exposure time in seconds from a FITS header.
+
+    We accept a variety of common keywords. If none is present, returns 1.0
+    and the caller should warn if normalization is requested.
+    """
+    for key in ("EXPTIME", "EXPOSURE", "ITIME", "TEXPTIME", "ELAPTIME"):
+        v = hdr.get(key, None)
+        if v is None:
+            continue
+        try:
+            vv = float(v)
+            if math.isfinite(vv) and vv > 0:
+                return vv
+        except Exception:
+            continue
+    return 1.0
+
+
+def _open_rectified_handles(paths: list[Path]):
+    """Open rectified MEF files (SCI/VAR/MASK) with memmap for block-wise stacking."""
+    handles = []
+    for p in paths:
+        hdul = fits.open(p, memmap=True)
+        # Find by EXTNAME; fall back by index
+        def _get(ext):
+            try:
+                return hdul[ext].data
+            except Exception:
+                # try name lookup
+                try:
+                    return hdul[ext.upper()].data
+                except Exception:
+                    return None
+
+        sci = _get("SCI")
+        if sci is None:
+            sci = hdul[1].data
+        var = _get("VAR")
+        mask = _get("MASK")
+        handles.append({"path": p, "hdul": hdul, "sci": sci, "var": var, "mask": mask})
+    return handles
+
+
+def _close_rectified_handles(handles):
+    for h in handles:
+        try:
+            h["hdul"].close()
+        except Exception:
+            pass
+
+
+def _robust_stack_sigma_clip(
+    rect_paths: list[Path],
+    *,
+    exclude_bits: int,
+    sigma: float = 4.0,
+    maxiters: int = 2,
+    block_rows: int = 64,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
+    """Robust stack of rectified frames using sigma-clipping across exposures.
+
+    Works block-wise in Y to avoid holding the full (nexp, ny, nlam) cube in RAM.
+    Returns (sci, var, mask, coverage, stats).
+    """
+    if not rect_paths:
+        raise ValueError("No rectified frames to stack")
+
+    handles = _open_rectified_handles(rect_paths)
+    try:
+        sci0 = handles[0]["sci"]
+        if sci0 is None:
+            raise ValueError("Rectified SCI data not found")
+        ny, nlam = sci0.shape
+
+        out_sci = np.zeros((ny, nlam), dtype=np.float32)
+        out_var = np.zeros((ny, nlam), dtype=np.float32)
+        out_mask = np.zeros((ny, nlam), dtype=np.uint16)
+        coverage = np.zeros((ny, nlam), dtype=np.int16)
+
+        rejected_count = np.zeros((ny, nlam), dtype=np.int16)
+
+        total_valid_samples = 0
+        total_rejected_samples = 0
+
+        for y0 in range(0, ny, int(max(1, block_rows))):
+            y1 = min(ny, y0 + int(max(1, block_rows)))
+            by = y1 - y0
+            nexp = len(handles)
+
+            vals = np.empty((nexp, by, nlam), dtype=np.float64)
+            vars_ = np.empty((nexp, by, nlam), dtype=np.float64)
+            masks = np.empty((nexp, by, nlam), dtype=np.uint16)
+
+            for j, h in enumerate(handles):
+                s = np.asarray(h["sci"][y0:y1, :], dtype=np.float64)
+                if h["var"] is not None:
+                    v = np.asarray(h["var"][y0:y1, :], dtype=np.float64)
+                else:
+                    v = np.full_like(s, np.nan, dtype=np.float64)
+                if h["mask"] is not None:
+                    m = np.asarray(h["mask"][y0:y1, :], dtype=np.uint16)
+                else:
+                    m = np.zeros((by, nlam), dtype=np.uint16)
+
+                # valid sample mask
+                valid = (v > 0) & np.isfinite(s) & ((m & exclude_bits) == 0)
+                total_valid_samples += int(np.sum(valid))
+
+                s[~valid] = np.nan
+                v[~valid] = np.nan
+
+                vals[j] = s
+                vars_[j] = v
+                masks[j] = m
+
+            # Iterative sigma clipping
+            cur_vals = vals
+            cur_vars = vars_
+
+            for _it in range(int(maxiters)):
+                center = np.nanmedian(cur_vals, axis=0)
+                # MAD-based scatter
+                resid = np.abs(cur_vals - center[None, :, :])
+                mad = np.nanmedian(resid, axis=0)
+                scatter = 1.4826 * mad
+                scatter = np.where(np.isfinite(scatter) & (scatter > 0), scatter, np.nan)
+
+                # Combined expected sigma per sample
+                combined = np.sqrt(np.nan_to_num(scatter, nan=0.0) ** 2 + np.nan_to_num(cur_vars, nan=0.0))
+                combined = np.where(combined > 0, combined, np.nan)
+
+                reject = np.isfinite(cur_vals) & (resid > float(sigma) * combined)
+                if not np.any(reject):
+                    break
+                total_rejected_samples += int(np.sum(reject))
+                cur_vals = cur_vals.copy()
+                cur_vars = cur_vars.copy()
+                cur_vals[reject] = np.nan
+                cur_vars[reject] = np.nan
+
+                rejected_count[y0:y1, :] += np.sum(reject, axis=0).astype(np.int16)
+
+            # Final weighted mean
+            w = np.zeros_like(cur_vars, dtype=np.float64)
+            good = np.isfinite(cur_vals) & np.isfinite(cur_vars) & (cur_vars > 0)
+            w[good] = 1.0 / cur_vars[good]
+            sumw = np.sum(w, axis=0)
+            sumwv = np.sum(w * np.nan_to_num(cur_vals, nan=0.0), axis=0)
+
+            mean = np.zeros((by, nlam), dtype=np.float32)
+            varo = np.zeros((by, nlam), dtype=np.float32)
+            ok = sumw > 0
+            mean[ok] = (sumwv[ok] / sumw[ok]).astype(np.float32)
+            varo[ok] = (1.0 / np.maximum(sumw[ok], 1e-30)).astype(np.float32)
+
+            cov = np.sum(good, axis=0).astype(np.int16)
+            coverage[y0:y1, :] = cov
+
+            # Mask: OR of accepted masks + REJECTED where something was rejected
+            mout = np.zeros((by, nlam), dtype=np.uint16)
+            for j in range(nexp):
+                # accepted where good[j] True
+                mj = masks[j]
+                mout |= np.where(good[j], mj, 0).astype(np.uint16)
+            rej_pix = rejected_count[y0:y1, :] > 0
+            mout[rej_pix] |= REJECTED
+            mout[cov == 0] |= NO_COVERAGE
+
+            out_sci[y0:y1, :] = mean
+            out_var[y0:y1, :] = varo
+            out_mask[y0:y1, :] = mout
+
+        stats = {
+            "total_valid_samples": int(total_valid_samples),
+            "total_rejected_samples": int(total_rejected_samples),
+            "rejected_fraction": float(total_rejected_samples / total_valid_samples) if total_valid_samples else 0.0,
+            "rejected_pixels_fraction": float(np.mean(rejected_count > 0)) if rejected_count.size else 0.0,
+        }
+        return out_sci, out_var, out_mask, coverage, stats
+    finally:
+        _close_rectified_handles(handles)
+
+
 def run_linearize(
     cfg: Dict[str, Any],
     out_dir: Optional[Path] = None,
@@ -642,10 +849,42 @@ def run_linearize(
         resolved.append(clean_p if clean_p.exists() else p)
     sci_paths = [Path(p) for p in resolved]
 
+
     # Output wavelength grid (common for the whole series)
-    unit = _infer_lambda_unit(lam_hdr, lam_map)
+    unit, waveref, unit_src = _read_lambda_map_meta(lam_hdr, lam_map)
+    if unit_src == "heuristic":
+        log.warning(
+            "lambda_map is missing explicit wavelength metadata (WAVEUNIT/WAVEREF); "
+            "falling back to heuristic unit=%s waveref=%s. "
+            "Please re-run Wavesolution to regenerate lambda_map.fits.",
+            unit,
+            waveref,
+        )
+
     wmin_cfg = lcfg.get("lambda_min_A", lcfg.get("wmin"))
     wmax_cfg = lcfg.get("lambda_max_A", lcfg.get("wmax"))
+
+    bunit_mode = str(
+        lcfg.get("bunit_mode", lcfg.get("output_bunit_mode", "adu_bin"))
+    ).strip().lower()
+    if bunit_mode in {
+        "adu/angstrom",
+        "adu_per_angstrom",
+        "adu_per_a",
+        "adu/a",
+        "per_angstrom",
+        "density",
+        "adu/nm",
+        "adu_per_nm",
+        "per_nm",
+        "adu_per_unit",
+    }:
+        bunit_mode = "adu_per_unit"
+    elif bunit_mode in {"adu/bin", "adu_bin", "bin", "integrated"}:
+        bunit_mode = "adu_bin"
+    else:
+        # unknown -> keep backwards-compatible behavior
+        bunit_mode = "adu_bin"
 
     # grid policy
     grid_mode = str(lcfg.get("grid_mode", "intersection"))
@@ -692,6 +931,15 @@ def run_linearize(
 
     wave_edges = wave0 + dw * np.arange(nlam + 1, dtype=np.float64)
 
+    # Output science units (integrated per-bin vs per-wavelength-unit)
+    scale_to_density = bunit_mode == "adu_per_unit" and unit != "pix"
+    if scale_to_density:
+        if not (math.isfinite(dw) and dw > 0):
+            raise ValueError("dw must be positive for bunit_mode=adu_per_unit")
+        bunit = f"ADU/{unit}"
+    else:
+        bunit = "ADU/bin"
+
     # Crop by Y if requested
     ny, nx = lam_map.shape
     y0 = max(0, y_crop_top)
@@ -705,6 +953,34 @@ def run_linearize(
     if per_exp_dir is not None:
         per_exp_dir.mkdir(parents=True, exist_ok=True)
 
+    # Stacking configuration
+    normalize_exptime = bool(lcfg.get("normalize_exptime", True))
+    robust_stack = bool(lcfg.get("robust_stack", True))
+    stack_sigma = float(lcfg.get("stack_sigma", 4.0) or 4.0)
+    stack_maxiters = int(lcfg.get("stack_maxiters", 2) or 2)
+    # Exclude these mask bits from stacking weights
+    exclude_bits = BADPIX | COSMIC | SATURATED | NO_COVERAGE | USER
+
+    # Ensure per-exposure products exist when robust stacking is enabled
+    if robust_stack and not save_per_exp:
+        log.warning("robust_stack=True requires per-exposure rectified frames; enabling save_per_exposure.")
+        save_per_exp = True
+        per_exp_dir = out_dir / "per_exp"
+        per_exp_dir.mkdir(parents=True, exist_ok=True)
+
+    rect_paths: list[Path] = []
+    exp_times_s: list[float] = []
+
+    # Apply EXPTIME normalization policy to declared output units
+    if normalize_exptime:
+        if isinstance(bunit, str) and bunit.startswith("ADU/"):
+            bunit = "ADU/s/" + bunit.split("ADU/", 1)[1]
+        elif bunit == "ADU/bin":
+            bunit = "ADU/s/bin"
+        else:
+            bunit = "ADU/s"
+
+    # Legacy (non-robust) accumulator is kept for fallback only
     stack_num = np.zeros((ny, nlam), dtype=np.float64)
     stack_den = np.zeros((ny, nlam), dtype=np.float64)
     stack_var_den = np.zeros((ny, nlam), dtype=np.float64)
@@ -712,6 +988,15 @@ def run_linearize(
     mask_sum = np.zeros((ny, nlam), dtype=np.uint16)
 
     sat_levels_adu: list[float] = []
+
+    # Noise model overrides (optional).
+    gain_override = lcfg.get("gain_e_per_adu")
+    rdnoise_override = lcfg.get("read_noise_e")
+    gain_override_f = float(gain_override) if gain_override is not None else None
+    rdnoise_override_f = (
+        float(rdnoise_override) if rdnoise_override is not None else None
+    )
+    noise_meta: list[dict[str, Any]] = []
 
     for i, p in enumerate(sci_paths, 1):
         if cancel_token is not None and getattr(cancel_token, "cancelled", False):
@@ -725,13 +1010,50 @@ def run_linearize(
             raise ValueError(
                 f"Science shape {data.shape} != lambda_map shape {lam_map.shape} for {p.name}"
             )
-        if var_in is not None:
-            var = np.asarray(var_in, dtype=np.float64)[y0:y1, :]
-        else:
-            var = _estimate_variance_adu(data, hdr)
+
         mask = None
         if mask_in is not None:
             mask = np.asarray(mask_in, dtype=np.uint16)[y0:y1, :]
+        # Resolve (gain, read-noise) in a single, centralized way.
+        npar = resolve_noise_params(
+            hdr,
+            gain_override=gain_override_f,
+            rdnoise_override=rdnoise_override_f,
+        )
+        hdr.setdefault("GAIN", float(npar.gain_e_per_adu))
+        hdr.setdefault("RDNOISE", float(npar.rdnoise_e))
+        hdr.setdefault("NOISRC", str(npar.source))
+
+        if var_in is not None:
+            var = np.asarray(var_in, dtype=np.float64)[y0:y1, :]
+            var_source = "input"
+        else:
+            var_est, _npar2 = estimate_variance_adu2(
+                data,
+                hdr,
+                gain_override=gain_override_f,
+                rdnoise_override=rdnoise_override_f,
+            )
+            var = np.asarray(var_est, dtype=np.float64)
+            var_source = "estimated"
+
+        # Sanity: variance must be finite and >= 0. Flag bad pixels via mask.
+        bad_var = ~np.isfinite(var) | (var < 0)
+        if np.any(bad_var):
+            var = np.where(bad_var, 0.0, var)
+            if mask is None:
+                mask = np.zeros_like(var, dtype=np.uint16)
+            mask[bad_var] |= BADPIX
+
+        noise_meta.append(
+            {
+                "path": str(p),
+                "var_source": var_source,
+                "gain_e_per_adu": float(npar.gain_e_per_adu),
+                "rdnoise_e": float(npar.rdnoise_e),
+                "noise_source": str(npar.source),
+            }
+        )
 
         # Saturation masking (optional): flag detector pixels near/above full well
         mask_saturation = bool(lcfg.get("mask_saturation", True))
@@ -816,10 +1138,28 @@ def run_linearize(
                     satmask[yy, finite].astype(np.float64), lam_row[finite], wave_edges
                 )
                 rect_mask[yy, sm_row > 0] |= SATURATED
+        # Optional: express data as a *density* per wavelength unit instead of per-bin counts.
+        if scale_to_density:
+            rect /= float(dw)
+            rect_var /= float(dw) ** 2
+        # Record exposure time and optionally normalize to ADU/s (or ADU/s/<unit>)
+        exptime_s = _get_exptime_seconds(hdr)
+        exp_times_s.append(float(exptime_s))
+        if normalize_exptime:
+            if not (math.isfinite(exptime_s) and exptime_s > 0):
+                log.warning("EXPTIME missing/invalid in %s; using 1.0 s for normalization", p.name)
+                exptime_s = 1.0
+            rect /= float(exptime_s)
+            rect_var /= float(exptime_s) ** 2
 
         # Per-exposure output
         if per_exp_dir is not None:
             ohdr = _set_linear_wcs(hdr, wave0, dw, unit=unit)
+            ohdr["WAVEUNIT"] = (str(unit), "Wavelength unit (explicit)")
+            ohdr["WAVEREF"] = (str(waveref), "Wavelength reference (air/vacuum)")
+            ohdr["BUNIT"] = (str(bunit), "Data unit")
+            ohdr["NORMEXP"] = (bool(normalize_exptime), "Normalize to per-second units (ADU/s)")
+            ohdr["TEXPS"] = (float(exptime_s), "Exposure time used for normalization (s)")
             # Saturation metadata (if used)
             if sat_level is not None and mask_saturation:
                 try:
@@ -853,33 +1193,61 @@ def run_linearize(
                     shutil.copy2(out_rect, out_lin_alias)
             except Exception:
                 pass
+            rect_paths.append(out_rect)
 
-        # Stack: inverse-variance weighted mean
-        w = np.zeros_like(rect_var, dtype=np.float64)
-        fatal_bits = NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED
-        good = (rect_var > 0) & ((rect_mask & fatal_bits) == 0)
-        w[good] = 1.0 / rect_var[good]
-        stack_num += rect.astype(np.float64) * w
-        stack_den += w
-        # For the output variance (of the weighted mean): var = 1/sum(w)
-        stack_var_den += w
-        coverage += good.astype(np.int16)
-        mask_sum |= rect_mask
+        if not robust_stack:
+                    # Stack: inverse-variance weighted mean
+                    w = np.zeros_like(rect_var, dtype=np.float64)
+                    fatal_bits = NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED
+                    good = (rect_var > 0) & ((rect_mask & fatal_bits) == 0)
+                    w[good] = 1.0 / rect_var[good]
+                    stack_num += rect.astype(np.float64) * w
+                    stack_den += w
+                    # For the output variance (of the weighted mean): var = 1/sum(w)
+                    stack_var_den += w
+                    coverage += good.astype(np.int16)
+                    mask_sum |= rect_mask
 
-    out_sci = np.zeros((ny, nlam), dtype=np.float32)
-    out_var = np.zeros((ny, nlam), dtype=np.float32)
-    ok = stack_den > 0
-    out_sci[ok] = (stack_num[ok] / stack_den[ok]).astype(np.float32)
-    out_var[ok] = (1.0 / np.maximum(stack_var_den[ok], 1e-20)).astype(np.float32)
-    out_mask = mask_sum.copy()
-    out_mask[~ok] |= NO_COVERAGE
+    # Final stack
+    stack_stats: dict[str, Any] = {}
+    if robust_stack:
+        if not rect_paths:
+            raise RuntimeError("robust_stack=True but no per-exposure rectified frames are available")
+        out_sci, out_var, out_mask, coverage, stack_stats = _robust_stack_sigma_clip(
+            rect_paths,
+            exclude_bits=exclude_bits,
+            sigma=stack_sigma,
+            maxiters=stack_maxiters,
+            block_rows=int(lcfg.get("stack_block_rows", 64) or 64),
+        )
+    else:
+        out_sci = np.zeros((ny, nlam), dtype=np.float32)
+        out_var = np.zeros((ny, nlam), dtype=np.float32)
+        ok = stack_den > 0
+        out_sci[ok] = (stack_num[ok] / stack_den[ok]).astype(np.float32)
+        out_var[ok] = (1.0 / np.maximum(stack_var_den[ok], 1e-20)).astype(np.float32)
+        out_mask = mask_sum.copy()
+        out_mask[~ok] |= NO_COVERAGE
 
     # Output products
     preview_fits = out_dir / "lin_preview.fits"
     done_json = out_dir / "linearize_done.json"
 
     hdr0 = _set_linear_wcs(lam_hdr, wave0, dw, unit=unit)
-    hdr0["BUNIT"] = ("ADU", "Data unit")
+    hdr0["WAVEUNIT"] = (str(unit), "Wavelength unit (explicit)")
+    hdr0["WAVEREF"] = (str(waveref), "Wavelength reference (air/vacuum)")
+    hdr0["BUNIT"] = (str(bunit), "Data unit")
+    hdr0["NORMEXP"] = (bool(normalize_exptime), "Normalize stack to per-second units (ADU/s)")
+    hdr0["NEXP"] = (int(len(exp_times_s)), "Number of exposures stacked")
+    try:
+        hdr0["TEXPTOT"] = (float(np.sum(exp_times_s)), "Total exposure time (s)")
+        hdr0["TEXPMED"] = (float(np.median(exp_times_s)), "Median exposure time (s)")
+    except Exception:
+        pass
+    hdr0["STKMD"] = ("sigclip" if robust_stack else "wmean", "Stacking method")
+    if robust_stack:
+        hdr0["STKSIG"] = (float(stack_sigma), "Sigma clip threshold")
+        hdr0["STKITR"] = (int(stack_maxiters), "Sigma clip iterations")
     hdr0 = add_provenance(hdr0, cfg, stage="linearize")
     _write_mef(
         preview_fits,
@@ -918,6 +1286,20 @@ def run_linearize(
     payload = {
         "stage": "linearize",
         "lambda_map": str(lam_path),
+        "wave_unit": str(unit),
+        "wave_ref": str(waveref),
+        "unit_source": str(unit_src),
+        "bunit": str(bunit),
+        "bunit_mode": str(bunit_mode),
+        "normalize_exptime": bool(normalize_exptime),
+        "exptime_total_s": float(np.sum(exp_times_s)) if exp_times_s else None,
+        "exptime_median_s": float(np.median(exp_times_s)) if exp_times_s else None,
+        "stacking": {
+            "method": "sigma_clip" if robust_stack else "wmean",
+            "sigma": float(stack_sigma) if robust_stack else None,
+            "maxiters": int(stack_maxiters) if robust_stack else None,
+            **(stack_stats or {}),
+        },
         "inputs": [str(p) for p in sci_paths],
         "wave0": wave0,
         "dw": dw,
@@ -937,6 +1319,17 @@ def run_linearize(
             "saturation_level_max_adu": float(np.nanmax(sat_levels_adu))
             if sat_levels_adu
             else None,
+        },
+        "noise": {
+            "gain_override_e_per_adu": gain_override_f,
+            "read_noise_override_e": rdnoise_override_f,
+            "gain_median_e_per_adu": float(np.median([m["gain_e_per_adu"] for m in noise_meta]))
+            if noise_meta
+            else None,
+            "rdnoise_median_e": float(np.median([m["rdnoise_e"] for m in noise_meta]))
+            if noise_meta
+            else None,
+            "per_exposure": noise_meta,
         },
         "products": {
             "preview_fits": str(preview_fits),
@@ -983,18 +1376,46 @@ def run_linearize(
             np.maximum(out_var[good].astype(np.float64), 1e-20)
         )
         snr_vals = snr[good]
+        cov_nonzero = float(np.count_nonzero(coverage > 0) / float(coverage.size)) if coverage.size else 0.0
         qc = {
             "stage": "linearize",
             "preview": str(preview_fits),
             "wave0": float(wave0),
             "dw": float(dw),
             "nlam": int(nlam),
+            "wave_unit": str(unit),
+            "wave_ref": str(waveref),
+            "bunit": str(bunit),
+            "exptime_policy": {
+                "normalize_exptime": bool(normalize_exptime),
+                "n_exp": int(len(exp_times_s)),
+                "total_s": float(np.sum(exp_times_s)) if exp_times_s else None,
+                "median_s": float(np.median(exp_times_s)) if exp_times_s else None,
+            },
+            "stacking": {
+                "method": "sigma_clip" if robust_stack else "wmean",
+                "sigma": float(stack_sigma) if robust_stack else None,
+                "maxiters": int(stack_maxiters) if robust_stack else None,
+                "exclude_bits": int(exclude_bits),
+                **(stack_stats or {}),
+            },
             "coverage": {
                 "min": int(np.min(coverage)),
                 "median": float(np.median(coverage)),
                 "max": int(np.max(coverage)),
+                "nonzero_frac": cov_nonzero,
             },
             "mask_summary": summarize_mask(out_mask),
+            "noise": {
+                "gain_median_e_per_adu": float(np.median([m["gain_e_per_adu"] for m in noise_meta]))
+                if noise_meta
+                else None,
+                "rdnoise_median_e": float(np.median([m["rdnoise_e"] for m in noise_meta]))
+                if noise_meta
+                else None,
+                "gain_override_e_per_adu": gain_override_f,
+                "read_noise_override_e": rdnoise_override_f,
+            },
             "snr_abs": {
                 "median": float(np.nanmedian(snr_vals)) if snr_vals.size else None,
                 "p10": float(np.nanpercentile(snr_vals, 10)) if snr_vals.size else None,
