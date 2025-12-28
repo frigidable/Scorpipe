@@ -13,6 +13,50 @@ from scorpio_pipe.version import PIPELINE_VERSION
 from scorpio_pipe.paths import resolve_work_dir
 
 
+class QCReportOutput(dict[str, Path]):
+    """QC report output paths.
+
+    Newer code/tests expect a mapping with at least ``{"json": Path, "html": Path}``.
+    Older code/tests historically treated :func:`build_qc_report` return value as the
+    HTML path directly.
+
+    This tiny helper keeps both behaviours:
+
+    - Mapping access: ``out["json"]`` / ``out["html"]``
+    - Path-like attribute access delegated to the HTML path: ``out.exists()``,
+      ``out.parent``, ``str(out)``, etc.
+    """
+
+    def __init__(
+        self,
+        *,
+        json: Path,
+        html: Path,
+        legacy_json: Path | None = None,
+        legacy_html: Path | None = None,
+    ) -> None:
+        super().__init__()
+        self["json"] = Path(json)
+        self["html"] = Path(html)
+        if legacy_json is not None:
+            self["legacy_json"] = Path(legacy_json)
+        if legacy_html is not None:
+            self["legacy_html"] = Path(legacy_html)
+
+    def __getattr__(self, name: str) -> Any:  # pragma: no cover
+        # Delegate unknown attributes to the HTML path to preserve old behaviour.
+        return getattr(self["html"], name)
+
+    def __fspath__(self) -> str:  # pragma: no cover
+        return str(self["html"])
+
+    def __str__(self) -> str:  # pragma: no cover
+        return str(self["html"])
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"QCReportOutput(html={self.get('html')!r}, json={self.get('json')!r})"
+
+
 def _read_json(p: Path) -> dict[str, Any] | None:
     try:
         return json.loads(p.read_text(encoding="utf-8"))
@@ -594,7 +638,7 @@ def build_qc_report(
     *,
     out_dir: str | Path | None = None,
     config_dir: Path | None = None,
-) -> Path:
+) -> QCReportOutput:
     """Build a lightweight QC report (JSON + HTML).
 
     Writes:
@@ -852,17 +896,24 @@ def build_qc_report(
     out_html = out_dir / "index.html"
     out_html.write_text(html, encoding="utf-8")
 
+    legacy_json: Path | None = None
+    legacy_html: Path | None = None
+
     # legacy mirror: keep older UI/tests that expect work_dir/report/
     try:
         legacy_dir = work_dir / "report"
         legacy_dir.mkdir(parents=True, exist_ok=True)
-        (legacy_dir / "qc_report.json").write_text(
-            out_json.read_text(encoding="utf-8"), encoding="utf-8"
-        )
-        (legacy_dir / "index.html").write_text(
-            out_html.read_text(encoding="utf-8"), encoding="utf-8"
-        )
+        legacy_json = legacy_dir / "qc_report.json"
+        legacy_html = legacy_dir / "index.html"
+        legacy_json.write_text(out_json.read_text(encoding="utf-8"), encoding="utf-8")
+        legacy_html.write_text(out_html.read_text(encoding="utf-8"), encoding="utf-8")
     except Exception:
-        pass
+        legacy_json = None
+        legacy_html = None
 
-    return out_html
+    return QCReportOutput(
+        json=out_json,
+        html=out_html,
+        legacy_json=legacy_json,
+        legacy_html=legacy_html,
+    )

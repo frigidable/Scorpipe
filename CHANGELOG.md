@@ -1,4 +1,8 @@
 
+## v5.37.10
+
+- QC report: `build_qc_report()` now returns a mapping with output paths (`{"json": ..., "html": ...}`) while remaining backward-compatible as a Path-like HTML return value.
+
 ## v5.37.9
 
 - QC report: fixed product-key mismatches, now correctly aggregates wavesolution/linearize/manifest signatures into one JSON+HTML page.
