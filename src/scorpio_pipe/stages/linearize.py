@@ -215,102 +215,123 @@ def _lambda_edges(lam: np.ndarray) -> np.ndarray:
     return edges
 
 
-def _rebin_row_cumulative(
-    values: np.ndarray,
-    lam_row: np.ndarray,
-    edges_out: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Flux-conserving rebin of integrated-per-pixel values.
+def _monotonicize_lambda_centers(lam_centers: np.ndarray) -> tuple[np.ndarray, bool]:
+    """Return strictly monotonic *increasing* wavelength centers.
 
-    Uses cumulative integral on *pixel edges* and linear interpolation.
-    Returns (rebinned_values, coverage_fraction).
+    The lambda_map should be monotonic along the dispersion axis. Small numerical
+    imperfections (and occasional reversed dispersion) do occur; this helper
+    keeps the pixel order (except a full reverse when dispersion is decreasing)
+    and enforces strict monotonicity with a tiny step.
     """
-    lam_row = np.asarray(lam_row, dtype=np.float64)
-    values = np.asarray(values, dtype=np.float64)
-    if lam_row.shape != values.shape:
-        raise ValueError("lam_row and values must have the same shape")
+    lam = np.asarray(lam_centers, dtype=float)
+    if lam.size < 2:
+        return lam, False
 
-    # Ensure monotonic increasing wavelength.
-    if not np.all(np.diff(lam_row) > 0):
-        order = np.argsort(lam_row)
-        lam_row = lam_row[order]
-        values = values[order]
+    d = np.diff(lam)
+    d = d[np.isfinite(d)]
+    reversed_disp = bool(d.size > 0 and np.nanmedian(d) < 0)
+    if reversed_disp:
+        lam = lam[::-1]
+        d = -d
 
-    edges_in = _lambda_edges(lam_row)
-    c = np.empty(values.size + 1, dtype=np.float64)
-    c[0] = 0.0
-    np.cumsum(values, out=c[1:])
-    # Interpolate cumulative at output edges.
-    c_out = np.interp(edges_out, edges_in, c, left=0.0, right=float(c[-1]))
+    dpos = d[d > 0]
+    step = float(np.nanmedian(dpos)) if dpos.size else 1.0
+    eps = max(abs(step) * 1e-3, 1e-6)
+
+    out = lam.copy()
+    for i in range(1, out.size):
+        if not np.isfinite(out[i]):
+            out[i] = out[i - 1] + eps
+        elif out[i] <= out[i - 1]:
+            out[i] = out[i - 1] + eps
+
+    return out, reversed_disp
+
+
+def _rebin_row_var_weightsquared(var_in: np.ndarray, lam_centers: np.ndarray, edges_out: np.ndarray) -> np.ndarray:
+    """Flux-conserving variance propagation for the rebinning transform.
+
+    For output y = Σ w_j x_j (independent input pixels), Var(y) = Σ w_j^2 Var(x_j),
+    where w_j is the overlap fraction of the output bin with input pixel j.
+    """
+    v = np.asarray(var_in, dtype=float)
+    lam = np.asarray(lam_centers, dtype=float)
+    edges_out = np.asarray(edges_out, dtype=float)
+
+    if v.size == 0 or edges_out.size < 2:
+        return np.zeros(max(edges_out.size - 1, 0), dtype=float)
+
+    lam_m, rev = _monotonicize_lambda_centers(lam)
+    if rev:
+        v = v[::-1]
+
+    edges_in = _lambda_edges(lam_m)
+    widths = np.diff(edges_in)
+    widths = np.where(widths > 0, widths, np.nan)
+
+    n_in = v.size
+    n_out = edges_out.size - 1
+    out = np.zeros(n_out, dtype=float)
+
+    i = 0
+    k = 0
+    while i < n_in and k < n_out:
+        a0 = edges_in[i]
+        a1 = edges_in[i + 1]
+        b0 = edges_out[k]
+        b1 = edges_out[k + 1]
+
+        lo = a0 if a0 > b0 else b0
+        hi = a1 if a1 < b1 else b1
+        if hi > lo and np.isfinite(widths[i]) and widths[i] > 0 and np.isfinite(v[i]):
+            frac = (hi - lo) / widths[i]
+            out[k] += (frac * frac) * v[i]
+
+        if a1 <= b1:
+            i += 1
+        else:
+            k += 1
+
+    return out
+
+
+def _rebin_row_cumulative(values: np.ndarray, lam_centers: np.ndarray, edges_out: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Flux-conserving rebin of a 1D row onto a new wavelength grid.
+
+    Implements an edge-based cumulative integral approach:
+    - input pixel intervals are estimated from wavelength centers,
+    - flux density is assumed constant within each interval,
+    - the cumulative integral is interpolated to output bin edges.
+
+    Returns the integrated flux per output bin and the coverage fraction (0..1).
+    """
+    v = np.asarray(values, dtype=float)
+    lam = np.asarray(lam_centers, dtype=float)
+    edges_out = np.asarray(edges_out, dtype=float)
+
+    if v.size == 0 or edges_out.size < 2:
+        n = max(edges_out.size - 1, 0)
+        return np.zeros(n, dtype=float), np.zeros(n, dtype=float)
+
+    lam_m, rev = _monotonicize_lambda_centers(lam)
+    if rev:
+        v = v[::-1]
+
+    edges_in = _lambda_edges(lam_m)
+    c = np.zeros(edges_in.size, dtype=float)
+    c[1:] = np.cumsum(np.where(np.isfinite(v), v, 0.0))
+
+    c_out = np.interp(edges_out, edges_in, c, left=c[0], right=c[-1])
     out = np.diff(c_out)
 
-    # Coverage fraction: how much of each output bin is within the input λ-range.
-    lo = float(edges_in[0])
-    hi = float(edges_in[-1])
-    bin_lo = edges_out[:-1]
-    bin_hi = edges_out[1:]
-    overlap = np.clip(np.minimum(bin_hi, hi) - np.maximum(bin_lo, lo), 0.0, None)
-    cov = overlap / np.maximum(bin_hi - bin_lo, 1e-12)
-    return out.astype(np.float32), cov.astype(np.float32)
+    lo_in = edges_in[0]
+    hi_in = edges_in[-1]
+    lo = edges_out[:-1]
+    hi = edges_out[1:]
+    overlap = np.maximum(0.0, np.minimum(hi, hi_in) - np.maximum(lo, lo_in))
+    cov = overlap / np.maximum(hi - lo, 1e-12)
 
-
-def _write_mef(
-    path: Path,
-    sci: np.ndarray,
-    hdr: fits.Header,
-    var: Optional[np.ndarray] = None,
-    mask: Optional[np.ndarray] = None,
-    cov: Optional[np.ndarray] = None,
-    grid: WaveGrid | None = None,
-) -> None:
-    """Write 2D MEF product with canonical SCI/VAR/MASK and optional COV.
-
-    Primary HDU stores SCI data for legacy readers; SCI extension is canonical.
-    """
-    if grid is None:
-        grid = try_read_grid(hdr)
-    extra: list[fits.ImageHDU] = []
-    if cov is not None:
-        extra.append(fits.ImageHDU(data=np.asarray(cov, dtype=np.float32), name="COV"))
-    write_sci_var_mask(path, sci, var=var, mask=mask, header=hdr, grid=grid, extra_hdus=extra, primary_data=sci)
-
-
-
-def _set_linear_wcs(hdr: fits.Header, wave0: float, dw: float) -> fits.Header:
-    hdr = hdr.copy()
-    # 1-indexed FITS WCS
-    hdr["CTYPE1"] = ("WAVE", "Linear wavelength")
-    hdr["CUNIT1"] = ("Angstrom", "Wavelength unit")
-    hdr["CRPIX1"] = (1.0, "Reference pixel")
-    hdr["CRVAL1"] = (float(wave0), "Wavelength at CRPIX1")
-    hdr["CDELT1"] = (float(dw), "Angstrom per pixel")
-    return hdr
-
-
-def _infer_lambda_unit(lam_hdr: fits.Header, lam_map: np.ndarray) -> str:
-    """Best-effort guess for lambda_map unit.
-
-    SCORPIO wavesolution products usually store wavelengths in Angstrom,
-    but some intermediate workflows may store pixel coordinates.
-    """
-    for k in ("CUNIT1", "BUNIT", "UNIT", "CUNIT"):
-        if k in lam_hdr:
-            try:
-                u = str(lam_hdr[k]).strip().lower()
-                if "ang" in u or "\u00c5" in u or u == "a":
-                    return "Angstrom"
-                if "pix" in u or "px" in u:
-                    return "pix"
-            except Exception:
-                pass
-    # heuristic fallback
-    lam = np.asarray(lam_map, dtype=float)
-    finite = np.isfinite(lam)
-    if not np.any(finite):
-        return "Angstrom"
-    v = float(np.nanmedian(lam[finite]))
-    return "pix" if v < 2000.0 else "Angstrom"
-
+    return out.astype(float), cov.astype(float)
 
 def _compute_output_grid(
     lam_map: np.ndarray,
@@ -625,7 +646,7 @@ def run_linearize(cfg: Dict[str, Any], out_dir: Optional[Path] = None, *, cancel
                 rect_mask[yy, :] |= NO_COVERAGE
                 continue
             v_row, cov = _rebin_row_cumulative(data[yy, finite], lam_row[finite], wave_edges)
-            vv_row, _ = _rebin_row_cumulative(var[yy, finite], lam_row[finite], wave_edges)
+            vv_row = _rebin_row_var_weightsquared(var[yy, finite], lam_row[finite], wave_edges)
             rect[yy] = v_row
             rect_var[yy] = np.maximum(vv_row, 0.0)
             rect_cov[yy] = cov

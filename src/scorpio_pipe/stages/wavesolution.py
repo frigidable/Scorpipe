@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 import logging
 import json
@@ -683,81 +683,120 @@ def _weighted_rms(x: np.ndarray, w: np.ndarray) -> float:
 
 
 def _plot_residuals_vs_lambda(
+    lam_key: np.ndarray,
     lam_all: np.ndarray,
     dlam_all: np.ndarray,
     used_mask: np.ndarray,
-    rejected_lines_A: list[float] | None,
+    rejected_lines_A: Sequence[float],
     outpng: Path,
     title: str,
 ) -> None:
+    """QC plot: median Δλ per identified line vs λ.
+
+    Notes
+    -----
+    - "used" points are derived from samples that survived the 2D fit/rejection mask.
+    - "rejected" points are lines explicitly rejected by the user (in Å), shown for context.
+    """
+    # Local imports keep matplotlib optional for headless/CLI runs until QC is requested.
+    from scorpio_pipe.plot_style import mpl_style
+    import matplotlib.pyplot as plt
+
+    lam_key = np.asarray(lam_key, dtype=float)
     lam_all = np.asarray(lam_all, dtype=float)
     dlam_all = np.asarray(dlam_all, dtype=float)
     used_mask = np.asarray(used_mask, dtype=bool)
-    rej = rejected_lines_A or []
-    # per-line medians
-    lam_key = np.round(lam_all, 3)
-    uniq = np.unique(lam_key[np.isfinite(lam_key)])
-    xs: list[float] = []
-    ys: list[float] = []
+
+    m_finite = np.isfinite(lam_all) & np.isfinite(dlam_all) & np.isfinite(lam_key)
+    if not np.any(m_finite):
+        return
+
+    xs_used: list[float] = []
+    ys_used: list[float] = []
+    xs_rej: list[float] = []
+    ys_rej: list[float] = []
+
+    uniq = np.unique(lam_key[m_finite])
+    rej = [float(r) for r in rejected_lines_A] if rejected_lines_A is not None else []
+
+    # classify and aggregate per line
     for lk in uniq:
-        m_line = (lam_key == lk)
+        m_line = m_finite & (lam_key == lk)
+        if not np.any(m_line):
+            continue
+
         lam0 = float(np.median(lam_all[m_line])) if np.any(m_line) else float(lk)
         line_rej = any(abs(lam0 - float(r)) <= 0.25 for r in rej)
-        m = m_line & used_mask
-        if not np.any(m):
-            continue
-        xs.append(lam0)
-        ys.append(float(np.median(dlam_all[m])))
+
+        m_used = m_line & used_mask
+        if np.any(m_used):
+            xs_used.append(lam0)
+            ys_used.append(float(np.median(dlam_all[m_used])))
+        else:
+            # Keep rejected / unused lines visible for context (median over all finite samples).
+            xs_rej.append(lam0)
+            ys_rej.append(float(np.median(dlam_all[m_line])))
+
+        if line_rej and xs_rej and xs_rej[-1] != lam0:
+            # If a rejected line had used points (rare), also mark it as rejected for visibility.
+            xs_rej.append(lam0)
+            ys_rej.append(float(np.median(dlam_all[m_line])))
 
     with mpl_style():
         fig, ax = plt.subplots(figsize=(8.5, 3.2))
-        if xs:
-            ax.scatter(xs, ys)
-            # simple trend
-            if len(xs) >= 2:
-                p = np.polyfit(xs, ys, deg=1)
-                xg = np.linspace(min(xs), max(xs), 200)
-                ax.plot(xg, np.polyval(p, xg))
+        if xs_used:
+            ax.scatter(xs_used, ys_used, label="used")
+            # Trend on used points only
+            if len(xs_used) >= 2:
+                x = np.asarray(xs_used)
+                y = np.asarray(ys_used)
+                p = np.polyfit(x, y, deg=1)
+                xx = np.linspace(x.min(), x.max(), 200)
+                ax.plot(xx, p[0] * xx + p[1], label="linear trend")
+
+        if xs_rej:
+            ax.scatter(xs_rej, ys_rej, marker="x", label="rejected/unused")
+
         ax.axhline(0.0, lw=1.0)
         ax.set_xlabel("λ [Å]")
         ax.set_ylabel("median Δλ [Å]")
         ax.set_title(title)
+        if xs_rej or (xs_used and len(xs_used) >= 2):
+            ax.legend(loc="best", frameon=False)
+
         fig.tight_layout()
         fig.savefig(outpng, dpi=150)
         plt.close(fig)
 
-
 def _plot_residuals_vs_y(
-    y_pix_all: np.ndarray,
+    y_all: np.ndarray,
     dlam_all: np.ndarray,
     used_mask: np.ndarray,
     outpng: Path,
     title: str,
-    *,
-    n_bins: int = 32,
 ) -> None:
-    y = np.asarray(y_pix_all, dtype=float)
-    d = np.asarray(dlam_all, dtype=float)
+    """QC plot: median Δλ vs slit coordinate Y."""
+    from scorpio_pipe.plot_style import mpl_style
+    import matplotlib.pyplot as plt
+
+    y_all = np.asarray(y_all, dtype=float)
+    dlam_all = np.asarray(dlam_all, dtype=float)
     used_mask = np.asarray(used_mask, dtype=bool)
-    m = np.isfinite(y) & np.isfinite(d) & used_mask
+
+    m = np.isfinite(y_all) & np.isfinite(dlam_all) & used_mask
     if not np.any(m):
         return
-    y0, y1 = float(np.min(y[m])), float(np.max(y[m]))
-    if y1 <= y0:
-        return
-    edges = np.linspace(y0, y1, n_bins + 1)
-    yc: list[float] = []
+
+    yc = np.unique(y_all[m])
     med: list[float] = []
-    for i in range(n_bins):
-        mi = m & (y >= edges[i]) & (y < edges[i + 1])
-        if not np.any(mi):
-            continue
-        yc.append(float(0.5 * (edges[i] + edges[i + 1])))
-        med.append(float(np.median(d[mi])))
+    for yy in yc:
+        mi = m & (y_all == yy)
+        if np.any(mi):
+            med.append(float(np.median(dlam_all[mi])))
 
     with mpl_style():
         fig, ax = plt.subplots(figsize=(8.5, 3.2))
-        if yc:
+        if len(med) == len(yc) and len(yc) > 0:
             ax.plot(yc, med)
         ax.axhline(0.0, lw=1.0)
         ax.set_xlabel("Y [px]")
@@ -767,30 +806,35 @@ def _plot_residuals_vs_y(
         fig.savefig(outpng, dpi=150)
         plt.close(fig)
 
-
 def _plot_residual_hist(
     dlam_all: np.ndarray,
     used_mask: np.ndarray,
     outpng: Path,
     title: str,
 ) -> None:
+    """QC plot: histogram of Δλ normalized by σ_MAD."""
+    from scorpio_pipe.plot_style import mpl_style
+    import matplotlib.pyplot as plt
+
     d = np.asarray(dlam_all, dtype=float)
     used_mask = np.asarray(used_mask, dtype=bool)
     m = np.isfinite(d) & used_mask
     if not np.any(m):
         return
+
     sigma = _mad_sigma(d[m])
     z = d[m] / sigma if np.isfinite(sigma) and sigma > 0 else d[m]
+
     with mpl_style():
         fig, ax = plt.subplots(figsize=(6.8, 3.2))
         ax.hist(z, bins=40)
+        ax.axvline(0.0, lw=1.0)
         ax.set_xlabel("Δλ / σ_MAD")
-        ax.set_ylabel("count")
+        ax.set_ylabel("N")
         ax.set_title(title)
         fig.tight_layout()
         fig.savefig(outpng, dpi=150)
         plt.close(fig)
-
 
 # --------------------------- public stage ---------------------------
 

@@ -1,5 +1,5 @@
-* @frigidable
-
-/.github/workflows/ @frigidable
-/src/ @frigidable
-/packaging/ @frigidable
+# CODEOWNERS
+#
+# This file is used together with branch protection / rulesets option
+# “Require review from Code Owners”.
+* frigidable

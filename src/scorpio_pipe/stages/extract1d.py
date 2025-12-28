@@ -358,10 +358,20 @@ def _write_mef_1d(path: Path, flux: np.ndarray, hdr0: fits.Header, var: np.ndarr
     write_sci_var_mask(path, flux, var=var, mask=mask, header=hdr0, grid=grid, primary_data=flux)
 
 
-def run_extract1d(cfg: Dict[str, Any], *, in_fits: Optional[Path] = None, out_dir: Optional[Path] = None) -> Dict[str, Any]:
+def run_extract1d(
+    cfg: Dict[str, Any],
+    *,
+    in_fits: Optional[Path] = None,
+    stacked_fits: Optional[Path] = None,
+    out_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
     ecfg = cfg.get("extract1d", {}) if isinstance(cfg.get("extract1d"), dict) else {}
     if not bool(ecfg.get("enabled", True)):
         return {"skipped": True, "reason": "extract1d.enabled=false"}
+    # Backward-compatible alias used in older code/tests.
+    if in_fits is None and stacked_fits is not None:
+        in_fits = stacked_fits
+
 
     wd = resolve_work_dir(cfg)
     products_root = wd / "products"

@@ -333,13 +333,11 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
 
         if kind == "power":
             used_fit = pow_used
-            rms = pow_rms
 
             def model_fn(xx, yy):
                 return polyval2d_power(xx, yy, pow_coeff, pow_meta)
         else:
             used_fit = cheb_used
-            rms = cheb_rms
 
             def model_fn(xx, yy):
                 return polyval2d_cheb(xx, yy, cheb_C, cheb_meta)

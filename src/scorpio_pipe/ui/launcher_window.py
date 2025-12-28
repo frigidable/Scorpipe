@@ -1444,6 +1444,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._update_enables()
         self._refresh_statusbar()
 
+        if idx == 7:
+            try:
+                self._update_wavesol_stepper()
+            except Exception:
+                pass
+
         # refresh derived UI state
         try:
             self._update_setup_hint()
@@ -1600,6 +1606,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
             pass
         self._update_enables()
         self._refresh_statusbar()
+
+        if idx == 7:
+            try:
+                self._update_wavesol_stepper()
+            except Exception:
+                pass
 
     def _get_cfg_value(self, dotted: str, default: Any | None = None) -> Any:
         cfg = self._cfg or {}
@@ -2130,6 +2142,20 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 _set_value(getattr(self, 'dspin_ex1d_opt_clip', None), _safe_float(ex.get('optimal_sigma_clip', 5.0), 5.0))
             if hasattr(self, 'chk_ex1d_png'):
                 _set_checked(getattr(self, 'chk_ex1d_png', None), bool(ex.get('save_png', True)))
+
+        # keep derived labels fresh
+        try:
+            self._refresh_pair_sets_combo()
+        except Exception:
+            pass
+        try:
+            self._refresh_pairs_label()
+        except Exception:
+            pass
+        try:
+            self._update_wavesol_stepper()
+        except Exception:
+            pass
 
 
     def _build_page_calib(self) -> QtWidgets.QWidget:
@@ -3619,6 +3645,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             return
         if not self._ensure_cfg_saved():
             return
+
         try:
             # LineID preparation can take noticeable time on large frames.
             from PySide6.QtWidgets import QApplication
@@ -3628,11 +3655,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
             QApplication.processEvents()
 
             ctx = load_context(self._cfg_path)
-            # if config points to built-in pairs (absolute), avoid overwriting: use workdir file.
+
+            # If config points to a built-in pairs file (absolute), avoid overwriting it:
+            # switch back to the default workdir hand_pairs.
             pairs = self._current_pairs_path()
             if pairs and pairs.is_absolute():
-                # switch to default workdir path
-                self._set_cfg_value("wavesol.hand_pairs_path", "")
+                self._set_cfg_value('wavesol.hand_pairs_path', '')
                 self.editor_yaml.blockSignals(True)
                 self.editor_yaml.setPlainText(_yaml_dump(self._cfg or {}))
                 self.editor_yaml.blockSignals(False)
@@ -3649,18 +3677,17 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 pass
 
             # 2) Open the interactive LineID GUI to create/update hand_pairs.txt.
-            #    This mirrors the v4.13.2 behavior users expect.
             try:
                 from scorpio_pipe.wavesol_paths import wavesol_dir
                 from scorpio_pipe.stages.lineid_gui import prepare_lineid
 
                 wdir = wavesol_dir(ctx.cfg)
-                superneon_f = wdir / "superneon.fits"
-                peaks_f = wdir / "peaks_candidates.csv"
-                hand_f = self._current_pairs_path() or (wdir / "hand_pairs.txt")
+                superneon_f = wdir / 'superneon.fits'
+                peaks_f = wdir / 'peaks_candidates.csv'
+                hand_f = self._current_pairs_path() or (wdir / 'hand_pairs.txt')
 
-                wcfg = (ctx.cfg.get("wavesol", {}) or {}) if isinstance(ctx.cfg, dict) else {}
-                y_half = int(wcfg.get("y_half", 20))
+                wcfg = (ctx.cfg.get('wavesol', {}) or {}) if isinstance(ctx.cfg, dict) else {}
+                y_half = int(wcfg.get('y_half', 20))
 
                 prepare_lineid(
                     ctx.cfg,
@@ -3668,23 +3695,22 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     peaks_candidates_csv=peaks_f,
                     hand_file=hand_f,
                     y_half=y_half,
-                    title="LineID",
+                    title='LineID',
                 )
             except Exception as e:
-                # Interactive GUI errors should not mask preparation results.
                 self._log_exception(e)
 
             # Pretty-print: show the key artifacts, not a raw Python object.
             try:
-                msg = ", ".join(f"{k}={v}" for k, v in out.items())
+                msg = ', '.join(f"{k}={v}" for k, v in out.items())
             except Exception:
                 msg = str(out)
             self._log_info(f"LineID wrote: {msg}")
 
             self._refresh_pairs_label()
             try:
-                if hasattr(self, "outputs_lineid"):
-                    self.outputs_lineid.set_context(self._cfg, stage="wavesol")
+                if hasattr(self, 'outputs_lineid'):
+                    self.outputs_lineid.set_context(self._cfg, stage='wavesol')
             except Exception:
                 pass
             self._maybe_auto_qc()
@@ -3697,8 +3723,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 QApplication.restoreOverrideCursor()
             except Exception:
                 pass
+            try:
+                self._update_wavesol_stepper()
+            except Exception:
+                pass
 
-    
     # --------------------------- pair sets (wavesol hand pairs) ---------------------------
 
     def _show_msgbox_lines(self, title: str, lines: list[str], icon: str = "info") -> None:
@@ -3757,56 +3786,66 @@ class LauncherWindow(QtWidgets.QMainWindow):
             "binning": _norm_binning(setup.get("binning", "")),
         }
 
+
     def _refresh_pair_sets_combo(self) -> None:
-        if not hasattr(self, "combo_pair_sets"):
+        """Populate pair-set combos (LineID page and Wavesol stepper)."""
+        combos: list[tuple[str, tuple[str, ...]]] = []
+        if hasattr(self, "combo_pair_sets"):
+            combos.append(("combo_pair_sets", ("btn_use_pair_set", "btn_copy_pair_set")))
+        if hasattr(self, "combo_pair_sets_ws"):
+            combos.append(("combo_pair_sets_ws", ("btn_use_pair_set_ws",)))
+        if not combos:
             return
-        combo = self.combo_pair_sets
+    
         try:
             setup = self._setup_key_for_pairs()
             items = list_pair_sets(setup)
         except Exception as e:
             self._log_exception(e)
             items = []
-
-        # preserve current selection if possible
-        prev = None
-        try:
-            prev = combo.currentData()
-        except Exception:
-            prev = None
-
-        combo.blockSignals(True)
-        combo.clear()
-        if not items:
-            combo.addItem("(нет наборов)", None)
-            combo.setEnabled(False)
-        else:
-            combo.setEnabled(True)
-            for it in items:
-                tag = "user" if str(it.origin) == "user" else "built-in"
-                combo.addItem(
-                    f"{it.label} [{tag}]",
-                    {"origin": str(it.origin), "label": str(it.label), "path": str(it.path)},
-                )
-
-        # try restore
-        if prev is not None and items:
-            for i in range(combo.count()):
-                if combo.itemData(i) == prev:
-                    combo.setCurrentIndex(i)
-                    break
-        combo.blockSignals(False)
-
-        # update buttons/actions
-        try:
-            has_sel = isinstance(combo.currentData(), dict)
-            for btn_name in ("btn_use_pair_set", "btn_copy_pair_set"):
-                if hasattr(self, btn_name):
-                    getattr(self, btn_name).setEnabled(bool(has_sel))
-            if hasattr(self, "act_export_selected_pair_set"):
-                self.act_export_selected_pair_set.setEnabled(bool(has_sel))
-        except Exception:
-            pass
+    
+        for combo_name, btn_names in combos:
+            combo = getattr(self, combo_name)
+    
+            # preserve current selection if possible
+            try:
+                prev = combo.currentData()
+            except Exception:
+                prev = None
+    
+            combo.blockSignals(True)
+            combo.clear()
+            if not items:
+                combo.addItem("(нет наборов)", None)
+                combo.setEnabled(False)
+            else:
+                combo.setEnabled(True)
+                for it in items:
+                    tag = "user" if str(it.origin) == "user" else "built-in"
+                    combo.addItem(
+                        f"{it.label} [{tag}]",
+                        {"origin": str(it.origin), "label": str(it.label), "path": str(it.path)},
+                    )
+    
+            # try restore
+            if prev is not None and items:
+                for i in range(combo.count()):
+                    if combo.itemData(i) == prev:
+                        combo.setCurrentIndex(i)
+                        break
+            combo.blockSignals(False)
+    
+            # update buttons/actions
+            try:
+                has_sel = isinstance(combo.currentData(), dict)
+                for btn_name in btn_names:
+                    if hasattr(self, btn_name):
+                        getattr(self, btn_name).setEnabled(bool(has_sel))
+                if combo_name == "combo_pair_sets" and hasattr(self, "act_export_selected_pair_set"):
+                    self.act_export_selected_pair_set.setEnabled(bool(has_sel))
+            except Exception:
+                pass
+    
 
     def _selected_pair_set_id(self) -> dict | None:
         if not hasattr(self, "combo_pair_sets"):
@@ -3849,14 +3888,16 @@ class LauncherWindow(QtWidgets.QMainWindow):
         except Exception:
             return wd / "wavesol" / "hand_pairs.txt"
 
+
     def _refresh_pairs_label(self) -> None:
-        if not hasattr(self, "lbl_pairs_file"):
-            return
         p = self._current_pairs_path()
-        if p is None:
-            self.lbl_pairs_file.setText("hand pairs: —")
-        else:
-            self.lbl_pairs_file.setText(f"hand pairs: {p}")
+        txt = "hand pairs: —" if p is None else f"hand pairs: {p}"
+        for name in ("lbl_pairs_file", "lbl_pairs_file_ws"):
+            if hasattr(self, name):
+                try:
+                    getattr(self, name).setText(txt)
+                except Exception:
+                    pass
 
     def _do_use_pair_set(self) -> None:
         """Copy selected pair set into work_dir and point config to it."""
@@ -3868,6 +3909,25 @@ class LauncherWindow(QtWidgets.QMainWindow):
         if ps is None:
             self._show_msgbox_lines("Pairs", ["Не выбран набор пар."], icon="warn")
             return
+        self._do_use_pair_set_impl(ps)
+
+    def _do_use_pair_set_ws(self) -> None:
+        """Same as 'Use pair set', but triggered from the Wavesolution stepper."""
+        if not self._ensure_cfg_saved():
+            return
+        if not self._sync_cfg_from_editor():
+            return
+        if not hasattr(self, "combo_pair_sets_ws"):
+            return
+        data = self.combo_pair_sets_ws.currentData()
+        if not isinstance(data, dict) or "path" not in data:
+            self._show_msgbox_lines("Pairs", ["Не выбран набор пар."], icon="warn")
+            return
+        ps = {"path": str(data["path"]), "label": str(data.get("label", "")), "origin": str(data.get("origin", ""))}
+        self._do_use_pair_set_impl(ps)
+
+    def _do_use_pair_set_impl(self, ps: dict) -> None:
+        """Implementation: copy pair set into work_dir and update config."""
         cfg = self._cfg or {}
         if not self._cfg_path:
             self._show_msgbox_lines("Pairs", ["Сначала сохраните config.yaml (Apply)."], icon="warn")
@@ -3878,7 +3938,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             cfg2.setdefault("config_dir", str(self._cfg_path.parent))
             wd = resolve_work_dir(cfg2)
             disperser = str(cfg.get("setup", {}).get("disperser", "") or "")
-            src = Path(ps["path"]).expanduser()
+            src = Path(str(ps.get("path", ""))).expanduser()
             dst = copy_pair_set_to_workdir(disperser, wd, src)
             rel = _rel_to_workdir(wd, dst)
             self._set_cfg_value("wavesol.hand_pairs_path", rel)
@@ -3888,6 +3948,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._do_save_cfg()
             self._refresh_pairs_label()
             self._log_info(f"Using pair set '{ps.get('label','')}' → {dst}")
+            try:
+                self._update_wavesol_stepper()
+            except Exception:
+                pass
         except Exception as e:
             self._log_exception(e)
             self._show_msgbox_lines("Pairs", ["Не удалось скопировать набор пар в work_dir.", str(e)], icon="error")
@@ -4043,6 +4107,120 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.lbl_wavesol_dir = QtWidgets.QLabel("wavesol: —")
         self.lbl_wavesol_dir.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         gl.addWidget(self.lbl_wavesol_dir)
+        
+
+        # ---------------- director workflow (director's cut) ----------------
+        gflow = _box("Workflow 3.1–3.6 (director's cut)")
+        left_layout.addWidget(gflow)
+        fl = QtWidgets.QGridLayout(gflow)
+        fl.setHorizontalSpacing(10)
+        fl.setVerticalSpacing(8)
+
+        note = QtWidgets.QLabel(
+            "Режиссёрская сборка: жёсткий маршрут к стабильной λ-карте. "
+            "Кнопки блокируются, пока нет нужных артефактов (superneon, пары, λ-map и т.д.). "
+            "Подсказка: библиотека line-ID/hand pairs доступна прямо здесь."
+        )
+        note.setWordWrap(True)
+        fl.addWidget(note, 0, 0, 1, 3)
+
+        def _mk_step_frame(title: str) -> tuple[QtWidgets.QFrame, QtWidgets.QVBoxLayout]:
+            fr = QtWidgets.QFrame()
+            fr.setFrameShape(QtWidgets.QFrame.StyledPanel)
+            fr.setFrameShadow(QtWidgets.QFrame.Raised)
+            fr.setMinimumWidth(240)
+            v = QtWidgets.QVBoxLayout(fr)
+            v.setContentsMargins(8, 8, 8, 8)
+            v.setSpacing(6)
+            t = QtWidgets.QLabel(f"<b>{title}</b>")
+            t.setTextFormat(QtCore.Qt.RichText)
+            v.addWidget(t)
+            return fr, v
+
+        # 3.1 SuperNeon
+        fr31, v31 = _mk_step_frame("3.1 SuperNeon")
+        self.lbl_ws31_status = QtWidgets.QLabel("—")
+        self.lbl_ws31_status.setWordWrap(True)
+        v31.addWidget(self.lbl_ws31_status)
+        self.btn_ws_go_superneon = QtWidgets.QPushButton("Go: SuperNeon")
+        self.btn_ws_go_superneon.setCursor(QtCore.Qt.PointingHandCursor)
+        v31.addWidget(self.btn_ws_go_superneon)
+        fl.addWidget(fr31, 1, 0)
+
+        # 3.2 Line ID + pairs library (mini)
+        fr32, v32 = _mk_step_frame("3.2 Line ID / hand pairs")
+        self.lbl_ws32_status = QtWidgets.QLabel("—")
+        self.lbl_ws32_status.setWordWrap(True)
+        v32.addWidget(self.lbl_ws32_status)
+        self.lbl_pairs_file_ws = QtWidgets.QLabel("hand pairs: —")
+        self.lbl_pairs_file_ws.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        v32.addWidget(self.lbl_pairs_file_ws)
+
+        self.btn_ws_open_lineid = QtWidgets.QPushButton("Open LineID GUI")
+        self.btn_ws_open_lineid.setCursor(QtCore.Qt.PointingHandCursor)
+        v32.addWidget(self.btn_ws_open_lineid)
+
+        row32 = QtWidgets.QHBoxLayout()
+        self.combo_pair_sets_ws = QtWidgets.QComboBox()
+        self.combo_pair_sets_ws.setMinimumWidth(220)
+        self.combo_pair_sets_ws.setToolTip("Библиотека наборов пар: встроенные + пользовательские")
+        row32.addWidget(self.combo_pair_sets_ws, 1)
+        self.btn_use_pair_set_ws = QtWidgets.QPushButton("Use")
+        self.btn_use_pair_set_ws.setCursor(QtCore.Qt.PointingHandCursor)
+        self.btn_use_pair_set_ws.setToolTip("Скопировать выбранный набор пар в work_dir и использовать его")
+        row32.addWidget(self.btn_use_pair_set_ws)
+        self.btn_open_pairs_library_ws = QtWidgets.QPushButton("Library")
+        self.btn_open_pairs_library_ws.setCursor(QtCore.Qt.PointingHandCursor)
+        self.btn_open_pairs_library_ws.setToolTip("Открыть папку пользовательской библиотеки")
+        row32.addWidget(self.btn_open_pairs_library_ws)
+        v32.addLayout(row32)
+        fl.addWidget(fr32, 1, 1)
+
+        # 3.3 Solve λ-map
+        fr33, v33 = _mk_step_frame("3.3 Solve λ(x,y)")
+        self.lbl_ws33_status = QtWidgets.QLabel("—")
+        self.lbl_ws33_status.setWordWrap(True)
+        v33.addWidget(self.lbl_ws33_status)
+        self.btn_ws_run_wavesol = QtWidgets.QPushButton("Run: Wavesolution")
+        self.btn_ws_run_wavesol.setCursor(QtCore.Qt.PointingHandCursor)
+        v33.addWidget(self.btn_ws_run_wavesol)
+        fl.addWidget(fr33, 1, 2)
+
+        # 3.4 Clean pairs
+        fr34, v34 = _mk_step_frame("3.4 Clean pairs")
+        self.lbl_ws34_status = QtWidgets.QLabel("—")
+        self.lbl_ws34_status.setWordWrap(True)
+        v34.addWidget(self.lbl_ws34_status)
+        self.btn_ws_clean_pairs = QtWidgets.QPushButton("Open: Pairs cleaner…")
+        self.btn_ws_clean_pairs.setCursor(QtCore.Qt.PointingHandCursor)
+        v34.addWidget(self.btn_ws_clean_pairs)
+        fl.addWidget(fr34, 2, 0)
+
+        # 3.5 Clean 2D lines
+        fr35, v35 = _mk_step_frame("3.5 Clean 2D lines")
+        self.lbl_ws35_status = QtWidgets.QLabel("—")
+        self.lbl_ws35_status.setWordWrap(True)
+        v35.addWidget(self.lbl_ws35_status)
+        self.btn_ws_clean_2d = QtWidgets.QPushButton("Open: 2D line cleaner…")
+        self.btn_ws_clean_2d.setCursor(QtCore.Qt.PointingHandCursor)
+        v35.addWidget(self.btn_ws_clean_2d)
+        fl.addWidget(fr35, 2, 1)
+
+        # 3.6 QC / Frames
+        fr36, v36 = _mk_step_frame("3.6 QC / Frames")
+        self.lbl_ws36_status = QtWidgets.QLabel("—")
+        self.lbl_ws36_status.setWordWrap(True)
+        v36.addWidget(self.lbl_ws36_status)
+        row36 = QtWidgets.QHBoxLayout()
+        self.btn_ws_open_qc = QtWidgets.QPushButton("QC")
+        self.btn_ws_open_qc.setCursor(QtCore.Qt.PointingHandCursor)
+        row36.addWidget(self.btn_ws_open_qc)
+        self.btn_ws_open_frames = QtWidgets.QPushButton("Frames")
+        self.btn_ws_open_frames.setCursor(QtCore.Qt.PointingHandCursor)
+        row36.addWidget(self.btn_ws_open_frames)
+        v36.addLayout(row36)
+        fl.addWidget(fr36, 2, 2)
+
 
         # ---------------- parameters ----------------
         gpar = _box("Parameters")
@@ -4386,10 +4564,152 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_qc_wavesol.clicked.connect(self._open_qc_viewer)
         self.btn_frames_wavesol.clicked.connect(lambda: self._open_frames_window('wavesol'))
 
+        # stepper wiring (director's cut)
+        try:
+            self.btn_ws_go_superneon.clicked.connect(lambda: self.steps.setCurrentRow(5))
+            self.btn_ws_open_lineid.clicked.connect(lambda: self.steps.setCurrentRow(6))
+            self.btn_ws_run_wavesol.clicked.connect(self._do_wavesolution)
+            self.btn_ws_clean_pairs.clicked.connect(self._do_clean_pairs)
+            self.btn_ws_clean_2d.clicked.connect(self._do_clean_wavesol2d)
+            self.btn_ws_open_qc.clicked.connect(self._open_qc_viewer)
+            self.btn_ws_open_frames.clicked.connect(lambda: self._open_frames_window('wavesol'))
+            self.btn_use_pair_set_ws.clicked.connect(self._do_use_pair_set_ws)
+            self.btn_open_pairs_library_ws.clicked.connect(self._do_open_pairs_library)
+        except Exception:
+            pass
+
         # initial sync
         self._sync_stage_controls_from_cfg()
         _model_changed()
         return w
+
+    def _update_wavesol_stepper(self) -> None:
+        """Update director's-cut workflow widgets on the Wavelength solution page."""
+        if not hasattr(self, "lbl_ws_step_31"):
+            return
+
+        cfg = dict(self._cfg or {})
+        if self._cfg_path:
+            cfg.setdefault("config_dir", str(self._cfg_path.parent))
+
+        # Resolve wavesol dir (best-effort)
+        wsdir = None
+        try:
+            wsdir = wavesol_dir(cfg)
+        except Exception:
+            try:
+                wd = resolve_work_dir(cfg)
+                wsdir = (wd / "wavesol")
+            except Exception:
+                wsdir = None
+
+        def _set(lbl, kind: str, msg: str) -> None:
+            if lbl is None:
+                return
+            icon = {
+                "ok": "✅",
+                "warn": "⚠️",
+                "lock": "🔒",
+                "partial": "🟡",
+                "run": "⏳",
+            }.get(kind, "•")
+            try:
+                lbl.setText(f"{icon} {msg}")
+            except Exception:
+                pass
+
+        # directory label
+        try:
+            if wsdir is not None and hasattr(self, "lbl_wavesol_dir"):
+                self.lbl_wavesol_dir.setText(f"wavesol: {wsdir}")
+        except Exception:
+            pass
+
+        # Files
+        def _p(name: str):
+            return (wsdir / name) if wsdir is not None else None
+
+        superneon = _p("superneon.fits")
+        peaks = _p("peaks_candidates.csv")
+        pairs = self._current_pairs_path()
+        w1d = _p("wavesolution_1d.json")
+        w2d = _p("wavesolution_2d.json")
+        lmap = _p("lambda_map.fits")
+        cpts = _p("control_points_2d.csv")
+        resid = _p("residuals_2d.png")
+
+        # Step 3.1
+        sn_ready = bool(superneon and superneon.exists())
+        if sn_ready:
+            _set(self.lbl_ws_step_31, "ok", "SuperNeon готов")
+        else:
+            _set(self.lbl_ws_step_31, "lock", "Нужен SuperNeon")
+        try:
+            self.btn_ws_run_wavesol.setEnabled(sn_ready and bool(pairs and pairs.exists()))
+        except Exception:
+            pass
+
+        # Step 3.2
+        pairs_ready = bool(pairs and pairs.exists())
+        if pairs_ready:
+            _set(self.lbl_ws_step_32, "ok", "Пары линий готовы")
+        else:
+            _set(self.lbl_ws_step_32, "lock", "Нужен LineID (hand_pairs)")
+        try:
+            if hasattr(self, "lbl_pairs_file_ws"):
+                self.lbl_pairs_file_ws.setText("hand pairs: —" if not pairs else f"hand pairs: {pairs}")
+        except Exception:
+            pass
+        try:
+            self.btn_ws_clean_pairs.setEnabled(pairs_ready)
+        except Exception:
+            pass
+
+        # Step 3.3
+        has_1d = bool(w1d and w1d.exists())
+        has_2d = bool(w2d and w2d.exists())
+        has_map = bool(lmap and lmap.exists())
+        if has_map and has_2d:
+            _set(self.lbl_ws_step_33, "ok", "λ-map построен")
+        elif has_1d:
+            _set(self.lbl_ws_step_33, "partial", "Есть 1D, нужен 2D λ-map")
+        else:
+            _set(self.lbl_ws_step_33, "warn", "Решение ещё не построено")
+
+        # Step 3.4
+        if pairs_ready:
+            _set(self.lbl_ws_step_34, "ok", "Можно чистить пары")
+        else:
+            _set(self.lbl_ws_step_34, "lock", "Нечего чистить без hand_pairs")
+
+        # Step 3.5
+        cpts_ready = bool(cpts and cpts.exists())
+        if cpts_ready:
+            _set(self.lbl_ws_step_35, "ok", "2D контрольные точки готовы")
+        else:
+            _set(self.lbl_ws_step_35, "lock", "Нужны control_points_2d.csv")
+        try:
+            self.btn_ws_clean_2d.setEnabled(cpts_ready)
+        except Exception:
+            pass
+
+        # Step 3.6
+        qc_ready = bool(resid and resid.exists())
+        if qc_ready:
+            _set(self.lbl_ws_step_36, "ok", "QC графики готовы")
+        elif has_map:
+            _set(self.lbl_ws_step_36, "warn", "λ-map есть, QC ещё не найден")
+        else:
+            _set(self.lbl_ws_step_36, "lock", "Сначала постройте λ-map")
+
+        # Minor nicety: show small hint if peaks file exists
+        try:
+            if hasattr(self, "lbl_ws_step_31") and peaks and peaks.exists() and not sn_ready:
+                # ignore
+                pass
+        except Exception:
+            pass
+
 
     def _do_clean_pairs(self) -> None:
         if not self._ensure_cfg_saved():
@@ -4423,6 +4743,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
         try:
             if hasattr(self, "outputs_wavesol"):
                 self.outputs_wavesol.set_context(self._cfg, stage="wavesol")
+        except Exception:
+            pass
+
+        try:
+            self._update_wavesol_stepper()
         except Exception:
             pass
 
@@ -4498,6 +4823,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
         except Exception as e:
             self._log_exception(e)
 
+        try:
+            self._update_wavesol_stepper()
+        except Exception:
+            pass
+
+
     def _do_wavesolution(self) -> None:
         if not self._ensure_stage_applied("wavesol", "Wavelength solution"):
             return
@@ -4519,6 +4850,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
         except Exception as e:
             self._set_step_status(7, "fail")
             self._log_exception(e)
+
+        finally:
+            try:
+                self._update_wavesol_stepper()
+            except Exception:
+                pass
 
 
     # --------------------------- linearize / sky / extract1d (v5) ---------------------------
@@ -5706,6 +6043,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
             pass
         self._refresh_statusbar()
 
+        if idx == 7:
+            try:
+                self._update_wavesol_stepper()
+            except Exception:
+                pass
+
     # --------------------------- statusbar / shortcuts ---------------------------
 
     def _build_statusbar_widgets(self) -> None:
@@ -5739,6 +6082,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
             pass
 
         self._refresh_statusbar()
+
+        if idx == 7:
+            try:
+                self._update_wavesol_stepper()
+            except Exception:
+                pass
 
     def _short_path(self, p: Path | None) -> str:
         if not p:
