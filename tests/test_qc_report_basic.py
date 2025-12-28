@@ -9,6 +9,7 @@ fits = pytest.importorskip("astropy.io.fits")
 from scorpio_pipe.frame_signature import FrameSignature
 from scorpio_pipe.qc_report import build_qc_report
 from scorpio_pipe.work_layout import ensure_work_layout
+from scorpio_pipe.workspace_paths import stage_dir
 from scorpio_pipe.wavesol_paths import wavesol_dir
 
 
@@ -18,11 +19,15 @@ def test_qc_report_collects_basic_metrics(tmp_path: Path) -> None:
 
     # Minimal calibration done markers
     sig = FrameSignature(ny=16, nx=32, bx=1, by=2, window="", readout="RATE=185.0")
-    (layout.calibs / "superbias_done.json").write_text(
+    sb_dir = stage_dir(work_dir, "superbias")
+    sb_dir.mkdir(parents=True, exist_ok=True)
+    (sb_dir / "superbias_done.json").write_text(
         json.dumps({"status": "ok", "frame_signature": sig.to_dict(), "n_inputs": 3}, indent=2),
         encoding="utf-8",
     )
-    (layout.calibs / "superflat_done.json").write_text(
+    sf_dir = stage_dir(work_dir, "superflat")
+    sf_dir.mkdir(parents=True, exist_ok=True)
+    (sf_dir / "superflat_done.json").write_text(
         json.dumps({"status": "ok", "frame_signature": sig.to_dict(), "n_inputs": 5}, indent=2),
         encoding="utf-8",
     )

@@ -262,7 +262,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
             "8  Wavelength solution",
             "9  Linearize (2D solution)",
             "10 Sky subtraction (Kelson)",
-            "11 Extract 1D spectrum",
+            "11 Stack2D (combine)",
+            "12 Extract 1D spectrum",
         ]:
             it = QtWidgets.QListWidgetItem(title)
             it.setIcon(self._icon_status("idle"))
@@ -288,6 +289,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.page_wavesol = self._build_page_wavesol()
         self.page_linearize = self._build_page_linearize()
         self.page_sky = self._build_page_sky()
+        self.page_stack2d = self._build_page_stack2d()
         self.page_extract1d = self._build_page_extract1d()
         for p in [
             self.page_project,
@@ -300,6 +302,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.page_wavesol,
             self.page_linearize,
             self.page_sky,
+            self.page_stack2d,
             self.page_extract1d,
         ]:
             self.stack.addWidget(p)
@@ -2351,7 +2354,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             if hasattr(self, "chk_sky_stack_after"):
                 _set_checked(
                     getattr(self, "chk_sky_stack_after", None),
-                    bool(sky.get("stack_after", True)),
+                    False,
                 )
             if hasattr(self, "chk_sky_save_models"):
                 _set_checked(
@@ -5983,13 +5986,14 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.chk_sky_per_exp,
         )
 
-        self.chk_sky_stack_after = QtWidgets.QCheckBox("Stack after sky")
+        self.chk_sky_stack_after = QtWidgets.QCheckBox("Stack2D is a separate step (see Step 11)")
+        self.chk_sky_stack_after.setEnabled(False)
         bf.addRow(
             self._param_label(
-                "Stack after",
-                "После вычитания неба автоматически выполнить stacking (2D) в (λ, y).\n"
-                "Полезно для получения итогового 2D-кадра и последующей 1D-экстракции.\n"
-                "Типично: включено.",
+                "Stack2D",
+                "В v5.38.2 Stack2D вынесен в отдельную стадию.\n"
+                "Небо (Step 10) больше не запускает stacking автоматически.\n"
+                "Запустите Step 11 Stack2D отдельно.",
             ),
             self.chk_sky_stack_after,
         )
@@ -6514,6 +6518,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         - "stack2d.y_align"
         """
         from scorpio_pipe.ui.lambda_windows_dialog import LambdaWindowsDialog
+        from scorpio_pipe.workspace_paths import stage_dir
 
         # We select on a linearized preview if possible; otherwise on the first available rectified frame.
         if not self._ensure_cfg_saved():
@@ -6526,7 +6531,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 fits_path = work / "lin" / "obj_sum_lin.fits"
             if not fits_path.exists():
                 # try any per-exp sky frame
-                cand = list((work / "products" / "sky" / "per_exp").glob("*.fits"))
+                # Fallback: any sky product in canonical stage tree.
+                sky_root = stage_dir(work, "sky")
+                cand = list(sky_root.rglob("*.fits"))
                 if cand:
                     fits_path = cand[0]
             if not fits_path.exists():
@@ -6573,12 +6580,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 if isinstance(ctx.cfg.get("sky"), dict)
                 else {}
             )
-            do_stack = bool(sky_cfg.get("stack_after", True))
+            # Sky runs as a standalone stage. Stack2D is executed explicitly
+            # in its own step.
             tasks = ["sky"]
-            if do_stack:
-                tasks.append("stack2d")
             run_sequence(ctx, tasks)
-            self._log_info("Sky subtraction done" + (" + Stack2D" if do_stack else ""))
+            self._log_info("Sky subtraction done")
             try:
                 if hasattr(self, "outputs_sky"):
                     self.outputs_sky.set_context(self._cfg, stage="sky")
@@ -6589,6 +6595,189 @@ class LauncherWindow(QtWidgets.QMainWindow):
         except Exception as e:
             self._set_step_status(9, "fail")
             self._log_exception(e)
+
+    def _do_run_stack2d(self) -> None:
+        from scorpio_pipe.product_naming import legacy_sky_sub_fits_names, sky_sub_fits_name
+        from scorpio_pipe.workspace_paths import resolve_input_path, stage_dir
+
+        if not self._ensure_stage_applied("stack2d", "Stack2D"):
+            return
+        if not self._ensure_cfg_saved():
+            return
+
+        self._set_step_status(10, "running")
+        try:
+            ctx = load_context(self._cfg_path)
+            work = resolve_work_dir(ctx.cfg)
+
+            # Sanity: require that sky-subtracted frames exist for the science exposure list.
+            sky_root = stage_dir(work, "sky")
+            frames = ctx.cfg.get("frames") if isinstance(ctx.cfg.get("frames"), dict) else {}
+            obj_list = frames.get("obj") if isinstance(frames.get("obj"), list) else []
+            stems = [Path(x).stem for x in obj_list if isinstance(x, str) and x.strip()]
+
+            if stems:
+                missing: list[str] = []
+                for stem in stems:
+                    canon = sky_sub_fits_name(stem)
+                    extra = []
+                    for name in legacy_sky_sub_fits_names(stem):
+                        extra.extend(
+                            [
+                                sky_root / stem / name,
+                                sky_root / "per_exp" / name,
+                                work / "products" / "sky" / "per_exp" / name,
+                                work / "sky" / "per_exp" / name,
+                                sky_root / name,
+                                work / "products" / "sky" / name,
+                                work / "sky" / name,
+                            ]
+                        )
+                    p = resolve_input_path(
+                        "skysub_fits",
+                        work,
+                        "sky",
+                        raw_stem=stem,
+                        relpath=canon,
+                        extra_candidates=extra,
+                    )
+                    if not p.exists():
+                        missing.append(stem)
+                if missing:
+                    raise FileNotFoundError(
+                        "Missing sky-subtracted inputs for stems: "
+                        + ", ".join(missing)
+                        + ". Run 'Sky subtraction' first."
+                    )
+            else:
+                # Fallback: any sky-sub products in stage dir (legacy behavior)
+                inputs = list(sky_root.rglob("*_skysub.fits"))
+                if not inputs:
+                    inputs = list(sky_root.rglob("*_sky_sub.fits"))
+                if not inputs:
+                    raise FileNotFoundError(
+                        "No sky-subtracted frames found. Run 'Sky subtraction' first."
+                    )
+
+            run_sequence(ctx, ["stack2d"])
+            self._log_info("Stack2D done")
+            try:
+                if hasattr(self, "outputs_stack2d"):
+                    self.outputs_stack2d.set_context(self._cfg, stage="stack2d")
+            except Exception:
+                pass
+            self._set_step_status(10, "ok")
+            self._maybe_auto_qc()
+        except Exception as e:
+            self._set_step_status(10, "fail")
+            self._log_exception(e)
+
+    def _build_page_stack2d(self) -> QtWidgets.QWidget:
+        w = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(w)
+        lay.setSpacing(12)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        lay.addWidget(splitter, 1)
+
+        left = QtWidgets.QWidget()
+        left_layout = QtWidgets.QVBoxLayout(left)
+        left_layout.setSpacing(12)
+
+        g = _box("Stack2D (combine)")
+        left_layout.addWidget(g)
+        gl = QtWidgets.QVBoxLayout(g)
+
+        lbl = QtWidgets.QLabel(
+            "Robust 2D stacking of sky-subtracted frames in (λ, y).\n"
+            "Input: products/.../sky/<raw_stem>/<raw_stem>_skysub.fits\n"
+            "Output: products/.../stack2d/stacked2d.fits"
+        )
+        lbl.setWordWrap(True)
+        gl.addWidget(lbl)
+
+        gpar = _box("Parameters")
+        pl = QtWidgets.QVBoxLayout(gpar)
+        pl.setSpacing(10)
+
+        form = QtWidgets.QFormLayout()
+        form.setLabelAlignment(QtCore.Qt.AlignLeft)
+        form.setHorizontalSpacing(12)
+
+        self.dspin_stack2d_clip = QtWidgets.QDoubleSpinBox()
+        self.dspin_stack2d_clip.setRange(0.5, 10.0)
+        self.dspin_stack2d_clip.setDecimals(2)
+        self.dspin_stack2d_clip.setSingleStep(0.25)
+        form.addRow(
+            self._param_label(
+                "Sigma clip",
+                "Sigma-clipping during stack. Typical: 2.5–4.",
+            ),
+            self.dspin_stack2d_clip,
+        )
+
+        self.spin_stack2d_maxiter = QtWidgets.QSpinBox()
+        self.spin_stack2d_maxiter.setRange(1, 20)
+        self.spin_stack2d_maxiter.setSingleStep(1)
+        form.addRow(
+            self._param_label(
+                "Max iters",
+                "Max clipping iterations. Typical: 3–8.",
+            ),
+            self.spin_stack2d_maxiter,
+        )
+
+        self.chk_stack2d_png = QtWidgets.QCheckBox("Save PNG")
+        form.addRow(
+            self._param_label(
+                "Save PNG",
+                "Save diagnostic PNG of the stacked frame. Typical: enabled.",
+            ),
+            self.chk_stack2d_png,
+        )
+
+        pl.addLayout(form)
+        gl.addWidget(gpar)
+
+        # Apply / Run row
+        row = QtWidgets.QHBoxLayout()
+        self.btn_stack2d_apply = QtWidgets.QPushButton("Apply")
+        self.btn_stack2d_run = QtWidgets.QPushButton("Run Stack2D")
+        self.btn_stack2d_run.setProperty("primary", True)
+        row.addWidget(self.btn_stack2d_apply)
+        row.addStretch(1)
+        row.addWidget(self.btn_stack2d_run)
+        gl.addLayout(row)
+
+        # Right: outputs
+        right = QtWidgets.QWidget()
+        right_layout = QtWidgets.QVBoxLayout(right)
+        right_layout.setSpacing(12)
+        self.outputs_stack2d = OutputsPanel(stage="stack2d")
+        right_layout.addWidget(self.outputs_stack2d, 1)
+
+        splitter.addWidget(left)
+        splitter.addWidget(right)
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 3)
+
+        # Wire
+        self.dspin_stack2d_clip.valueChanged.connect(
+            lambda v: self._stage_set_pending("stack2d", "stack2d.sigma_clip", float(v))
+        )
+        self.spin_stack2d_maxiter.valueChanged.connect(
+            lambda v: self._stage_set_pending("stack2d", "stack2d.max_iter", int(v))
+        )
+        self.chk_stack2d_png.toggled.connect(
+            lambda b: self._stage_set_pending("stack2d", "stack2d.save_png", bool(b))
+        )
+        self.btn_stack2d_apply.clicked.connect(
+            lambda: self._stage_apply("stack2d", "Stack2D")
+        )
+        self.btn_stack2d_run.clicked.connect(self._do_run_stack2d)
+
+        return w
 
     def _build_page_extract1d(self) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
@@ -6609,8 +6798,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         lbl = QtWidgets.QLabel(
             "Extract a 1D spectrum F(λ) from the stacked 2D product in (λ, y).\n"
-            "Input: products/stack/stacked2d.fits (fallback: products/sky/*).\n"
-            "Output: products/spec/spec1d.fits (+ trace.json and PNG quicklook)."
+            "Input: products/.../stack2d/stacked2d.fits (required).\n"
+            "Output: products/.../spec/spec1d.fits (+ trace.json and PNG quicklook)."
         )
         lbl.setWordWrap(True)
         gl.addWidget(lbl)
@@ -6815,7 +7004,27 @@ class LauncherWindow(QtWidgets.QMainWindow):
             return
         if not self._ensure_cfg_saved():
             return
-        self._set_step_status(10, "running")
+        from scorpio_pipe.workspace_paths import stage_dir
+
+        # Enforce: Extract1D only after successful Stack2D.
+        try:
+            wd = resolve_work_dir(self._cfg)
+            if not (stage_dir(wd, "stack2d") / "stack2d_done.json").exists():
+                self._show_msg(
+                    "Stack2D not complete",
+                    [
+                        "Run Step 11: Stack2D first (it produces stacked2d.fits).",
+                        "If you really know what you're doing, you can run Extract1D via CLI and pass --in-fits.",
+                    ],
+                    icon="warn",
+                )
+                self._set_step_status(11, "fail")
+                return
+        except Exception:
+            # If work_dir cannot be resolved, runner will report a clearer error.
+            pass
+
+        self._set_step_status(11, "running")
         try:
             ctx = load_context(self._cfg_path)
             run_sequence(ctx, ["extract1d"])
@@ -6825,10 +7034,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     self.outputs_extract1d.set_context(self._cfg, stage="spec")
             except Exception:
                 pass
-            self._set_step_status(10, "ok")
+            self._set_step_status(11, "ok")
             self._maybe_auto_qc()
         except Exception as e:
-            self._set_step_status(10, "fail")
+            self._set_step_status(11, "fail")
             self._log_exception(e)
 
     # --------------------------- misc helpers ---------------------------

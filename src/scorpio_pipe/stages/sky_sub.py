@@ -664,18 +664,19 @@ def run_sky_sub(
         Optional path to the linearized stacked frame. If None,
         uses work_dir/lin/obj_sum_lin.fits.
     out_dir
-        Output directory. Defaults to work_dir/sky.
+        Output directory. Defaults to the canonical stage directory
+        ``products/NN_sky`` (see :func:`scorpio_pipe.workspace_paths.stage_dir`).
     """
 
     sky_cfg = (cfg.get("sky") or {}) if isinstance(cfg.get("sky"), dict) else {}
-    # v5.12 defaults (best-practice): products/ as canonical outputs.
+    # v5.38+: stage directories under products/NN_*.
     wd = resolve_work_dir(cfg)
-    products_root = wd / "products"
+    from scorpio_pipe.workspace_paths import stage_dir
+
     legacy_root = wd / "sky"
     if not bool(sky_cfg.get("enabled", True)):
         # Write a marker anyway to keep resume/QC stable.
-        wd = resolve_work_dir(cfg)
-        out_dir = Path(out_dir) if out_dir is not None else (wd / "sky")
+        out_dir = Path(out_dir) if out_dir is not None else stage_dir(wd, "sky")
         out_dir.mkdir(parents=True, exist_ok=True)
         done = out_dir / "sky_sub_done.json"
         done.write_text(
@@ -712,10 +713,11 @@ def run_sky_sub(
         roi = _roi_from_cfg(cfg)
     except Exception:
         # Try interactive mode if enabled.
-        wd = resolve_work_dir(cfg)
+        lin_stage = stage_dir(wd, "linearize")
         cand = [
-            wd / "products" / "lin" / "lin_preview.fits",
-            wd / "lin" / "obj_sum_lin.fits",
+            lin_stage / "lin_preview.fits",
+            wd / "products" / "lin" / "lin_preview.fits",  # legacy
+            wd / "lin" / "obj_sum_lin.fits",  # legacy
         ]
         preview = next((p for p in cand if p.exists()), None)
         if preview is not None:
@@ -730,7 +732,7 @@ def run_sky_sub(
                 cfg["sky"]["roi"].update(roi_dict)
         roi = _roi_from_cfg(cfg)
 
-    out_dir = Path(out_dir) if out_dir is not None else (products_root / "sky")
+    out_dir = Path(out_dir) if out_dir is not None else stage_dir(wd, "sky")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     per_exposure = bool(sky_cfg.get("per_exposure", True))
@@ -741,8 +743,16 @@ def run_sky_sub(
     save_per_exp_model = bool(sky_cfg.get("save_per_exp_model", False))
     save_spectrum_1d = bool(sky_cfg.get("save_spectrum_1d", False))
 
-    # Helper: mirror a product into legacy folder for backward compatibility.
+    # Legacy write-outs are disabled by default.
+    # This avoids polluting new workspaces with deprecated paths.
+    compat = cfg.get("compat") if isinstance(cfg.get("compat"), dict) else {}
+    write_legacy = bool(compat.get("write_legacy_outputs", False))
+
     def _mirror_legacy(src: Path, rel: str) -> None:
+        if not write_legacy:
+            return
+        if not legacy_root.is_dir():
+            return
         try:
             dst = legacy_root / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
@@ -1242,11 +1252,11 @@ def run_sky_sub(
         hdr_out["OBJY0"] = int(obj_y0)
         hdr_out["OBJY1"] = int(obj_y1)
 
-        # per-exposure naming if needed
-        sky_model_path = base_dir / f"{tag}_sky_model.fits"
-        # New canonical naming (v5.19): *_skysub.fits
-        sky_sub_path = base_dir / f"{tag}_skysub.fits"
-        sky_sub_legacy = base_dir / f"{tag}_sky_sub.fits"
+        # Per-exposure naming (single source of truth).
+        from scorpio_pipe.product_naming import sky_model_fits_name, sky_sub_fits_name
+
+        sky_model_path = base_dir / sky_model_fits_name(tag)
+        sky_sub_path = base_dir / sky_sub_fits_name(tag)
         sky_spec_csv = base_dir / f"{tag}_sky_spectrum.csv"
         sky_spec_json = base_dir / f"{tag}_sky_spectrum.json"
 
@@ -1260,12 +1270,9 @@ def run_sky_sub(
             var=None if var is None else np.asarray(var, dtype=np.float32),
             mask=None if mask is None else np.asarray(mask, dtype=np.uint16),
         )
-        # Backward-compatible alias
-        try:
-            if sky_sub_legacy != sky_sub_path:
-                shutil.copy2(sky_sub_path, sky_sub_legacy)
-        except Exception:
-            pass
+        # NOTE: do not write legacy aliases here.
+        # Readers should accept legacy spellings, but writers must keep a
+        # single canonical filename.
 
         # 1D sky spectrum export (optional)
         if save_spectrum_1d:
@@ -1427,7 +1434,7 @@ def run_sky_sub(
             "lin_fits": str(lin_path),
             "sky_model": str(sky_model_path) if write_model else None,
             "sky_sub": str(sky_sub_path),
-            "sky_sub_legacy": str(sky_sub_legacy) if sky_sub_legacy.exists() else None,
+            "sky_sub_legacy": None,
             "sky_spec_csv": str(sky_spec_csv)
             if (save_spectrum_1d and sky_spec_csv.exists())
             else None,
@@ -1442,7 +1449,9 @@ def run_sky_sub(
     if not per_exposure:
         if lin_fits is None:
             # Prefer canonical products/... then legacy.
+            lin_stage = stage_dir(wd, "linearize")
             cand = [
+                lin_stage / "lin_preview.fits",
                 wd / "products" / "lin" / "lin_preview.fits",
                 wd / "lin" / "obj_sum_lin.fits",
             ]
@@ -1465,9 +1474,11 @@ def run_sky_sub(
             _mirror_legacy(Path(one["sky_model"]), "sky_model.fits")
         payload = {"mode": "stack", "out_dir": str(out_dir), "result": one}
     else:
+        lin_stage = stage_dir(wd, "linearize")
         per_dir_cand = [
-            wd / "products" / "lin" / "per_exp",
-            wd / "lin" / "per_exp",
+            lin_stage / "per_exp",
+            wd / "products" / "lin" / "per_exp",  # legacy
+            wd / "lin" / "per_exp",  # legacy
         ]
         per_dir = next((p for p in per_dir_cand if p.exists()), per_dir_cand[0])
         if not per_dir.exists():
@@ -1475,19 +1486,44 @@ def run_sky_sub(
                 "Missing per-exposure linearized frames. Expected one of: "
                 + ", ".join(str(p) for p in per_dir_cand)
             )
-        out_per = out_dir / "per_exp"
-        out_per.mkdir(parents=True, exist_ok=True)
-        # Prefer canonical outputs from linearize (v5.19+): *_rectified.fits.
-        # Fall back to legacy *_lin.fits if needed. Avoid processing both (duplicates).
-        files = sorted(per_dir.glob("*_rectified.fits"))
-        if not files:
-            files = sorted(per_dir.glob("*_lin.fits"))
-        if not files:
-            files = sorted(per_dir.glob("*.fits"))
-        if not files:
-            raise FileNotFoundError(
-                f"No per-exposure linearized FITS found in {per_dir}"
-            )
+        # Prefer processing exactly the science frames listed in config (frames.obj).
+        # This makes downstream Stack2D deterministic and allows strong consistency checks.
+        frames = cfg.get("frames") if isinstance(cfg.get("frames"), dict) else {}
+        obj_list = frames.get("obj") if isinstance(frames.get("obj"), list) else []
+        obj_stems = [Path(p).stem for p in obj_list if isinstance(p, str) and p.strip()]
+
+        files: list[Path] = []
+        missing: list[str] = []
+        if obj_stems:
+            for stem in obj_stems:
+                cand = [
+                    per_dir / f"{stem}_rectified.fits",
+                    per_dir / f"{stem}_lin.fits",  # legacy
+                    per_dir / f"{stem}.fits",
+                ]
+                p = next((c for c in cand if c.exists()), None)
+                if p is None:
+                    missing.append(stem)
+                else:
+                    files.append(p)
+            if missing:
+                raise FileNotFoundError(
+                    "Missing per-exposure linearized frames for: "
+                    + ", ".join(missing)
+                    + ". Expected in: "
+                    + str(per_dir)
+                )
+        else:
+            # Fallback: process everything found (legacy behavior)
+            files = sorted(per_dir.glob("*_rectified.fits"))
+            if not files:
+                files = sorted(per_dir.glob("*_lin.fits"))
+            if not files:
+                files = sorted(per_dir.glob("*.fits"))
+            if not files:
+                raise FileNotFoundError(
+                    f"No per-exposure linearized FITS found in {per_dir}"
+                )
         results: list[dict[str, Any]] = []
         for f in files:
             tag = f.stem
@@ -1495,10 +1531,12 @@ def run_sky_sub(
                 tag = tag[:-4]
             if tag.endswith("_rectified"):
                 tag = tag[:-10]
+            base_dir = out_dir / tag
+            base_dir.mkdir(parents=True, exist_ok=True)
             res = _process_one(
                 f,
                 tag=tag,
-                base_dir=out_per,
+                base_dir=base_dir,
                 write_model=bool(sky_cfg.get("save_sky_model", True))
                 and save_per_exp_model,
             )

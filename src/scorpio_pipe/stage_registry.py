@@ -58,7 +58,8 @@ STAGES: tuple[StageSpec, ...] = (
     _mk(7, "wavesolution", "wavesol", "Wavelength solution"),
     _mk(8, "linearize", "lin", "Linearize"),
     _mk(9, "sky", "sky", "Sky subtraction"),
-    _mk(10, "stack2d", "stack", "Stack2D"),
+    # Keep numeric id stable; use explicit slug to avoid ambiguity.
+    _mk(10, "stack2d", "stack2d", "Stack2D"),
     _mk(11, "extract1d", "spec", "Extract1D"),
     _mk(12, "qc_report", "qc", "QC report"),
 )

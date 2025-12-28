@@ -363,7 +363,10 @@ def run_stack2d(
 
     wd = resolve_work_dir(cfg)
     if out_dir is None:
-        out_dir = wd / "products" / "stack"
+        # Canonical v5.38+: stage directory under products/NN_*.
+        from scorpio_pipe.workspace_paths import stage_dir
+
+        out_dir = stage_dir(wd, "stack2d")
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 

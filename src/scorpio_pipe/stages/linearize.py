@@ -1172,9 +1172,12 @@ def run_linearize(
                     pass
             ohdr = add_provenance(ohdr, cfg, stage="linearize")
 
-            # Canonical v5.18+ naming: *_rectified.fits (keep *_lin.fits as a compatibility alias)
+            # Canonical naming: *_rectified.fits
+            #
+            # Important (v5.38+): do NOT write compatibility aliases (e.g. *_lin.fits)
+            # into canonical stage folders. Legacy filenames are supported via
+            # resolve_input_path(...) when reading old workspaces.
             out_rect = per_exp_dir / f"{base_for_mask}_rectified.fits"
-            out_lin_alias = per_exp_dir / f"{base_for_mask}_lin.fits"
             _write_mef(
                 out_rect,
                 rect,
@@ -1186,13 +1189,6 @@ def run_linearize(
                 dw=dw,
                 unit=unit,
             )
-            try:
-                if out_lin_alias.resolve() != out_rect.resolve():
-                    import shutil
-
-                    shutil.copy2(out_rect, out_lin_alias)
-            except Exception:
-                pass
             rect_paths.append(out_rect)
 
         if not robust_stack:
@@ -1428,17 +1424,21 @@ def run_linearize(
         pass
     done_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
-    # Legacy mirroring (UI / older workflows expect work_dir/lin/obj_sum_lin.*)
+    # Legacy mirroring (disabled by default).
+    #
+    # v5.38+ keeps legacy paths for *reading* via resolve_input_path(...), but
+    # does not write duplicated outputs unless explicitly requested.
     try:
-        legacy_dir = work_dir / "lin"
-        if legacy_dir.resolve() != out_dir.resolve():
-            legacy_dir.mkdir(parents=True, exist_ok=True)
-            import shutil
+        compat = cfg.get("compat") if isinstance(cfg.get("compat"), dict) else {}
+        if bool(compat.get("write_legacy_outputs", False)):
+            legacy_dir = work_dir / "lin"
+            if legacy_dir.resolve() != out_dir.resolve() and legacy_dir.is_dir():
+                import shutil
 
-            shutil.copy2(preview_fits, legacy_dir / "obj_sum_lin.fits")
-            if preview_png.exists():
-                shutil.copy2(preview_png, legacy_dir / "obj_sum_lin.png")
-            shutil.copy2(done_json, legacy_dir / "linearize_done.json")
+                shutil.copy2(preview_fits, legacy_dir / "obj_sum_lin.fits")
+                if preview_png.exists():
+                    shutil.copy2(preview_png, legacy_dir / "obj_sum_lin.png")
+                shutil.copy2(done_json, legacy_dir / "linearize_done.json")
     except Exception:
         pass
 

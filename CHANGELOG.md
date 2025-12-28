@@ -1,4 +1,12 @@
 
+## v5.38.2
+
+### P1 — Stack2D as a first-class stage + strict product naming
+- Stack2D is now an explicit stage everywhere: pipeline/UI order is **Sky → Stack2D → Extract1D**, with products in the canonical `products/NN_stack2d/` stage dir.
+- Stack2D input selection is now deterministic: it validates that a sky-subtracted product exists for every science `raw_stem` from `frames.obj` (and fails fast with a clear list of missing stems).
+- Naming policy hardened: stages no longer write compatibility aliases (e.g. `*_lin.fits`). Legacy names remain supported for reading via the resolver.
+- Extract1D: keeps the strict requirement that Stack2D must be complete in the pipeline flow; adds an **opt-in** manual fallback to a Sky frame via `extract1d.allow_sky_fallback`.
+
 ## v5.38.1
 
 ### Block 1 — Canonical workspace paths + backward compatibility

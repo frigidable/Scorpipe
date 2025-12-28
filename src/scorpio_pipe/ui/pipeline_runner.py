@@ -296,31 +296,83 @@ def _task_stack2d(
     cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None
 ) -> Path:
     from scorpio_pipe.stages.stack2d import run_stack2d
+    from scorpio_pipe.product_naming import legacy_sky_sub_fits_names, sky_sub_fits_name
+    from scorpio_pipe.workspace_paths import resolve_input_path
 
     _ = cancel_token
     wd = resolve_work_dir(cfg)
 
-    # Canonical (new): products/09_sky/<stem>/*_sky_sub.fits
     sky_stage = stage_dir(wd, "sky")
-    inputs = sorted(p for p in sky_stage.rglob("*_sky_sub.fits") if p.is_file())
 
-    # Legacy: products/sky/per_exp and sky/per_exp, and also stage_dir/"per_exp".
-    if not inputs:
-        legacy_dirs = [
-            sky_stage / "per_exp",
-            wd / "products" / "sky" / "per_exp",
-            wd / "sky" / "per_exp",
-        ]
-        for d in legacy_dirs:
-            if d.exists():
-                inputs = sorted(d.glob("*_sky_sub.fits"))
-                if inputs:
-                    break
+    # Prefer an explicit science exposure list from config.
+    frames = cfg.get("frames") if isinstance(cfg.get("frames"), dict) else {}
+    obj_list = frames.get("obj") if isinstance(frames.get("obj"), list) else []
+    stems = [Path(x).stem for x in obj_list if isinstance(x, str) and x.strip()]
 
-    if not inputs:
-        raise FileNotFoundError(
-            f"No per-exposure sky-subtracted frames found (tried {sky_stage} and legacy locations)"
+    def _find_skysub(stem: str) -> Path:
+        canon_name = sky_sub_fits_name(stem)
+        extra: list[Path] = []
+        for name in legacy_sky_sub_fits_names(stem):
+            extra.extend(
+                [
+                    # canonical/per-exp
+                    sky_stage / stem / name,
+                    # legacy per-exp layouts
+                    sky_stage / "per_exp" / name,
+                    wd / "products" / "sky" / "per_exp" / name,
+                    wd / "sky" / "per_exp" / name,
+                    # legacy flat layouts
+                    sky_stage / name,
+                    wd / "products" / "sky" / name,
+                    wd / "sky" / name,
+                ]
+            )
+        return resolve_input_path(
+            "skysub_fits",
+            wd,
+            "sky",
+            raw_stem=stem,
+            relpath=canon_name,
+            extra_candidates=extra,
         )
+
+    if stems:
+        inputs: list[Path] = []
+        missing: list[str] = []
+        for stem in stems:
+            p = _find_skysub(stem)
+            if p.exists():
+                inputs.append(p)
+            else:
+                missing.append(stem)
+        if missing:
+            raise FileNotFoundError(
+                "Stack2D: missing sky-subtracted inputs for stems: "
+                + ", ".join(missing)
+                + ". Expected *_skysub.fits from the Sky stage. Run Sky first."
+            )
+    else:
+        # Fallback: scan the sky stage for any skysub products (legacy behavior).
+        inputs = sorted(p for p in sky_stage.rglob("*_skysub.fits") if p.is_file())
+        if not inputs:
+            inputs = sorted(p for p in sky_stage.rglob("*_sky_sub.fits") if p.is_file())
+        if not inputs:
+            legacy_dirs = [
+                sky_stage / "per_exp",
+                wd / "products" / "sky" / "per_exp",
+                wd / "sky" / "per_exp",
+            ]
+            for d in legacy_dirs:
+                if d.exists():
+                    inputs = sorted(p for p in d.glob("*_skysub.fits") if p.is_file())
+                    if not inputs:
+                        inputs = sorted(p for p in d.glob("*_sky_sub.fits") if p.is_file())
+                    if inputs:
+                        break
+        if not inputs:
+            raise FileNotFoundError(
+                f"No per-exposure sky-subtracted frames found (tried {sky_stage} and legacy locations)"
+            )
 
     out_p = stage_dir(out_dir, "stack2d")
     res = run_stack2d(cfg, inputs=inputs, out_dir=out_p)

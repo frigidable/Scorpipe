@@ -100,7 +100,17 @@ def legacy_candidates(
             ]
         out += [_join(prod / "sky"), _join(wd / "sky")]
     elif k == "stack2d":
-        out += [_join(prod / "stack"), _join(wd / "stack")]
+        # Historical locations:
+        #   - work_dir/stack/ (very old)
+        #   - work_dir/products/stack/ (old)
+        #   - work_dir/products/10_stack2d/ (v5.38+ canonical)
+        out += [
+            _join(prod / "10_stack"),
+            _join(prod / "10_stack2d"),
+            _join(prod / "stack"),
+            _join(prod / "stack2d"),
+            _join(wd / "stack"),
+        ]
     elif k == "extract1d":
         out += [_join(prod / "spec"), _join(wd / "spec")]
     elif k in {"superbias", "superflat"}:

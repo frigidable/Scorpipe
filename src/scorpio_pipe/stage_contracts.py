@@ -133,13 +133,13 @@ CONTRACTS: dict[str, StageContract] = {
     "stack2d": StageContract(
         stage="stack2d",
         title="2D stacking",
-        inputs=("per-exp sky-subtracted frames",),
+        inputs=("per-exp sky-subtracted frames (*_skysub.fits)",),
         outputs=("stack2d_done", "stacked2d_fits", "coverage_png"),
     ),
     "extract1d": StageContract(
         stage="extract1d",
         title="1D extraction",
-        inputs=("stacked2d.fits or obj_sky_sub.fits",),
+        inputs=("stacked2d.fits (from Stack2D)",),
         outputs=("extract1d_done", "spec1d_fits", "spec1d_png"),
     ),
     "qc_report": StageContract(

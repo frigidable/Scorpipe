@@ -73,8 +73,13 @@ def test_smoke_synthetic_chain():
         }
 
         lin = run_linearize(cfg)
+        from scorpio_pipe.workspace_paths import stage_dir
+
         run_sky_sub(cfg)
-        sky_fits = sorted((work_dir / "products" / "sky" / "per_exp").glob("*.fits"))
+        sky_stage = stage_dir(work_dir, "sky")
+        sky_fits = sorted(sky_stage.rglob("*_skysub.fits"))
+        if not sky_fits:
+            sky_fits = sorted(sky_stage.rglob("*_sky_sub.fits"))
         st = run_stack2d(cfg, inputs=sky_fits)
         ex = run_extract1d(cfg, stacked_fits=st["stacked2d_fits"])
 

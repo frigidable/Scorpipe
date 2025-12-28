@@ -415,23 +415,105 @@ def run_extract1d(
     if in_fits is None and stacked_fits is not None:
         in_fits = stacked_fits
 
+    from scorpio_pipe.workspace_paths import resolve_input_path
+    from scorpio_pipe.workspace_paths import stage_dir
+
     wd = resolve_work_dir(cfg)
-    products_root = wd / "products"
-    out_dir = Path(out_dir) if out_dir is not None else (products_root / "spec")
+    out_dir = Path(out_dir) if out_dir is not None else stage_dir(wd, "extract1d")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Determine input
     if in_fits is None:
-        cand = [
-            products_root / "stack" / "stacked2d.fits",
-            products_root / "sky" / "obj_sky_sub.fits",
-            wd / "sky" / "obj_sky_sub.fits",
-        ]
-        in_fits = next((p for p in cand if p.exists()), cand[0])
+        # Prefer Stack2D products (new→legacy resolver).
+        p = resolve_input_path(
+            "stacked2d",
+            wd,
+            "stack2d",
+            relpath="stacked2d.fits",
+        )
+        if p.exists():
+            in_fits = p
+        else:
+            # Optional manual-mode fallback: allow extraction directly from a sky-subtracted frame.
+            #
+            # Important: the GUI pipeline enforces Stack2D → Extract1D. This fallback is only
+            # intended for explicit/manual workflows (CLI, notebooks) when users understand
+            # they are extracting from a single (non-stacked) frame.
+            if not bool(ecfg.get("allow_sky_fallback", False)):
+                raise FileNotFoundError(
+                    "Stack2D products not found. Run the Stack2D stage first (or pass in_fits=...). "
+                    "For manual extraction without Stack2D, set extract1d.allow_sky_fallback=true. Tried: "
+                    + str(p)
+                )
+
+            from scorpio_pipe.product_naming import (
+                legacy_sky_sub_fits_names,
+                sky_sub_fits_name,
+            )
+
+            def _resolve_skysub(tag: str, *, raw_stem: str | None = None) -> Path:
+                # Canonical filename for this tag
+                canon_name = sky_sub_fits_name(tag)
+                extra: list[Path] = []
+                # Try legacy names in a few likely legacy layouts
+                for name in legacy_sky_sub_fits_names(tag):
+                    extra.extend(
+                        [
+                            stage_dir(wd, "sky") / tag / name,
+                            stage_dir(wd, "sky") / "per_exp" / name,
+                            wd / "products" / "sky" / "per_exp" / name,
+                            wd / "sky" / "per_exp" / name,
+                            stage_dir(wd, "sky") / name,
+                            wd / "products" / "sky" / name,
+                            wd / "sky" / name,
+                        ]
+                    )
+                return resolve_input_path(
+                    "skysub",
+                    wd,
+                    "sky",
+                    raw_stem=raw_stem,
+                    relpath=canon_name,
+                    extra_candidates=extra,
+                )
+
+            # 1) Prefer a stacked/combined sky-sub frame (sky stage in stack mode): obj_skysub.fits
+            p_obj = _resolve_skysub("obj")
+            if p_obj.exists():
+                in_fits = p_obj
+            else:
+                # 2) If exactly one science exposure is defined, use its skysub frame.
+                frames = cfg.get("frames") if isinstance(cfg.get("frames"), dict) else {}
+                obj_list = frames.get("obj") if isinstance(frames.get("obj"), list) else []
+                stems = [Path(x).stem for x in obj_list if isinstance(x, str) and x.strip()]
+                if len(stems) == 1:
+                    stem = stems[0]
+                    p_one = _resolve_skysub(stem, raw_stem=stem)
+                    if p_one.exists():
+                        in_fits = p_one
+                    else:
+                        raise FileNotFoundError(
+                            "Manual sky fallback requested but skysub frame not found for stem: "
+                            + stem
+                            + ". Tried: "
+                            + str(p_one)
+                        )
+                else:
+                    # 3) Last-resort: scan the sky stage folder.
+                    sky_stage = stage_dir(wd, "sky")
+                    found = sorted({p for p in sky_stage.rglob("*_skysub.fits")})
+                    if len(found) == 1:
+                        in_fits = found[0]
+                    else:
+                        raise FileNotFoundError(
+                            "Manual sky fallback requested but could not unambiguously choose a sky-subtracted frame. "
+                            f"Found {len(found)} candidates in {sky_stage}. "
+                            "Pass in_fits=... or run Stack2D first."
+                        )
     in_fits = Path(in_fits)
     if not in_fits.exists():
         raise FileNotFoundError(
-            "No 2D input for extraction. Expected stacked2d.fits or obj_sky_sub.fits, got: "
+            "No 2D input for extraction. Expected stacked2d.fits or obj_skysub.fits, got: "
             + str(in_fits)
         )
 
@@ -561,17 +643,22 @@ def run_extract1d(
     }
     done.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    # Legacy mirror
+    # Legacy mirror (disabled by default).
+    #
+    # v5.38+ supports legacy paths for *reading* via resolve_input_path(...), but
+    # does not write duplicated outputs unless explicitly requested.
     try:
-        legacy = wd / "spec"
-        legacy.mkdir(parents=True, exist_ok=True)
-        import shutil
+        compat = cfg.get("compat") if isinstance(cfg.get("compat"), dict) else {}
+        if bool(compat.get("write_legacy_outputs", False)):
+            legacy = wd / "spec"
+            if legacy.is_dir() and legacy.resolve() != out_dir.resolve():
+                import shutil
 
-        shutil.copy2(out_fits, legacy / "spec1d.fits")
-        if out_png.exists():
-            shutil.copy2(out_png, legacy / "spec1d.png")
-        shutil.copy2(trace_json, legacy / "trace.json")
-        shutil.copy2(done, legacy / "extract1d_done.json")
+                shutil.copy2(out_fits, legacy / "spec1d.fits")
+                if out_png.exists():
+                    shutil.copy2(out_png, legacy / "spec1d.png")
+                shutil.copy2(trace_json, legacy / "trace.json")
+                shutil.copy2(done, legacy / "extract1d_done.json")
     except Exception:
         pass
 
