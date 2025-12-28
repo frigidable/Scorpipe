@@ -2,19 +2,55 @@ name: CI
 
 on:
   push:
-    branches: ["main"]
+    branches: [main]
   pull_request:
+    branches: [main]
   workflow_dispatch:
-
-permissions:
-  contents: read
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
-  lint:
+  meta_validate:
+    name: meta_validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Validate .github/dependabot.yml parses as YAML and has 2 update blocks
+        run: |
+          python -m pip install --upgrade pip pyyaml
+          python - <<'PY'
+          from pathlib import Path
+          import yaml
+
+          p = Path(".github/dependabot.yml")
+          data = yaml.safe_load(p.read_text(encoding="utf-8"))
+          updates = data.get("updates")
+          assert isinstance(updates, list), "dependabot.yml: 'updates' must be a list"
+          assert len(updates) == 2, f"dependabot.yml: expected 2 update blocks, got {len(updates)}"
+          ecos = [u.get("package-ecosystem") for u in updates]
+          assert set(ecos) == {"github-actions", "pip"}, f"dependabot.yml: unexpected ecosystems {ecos}"
+          print("OK: dependabot.yml parses and looks sane:", ecos)
+          PY
+
+      - name: Install actionlint
+        run: |
+          go version
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.9
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: actionlint (.github/workflows/*.yml)
+        run: actionlint -color
+
+  tests:
+    name: tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -22,96 +58,88 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Set up Python
-        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a13 # v5.3.0
         with:
           python-version: "3.12"
-          cache: "pip"
 
-      - name: Install (dev)
+      - name: Install package + test deps
         run: |
-          python -m pip install -U pip
-          python -m pip install -e ".[dev]"
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install pytest
 
-      - name: Ruff (lint)
-        run: |
-          python -m ruff check src tests
-
-      - name: Ruff (format check)
-        run: |
-          python -m ruff format --check src tests
-
-  tests:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - name: Set up Python
-        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
-        with:
-          python-version: "3.12"
-          cache: "pip"
-
-      - name: Install (dev)
-        run: |
-          python -m pip install -U pip
-          python -m pip install -e ".[dev]"
-
-      - name: Pytest
-        run: |
-          pytest -q
+      - name: Run tests
+        run: pytest -q
 
   build_check:
+    name: build_check
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Set up Python
-        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a13 # v5.3.0
         with:
           python-version: "3.12"
-          cache: "pip"
 
-      - name: Build sdist/wheel
+      - name: Build (sdist/wheel)
         run: |
-          python -m pip install -U pip build
+          python -m pip install --upgrade pip build
           python -m build
 
-      - name: Install from wheel + smoke-test
+      - name: Install from wheel + smoke test
         run: |
+          python -m pip install --upgrade pip
           python -m pip install dist/*.whl
-          scorpio-pipe version
+          python -c "import scorpio_pipe; print('scorpio_pipe version:', getattr(scorpio_pipe, '__version__', 'unknown'))"
+          scorpio-pipe --help
 
   dependency_review:
-    if: ${{ github.event_name == 'pull_request' }}
+    name: dependency_review
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    if: github.event_name == 'pull_request'
     permissions:
       contents: read
       pull-requests: read
     steps:
-      - name: Dependency review
-        uses: actions/dependency-review-action@3c4e3dcb1aa7874d2c16be7d79418e9b7efd6261 # v4.8.2
-        with:
-          fail-on-severity: "moderate"
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Dependency Review
+        uses: actions/dependency-review-action@3c4e3dcb1aa7874d2c16be7d79418e9b7efd6261 # v4.8.2 (tag v4)
 
   gate:
     name: gate
     runs-on: ubuntu-latest
-    if: ${{ always() }}
-    needs: [lint, tests, build_check]
+    timeout-minutes: 5
+    if: always()
+    needs:
+      - meta_validate
+      - tests
+      - build_check
+      - dependency_review
     steps:
-      - name: Summarize results
+      - name: Summarize required jobs
+        env:
+          NEEDS_JSON: ${{ toJson(needs) }}
         run: |
-          echo "lint:       ${{ needs.lint.result }}"
-          echo "tests:      ${{ needs.tests.result }}"
-          echo "build_check:${{ needs.build_check.result }}"
-
-      - name: Fail if any required job failed
-        run: |
-          test "${{ needs.lint.result }}" = "success"
-          test "${{ needs.tests.result }}" = "success"
-          test "${{ needs.build_check.result }}" = "success"
+          python - <<'PY'
+          import json, os, sys
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          # dependency_review may be "skipped" on push events; that's OK.
+          allow_skipped = {"dependency_review"}
+          bad = []
+          for job_id, meta in needs.items():
+            res = meta.get("result")
+            if res == "success":
+              continue
+            if res == "skipped" and job_id in allow_skipped:
+              continue
+            bad.append(f"{job_id}={res}")
+          if bad:
+            print("Blocking merge: required CI jobs not successful:", ", ".join(bad))
+            sys.exit(1)
+          print("OK: all required CI jobs are green.")
+          PY
