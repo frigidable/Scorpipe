@@ -290,89 +290,115 @@ def _task_sky(
     _ = cancel_token
     out_p = stage_dir(out_dir, "sky")
     run_sky_sub(cfg, out_dir=out_p)
-    return out_p / "sky_sub_done.json"
+    return out_p / "sky_done.json"
 
 
 def _task_stack2d(
     cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None
 ) -> Path:
+    """Stack rectified, sky-subtracted frames.
+
+    Contract (v5.39+)
+    --------------
+    - Sky stage writes RAW products in ``09_sky``.
+    - Linearization writes rectified products in ``10_linearize``.
+    - Stack2D consumes *only* ``10_linearize/*_skysub.fits``.
+
+    For backward compatibility, we also try a few legacy locations if the
+    canonical rectified products are not found.
+    """
+
     from scorpio_pipe.stages.stack2d import run_stack2d
-    from scorpio_pipe.product_naming import legacy_sky_sub_fits_names, sky_sub_fits_name
-    from scorpio_pipe.workspace_paths import resolve_input_path
+    from scorpio_pipe.product_naming import sky_sub_fits_name
+    from scorpio_pipe.workspace_paths import extract_stem_short
 
     _ = cancel_token
     wd = resolve_work_dir(cfg)
 
-    sky_stage = stage_dir(wd, "sky")
+    lin_stage = stage_dir(wd, "linearize")
 
     # Prefer an explicit science exposure list from config.
     frames = cfg.get("frames") if isinstance(cfg.get("frames"), dict) else {}
     obj_list = frames.get("obj") if isinstance(frames.get("obj"), list) else []
-    stems = [Path(x).stem for x in obj_list if isinstance(x, str) and x.strip()]
+    stems = [
+        extract_stem_short(x)
+        for x in obj_list
+        if isinstance(x, str) and x.strip()
+    ]
 
-    def _find_skysub(stem: str) -> Path:
-        canon_name = sky_sub_fits_name(stem)
-        extra: list[Path] = []
-        for name in legacy_sky_sub_fits_names(stem):
-            extra.extend(
-                [
-                    # canonical/per-exp
-                    sky_stage / stem / name,
-                    # legacy per-exp layouts
-                    sky_stage / "per_exp" / name,
-                    wd / "products" / "sky" / "per_exp" / name,
-                    wd / "sky" / "per_exp" / name,
-                    # legacy flat layouts
-                    sky_stage / name,
-                    wd / "products" / "sky" / name,
-                    wd / "sky" / name,
-                ]
-            )
-        return resolve_input_path(
-            "skysub_fits",
-            wd,
-            "sky",
-            raw_stem=stem,
-            relpath=canon_name,
-            extra_candidates=extra,
-        )
+    def _pick_existing(cands: list[Path]) -> Path:
+        for c in cands:
+            if c.exists():
+                return c
+        return cands[0]
+
+    def _find_rectified_skysub(stem: str) -> Path:
+        name = sky_sub_fits_name(stem)
+        alt = name.replace("_skysub.fits", "_sky_sub.fits")
+        cands: list[Path] = [
+            # canonical flat outputs
+            lin_stage / name,
+            lin_stage / alt,
+            # possible per-exp layouts
+            lin_stage / stem / name,
+            lin_stage / stem / alt,
+            lin_stage / "per_exp" / name,
+            lin_stage / "per_exp" / alt,
+            # legacy roots
+            wd / "products" / "lin" / "per_exp" / name,
+            wd / "products" / "lin" / "per_exp" / alt,
+            wd / "lin" / "per_exp" / name,
+            wd / "lin" / "per_exp" / alt,
+            wd / "products" / "lin" / name,
+            wd / "products" / "lin" / alt,
+            wd / "lin" / name,
+            wd / "lin" / alt,
+        ]
+        return _pick_existing(cands)
 
     if stems:
         inputs: list[Path] = []
         missing: list[str] = []
         for stem in stems:
-            p = _find_skysub(stem)
+            p = _find_rectified_skysub(stem)
             if p.exists():
                 inputs.append(p)
             else:
                 missing.append(stem)
         if missing:
             raise FileNotFoundError(
-                "Stack2D: missing sky-subtracted inputs for stems: "
+                "Stack2D: missing rectified sky-subtracted inputs for stems: "
                 + ", ".join(missing)
-                + ". Expected *_skysub.fits from the Sky stage. Run Sky first."
+                + ". Expected 10_linearize/*_skysub.fits. Run Linearization first."
             )
     else:
-        # Fallback: scan the sky stage for any skysub products (legacy behavior).
-        inputs = sorted(p for p in sky_stage.rglob("*_skysub.fits") if p.is_file())
+        # Fallback: scan for any rectified sky-subtracted products.
+        inputs = sorted(p for p in lin_stage.glob("*_skysub.fits") if p.is_file())
         if not inputs:
-            inputs = sorted(p for p in sky_stage.rglob("*_sky_sub.fits") if p.is_file())
+            inputs = sorted(p for p in lin_stage.glob("*_sky_sub.fits") if p.is_file())
+        if not inputs and lin_stage.exists():
+            inputs = sorted(p for p in lin_stage.rglob("*_skysub.fits") if p.is_file())
+        if not inputs and lin_stage.exists():
+            inputs = sorted(p for p in lin_stage.rglob("*_sky_sub.fits") if p.is_file())
+
         if not inputs:
             legacy_dirs = [
-                sky_stage / "per_exp",
-                wd / "products" / "sky" / "per_exp",
-                wd / "sky" / "per_exp",
+                wd / "products" / "lin" / "per_exp",
+                wd / "lin" / "per_exp",
             ]
             for d in legacy_dirs:
                 if d.exists():
                     inputs = sorted(p for p in d.glob("*_skysub.fits") if p.is_file())
                     if not inputs:
-                        inputs = sorted(p for p in d.glob("*_sky_sub.fits") if p.is_file())
+                        inputs = sorted(
+                            p for p in d.glob("*_sky_sub.fits") if p.is_file()
+                        )
                     if inputs:
                         break
+
         if not inputs:
             raise FileNotFoundError(
-                f"No per-exposure sky-subtracted frames found (tried {sky_stage} and legacy locations)"
+                f"No rectified sky-subtracted frames found (tried {lin_stage} and legacy locations)"
             )
 
     out_p = stage_dir(out_dir, "stack2d")
@@ -537,40 +563,51 @@ def _input_paths_for_hash(cfg: dict[str, Any], task: str, out_dir: Path) -> list
     if task == "wavesolution":
         return [wsol / "peaks_candidates.csv", wsol / "hand_pairs.txt"]
     if task == "linearize":
-        return _frame_list("obj") + [wsol / "lambda_map.fits"]
-    if task in ("sky", "sky_sub"):
-        p = resolve_input_path(
-            "lin_preview_fits",
-            wd,
-            "linearize",
-            relpath="lin_preview.fits",
-            extra_candidates=[wd / "lin" / "obj_sum_lin.fits", wd / "products" / "lin" / "lin_preview.fits"],
-        )
-        return [p]
-    if task in ("stack2d", "stack"):
-        inputs: list[Path] = []
-        inputs.append(
-            resolve_input_path(
-                "sky_sub_done_json",
-                wd,
-                "sky",
-                relpath="sky_sub_done.json",
-                extra_candidates=[wd / "products" / "sky" / "sky_sub_done.json", wd / "sky" / "sky_sub_done.json"],
-            )
-        )
-
+        lin_inputs: list[Path] = []
+        lin_inputs.extend(_frame_list("obj"))
+        lin_inputs.append(wsol / "lambda_map.fits")
         sky_stage = stage_dir(wd, "sky")
-        # New per-exp layout: products/09_sky/<stem>/*.fits
         if sky_stage.exists():
-            inputs.extend(sorted(p for p in sky_stage.rglob("*.fits") if p.is_file()))
+            raw_products = sorted(p for p in sky_stage.glob("*_skysub_raw.fits") if p.is_file())
+            if raw_products:
+                lin_inputs.extend(raw_products)
+            else:
+                lin_inputs.append(sky_stage / "sky_done.json")
         else:
-            inputs.append(sky_stage)
-
-        # Legacy per-exp folder.
-        legacy_per = wd / "products" / "sky" / "per_exp"
-        if legacy_per.exists():
-            inputs.extend(sorted(legacy_per.glob("*.fits")))
-
+            lin_inputs.append(sky_stage)
+        return lin_inputs
+    if task in ("sky", "sky_sub"):
+        # Sky runs in RAW geometry; it depends on wavesol lambda_map and pre-cleaned frames.
+        sky_inputs: list[Path] = []
+        cos_clean = stage_dir(wd, "cosmics") / "clean"
+        if cos_clean.exists():
+            sky_inputs.extend(sorted(p for p in cos_clean.glob("*_clean.fits") if p.is_file()))
+        else:
+            sky_inputs.extend(_frame_list("obj"))
+        sky_inputs.append(wsol / "lambda_map.fits")
+        if sb:
+            sky_inputs.append(sb)
+        return sky_inputs
+    if task in ("stack2d", "stack"):
+        # Stack2D depends on rectified sky-subtracted frames produced by Linearization.
+        inputs: list[Path] = []
+        lin_stage = stage_dir(wd, "linearize")
+        try:
+            if lin_stage.exists():
+                inputs.extend(sorted(p for p in lin_stage.glob("*_skysub.fits") if p.is_file()))
+                if not inputs:
+                    inputs.extend(sorted(p for p in lin_stage.rglob("*_skysub.fits") if p.is_file()))
+        except Exception:
+            pass
+        if not inputs:
+            legacy_dirs = [wd / "products" / "lin" / "per_exp", wd / "lin" / "per_exp"]
+            for d in legacy_dirs:
+                if d.exists():
+                    inputs.extend(sorted(p for p in d.glob("*_skysub.fits") if p.is_file()))
+                    if inputs:
+                        break
+        if not inputs:
+            inputs.append(lin_stage)
         return inputs
     if task == "extract1d":
         return [

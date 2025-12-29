@@ -5,9 +5,9 @@ This module is intentionally conservative:
 - Migration is opt-in and implemented as a *copy* into a new run folder.
 
 Currently supported:
-- Detecting pre-v5.38.6 stage directory layouts (e.g. different numbering and
+- Detecting pre-v5.39.1 stage directory layouts (e.g. different numbering and
   two-step sky subtraction directories).
-- Optional copy-migration into the v5.38.6 canonical layout (12 stages).
+- Optional copy-migration into the v5.39.1 canonical layout (12 stages).
 """
 
 from __future__ import annotations
@@ -40,10 +40,10 @@ def _stage_dirs(run_root: Path) -> list[Path]:
 def detect_legacy_stage_layout(run_root: str | Path) -> LegacyLayoutInfo:
     """Detect older stage directory layouts.
 
-    We currently flag legacy if we see any of:
-    - a "linearize" stage directory not named "09_linearize"
-    - a unified sky stage directory missing, while older sky directories exist
-    - stack/extract stage directories with older numbering/slugs
+    We flag legacy if we see any of:
+    - pre-stage-layout "products/*" folders (e.g. products/lin, products/stack)
+    - old numbering after the Sky↔Linearize swap (e.g. 09_linearize, 10_sky)
+    - deprecated slugs (stack2d, extract1d) or two-step sky dirs (skyraw/skyrect)
 
     This is *only* a hint for the GUI: the pipeline can still operate read-only
     using directory fallbacks in :mod:`scorpio_pipe.workspace_paths`.
@@ -51,18 +51,36 @@ def detect_legacy_stage_layout(run_root: str | Path) -> LegacyLayoutInfo:
 
     rr = Path(run_root)
     dirs = _stage_dirs(rr)
-
     found: list[str] = []
+
+    # Pre-stage-layout products tree.
+    prod = rr / "products"
+    if prod.is_dir():
+        for name in ["lin", "stack", "stack2d", "extract", "extract1d", "sky", "skyraw", "skyrect"]:
+            p = prod / name
+            if p.exists():
+                found.append(str(p.relative_to(rr)))
 
     # Any legacy sky directories (two-step sky subtraction).
     sky_legacy = [d for d in dirs if d.name.endswith("_skyraw") or d.name.endswith("_skyrect")]
     if sky_legacy:
         found.extend([d.name for d in sky_legacy])
 
-    # Legacy numbering for downstream stages.
+    # Old order before v5.39.1 swap.
+    if (rr / "09_linearize").exists() or (rr / "10_sky").exists():
+        if (rr / "09_linearize").exists():
+            found.append("09_linearize")
+        if (rr / "10_sky").exists():
+            found.append("10_sky")
+
+    # Canonical since v5.39.1: 09_sky, 10_linearize, 11_stack, 12_extract.
     linearize = [d for d in dirs if d.name.endswith("_linearize")]
-    if linearize and not (rr / "09_linearize").exists():
+    if linearize and not (rr / "10_linearize").exists():
         found.extend([d.name for d in linearize])
+
+    sky = [d for d in dirs if d.name.endswith("_sky")]
+    if sky and not (rr / "09_sky").exists():
+        found.extend([d.name for d in sky])
 
     stack_legacy = [d for d in dirs if d.name.endswith("_stack2d")]
     if stack_legacy and not (rr / "11_stack").exists():
@@ -78,7 +96,7 @@ def detect_legacy_stage_layout(run_root: str | Path) -> LegacyLayoutInfo:
     found_u = tuple(sorted(set(found)))
     reason = (
         "This run folder uses an older stage directory layout. "
-        "It can be opened as-is (read-only browsing), or copied into the new v5.38.6 layout."
+        "It can be opened as-is (read-only browsing), or copied into the new v5.39.1 layout."
     )
     return LegacyLayoutInfo(is_legacy=True, reason=reason, found=found_u)
 
@@ -94,8 +112,8 @@ def _unique_sibling(root: Path, stem: str) -> Path:
     return root.parent / f"{stem}_999"
 
 
-def migrate_run_to_v5386(src_run_root: str | Path, dst_run_root: str | Path | None = None) -> Path:
-    """Copy a legacy run into the v5.38.6 canonical layout.
+def migrate_run_to_v5391(src_run_root: str | Path, dst_run_root: str | Path | None = None) -> Path:
+    """Copy a legacy run into the v5.39.1 canonical layout.
 
     The migration is a best-effort copy of stage directories into their new
     canonical names. The source run is left untouched.
@@ -168,3 +186,10 @@ def migrate_run_to_v5386(src_run_root: str | Path, dst_run_root: str | Path | No
         shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
 
     return dst
+
+
+# Backward compatible alias
+
+def migrate_run_to_v5386(src_run_root: str | Path, dst_run_root: str | Path | None = None) -> Path:
+    """Alias for :func:`migrate_run_to_v5391` (kept for older UI builds)."""
+    return migrate_run_to_v5391(src_run_root, dst_run_root)

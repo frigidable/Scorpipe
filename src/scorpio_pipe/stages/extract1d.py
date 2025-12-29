@@ -1,27 +1,18 @@
 """1D extraction for long-slit products in (λ, y).
 
-v5.14: this stage is no longer a placeholder. It supports:
-  - boxcar extraction around an estimated spatial trace
-  - (basic) Horne-style optimal extraction using a single profile template
-
 Inputs
 ------
 Prefer stacked 2D product:
-  work_dir/products/stack/stacked2d.fits
+  11_stack/stacked2d.fits
 
-Fallback:
-  work_dir/products/sky/obj_sky_sub.fits (or legacy work_dir/sky/obj_sky_sub.fits)
-
-The input is expected to be an MEF with extensions:
-  - PRIMARY (SCI)
-  - VAR (optional)
-  - MASK (optional, uint16)
+Fallback (per-exposure rectified inputs):
+  10_linearize/<stem>_skysub.fits
 
 Outputs
 -------
-products/spec/spec1d.fits (PRIMARY=FLUX, EXT=VAR, MASK)
-products/spec/spec1d.png
-products/spec/trace.json
+12_extract/spec/spec1d.fits (PRIMARY=FLUX, EXT=VAR, MASK)
+12_extract/spec/spec1d.png
+12_extract/spec/trace.json
 """
 
 from __future__ import annotations
@@ -459,6 +450,12 @@ def run_extract1d(
                 for name in legacy_sky_sub_fits_names(tag):
                     extra.extend(
                         [
+                            # New contract (v5.39.1+): rectified skysub lives in Linearize stage root
+                            stage_dir(wd, "linearize") / name,
+                            stage_dir(wd, "linearize") / "per_exp" / name,
+                            wd / "products" / "linearize" / name,
+                            wd / "linearize" / name,
+                            # Legacy locations (pre v5.39.1)
                             stage_dir(wd, "sky") / tag / name,
                             stage_dir(wd, "sky") / "per_exp" / name,
                             wd / "products" / "sky" / "per_exp" / name,
@@ -471,7 +468,7 @@ def run_extract1d(
                 return resolve_input_path(
                     "skysub",
                     wd,
-                    "sky",
+                    "linearize",
                     raw_stem=raw_stem,
                     relpath=canon_name,
                     extra_candidates=extra,
@@ -500,14 +497,18 @@ def run_extract1d(
                         )
                 else:
                     # 3) Last-resort: scan the sky stage folder.
-                    sky_stage = stage_dir(wd, "sky")
-                    found = sorted({p for p in sky_stage.rglob("*_skysub.fits")})
+                    lin_stage = stage_dir(wd, "linearize")
+                    found = sorted({p for p in lin_stage.rglob("*_skysub.fits")})
+                    if not found:
+                        # Legacy fallback
+                        sky_stage = stage_dir(wd, "sky")
+                        found = sorted({p for p in sky_stage.rglob("*_skysub.fits")})
                     if len(found) == 1:
                         in_fits = found[0]
                     else:
                         raise FileNotFoundError(
                             "Manual sky fallback requested but could not unambiguously choose a sky-subtracted frame. "
-                            f"Found {len(found)} candidates in {sky_stage}. "
+                            f"Found {len(found)} candidates in {lin_stage if found else sky_stage}. "
                             "Pass in_fits=... or run Stack2D first."
                         )
     in_fits = Path(in_fits)

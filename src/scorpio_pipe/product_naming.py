@@ -69,6 +69,15 @@ def sky_model_fits_name(raw_stem: str) -> str:
     return per_exp_name(raw_stem, SUF_SKYMODEL, ext="fits")
 
 
+def sky_sub_raw_fits_name(stem: str) -> str:
+    """Per-exposure sky-subtracted frame in RAW detector geometry (MEF)."""
+    return f"{stem}_skysub_raw.fits"
+
+
+def sky_model_raw_fits_name(stem: str) -> str:
+    """Per-exposure sky model in RAW detector geometry (MEF)."""
+    return f"{stem}_skymodel_raw.fits"
+
 def legacy_sky_sub_fits_names(raw_stem: str) -> tuple[str, ...]:
     """Known legacy spellings for sky-subtracted frames."""
     stem = (raw_stem or "").strip()

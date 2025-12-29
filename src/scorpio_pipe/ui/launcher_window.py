@@ -253,6 +253,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         # Step list with status icons (commercial UX: you always see progress).
         self._step_items = []  # list[QtWidgets.QListWidgetItem]
         self._stage_keys = [s.key for s in iter_gui_stages()]
+        self._stage_row = {k: i for i, k in enumerate(self._stage_keys)}
         self._stage_titles = [s.title for s in iter_gui_stages()]
         for title in self._stage_titles:
             it = QtWidgets.QListWidgetItem(title)
@@ -410,6 +411,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 it.setIcon(self._icon_status(status))
         except Exception:
             pass
+
+    def _stage_row_index(self, stage_key: str) -> int:
+        try:
+            return int(getattr(self, '_stage_row', {}).get(stage_key, -1))
+        except Exception:
+            return -1
 
     def _open_in_explorer(self, path: Path) -> None:
         try:
@@ -2599,6 +2606,46 @@ class LauncherWindow(QtWidgets.QMainWindow):
             _set_checked(
                 getattr(self, "chk_sky_enabled", None), bool(sky.get("enabled", True))
             )
+
+
+            # Primary method (observer-friendly). Support legacy keys (input_geometry/method).
+            if hasattr(self, "combo_sky_primary_method"):
+                pm_raw = sky.get("primary_method") or sky.get("method") or sky.get("primary")
+                ig = str(sky.get("input_geometry", "") or "").strip().lower()
+                pm = str(pm_raw or "kelson_raw").strip().lower()
+                # Legacy RECTIFIED branch is not exposed in UI anymore; map to safe default.
+                if ig.startswith("rect"):
+                    pm = "kelson_raw"
+                if pm.startswith("kelson"):
+                    val = "kelson_raw"
+                elif "scale" in pm:
+                    val = "sky_scale_raw"
+                else:
+                    val = "kelson_raw"
+                combo = getattr(self, "combo_sky_primary_method", None)
+                try:
+                    i = combo.findData(val)
+                    if i >= 0:
+                        combo.setCurrentIndex(i)
+                except Exception:
+                    pass
+
+            # Post-rectification residual cleanup (executed in Linearization)
+            if hasattr(self, "combo_sky_post_cleanup"):
+                lin = cfg.get("linearize", {}) if isinstance(cfg.get("linearize"), dict) else {}
+                v = lin.get("post_sky_cleanup", None)
+                if v in (None, ""):
+                    v = sky.get("post_cleanup", "auto")
+                vv = str(v or "auto").strip().lower()
+                if vv not in ("off", "auto", "on"):
+                    vv = "auto"
+                combo = getattr(self, "combo_sky_post_cleanup", None)
+                try:
+                    i = combo.findData(vv)
+                    if i >= 0:
+                        combo.setCurrentIndex(i)
+                except Exception:
+                    pass
             if hasattr(self, "chk_sky_per_exp"):
                 _set_checked(
                     getattr(self, "chk_sky_per_exp", None),
@@ -2989,7 +3036,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_run_calib.clicked.connect(self._do_run_calib)
         self.btn_qc_calib.clicked.connect(self._open_qc_viewer)
         self.btn_frames_calib.clicked.connect(lambda: self._open_frames_window("calib"))
-        self.btn_to_cosmics.clicked.connect(lambda: self.steps.setCurrentRow(3))
+        self.btn_to_cosmics.clicked.connect(lambda: self.steps.setCurrentRow(self._stage_row_index("cosmics")))
 
         try:
             self._refresh_pair_sets_combo()
@@ -3003,7 +3050,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             return
         if not self._ensure_cfg_saved():
             return
-        self._set_step_status(2, "running")
+        self._set_step_status(self._stage_row_index("biascorr"), "running")
         try:
             ctx = load_context(self._cfg_path)
             run_sequence(ctx, ["manifest", "superbias"])
@@ -3013,10 +3060,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     self.outputs_calib.set_context(self._cfg, stage=None)
             except Exception:
                 pass
-            self._set_step_status(2, "ok")
+            self._set_step_status(self._stage_row_index("biascorr"), "ok")
             self._maybe_auto_qc()
         except Exception as e:
-            self._set_step_status(2, "fail")
+            self._set_step_status(self._stage_row_index("biascorr"), "fail")
             self._log_exception(e)
 
     # --------------------------- page: cosmics ---------------------------
@@ -3376,7 +3423,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_frames_cosmics.clicked.connect(
             lambda: self._open_frames_window("cosmics")
         )
-        self.btn_to_flatfield.clicked.connect(lambda: self.steps.setCurrentRow(4))
+        self.btn_to_flatfield.clicked.connect(lambda: self.steps.setCurrentRow(self._stage_row_index("flatfield")))
 
         # wire per-stage controls (pending → Apply)
         def _apply_to_from_ui() -> list[str]:
@@ -3470,7 +3517,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             return
         if not self._ensure_cfg_saved():
             return
-        self._set_step_status(3, "running")
+        self._set_step_status(self._stage_row_index("cosmics"), "running")
         try:
             ctx = load_context(self._cfg_path)
             run_sequence(ctx, ["cosmics"])
@@ -3480,10 +3527,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     self.outputs_cosmics.set_context(self._cfg, stage="cosmics")
             except Exception:
                 pass
-            self._set_step_status(3, "ok")
+            self._set_step_status(self._stage_row_index("cosmics"), "ok")
             self._maybe_auto_qc()
         except Exception as e:
-            self._set_step_status(3, "fail")
+            self._set_step_status(self._stage_row_index("cosmics"), "fail")
             self._log_exception(e)
 
     def _do_manual_cosmics(self) -> None:
@@ -3651,7 +3698,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_frames_flatfield.clicked.connect(
             lambda: self._open_frames_window("flatfield")
         )
-        self.btn_to_superneon.clicked.connect(lambda: self.steps.setCurrentRow(5))
+        self.btn_to_superneon.clicked.connect(lambda: self.steps.setCurrentRow(self._stage_row_index("superneon")))
 
         # ---- pending wiring (Apply button governs persistence) ----
         def _apply_to_from_ui() -> list[str]:
@@ -3699,7 +3746,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             return
         if not self._ensure_cfg_saved():
             return
-        self._set_step_status(4, "running")
+        self._set_step_status(self._stage_row_index("flatfield"), "running")
         try:
             ctx = load_context(self._cfg_path)
             run_sequence(ctx, ["flatfield"])
@@ -3709,10 +3756,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     self.outputs_flatfield.set_context(self._cfg, stage="flatfield")
             except Exception:
                 pass
-            self._set_step_status(4, "ok")
+            self._set_step_status(self._stage_row_index("flatfield"), "ok")
             self._maybe_auto_qc()
         except Exception as e:
-            self._set_step_status(4, "fail")
+            self._set_step_status(self._stage_row_index("flatfield"), "fail")
             self._log_exception(e)
 
     # --------------------------- page: superneon ---------------------------
@@ -4082,7 +4129,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_frames_superneon.clicked.connect(
             lambda: self._open_frames_window("superneon")
         )
-        self.btn_to_lineid.clicked.connect(lambda: self.steps.setCurrentRow(6))
+        self.btn_to_lineid.clicked.connect(lambda: self.steps.setCurrentRow(self._stage_row_index("arclineid")))
 
         # pending wiring
         self.chk_sn_bias_sub.toggled.connect(
@@ -4201,7 +4248,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             return
         if not self._ensure_cfg_saved():
             return
-        self._set_step_status(5, "running")
+        self._set_step_status(self._stage_row_index("superneon"), "running")
         try:
             ctx = load_context(self._cfg_path)
             run_sequence(ctx, ["superneon"])
@@ -4211,10 +4258,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     self.outputs_superneon.set_context(self._cfg, stage="wavesol")
             except Exception:
                 pass
-            self._set_step_status(5, "ok")
+            self._set_step_status(self._stage_row_index("superneon"), "ok")
             self._maybe_auto_qc()
         except Exception as e:
-            self._set_step_status(5, "fail")
+            self._set_step_status(self._stage_row_index("superneon"), "fail")
             self._log_exception(e)
 
     # --------------------------- page: lineid ---------------------------
@@ -4413,7 +4460,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.act_export_user_library_zip.triggered.connect(
             self._do_export_user_library_zip
         )
-        self.btn_to_wavesol.clicked.connect(lambda: self.steps.setCurrentRow(7))
+        self.btn_to_wavesol.clicked.connect(lambda: self.steps.setCurrentRow(self._stage_row_index("wavesol")))
 
         def _browse_csv() -> None:
             path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -4570,6 +4617,46 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 self._log_error(f"{title}: " + "; ".join(lines))
             except Exception:
                 pass
+
+
+    def _show_linearize_missing_sky_dialog(self, details: str) -> None:
+        """Show a user-friendly dialog when Linearization prerequisites are missing.
+
+        Typical case: user runs Step 10 (Linearization) before Step 09 (Sky Subtraction),
+        so 09_sky/*_skysub_raw.fits is missing.
+        """
+        try:
+            box = QtWidgets.QMessageBox(self)
+            box.setIcon(QtWidgets.QMessageBox.Warning)
+            box.setWindowTitle("Linearization: missing Sky products")
+            box.setText(
+                "Linearization (Step 10) requires sky-subtracted RAW products from Step 09 (Sky Subtraction).\n\n"
+                "Please run Sky Subtraction first, then retry Linearization."
+            )
+            if details:
+                box.setInformativeText(details)
+            btn_go = box.addButton("Go to Sky", QtWidgets.QMessageBox.ButtonRole.ActionRole)
+            box.addButton("Close", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            if box.clickedButton() == btn_go:
+                try:
+                    self.steps.setCurrentRow(self._stage_row_index("sky"))
+                except Exception:
+                    pass
+        except Exception:
+            # last resort: show a simple info box
+            try:
+                self._show_msgbox_lines(
+                    "Linearization: missing Sky products",
+                    [
+                        "Linearization requires Sky Subtraction products (Step 09).",
+                        details or "",
+                    ],
+                    icon="warn",
+                )
+            except Exception:
+                pass
+
 
     def _setup_key_for_pairs(self) -> dict[str, str]:
         """Return a *stable* setup key used by the pairs library.
@@ -5549,9 +5636,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
         # stepper wiring (director's cut)
         try:
             self.btn_ws_go_superneon.clicked.connect(
-                lambda: self.steps.setCurrentRow(5)
+                lambda: self.steps.setCurrentRow(self._stage_row_index("superneon"))
             )
-            self.btn_ws_open_lineid.clicked.connect(lambda: self.steps.setCurrentRow(6))
+            self.btn_ws_open_lineid.clicked.connect(lambda: self.steps.setCurrentRow(self._stage_row_index("arclineid")))
             self.btn_ws_run_wavesol.clicked.connect(self._do_wavesolution)
             self.btn_ws_clean_pairs.clicked.connect(self._do_clean_pairs)
             self.btn_ws_clean_2d.clicked.connect(self._do_clean_wavesol2d)
@@ -5892,7 +5979,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             return
         if not self._ensure_cfg_saved():
             return
-        self._set_step_status(7, "running")
+        self._set_step_status(self._stage_row_index("wavesol"), "running")
         try:
             ctx = load_context(self._cfg_path)
             out = run_wavesolution(ctx)
@@ -5902,13 +5989,13 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     self.outputs_wavesol.set_context(self._cfg, stage="wavesol")
             except Exception:
                 pass
-            self._set_step_status(7, "ok")
+            self._set_step_status(self._stage_row_index("wavesol"), "ok")
             self._log_info(
                 "Outputs:\n" + "\n".join(f"  {k}: {v}" for k, v in out.items())
             )
             self._maybe_auto_qc()
         except Exception as e:
-            self._set_step_status(7, "fail")
+            self._set_step_status(self._stage_row_index("wavesol"), "fail")
             self._log_exception(e)
 
         finally:
@@ -5938,8 +6025,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
         gl = QtWidgets.QVBoxLayout(g)
 
         lbl = QtWidgets.QLabel(
-            "Resample COSMICS-cleaned OBJ frames onto a linear wavelength grid using lambda_map(y,x).\n"
-            "Output: products/lin/lin_preview.fits (legacy mirror: lin/obj_sum_lin.fits).\n"
+            "Resample SKY-subtracted RAW frames (09_sky/*_skysub_raw.fits) onto a linear wavelength grid using lambda_map(y,x).\n"
+            "Output: 10_linearize/lin_preview.fits (+ per_exp/ for individual frames).\n"
+            "Option: post-rectification sky residual cleanup can be toggled on the Sky page.\n"
             "Tip: keep dlambda/lambda_min/lambda_max = 0 for auto."
         )
         lbl.setWordWrap(True)
@@ -6035,7 +6123,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         bf.addRow(
             self._param_label(
                 "PNG",
-                "Сохранить диагностическую картинку products/lin/lin_preview.png (legacy mirror: lin/obj_sum_lin.png).\n"
+                "Сохранить диагностическую картинку 10_linearize/lin_preview.png (legacy mirror: lin/obj_sum_lin.png).\n"
                 "Типично: включено.",
             ),
             self.chk_lin_png,
@@ -6048,7 +6136,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.chk_lin_per_frame = QtWidgets.QCheckBox("Save per-frame linearized")
         adv_lay.addWidget(
             self._small_note(
-                "Сохранять линейризованные отдельные кадры в lin/frames/*.fits.\n"
+                "Сохранять линейризованные отдельные кадры в 10_linearize/per_exp/*.fits.\n"
                 "Полезно для отладки, но занимает место.\n"
                 "Типично: выключено."
             )
@@ -6089,7 +6177,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         lay.addWidget(_hline())
         foot = QtWidgets.QHBoxLayout()
         lay.addLayout(foot)
-        self.btn_to_sky = QtWidgets.QPushButton("Go to Sky subtraction →")
+        self.btn_to_sky = QtWidgets.QPushButton("Go to Stack2D →")
         foot.addStretch(1)
         foot.addWidget(self.btn_to_sky)
 
@@ -6146,7 +6234,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_frames_linearize.clicked.connect(
             lambda: self._open_frames_window("lin")
         )
-        self.btn_to_sky.clicked.connect(lambda: self.steps.setCurrentRow(9))
+        self.btn_to_sky.clicked.connect(lambda: self.steps.setCurrentRow(self._stage_row_index("stack2d")))
 
         self._sync_stage_controls_from_cfg()
         return w
@@ -6156,7 +6244,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             return
         if not self._ensure_cfg_saved():
             return
-        self._set_step_status(8, "running")
+        self._set_step_status(self._stage_row_index("linearize"), "running")
         try:
             ctx = load_context(self._cfg_path)
             run_sequence(ctx, ["linearize"])
@@ -6166,10 +6254,27 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     self.outputs_linearize.set_context(self._cfg, stage="lin")
             except Exception:
                 pass
-            self._set_step_status(8, "ok")
+            self._set_step_status(self._stage_row_index("linearize"), "ok")
             self._maybe_auto_qc()
+        except FileNotFoundError as e:
+            self._set_step_status(self._stage_row_index("linearize"), "fail")
+            msg = str(e)
+            # Friendly UX: common mistake is running Linearize without Sky products.
+            if (
+                "Sky outputs not found" in msg
+                or "Missing sky product" in msg
+                or "expected 09_sky" in msg
+                or "/09_sky" in msg
+            ):
+                self._show_linearize_missing_sky_dialog(msg)
+                try:
+                    self._log_error("Linearize prerequisites missing: " + msg)
+                except Exception:
+                    pass
+                return
+            self._log_exception(e)
         except Exception as e:
-            self._set_step_status(8, "fail")
+            self._set_step_status(self._stage_row_index("linearize"), "fail")
             self._log_exception(e)
 
     def _build_page_sky(self) -> QtWidgets.QWidget:
@@ -6185,14 +6290,14 @@ class LauncherWindow(QtWidgets.QMainWindow):
         left_layout = QtWidgets.QVBoxLayout(left)
         left_layout.setSpacing(12)
 
-        g = _box("Sky subtraction (Kelson)")
+        g = _box("Sky Subtraction")
         left_layout.addWidget(g)
         gl = QtWidgets.QVBoxLayout(g)
 
         lbl = QtWidgets.QLabel(
-            "Kelson-style sky subtraction on rectified frames (λ, y).\n"
-            "Workflow: select OBJ/SKY regions on a preview stack (products/lin/lin_preview.fits) → run per exposure.\n"
-            "Optionally: stack the sky-subtracted frames into products/stack/stacked2d.fits."
+            "Primary sky subtraction in detector geometry (RAW), guided by λ(x,y) from Wavelength solution.\n"
+            "Workflow: select OBJ/SKY regions on a cosmics-clean preview → run Step 09 Sky.\n"
+            "Linearization (Step 10) resamples <stem>_skysub_raw.fits → <stem>_skysub.fits and can optionally clean residual sky."
         )
         lbl.setWordWrap(True)
         gl.addWidget(lbl)
@@ -6229,6 +6334,35 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.chk_sky_enabled,
         )
 
+
+        # Primary method (observer-friendly): how do we subtract sky?
+        self.combo_sky_primary_method = QtWidgets.QComboBox()
+        self.combo_sky_primary_method.addItem("Kelson RAW", "kelson_raw")
+        self.combo_sky_primary_method.addItem("Sky-Scale RAW", "sky_scale_raw")
+        bf.addRow(
+            self._param_label(
+                "Primary method",
+                "Основной метод вычитания неба (в детекторной геометрии).\n"
+                "Kelson RAW — универсальный режим по одному объектному кадру.\n"
+                "Sky-Scale RAW — масштабирование по отдельным sky-кадрам (если они есть).",
+            ),
+            self.combo_sky_primary_method,
+        )
+
+        # Post-rectification residual cleanup (executed in Linearization)
+        self.combo_sky_post_cleanup = QtWidgets.QComboBox()
+        self.combo_sky_post_cleanup.addItem("Off", "off")
+        self.combo_sky_post_cleanup.addItem("Auto", "auto")
+        self.combo_sky_post_cleanup.addItem("On", "on")
+        bf.addRow(
+            self._param_label(
+                "Post-cleanup",
+                "Дочистка остатка неба после переноса в линейную λ-сетку.\n"
+                "Выполняется на Step 10 (Linearization) — уже на rectified кадре.\n"
+                "Off/Auto/On. Типично: Auto.",
+            ),
+            self.combo_sky_post_cleanup,
+        )
         self.chk_sky_per_exp = QtWidgets.QCheckBox("Per exposure (recommended)")
         bf.addRow(
             self._param_label(
@@ -6244,8 +6378,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         bf.addRow(
             self._param_label(
                 "Stack2D",
-                "В v5.38.4 Stack2D вынесен в отдельную стадию.\n"
-                "Небо (Step 10) больше не запускает stacking автоматически.\n"
+                "В v5.39.1 Stack2D вынесен в отдельную стадию.\n"
+                "Небо (Step 09) больше не запускает stacking автоматически.\n"
                 "Запустите Step 11 Stack2D отдельно.",
             ),
             self.chk_sky_stack_after,
@@ -6600,7 +6734,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         lay.addWidget(_hline())
         foot = QtWidgets.QHBoxLayout()
         lay.addLayout(foot)
-        self.btn_to_extract1d = QtWidgets.QPushButton("Go to Extract 1D →")
+        self.btn_to_extract1d = QtWidgets.QPushButton("Go to Linearize →")
         foot.addStretch(1)
         foot.addWidget(self.btn_to_extract1d)
 
@@ -6631,6 +6765,27 @@ class LauncherWindow(QtWidgets.QMainWindow):
             lambda v: self._stage_set_pending("sky", "sky.spatial_poly_deg", int(v))
         )
 
+
+        # Primary sky method
+        self.combo_sky_primary_method.currentIndexChanged.connect(
+            lambda _: self._stage_set_pending(
+                "sky",
+                "sky.primary_method",
+                str(self.combo_sky_primary_method.currentData() or "kelson_raw"),
+            )
+        )
+
+        # Post-rectification residual cleanup (belongs to Linearization, but controlled here)
+        def _on_sky_post_cleanup_changed() -> None:
+            v = str(self.combo_sky_post_cleanup.currentData() or "auto").strip().lower()
+            if v not in {"off", "auto", "on"}:
+                v = "auto"
+            # preferred key (Linearization)
+            self._stage_set_pending("sky", "linearize.post_sky_cleanup", v)
+            # legacy key (Sky)
+            self._stage_set_pending("sky", "sky.post_cleanup", v)
+
+        self.combo_sky_post_cleanup.currentIndexChanged.connect(lambda _: _on_sky_post_cleanup_changed())
         self.chk_sky_per_exp.stateChanged.connect(
             lambda _: self._stage_set_pending(
                 "sky", "sky.per_exposure", bool(self.chk_sky_per_exp.isChecked())
@@ -6732,7 +6887,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_run_sky.clicked.connect(self._do_run_sky)
         self.btn_qc_sky.clicked.connect(self._open_qc_viewer)
         self.btn_frames_sky.clicked.connect(lambda: self._open_frames_window("sky"))
-        self.btn_to_extract1d.clicked.connect(lambda: self.steps.setCurrentRow(10))
+        self.btn_to_extract1d.clicked.connect(lambda: self.steps.setCurrentRow(self._stage_row_index("linearize")))
 
         self._sync_stage_controls_from_cfg()
         return w
@@ -6740,19 +6895,24 @@ class LauncherWindow(QtWidgets.QMainWindow):
     def _do_select_sky_rois(self) -> None:
         from scorpio_pipe.ui.sky_roi_dialog import SkyRoiDialog
 
-        # we select regions on the linearized stacked frame
+        # We select regions on a cosmics-cleaned RAW frame (detector geometry).
         if not self._ensure_cfg_saved():
             return
         try:
             ctx = load_context(self._cfg_path)
             work = resolve_work_dir(ctx.cfg)
-            fits_path = work / "products" / "lin" / "lin_preview.fits"
-            if not fits_path.exists():
-                # backward compatibility (older layouts)
-                fits_path = work / "lin" / "obj_sum_lin.fits"
-            if not fits_path.exists():
-                self._log_warn("Linearized sum not found. Run Linearize first.")
+            # Sky is performed in RAW detector geometry. We select sky/object windows on a cosmic-cleaned RAW frame.
+            from scorpio_pipe.workspace_paths import stage_dir
+
+            cos_root = stage_dir(work, "cosmics") / "clean"
+            cand = sorted(cos_root.glob("*_clean.fits")) if cos_root.exists() else []
+            if not cand:
+                # fallback: any clean product under the cosmics stage
+                cand = sorted(stage_dir(work, "cosmics").rglob("*_clean.fits"))
+            if not cand:
+                self._log_warn("No cosmic-cleaned frames found. Run Cosmics first.")
                 return
+            fits_path = cand[0]
             roi = (self._cfg.get("sky", {}) or {}).get("roi", {}) or {}
             dlg = SkyRoiDialog(fits_path, roi, parent=self)
             if dlg.exec() == QtWidgets.QDialog.Accepted:
@@ -6779,7 +6939,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         try:
             ctx = load_context(self._cfg_path)
             work = resolve_work_dir(ctx.cfg)
-            fits_path = work / "products" / "lin" / "lin_preview.fits"
+            fits_path = stage_dir(work, "linearize") / "lin_preview.fits"
             if not fits_path.exists():
                 fits_path = work / "lin" / "obj_sum_lin.fits"
             if not fits_path.exists():
@@ -6825,7 +6985,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         if any(k not in roi for k in need):
             self._log_warn("ROI is not set. Use 'Select regions…' first.")
             return
-        self._set_step_status(9, "running")
+        self._set_step_status(self._stage_row_index("sky"), "running")
         try:
             ctx = load_context(self._cfg_path)
             sky_cfg = (
@@ -6843,28 +7003,27 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     self.outputs_sky.set_context(self._cfg, stage="sky")
             except Exception:
                 pass
-            self._set_step_status(9, "ok")
+            self._set_step_status(self._stage_row_index("sky"), "ok")
             self._maybe_auto_qc()
         except Exception as e:
-            self._set_step_status(9, "fail")
+            self._set_step_status(self._stage_row_index("sky"), "fail")
             self._log_exception(e)
 
     def _do_run_stack2d(self) -> None:
-        from scorpio_pipe.product_naming import legacy_sky_sub_fits_names, sky_sub_fits_name
-        from scorpio_pipe.workspace_paths import resolve_input_path, stage_dir
+        from scorpio_pipe.workspace_paths import stage_dir
 
         if not self._ensure_stage_applied("stack2d", "Stack2D"):
             return
         if not self._ensure_cfg_saved():
             return
 
-        self._set_step_status(10, "running")
+        self._set_step_status(self._stage_row_index("stack2d"), "running")
         try:
             ctx = load_context(self._cfg_path)
             work = resolve_work_dir(ctx.cfg)
 
-            # Sanity: require that sky-subtracted frames exist for the science exposure list.
-            sky_root = stage_dir(work, "sky")
+            # Sanity: Stack2D consumes ONLY rectified sky-subtracted frames from Linearization.
+            lin_root = stage_dir(work, "linearize")
             frames = ctx.cfg.get("frames") if isinstance(ctx.cfg.get("frames"), dict) else {}
             obj_list = frames.get("obj") if isinstance(frames.get("obj"), list) else []
             stems = [Path(x).stem for x in obj_list if isinstance(x, str) and x.strip()]
@@ -6872,44 +7031,27 @@ class LauncherWindow(QtWidgets.QMainWindow):
             if stems:
                 missing: list[str] = []
                 for stem in stems:
-                    canon = sky_sub_fits_name(stem)
-                    extra = []
-                    for name in legacy_sky_sub_fits_names(stem):
-                        extra.extend(
-                            [
-                                sky_root / stem / name,
-                                sky_root / "per_exp" / name,
-                                work / "products" / "sky" / "per_exp" / name,
-                                work / "sky" / "per_exp" / name,
-                                sky_root / name,
-                                work / "products" / "sky" / name,
-                                work / "sky" / name,
-                            ]
-                        )
-                    p = resolve_input_path(
-                        "skysub_fits",
-                        work,
-                        "sky",
-                        raw_stem=stem,
-                        relpath=canon,
-                        extra_candidates=extra,
-                    )
-                    if not p.exists():
+                    cand = [
+                        lin_root / f"{stem}_skysub.fits",
+                        lin_root / "per_exp" / f"{stem}_skysub.fits",
+                        work / "products" / "lin" / "per_exp" / f"{stem}_skysub.fits",
+                        work / "lin" / "per_exp" / f"{stem}_skysub.fits",
+                        work / "products" / "lin" / f"{stem}_skysub.fits",
+                        work / "lin" / f"{stem}_skysub.fits",
+                    ]
+                    if not any(p.exists() for p in cand):
                         missing.append(stem)
                 if missing:
                     raise FileNotFoundError(
-                        "Missing sky-subtracted inputs for stems: "
-                        + ", ".join(missing)
-                        + ". Run 'Sky subtraction' first."
+                        "Missing linearized sky-subtracted inputs for stems: "
+                        + ", \n".join(missing)
+                        + ". Run 'Sky Subtraction' and then 'Linearization' first."
                     )
             else:
-                # Fallback: any sky-sub products in stage dir (legacy behavior)
-                inputs = list(sky_root.rglob("*_skysub.fits"))
-                if not inputs:
-                    inputs = list(sky_root.rglob("*_sky_sub.fits"))
+                inputs = list(lin_root.rglob("*_skysub.fits"))
                 if not inputs:
                     raise FileNotFoundError(
-                        "No sky-subtracted frames found. Run 'Sky subtraction' first."
+                        "No linearized sky-subtracted frames found. Run 'Linearization' first."
                     )
 
             run_sequence(ctx, ["stack2d"])
@@ -6919,10 +7061,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     self.outputs_stack2d.set_context(self._cfg, stage="stack2d")
             except Exception:
                 pass
-            self._set_step_status(10, "ok")
+            self._set_step_status(self._stage_row_index("stack2d"), "ok")
             self._maybe_auto_qc()
         except Exception as e:
-            self._set_step_status(10, "fail")
+            self._set_step_status(self._stage_row_index("stack2d"), "fail")
             self._log_exception(e)
 
     def _build_page_stack2d(self) -> QtWidgets.QWidget:
@@ -6943,9 +7085,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
         gl = QtWidgets.QVBoxLayout(g)
 
         lbl = QtWidgets.QLabel(
-            "Robust 2D stacking of sky-subtracted frames in (λ, y).\n"
-            "Input: products/.../sky/<raw_stem>/<raw_stem>_skysub.fits\n"
-            "Output: products/.../stack2d/stacked2d.fits"
+            "Robust 2D stacking of rectified sky-subtracted frames in (λ, y).\n"
+            "Input: 10_linearize/<stem>_skysub.fits\n"
+            "Output: 11_stack/stacked2d.fits"
         )
         lbl.setWordWrap(True)
         gl.addWidget(lbl)
@@ -7271,13 +7413,13 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     ],
                     icon="warn",
                 )
-                self._set_step_status(11, "fail")
+                self._set_step_status(self._stage_row_index("extract1d"), "fail")
                 return
         except Exception:
             # If work_dir cannot be resolved, runner will report a clearer error.
             pass
 
-        self._set_step_status(11, "running")
+        self._set_step_status(self._stage_row_index("extract1d"), "running")
         try:
             ctx = load_context(self._cfg_path)
             run_sequence(ctx, ["extract1d"])
@@ -7287,10 +7429,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     self.outputs_extract1d.set_context(self._cfg, stage="spec")
             except Exception:
                 pass
-            self._set_step_status(11, "ok")
+            self._set_step_status(self._stage_row_index("extract1d"), "ok")
             self._maybe_auto_qc()
         except Exception as e:
-            self._set_step_status(11, "fail")
+            self._set_step_status(self._stage_row_index("extract1d"), "fail")
             self._log_exception(e)
 
     # --------------------------- misc helpers ---------------------------

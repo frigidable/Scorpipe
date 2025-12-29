@@ -45,6 +45,7 @@ from ..logging_utils import get_logger
 from ..provenance import add_provenance
 from scorpio_pipe.paths import resolve_work_dir
 from scorpio_pipe.wavesol_paths import wavesol_dir
+from scorpio_pipe.workspace_paths import stage_dir
 
 log = get_logger(__name__)
 
@@ -269,6 +270,118 @@ def _open_science_with_optional_var_mask(
         pass
     data, hdr = _open_fits_resilient(path)
     return data, None, None, fits.Header(hdr)
+
+
+def _raw_stem_from_path(p: Path) -> str:
+    """Derive original raw stem from any pipeline product path."""
+
+    stem = p.stem
+    # common suffixes used in intermediate products
+    for suf in (
+        "_clean",
+        "_skysub_raw",
+        "_skymodel_raw",
+        "_rectified",
+        "_skysub",
+        "_skymodel",
+        "_lin",
+    ):
+        if stem.endswith(suf):
+            stem = stem[: -len(suf)]
+            break
+    return stem
+
+
+def _sky_rows_from_cfg(cfg: Dict[str, Any], ny: int) -> np.ndarray:
+    sky = cfg.get("sky", {}) if isinstance(cfg.get("sky", {}), dict) else {}
+    roi = sky.get("roi") if isinstance(sky.get("roi"), dict) else {}
+    top = roi.get("sky_top") if isinstance(roi.get("sky_top"), (list, tuple)) else None
+    bot = roi.get("sky_bot") if isinstance(roi.get("sky_bot"), (list, tuple)) else None
+
+    # UI schema (v5.3x): explicit window edges
+    if top is None and roi.get("sky_top_y0") is not None and roi.get("sky_top_y1") is not None:
+        top = [roi.get("sky_top_y0"), roi.get("sky_top_y1")]
+    if bot is None and roi.get("sky_bot_y0") is not None and roi.get("sky_bot_y1") is not None:
+        bot = [roi.get("sky_bot_y0"), roi.get("sky_bot_y1")]
+
+    def _clip(pair: Any) -> tuple[int, int] | None:
+        if not pair or len(pair) != 2:
+            return None
+        y0, y1 = int(pair[0]), int(pair[1])
+        if y0 > y1:
+            y0, y1 = y1, y0
+        y0 = max(0, min(ny - 1, y0))
+        y1 = max(0, min(ny - 1, y1))
+        if y1 - y0 < 2:
+            return None
+        return y0, y1
+
+    rows: list[int] = []
+    t = _clip(top)
+    b = _clip(bot)
+    if t:
+        rows.extend(range(t[0], t[1] + 1))
+    if b:
+        rows.extend(range(b[0], b[1] + 1))
+    if rows:
+        return np.asarray(rows, dtype=int)
+    # fallback: top/bottom bands
+    band = max(8, int(0.15 * ny))
+    return np.asarray(list(range(0, band)) + list(range(max(0, ny - band), ny)), dtype=int)
+
+
+def _post_rectified_sky_cleanup(
+    rect: np.ndarray,
+    rect_var: np.ndarray,
+    rect_mask: np.ndarray,
+    cfg: Dict[str, Any],
+    mode: str,
+) -> tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    """Residual sky cleanup on rectified grid.
+
+    Returns (cleaned_rect, residual_model, diag).
+    """
+
+    mode_n = str(mode).strip().lower()
+    if mode_n in {"off", "0", "false", "no"}:
+        return rect, np.zeros_like(rect, dtype=np.float32), {"enabled": False, "mode": "off"}
+
+    ny, nx = rect.shape
+    rows = _sky_rows_from_cfg(cfg, ny)
+    fatal = NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED
+    good = (rect_mask & fatal) == 0
+
+    sky = np.zeros(nx, dtype=np.float32)
+    for x in range(nx):
+        v = rect[rows, x]
+        ok = good[rows, x]
+        vv = v[ok]
+        sky[x] = np.float32(np.median(vv)) if vv.size else np.float32(np.median(v))
+
+    # auto gating: skip if residual is already negligible compared to noise
+    if mode_n in {"auto", "a"}:
+        try:
+            sig2 = np.median(rect_var[rows, :][good[rows, :]])
+            sig = float(np.sqrt(max(sig2, 1e-12)))
+            med_abs = float(np.median(np.abs(sky)))
+            if med_abs < 0.3 * sig:
+                return rect, np.zeros_like(rect, dtype=np.float32), {
+                    "enabled": False,
+                    "mode": "auto",
+                    "skipped": True,
+                    "median_abs_residual": med_abs,
+                    "sigma_est": sig,
+                }
+        except Exception:
+            pass
+
+    model = np.tile(sky[None, :], (ny, 1)).astype(np.float32)
+    cleaned = (rect - model).astype(np.float32)
+    return cleaned, model, {
+        "enabled": True,
+        "mode": "on" if mode_n in {"on", "1", "true", "yes"} else "auto",
+        "median_residual": float(np.median(sky)),
+    }
 
 
 ### Noise / variance helpers live in scorpio_pipe.noise_model
@@ -741,9 +854,9 @@ def run_linearize(
       - cleaned object frames (prefer cosmics outputs if present)
 
     Outputs (v5.14+):
-      - products/lin/lin_preview.fits (MEF: SCI [+VAR,+MASK,+COV])  # quick-look stack for ROI/QC
-      - products/lin/linearize_done.json
-      - per-exposure rectified frames under products/lin/per_exp/
+      - 10_linearize/lin_preview.fits (MEF: SCI [+VAR,+MASK,+COV])  # quick-look stack for ROI/QC
+      - 10_linearize/linearize_done.json
+      - per-exposure rectified frames under 10_linearize/per_exp/
 
     Backward compatibility:
       - mirrors preview to work_dir/lin/obj_sum_lin.fits and work_dir/lin/obj_sum_lin.png
@@ -751,7 +864,7 @@ def run_linearize(
     cfg = dict(cfg)
     work_dir = resolve_work_dir(cfg)
     if out_dir is None:
-        out_dir = work_dir / "products" / "lin"
+        out_dir = stage_dir(work_dir, "linearize")
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -816,38 +929,87 @@ def run_linearize(
     if not obj_frames:
         raise ValueError("No object frames configured (frames.obj is empty)")
 
-    # Prefer cosmics products if present.
-    # NOTE: cosmics stage historically used different layouts. Try a few.
+    # v5.39+ prefers Sky Subtraction outputs (RAW detector geometry):
+    #   09_sky/<stem>_skysub_raw.fits
+    # Backward compatibility:
+    #   - legacy runs can still linearize cosmics-cleaned frames directly.
+
+    # Locate cosmics products for legacy fallback and for additional masks.
     cosm_cfg = cfg.get("cosmics", {}) if isinstance(cfg.get("cosmics"), dict) else {}
     method = str(cosm_cfg.get("method", "stack_mad"))
     kind = "obj"
-    cosm_root = work_dir / "cosmics"
+    cosm_root = stage_dir(work_dir, "cosmics")
+    # legacy layouts (pre-stage_dir)
+    legacy_cosm_root = work_dir / "cosmics"
     cand_clean = [
         cosm_root / kind / "clean",  # current
-        cosm_root / method / kind / "clean",  # legacy (method/kind)
-        cosm_root / method / "clean",  # legacy (method)
+        legacy_cosm_root / kind / "clean",
+        legacy_cosm_root / method / kind / "clean",
+        legacy_cosm_root / method / "clean",
     ]
     cand_mask = [
         cosm_root / kind / "masks_fits",
-        cosm_root / method / kind / "masks_fits",
-        cosm_root / method / "masks_fits",
-        cosm_root / kind / "mask_fits",  # very old typo
+        legacy_cosm_root / kind / "masks_fits",
+        legacy_cosm_root / method / kind / "masks_fits",
+        legacy_cosm_root / method / "masks_fits",
+        legacy_cosm_root / kind / "mask_fits",  # very old typo
     ]
     clean_dir = next((p for p in cand_clean if p.exists()), cand_clean[0])
     mask_dir = next((p for p in cand_mask if p.exists()), cand_mask[0])
 
-    resolved = []
+    # Resolve raw input frame paths (config-relative).
+    config_dir = Path(str(cfg.get("config_dir", "."))).expanduser().resolve()
+    data_dir = Path(str(cfg.get("data_dir", ""))).expanduser()
+    if str(data_dir).strip():
+        try:
+            data_dir = data_dir.resolve()
+        except Exception:
+            pass
+
+    def _resolve_input(fp: Any) -> Path:
+        p = Path(str(fp)).expanduser()
+        if p.is_absolute():
+            return p
+        # Prefer config_dir (used throughout the pipeline), but also allow data_dir.
+        cand = (config_dir / p)
+        if cand.exists():
+            return cand.resolve()
+        if str(data_dir).strip():
+            return (data_dir / p).expanduser().resolve()
+        return cand.resolve()
+
+    # Determine whether we are in the new (09_sky -> 10_linearize) layout.
+    sky_root = stage_dir(work_dir, "sky")
+    new_layout_expected = sky_root.name.startswith("09_")
+    if new_layout_expected and not (sky_root.exists() and any(sky_root.glob("*_skysub_raw.fits"))):
+        raise FileNotFoundError(
+            "Sky outputs not found for v5.39+ layout. "
+            "Run stage 09_sky first (expected 09_sky/*_skysub_raw.fits)."
+        )
+
+    sci_paths: list[Path] = []
+    model_paths: list[Path | None] = []
+
     for fp in obj_frames:
-        p = Path(fp)
-        # config paths are expected to be absolute or relative to data_dir
-        if not p.is_absolute():
-            data_dir = Path(cfg.get("data_dir", "")).expanduser()
-            if data_dir:
-                p = (data_dir / p).expanduser()
-        base = p.stem
-        clean_p = clean_dir / f"{base}_clean.fits"
-        resolved.append(clean_p if clean_p.exists() else p)
-    sci_paths = [Path(p) for p in resolved]
+        raw_p = _resolve_input(fp)
+        stem = raw_p.stem
+        sky_p = sky_root / f"{stem}_skysub_raw.fits"
+        sky_model_p = sky_root / f"{stem}_skymodel_raw.fits"
+
+        if sky_p.exists():
+            sci_paths.append(sky_p)
+            model_paths.append(sky_model_p if sky_model_p.exists() else None)
+            continue
+
+        if new_layout_expected:
+            raise FileNotFoundError(
+                f"Missing sky product for {stem}: expected {sky_p.name} in {sky_root}" 
+            )
+
+        # Legacy fallback: use cosmics-cleaned frame if present, else raw.
+        clean_p = clean_dir / f"{stem}_clean.fits"
+        sci_paths.append(clean_p if clean_p.exists() else raw_p)
+        model_paths.append(None)
 
 
     # Output wavelength grid (common for the whole series)
@@ -1074,9 +1236,8 @@ def run_linearize(
                 satmask = None
 
         # Merge legacy cosmics masks (if present) with any input MASK plane.
-        base_for_mask = Path(p).stem
-        if base_for_mask.endswith("_clean"):
-            base_for_mask = base_for_mask[:-6]
+        # Important for v5.39+: input may be 09_sky/*_skysub_raw.fits.
+        base_for_mask = _raw_stem_from_path(Path(p))
         mp = mask_dir / f"{base_for_mask}_mask.fits"
         if mp.exists():
             try:
@@ -1152,31 +1313,87 @@ def run_linearize(
             rect /= float(exptime_s)
             rect_var /= float(exptime_s) ** 2
 
-        # Per-exposure output
-        if per_exp_dir is not None:
-            ohdr = _set_linear_wcs(hdr, wave0, dw, unit=unit)
-            ohdr["WAVEUNIT"] = (str(unit), "Wavelength unit (explicit)")
-            ohdr["WAVEREF"] = (str(waveref), "Wavelength reference (air/vacuum)")
-            ohdr["BUNIT"] = (str(bunit), "Data unit")
-            ohdr["NORMEXP"] = (bool(normalize_exptime), "Normalize to per-second units (ADU/s)")
-            ohdr["TEXPS"] = (float(exptime_s), "Exposure time used for normalization (s)")
-            # Saturation metadata (if used)
-            if sat_level is not None and mask_saturation:
-                try:
-                    ohdr["SATLEV"] = (
-                        float(sat_level),
-                        "Saturation level (ADU) used to flag MASK",
-                    )
-                    ohdr["SATMARG"] = (float(sat_margin), "Saturation margin (ADU)")
-                except Exception:
-                    pass
-            ohdr = add_provenance(ohdr, cfg, stage="linearize")
+        # v5.39+ optional post-rectification residual cleanup (runs here, after resampling)
+        sky_cfg = cfg.get("sky", {}) if isinstance(cfg.get("sky"), dict) else {}
+        # Post-rectification sky residual cleanup is executed here (on rectified grid).
+        # Accept config in two places for backward compatibility:
+        #   - linearize.post_sky_cleanup (preferred, since it belongs to Linearization)
+        #   - sky.post_cleanup (legacy)
+        cleanup_raw = lcfg.get("post_sky_cleanup", lcfg.get("sky_cleanup", sky_cfg.get("post_cleanup", "auto")))
+        post_cleanup = str(cleanup_raw).strip().lower()
+        residual_model = None
+        ran_cleanup = False
+        if post_cleanup in {"on", "auto"}:
+            rect2, model2, ran2 = _post_rectified_sky_cleanup(
+                rect,
+                rect_var,
+                rect_mask,
+                cfg,
+                mode=post_cleanup,
+            )
+            rect = rect2
+            residual_model = model2
+            ran_cleanup = bool(ran2)
 
-            # Canonical naming: *_rectified.fits
-            #
-            # Important (v5.38+): do NOT write compatibility aliases (e.g. *_lin.fits)
-            # into canonical stage folders. Legacy filenames are supported via
-            # resolve_input_path(...) when reading old workspaces.
+        # Output header (shared by all outputs for this exposure)
+        ohdr = _set_linear_wcs(hdr, wave0, dw, unit=unit)
+        ohdr["WAVEUNIT"] = (str(unit), "Wavelength unit (explicit)")
+        ohdr["WAVEREF"] = (str(waveref), "Wavelength reference (air/vacuum)")
+        ohdr["BUNIT"] = (str(bunit), "Data unit")
+        ohdr["NORMEXP"] = (
+            bool(normalize_exptime),
+            "Normalize to per-second units (ADU/s)",
+        )
+        ohdr["TEXPS"] = (float(exptime_s), "Exposure time used for normalization (s)")
+        if sat_level is not None and mask_saturation:
+            try:
+                ohdr["SATLEV"] = (
+                    float(sat_level),
+                    "Saturation level (ADU) used to flag MASK",
+                )
+                ohdr["SATMARG"] = (float(sat_margin), "Saturation margin (ADU)")
+            except Exception:
+                pass
+        ohdr = add_provenance(ohdr, cfg, stage="linearize")
+
+        # Canonical v5.39+ per-frame rectified product used downstream:
+        #   10_linearize/<stem>_skysub.fits
+        out_skysub = out_dir / f"{base_for_mask}_skysub.fits"
+        _write_mef(
+            out_skysub,
+            rect,
+            ohdr,
+            rect_var,
+            rect_mask,
+            rect_cov,
+            wave0=wave0,
+            dw=dw,
+            unit=unit,
+        )
+        rect_paths.append(out_skysub)
+
+        # Optional model product (written if user requested cleanup or auto ran it)
+        if post_cleanup != "off":
+            model_out = (
+                np.asarray(residual_model, dtype=np.float32)
+                if residual_model is not None
+                else np.zeros_like(rect, dtype=np.float32)
+            )
+            out_model = out_dir / f"{base_for_mask}_skymodel.fits"
+            _write_mef(
+                out_model,
+                model_out,
+                ohdr,
+                np.zeros_like(rect_var, dtype=np.float32),
+                rect_mask,
+                rect_cov,
+                wave0=wave0,
+                dw=dw,
+                unit=unit,
+            )
+
+        # Optional debug per-exposure output directory (kept for QC / troubleshooting)
+        if per_exp_dir is not None:
             out_rect = per_exp_dir / f"{base_for_mask}_rectified.fits"
             _write_mef(
                 out_rect,
@@ -1189,20 +1406,19 @@ def run_linearize(
                 dw=dw,
                 unit=unit,
             )
-            rect_paths.append(out_rect)
 
         if not robust_stack:
-                    # Stack: inverse-variance weighted mean
-                    w = np.zeros_like(rect_var, dtype=np.float64)
-                    fatal_bits = NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED
-                    good = (rect_var > 0) & ((rect_mask & fatal_bits) == 0)
-                    w[good] = 1.0 / rect_var[good]
-                    stack_num += rect.astype(np.float64) * w
-                    stack_den += w
-                    # For the output variance (of the weighted mean): var = 1/sum(w)
-                    stack_var_den += w
-                    coverage += good.astype(np.int16)
-                    mask_sum |= rect_mask
+            # Stack: inverse-variance weighted mean
+            w = np.zeros_like(rect_var, dtype=np.float64)
+            fatal_bits = NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED
+            good = (rect_var > 0) & ((rect_mask & fatal_bits) == 0)
+            w[good] = 1.0 / rect_var[good]
+            stack_num += rect.astype(np.float64) * w
+            stack_den += w
+            # For the output variance (of the weighted mean): var = 1/sum(w)
+            stack_var_den += w
+            coverage += good.astype(np.int16)
+            mask_sum |= rect_mask
 
     # Final stack
     stack_stats: dict[str, Any] = {}

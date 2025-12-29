@@ -2,27 +2,29 @@
 
 This module defines the *only* canonical list of GUI/pipeline stages.
 
-Contract (v5.38.6)
+Contract (v5.39.1)
 ------------------
 - Stage numbering is fixed: 01..12.
-- Labels must match the GUI exactly.
 - Canonical stage output directories live directly under the workspace/run root:
 
     run_root/NN_slug/
 
-UI-only stages (01..02) are displayed in the GUI but never produce outputs.
+- UI-only stages (01..02) are displayed in the GUI but never produce outputs.
 
-Why this exists
----------------
-Historically the pipeline had multiple ad-hoc stage lists (GUI, runner, QC).
-That quickly leads to broken paths and mismatched products. With this module
-we keep *one* table and everyone imports it.
+Stage order change
+------------------
+v5.39.1 moves **Sky Subtraction** *before* **Linearization**:
 
-Legacy note
------------
-Earlier layouts (<= v5.38.5) had different numbering for downstream stages and
-may contain additional legacy directories. Those names may still exist on disk,
-but they are *not* stage keys anymore.
+    ... 08_wavesol -> 09_sky -> 10_linearize -> 11_stack -> 12_extract
+
+Backward compatibility
+----------------------
+Older runs (v5.38.x) used:
+
+    09_sky -> 10_linearize
+
+We keep stage *keys* stable ("sky", "linearize"), and :func:`scorpio_pipe.workspace_paths.stage_dir`
+is responsible for resolving legacy directories when opening older runs.
 """
 
 from __future__ import annotations
@@ -63,10 +65,10 @@ STAGES: tuple[StageDef, ...] = (
     StageDef(4, "flatfield", "flat", "Flat-Fielding"),
     StageDef(5, "cosmics", "cosmics", "Cosmics Cleaning"),
     StageDef(6, "superneon", "superneon", "Superneon"),
-    StageDef(7, "arclineid", "lineid", "Arc Line ID"),
+    StageDef(7, "arclineid", "arclineid", "Arc Line ID"),
     StageDef(8, "wavesol", "wavesol", "Wavelength Solution"),
-    StageDef(9, "linearize", "linearize", "Linearization"),
-    StageDef(10, "sky", "sky", "Sky Subtraction"),
+    StageDef(9, "sky", "sky", "Sky Subtraction"),
+    StageDef(10, "linearize", "linearize", "Linearization"),
     StageDef(11, "stack2d", "stack", "Frame Stacking"),
     StageDef(12, "extract1d", "extract", "Object Extraction"),
 )
@@ -74,9 +76,9 @@ STAGES: tuple[StageDef, ...] = (
 
 # Compatibility aliases (old keys / task names -> canonical stage keys).
 #
-# Important: this maps *tasks/sections* to stages, not legacy sky stage keys.
+# Important: this maps *tasks/sections* to stages, not legacy directory names.
 ALIASES: dict[str, str] = {
-    # Project/setup were not stages in older versions.
+    # UI-only placeholders
     "project": "project",
     "setup": "setup",
     # Calibs / flats
@@ -94,10 +96,13 @@ ALIASES: dict[str, str] = {
     "arclineid": "arclineid",
     "wavesolution": "wavesol",
     "wavesol": "wavesol",
+    "wave": "wavesol",
     # Unified sky
     "sky": "sky",
     "sky_sub": "sky",
     # Downstream
+    "lin": "linearize",
+    "linearize": "linearize",
     "stack": "stack2d",
     "stack2d": "stack2d",
     "extract": "extract1d",
