@@ -1361,7 +1361,9 @@ def run_linearize(
 
     # QC metrics for quick inspection
     try:
-        qc_dir = work_dir / "qc"
+        from scorpio_pipe.work_layout import ensure_work_layout
+
+        qc_dir = ensure_work_layout(work_dir).manifest
         qc_dir.mkdir(parents=True, exist_ok=True)
         qc_path = qc_dir / "linearize_qc.json"
 

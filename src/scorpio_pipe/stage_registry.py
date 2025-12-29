@@ -1,94 +1,145 @@
-"""Stage registry (single source of truth for stage ids, labels and directories).
+"""Stage registry (single source of truth).
 
-Goal
-----
-We keep *one* canonical mapping:
+This module defines the *only* canonical list of GUI/pipeline stages.
 
-    GUI ↔ stage_key ↔ stage_id ↔ products/NN_slug
+Contract (v5.38.4)
+------------------
+- Stage numbering is fixed: 01..13.
+- Labels must match the GUI exactly.
+- Canonical stage output directories live directly under the workspace root:
 
-The registry is intentionally small and stable. If you add/reorder stages,
-update this module and only then update callers.
+    work_dir/NN_slug/
+
+UI-only stages (01..02) are displayed in the GUI but never produce outputs.
+
+Why this exists
+---------------
+Historically the pipeline had multiple ad-hoc stage lists (GUI, runner, QC).
+That quickly leads to broken paths and mismatched products. With this module
+we keep *one* table and everyone imports it.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Iterator
 
 
 @dataclass(frozen=True)
-class StageSpec:
-    """Single stage definition.
-
-    Fields
-    ------
-    id
-        Integer stage id. Directory prefix uses two digits (NN_).
-    key
-        Stable internal key used by the runner and config (e.g. "linearize").
-    slug
-        Short directory slug (e.g. "lin").
-    label
-        Human-facing label for GUI.
-    dir_name
-        Canonical directory name under work_dir/products.
-    """
+class StageDef:
+    """Single stage definition."""
 
     id: int
     key: str
     slug: str
     label: str
-    dir_name: str
+    ui_only: bool = False
+
+    @property
+    def dir_name(self) -> str:
+        return f"{int(self.id):02d}_{self.slug}"
+
+    @property
+    def title(self) -> str:
+        """Human title with numbering: ``NN Label``."""
+
+        return f"{int(self.id):02d} {self.label}"
 
 
-def _mk(id_: int, key: str, slug: str, label: str) -> StageSpec:
-    return StageSpec(id=id_, key=key, slug=slug, label=label, dir_name=f"{id_:02d}_{slug}")
-
-
-# NOTE: Keep ids stable. The canonical directory is products/NN_slug.
-# This is the *only* place where the order and ids are defined.
-STAGES: tuple[StageSpec, ...] = (
-    _mk(0, "manifest", "manifest", "Manifest"),
-    _mk(1, "superbias", "superbias", "SuperBias"),
-    _mk(2, "superflat", "superflat", "SuperFlat"),
-    _mk(3, "flatfield", "flatfield", "Flatfield"),
-    _mk(4, "cosmics", "cosmics", "Cosmics"),
-    _mk(5, "superneon", "superneon", "SuperNeon"),
-    _mk(6, "lineid_prepare", "lineid", "LineID prepare"),
-    _mk(7, "wavesolution", "wavesol", "Wavelength solution"),
-    _mk(8, "linearize", "lin", "Linearize"),
-    _mk(9, "sky", "sky", "Sky subtraction"),
-    # Keep numeric id stable; use explicit slug to avoid ambiguity.
-    _mk(10, "stack2d", "stack2d", "Stack2D"),
-    _mk(11, "extract1d", "spec", "Extract1D"),
-    _mk(12, "qc_report", "qc", "QC report"),
+# -----------------------------------------------------------------------------
+# Canonical stage table (DO NOT reorder without a migration plan).
+# Labels MUST match GUI strings exactly.
+# -----------------------------------------------------------------------------
+STAGES: tuple[StageDef, ...] = (
+    StageDef(1, "project", "project", "Project", ui_only=True),
+    StageDef(2, "setup", "setup", "Setup", ui_only=True),
+    StageDef(3, "biascorr", "biascorr", "Bias Correction"),
+    StageDef(4, "flatfield", "flatfield", "Flat-Fielding"),
+    StageDef(5, "cosmics", "cosmics", "Cosmics Cleaning"),
+    StageDef(6, "superneon", "superneon", "Superneon"),
+    StageDef(7, "arclineid", "arclineid", "Arc Line ID"),
+    StageDef(8, "wavesol", "wavesol", "Wavelength Solution"),
+    StageDef(9, "skyraw", "skyraw", "Sky Subtraction (Kelson)"),
+    StageDef(10, "linearize", "linearize", "Linearization"),
+    StageDef(11, "skyrect", "skyrect", "Sky Subtraction (Rectified)"),
+    StageDef(12, "stack2d", "stack2d", "Frame Stacking"),
+    StageDef(13, "extract1d", "extract1d", "Object Extraction"),
 )
+
+
+# Compatibility aliases (old keys -> canonical keys).
+# We keep them *only* to avoid breaking internal imports/tests during refactors.
+ALIASES: dict[str, str] = {
+    # Project/setup were not stages in older versions.
+    "project": "project",
+    "setup": "setup",
+    # Calibs / flats
+    "superbias": "biascorr",
+    "bias": "biascorr",
+    "biascorr": "biascorr",
+    "superflat": "flatfield",
+    "flat": "flatfield",
+    "flatfield": "flatfield",
+    # Others
+    "cosmics": "cosmics",
+    "superneon": "superneon",
+    "lineid": "arclineid",
+    "lineid_prepare": "arclineid",
+    "arclineid": "arclineid",
+    "wavesolution": "wavesol",
+    "wavesol": "wavesol",
+    # Sky
+    "sky": "skyrect",
+    "sky_sub": "skyrect",
+    "skyraw": "skyraw",
+    "skyrect": "skyrect",
+    # Downstream
+    "stack": "stack2d",
+    "stack2d": "stack2d",
+    "extract": "extract1d",
+    "extract1d": "extract1d",
+}
 
 
 class StageRegistry:
     """Lookup helpers for stage metadata."""
 
-    def __init__(self, stages: Iterable[StageSpec] = STAGES):
+    def __init__(self, stages: Iterable[StageDef] = STAGES) -> None:
         self._stages = tuple(stages)
         self._by_key = {s.key: s for s in self._stages}
-        self._by_id = {s.id: s for s in self._stages}
+        self._by_id = {int(s.id): s for s in self._stages}
 
-    def all(self) -> tuple[StageSpec, ...]:
-        return self._stages
+    def resolve_key(self, key: str) -> str:
+        k = str(key or "").strip().lower()
+        if not k:
+            raise KeyError("stage key is empty")
+        return ALIASES.get(k, k)
 
-    def get(self, key: str) -> StageSpec:
-        k = (key or "").strip().lower()
+    def get(self, key: str) -> StageDef:
+        k = self.resolve_key(key)
         if k not in self._by_key:
-            raise KeyError(f"Unknown stage key: {key!r}")
+            raise KeyError(f"Unknown stage key: {key!r} (resolved={k!r})")
         return self._by_key[k]
 
-    def by_id(self, id_: int) -> StageSpec:
-        if int(id_) not in self._by_id:
+    def by_id(self, id_: int) -> StageDef:
+        i = int(id_)
+        if i not in self._by_id:
             raise KeyError(f"Unknown stage id: {id_!r}")
-        return self._by_id[int(id_)]
+        return self._by_id[i]
+
+    def all(self, *, include_ui_only: bool = True) -> tuple[StageDef, ...]:
+        if include_ui_only:
+            return self._stages
+        return tuple(s for s in self._stages if not s.ui_only)
+
+    def iter(self, *, include_ui_only: bool = True) -> Iterator[StageDef]:
+        yield from self.all(include_ui_only=include_ui_only)
 
     def dir_name(self, key: str) -> str:
         return self.get(key).dir_name
+
+    def title(self, key: str) -> str:
+        return self.get(key).title
 
     def label(self, key: str) -> str:
         return self.get(key).label
@@ -96,9 +147,25 @@ class StageRegistry:
     def stage_id(self, key: str) -> int:
         return int(self.get(key).id)
 
-    def keys(self) -> tuple[str, ...]:
-        return tuple(s.key for s in self._stages)
 
-
-# Public singleton.
 REGISTRY = StageRegistry(STAGES)
+
+
+def get_stage(key: str) -> StageDef:
+    return REGISTRY.get(key)
+
+
+def iter_stages(*, include_ui_only: bool = True) -> Iterator[StageDef]:
+    yield from REGISTRY.iter(include_ui_only=include_ui_only)
+
+
+def iter_pipeline_stages() -> Iterator[StageDef]:
+    """Iterate stages that are executed by the pipeline."""
+
+    yield from iter_stages(include_ui_only=False)
+
+
+def iter_gui_stages() -> Iterator[StageDef]:
+    """Iterate stages shown in the GUI list (incl. UI-only placeholders)."""
+
+    yield from iter_stages(include_ui_only=True)

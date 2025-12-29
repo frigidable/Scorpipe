@@ -323,12 +323,8 @@ def _metrics_cosmics(products: list[Product]) -> dict[str, Any]:
 
 
 def _metrics_timings(work_dir: Path) -> dict[str, Any]:
-    # prefer canonical QC stage dir, fallback to legacy mirrors
-    p = stage_dir(work_dir, "qc_report") / "timings.json"
-    if not p.exists():
-        p = work_dir / "qc" / "timings.json"
-    if not p.exists():
-        p = work_dir / "report" / "timings.json"
+    # canonical: manifest/timings.json
+    p = work_dir / "manifest" / "timings.json"
     if not p.exists():
         return {}
     rows = _read_json(p)
@@ -650,11 +646,8 @@ def build_qc_report(
     """Build a lightweight QC report (JSON + HTML).
 
     Writes (canonical):
-      - work_dir/products/12_qc/qc_report.json
-      - work_dir/products/12_qc/index.html
-
-    Legacy mirrors are written *only if those directories already exist*:
-      - work_dir/qc/... and work_dir/report/...
+      - work_dir/manifest/qc_report.json
+      - work_dir/index.html
     """
 
     if config_dir is not None and not cfg.get("config_dir"):
@@ -662,7 +655,7 @@ def build_qc_report(
         cfg["config_dir"] = str(config_dir)
     work_dir = resolve_work_dir(cfg)
     if out_dir is None:
-        out_dir = stage_dir(work_dir, "qc_report")
+        out_dir = work_dir / "manifest"
     out_dir = Path(out_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -671,15 +664,8 @@ def build_qc_report(
         from scorpio_pipe.products_manifest import write_products_manifest
         from scorpio_pipe.work_layout import ensure_work_layout
 
-        layout = ensure_work_layout(work_dir)
-        # Canonical output: same directory as QC report
+        # Canonical output: manifest/products_manifest.json
         write_products_manifest(cfg=cfg, out_path=out_dir / "products_manifest.json")
-
-        # Legacy mirrors only if directories already exist (do not pollute new workspaces)
-        if layout.qc.is_dir():
-            write_products_manifest(cfg=cfg, out_path=layout.qc / "products_manifest.json")
-        if layout.report_legacy.is_dir():
-            write_products_manifest(cfg=cfg, out_path=layout.report_legacy / "products_manifest.json")
     except Exception:
         pass
 
@@ -906,30 +892,17 @@ def build_qc_report(
       {_render_gallery(work_dir, products)}
     </div>
 
-    <div class='meta' style='margin-top:16px'>Tip: open <code>report/qc_report.json</code> to feed QC into notebooks, or <code>report/timings.json</code> to profile the pipeline.</div>
+    <div class='meta' style='margin-top:16px'>Tip: open <code>manifest/qc_report.json</code> to feed QC into notebooks, or <code>manifest/timings.json</code> to profile the pipeline.</div>
   </div>
 </body>
 </html>"""
 
-    out_html = out_dir / "index.html"
+    # HTML is intentionally placed at the workspace root for easy access.
+    out_html = work_dir / "index.html"
     out_html.write_text(html, encoding="utf-8")
 
     legacy_json: Path | None = None
     legacy_html: Path | None = None
-
-    # legacy mirrors: write only if those dirs already exist (do not pollute new workspaces)
-    try:
-        for legacy_dir in (work_dir / "report", work_dir / "qc"):
-            if not legacy_dir.is_dir():
-                continue
-            legacy_json = legacy_dir / "qc_report.json"
-            legacy_html = legacy_dir / "index.html"
-            legacy_json.write_text(out_json.read_text(encoding="utf-8"), encoding="utf-8")
-            legacy_html.write_text(out_html.read_text(encoding="utf-8"), encoding="utf-8")
-            break
-    except Exception:
-        legacy_json = None
-        legacy_html = None
 
     return QCReportOutput(
         json=out_json,

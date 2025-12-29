@@ -55,9 +55,23 @@ def _resolve_path(p: Path, *, data_dir: Path, work_dir: Path, base_dir: Path) ->
 
 
 def _load_superbias(work_dir: Path) -> np.ndarray | None:
-    # New layout (v5+): work_dir/calibs/*.fits, but keep legacy fallback too.
-    for rel in (Path("calibs") / "superbias.fits", Path("calib") / "superbias.fits"):
-        p = work_dir / rel
+    """Load superbias (if available) for optional bias subtraction.
+
+    Canonical location (v5.38.5):
+      run_root/03_biascorr/superbias.fits
+
+    We also keep legacy fallbacks under calibs/ and calib/.
+    """
+
+    from scorpio_pipe.workspace_paths import stage_dir
+
+    candidates = [
+        stage_dir(work_dir, "superbias") / "superbias.fits",
+        work_dir / "calibs" / "superbias.fits",
+        work_dir / "calib" / "superbias.fits",
+    ]
+
+    for p in candidates:
         if not p.is_file():
             continue
         try:

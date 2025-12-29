@@ -29,17 +29,11 @@ def test_qc_report_builds_with_minimal_inputs(tmp_path: Path) -> None:
         "frames": {},
     }
 
-    # minimal required manifest
-    rep = tmp_path / "report"
-    rep.mkdir(parents=True, exist_ok=True)
-    (rep / "manifest.json").write_text("{}", encoding="utf-8")
+    out = build_qc_report(cfg)
+    assert out["html"].exists()
+    assert out["json"].exists()
 
-    out_html = build_qc_report(cfg)
-    assert out_html.exists()
-    out_json = out_html.parent / "qc_report.json"
-    assert out_json.exists()
-
-    js = json.loads(out_json.read_text(encoding="utf-8"))
+    js = json.loads(out["json"].read_text(encoding="utf-8"))
     assert "products" in js and isinstance(js["products"], list)
 
 

@@ -175,7 +175,7 @@ class QCAlertsWidget(QtWidgets.QWidget):
             self.lbl_counts.setText("—")
             return
 
-        qc_json = self._work_dir / "qc" / "qc_report.json"
+        qc_json = self._work_dir / "manifest" / "qc_report.json"
         if not qc_json.exists():
             qc_json = self._work_dir / "report" / "qc_report.json"
         if not qc_json.exists():

@@ -156,9 +156,9 @@ def _task_manifest(
 
     _ = ensure_work_layout(out_dir)
 
-    # Canonical location (products/00_manifest).
+    # Canonical location (run_root/manifest/manifest.json).
     p = write_manifest(
-        out_path=stage_dir(out_dir, "manifest") / "manifest.json",
+        out_path=Path(out_dir) / "manifest" / "manifest.json",
         cfg=cfg,
         cfg_path=config_path,
     )
@@ -263,11 +263,11 @@ def _task_qc_report(
 
     _ = cancel_token
     _ = ensure_work_layout(out_dir)
-    out_p = stage_dir(out_dir, "qc_report")
-    res = build_qc_report(cfg, out_dir=out_p)
+    # Canonical: manifest/qc_report.json + work_dir/index.html
+    res = build_qc_report(cfg)
     # build_qc_report historically returned Path; keep compatibility if it returns a dict
     if isinstance(res, dict):
-        return Path(res.get("qc_html", out_p / "index.html"))
+        return Path(res.get("qc_html", Path(out_dir) / "index.html"))
     return Path(res)
 
 

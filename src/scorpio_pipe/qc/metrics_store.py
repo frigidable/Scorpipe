@@ -4,7 +4,7 @@ The GUI already produces human-readable QC (HTML) and a stage state manifest.
 For regression testing and future automation we also keep a single, stable
 machine-readable summary under::
 
-    work_dir/products/metrics.json
+    work_dir/manifest/metrics.json
 
 The intent is **not** to duplicate all intermediate files. Instead we store:
 * per-stage status (ok/failed/skip),
@@ -34,7 +34,7 @@ def _utc_now() -> str:
 def metrics_path(work_dir: str | Path) -> Path:
     wd = Path(work_dir)
     layout = ensure_work_layout(wd)
-    return layout.products / "metrics.json"
+    return layout.manifest / "metrics.json"
 
 
 def load_metrics(work_dir: str | Path) -> dict[str, Any]:
@@ -68,7 +68,7 @@ def load_metrics(work_dir: str | Path) -> dict[str, Any]:
 def save_metrics(work_dir: str | Path, metrics: Mapping[str, Any]) -> Path:
     wd = Path(work_dir)
     layout = ensure_work_layout(wd)
-    p = layout.products / "metrics.json"
+    p = layout.manifest / "metrics.json"
     out = dict(metrics)
     out["updated_at"] = _utc_now()
     out.setdefault("pipeline_version", PIPELINE_VERSION)

@@ -29,6 +29,7 @@ from scorpio_pipe.ui.run_plan_dialog import RunPlanDialog
 from scorpio_pipe.ui.config_diff import ConfigDiffDialog
 from scorpio_pipe.paths import resolve_work_dir
 from scorpio_pipe.wavesol_paths import wavesol_dir
+from scorpio_pipe.stage_registry import iter_gui_stages
 from scorpio_pipe.pairs_library import (
     list_pair_sets,
     save_user_pair_set,
@@ -251,20 +252,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         # Step list with status icons (commercial UX: you always see progress).
         self._step_items = []  # list[QtWidgets.QListWidgetItem]
-        for title in [
-            "1  Project & data",
-            "2  Config & setup",
-            "3  Calibrations",
-            "4  Clean Cosmics",
-            "5  Flat-fielding (optional)",
-            "6  SuperNeon",
-            "7  Line ID",
-            "8  Wavelength solution",
-            "9  Linearize (2D solution)",
-            "10 Sky subtraction (Kelson)",
-            "11 Stack2D (combine)",
-            "12 Extract 1D spectrum",
-        ]:
+        self._stage_keys = [s.key for s in iter_gui_stages()]
+        self._stage_titles = [s.title for s in iter_gui_stages()]
+        for title in self._stage_titles:
             it = QtWidgets.QListWidgetItem(title)
             it.setIcon(self._icon_status("idle"))
             self.steps.addItem(it)
@@ -306,6 +296,25 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.page_extract1d,
         ]:
             self.stack.addWidget(p)
+
+        # Map canonical stage list (01..13) to actual UI pages.
+        # Some stages are currently represented by the same page (e.g. two sky stages).
+        _page_by_stage_key = {
+            "project": 0,
+            "setup": 1,
+            "biascorr": 2,
+            "flatfield": 4,
+            "cosmics": 3,
+            "superneon": 5,
+            "arclineid": 6,
+            "wavesol": 7,
+            "skyraw": 9,
+            "linearize": 8,
+            "skyrect": 9,
+            "stack2d": 10,
+            "extract1d": 11,
+        }
+        self._stage_page_index = [_page_by_stage_key[k] for k in self._stage_keys]
 
         self.steps.currentRowChanged.connect(self._on_step_changed)
 
@@ -1044,7 +1053,59 @@ class LauncherWindow(QtWidgets.QMainWindow):
         )
         fl.addRow("Binning", row_bin)
 
-        # Work dir
+        # Workspace root (top-level base)
+        row_ws = QtWidgets.QHBoxLayout()
+        self.edit_workspace_root = QtWidgets.QLineEdit()
+        try:
+            from scorpio_pipe.app_paths import pick_workspace_root
+
+            self.edit_workspace_root.setText(str(pick_workspace_root(getattr(self, "_pipeline_root", None))))
+        except Exception:
+            self.edit_workspace_root.setText("")
+        self.btn_pick_workspace_root = QtWidgets.QToolButton(text="…")
+        self.btn_pick_workspace_root.setCursor(QtCore.Qt.PointingHandCursor)
+        row_ws.addWidget(self.edit_workspace_root, 1)
+        row_ws.addWidget(self.btn_pick_workspace_root)
+        row_ws.addWidget(
+            HelpButton(
+                "Верхняя база workspace. Новый layout: <DD_MM_YYYY>/<OBJECT>_<DISPERSER>_<RUN>/<NN_stage>/."
+            )
+        )
+        fl.addRow("Workspace root", row_ws)
+
+        # Run controls
+        row_run = QtWidgets.QHBoxLayout()
+        self.spin_run_id = QtWidgets.QSpinBox()
+        self.spin_run_id.setRange(0, 99)
+        self.spin_run_id.setSpecialValueText("Auto")
+        self.spin_run_id.setToolTip("0 = Auto (следующий свободный _01/_02/...)")
+        self.btn_init_run = QtWidgets.QPushButton("Initialize run")
+        row_run.addWidget(self.spin_run_id)
+        row_run.addWidget(self.btn_init_run)
+        row_run.addWidget(
+            HelpButton(
+                "Создать/выбрать run-folder по representative FITS header: ночь, OBJECT и GRISM."
+            )
+        )
+        fl.addRow("Run", row_run)
+
+        # Recent runs (last 10) + Open…
+        row_recent = QtWidgets.QHBoxLayout()
+        self.combo_recent_runs = QtWidgets.QComboBox()
+        self.combo_recent_runs.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
+        self.btn_switch_run = QtWidgets.QPushButton("Switch")
+        self.btn_open_run = QtWidgets.QPushButton("Open…")
+        row_recent.addWidget(self.combo_recent_runs, 1)
+        row_recent.addWidget(self.btn_switch_run)
+        row_recent.addWidget(self.btn_open_run)
+        row_recent.addWidget(
+            HelpButton(
+                "Recent показывает последние 10 run-folder. Open… — выбрать любой run-folder через проводник."
+            )
+        )
+        fl.addRow("Recent runs", row_recent)
+
+        # Work dir (run-root)
         row_wd = QtWidgets.QHBoxLayout()
         self.edit_work_dir = QtWidgets.QLineEdit()
         # If the user edits the field manually, we stop auto-suggesting paths.
@@ -1058,10 +1119,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
         row_wd.addWidget(self.btn_pick_work_dir)
         row_wd.addWidget(
             HelpButton(
-                "Папка, куда будут записаны продукты пайплайна (calibs/, wavesol/, qc/ (и legacy report/...)."
+                "Run-folder: сюда пишутся все стадии как <NN_stage>/. Метаданные — в manifest/."
             )
         )
-        fl.addRow("Work directory", row_wd)
+        fl.addRow("Run folder", row_wd)
 
         # Create/Load config actions
         row_cfg = QtWidgets.QHBoxLayout()
@@ -1112,6 +1173,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.combo_disperser.currentTextChanged.connect(self._on_disperser_changed)
         self.combo_slit.currentTextChanged.connect(self._update_setup_hint)
         self.combo_binning.currentTextChanged.connect(self._update_setup_hint)
+        self.btn_pick_workspace_root.clicked.connect(self._pick_workspace_root)
+        self.btn_init_run.clicked.connect(self._initialize_run)
+        self.btn_switch_run.clicked.connect(self._switch_recent_run)
+        self.btn_open_run.clicked.connect(self._open_run_dialog)
+        # Keep recent list fresh when user changes workspace root.
+        self.edit_workspace_root.editingFinished.connect(self._refresh_recent_runs)
         self.btn_pick_work_dir.clicked.connect(self._pick_work_dir)
         self.btn_suggest_workdir.clicked.connect(self._suggest_work_dir)
         self.btn_make_cfg.clicked.connect(self._do_make_cfg)
@@ -1120,6 +1187,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_diff_cfg.clicked.connect(self._show_cfg_diff)
         self.btn_save_cfg.clicked.connect(self._do_save_cfg)
         self.editor_yaml.textChanged.connect(self._on_yaml_changed)
+
+        # Initial population of Recent runs.
+        QtCore.QTimer.singleShot(0, self._refresh_recent_runs)
 
         lay.addWidget(_hline())
         foot = QtWidgets.QHBoxLayout()
@@ -1133,12 +1203,153 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
     def _pick_work_dir(self) -> None:
         d = QtWidgets.QFileDialog.getExistingDirectory(
-            self, "Select work directory", str(Path.home())
+            self, "Select run folder", str(Path.home())
         )
         if d:
             self.edit_work_dir.setText(d)
             self._workdir_user_edited = True
-            self._workdir_user_edited = True
+            # a manual pick disables auto-suggest
+
+    def _pick_workspace_root(self) -> None:
+        d = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Select workspace root", str(Path.home())
+        )
+        if d:
+            self.edit_workspace_root.setText(d)
+            self._refresh_recent_runs()
+
+    def _refresh_recent_runs(self) -> None:
+        """Refresh combo box with the last 10 run folders under workspace_root."""
+
+        try:
+            from scorpio_pipe.run_root import format_run_label, scan_recent_runs
+
+            ws = Path((self.edit_workspace_root.text() or "").strip()).expanduser()
+            if not ws:
+                self.combo_recent_runs.clear()
+                self._recent_run_roots = []
+                return
+
+            runs = scan_recent_runs(ws, limit=10)
+            self._recent_run_roots = runs
+            self.combo_recent_runs.blockSignals(True)
+            self.combo_recent_runs.clear()
+            for idx, p in enumerate(runs):
+                label = format_run_label(ws, p)
+                if idx == 0:
+                    label = f"★ {label}"
+                self.combo_recent_runs.addItem(label, str(p))
+            self.combo_recent_runs.blockSignals(False)
+        except Exception:
+            self.combo_recent_runs.clear()
+            self._recent_run_roots = []
+
+    def _switch_recent_run(self) -> None:
+        i = int(self.combo_recent_runs.currentIndex())
+        if i < 0:
+            return
+        try:
+            p = Path(str(self.combo_recent_runs.currentData() or ""))
+        except Exception:
+            return
+        if not p:
+            return
+        self._open_run_root(p)
+
+    def _open_run_dialog(self) -> None:
+        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Open run folder", str(Path.home()))
+        if d:
+            self._open_run_root(Path(d))
+
+    def _open_run_root(self, run_root: Path) -> None:
+        run_root = Path(run_root).expanduser()
+        if not run_root.exists():
+            self._log_error(f"Run folder does not exist: {run_root}")
+            return
+
+        # Legacy layout hint (do not migrate automatically)
+        try:
+            from scorpio_pipe.run_root import detect_legacy_layout
+
+            if detect_legacy_layout(run_root):
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Old layout detected",
+                    "This folder looks like a legacy workspace (products/...).\n"
+                    "It will be opened as-is; no files will be moved automatically.",
+                )
+        except Exception:
+            pass
+
+        self.edit_work_dir.setText(str(run_root))
+        self._workdir_user_edited = True
+
+        # Prefer config.yaml inside the run folder.
+        cfg_p = run_root / "config.yaml"
+        if cfg_p.is_file():
+            self.edit_cfg_path.setText(str(cfg_p))
+            self._do_reload_cfg()
+        else:
+            # Still ensure manifest/config skeleton exists.
+            try:
+                from scorpio_pipe.work_layout import ensure_work_layout
+
+                ensure_work_layout(run_root)
+            except Exception:
+                pass
+
+    def _initialize_run(self) -> None:
+        """Compute run_root from representative header + auto-increment."""
+
+        try:
+            from scorpio_pipe.run_root import get_or_create_run_root
+
+            ws = Path((self.edit_workspace_root.text() or "").strip()).expanduser()
+            if not str(ws):
+                self._log_error("Workspace root is empty")
+                return
+
+            # representative header: prefer SCI/object frame, else ARC, else first.
+            header = None
+            try:
+                if self._inspect is not None and getattr(self._inspect, "table", None) is not None:
+                    df = self._inspect.table
+                    if df is not None and not df.empty and "path" in df.columns:
+                        def _pick(kind: str) -> str | None:
+                            try:
+                                sub = df[df.get("kind") == kind]
+                                if not sub.empty:
+                                    return str(sub.iloc[0]["path"])
+                            except Exception:
+                                return None
+                            return None
+
+                        p0 = _pick("obj") or _pick("arc") or str(df.iloc[0]["path"])
+                        if p0:
+                            from astropy.io import fits
+
+                            header = fits.getheader(p0, memmap=False)
+            except Exception:
+                header = None
+
+            run_id = int(self.spin_run_id.value()) if hasattr(self, "spin_run_id") else 0
+            run_id_opt = None if run_id <= 0 else run_id
+
+            run_root = get_or_create_run_root(
+                ws,
+                dataset_path=Path(self.edit_data_dir.text()) if hasattr(self, "edit_data_dir") else None,
+                headers=header,
+                run_id=run_id_opt,
+                create=True,
+            )
+
+            from scorpio_pipe.work_layout import ensure_work_layout
+
+            ensure_work_layout(run_root)
+            self._open_run_root(run_root)
+            self._refresh_recent_runs()
+        except Exception as e:
+            self._log_error(f"Initialize run failed: {e}")
 
     def _infer_night_date_parts(self) -> tuple[int, int, int] | None:
         """Infer night date as (dd, mm, yyyy) for the work/ structure.
@@ -1199,60 +1410,71 @@ class LauncherWindow(QtWidgets.QMainWindow):
         return None
 
     def _suggest_work_dir(self) -> None:
-        """Suggest a default (smart) work directory.
+        """Suggest a run-folder path using the new Night/Run layout.
 
-        Base convention: `<workspace_root>/<dd_mm_yyyy>/`.
-
-        Strategy (C-2 safe):
-          - try `<install_dir>/workspace/<night>/...` when writable
-          - otherwise fallback to `<LocalAppData>/Scorpipe/workspace/<night>/...`
-
-        Smart mode:
-          - If the night folder is empty -> use it (single-run, no extra nesting).
-          - If it already contains a different run -> use `<night>/<object>/<disperser>/`
-            (and add suffixes to avoid collisions).
+        This does not create any folders; it only fills the "Run folder" field.
         """
 
-        from scorpio_pipe.workdir import RunSignature, pick_smart_run_dir
-        from scorpio_pipe.app_paths import pick_workspace_root
-
-        dmy = self._infer_night_date_parts()
-        if dmy is None:
-            now = datetime.now()
-            dd, mm, yyyy = int(now.day), int(now.month), int(now.year)
-        else:
-            dd, mm, yyyy = dmy
-
-        night_dir = f"{dd:02d}_{mm:02d}_{yyyy:04d}"
-        ws_root = pick_workspace_root(getattr(self, "_pipeline_root", None))
-        base = ws_root / night_dir
-
-        # If we already know target+setup, apply the smart collision-free picker.
         try:
-            obj = (self.combo_object.currentText() or "").strip()
-            disp = (self.combo_disperser.currentText() or "").strip()
-            slit = (
-                getattr(self, "combo_slit", None).currentText()
-                if hasattr(self, "combo_slit")
-                else ""
-            ) or ""
-            slit = str(slit).strip()
-            binning = (
-                getattr(self, "combo_binning", None).currentText()
-                if hasattr(self, "combo_binning")
-                else ""
-            ) or ""
-            binning = str(binning).strip()
+            from scorpio_pipe.run_root import get_or_create_run_root
 
-            if obj:
-                sig = RunSignature(obj, disp, slit, binning)
-                wd = pick_smart_run_dir(base, sig, prefer_flat=True)
-            else:
-                wd = base
+            ws = Path((self.edit_workspace_root.text() or "").strip()).expanduser()
+            if not str(ws):
+                self._log_error("Workspace root is empty")
+                return
+
+            header = None
+            try:
+                if self._inspect is not None and getattr(self._inspect, "table", None) is not None:
+                    df = self._inspect.table
+                    if df is not None and not df.empty and "path" in df.columns:
+                        # prefer science/obj, otherwise arc
+                        p0 = None
+                        try:
+                            sub = df[df.get("kind") == "obj"]
+                            if not sub.empty:
+                                p0 = str(sub.iloc[0]["path"])
+                        except Exception:
+                            p0 = None
+                        if not p0:
+                            try:
+                                sub = df[df.get("kind") == "arc"]
+                                if not sub.empty:
+                                    p0 = str(sub.iloc[0]["path"])
+                            except Exception:
+                                p0 = None
+                        if not p0:
+                            p0 = str(df.iloc[0]["path"])
+                        if p0:
+                            from astropy.io import fits
+
+                            header = fits.getheader(p0, memmap=False)
+            except Exception:
+                header = None
+
+            run_id = int(self.spin_run_id.value()) if hasattr(self, "spin_run_id") else 0
+            run_id_opt = None if run_id <= 0 else run_id
+
+            rr = get_or_create_run_root(
+                ws,
+                dataset_path=Path(self.edit_data_dir.text()) if hasattr(self, "edit_data_dir") else None,
+                headers=header,
+                run_id=run_id_opt,
+                create=False,
+            )
+            self.edit_work_dir.setText(str(rr))
+            self._workdir_user_edited = False
         except Exception:
-            wd = base
-
-        self.edit_work_dir.setText(str(wd))
+            # fall back to the older heuristic
+            dmy = self._infer_night_date_parts()
+            if dmy is None:
+                now = datetime.now()
+                dd, mm, yyyy = int(now.day), int(now.month), int(now.year)
+            else:
+                dd, mm, yyyy = dmy
+            night_dir = f"{dd:02d}_{mm:02d}_{yyyy:04d}"
+            base = Path((self.edit_workspace_root.text() or "").strip()).expanduser() / night_dir
+            self.edit_work_dir.setText(str(base))
 
     def _populate_objects_from_inspect(self) -> None:
         self.combo_object.blockSignals(True)
@@ -5991,7 +6213,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         bf.addRow(
             self._param_label(
                 "Stack2D",
-                "В v5.38.2 Stack2D вынесен в отдельную стадию.\n"
+                "В v5.38.4 Stack2D вынесен в отдельную стадию.\n"
                 "Небо (Step 10) больше не запускает stacking автоматически.\n"
                 "Запустите Step 11 Stack2D отдельно.",
             ),
@@ -7132,7 +7354,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
     def _on_step_changed(self, idx: int) -> None:
         try:
-            self.stack.setCurrentIndex(int(idx))
+            i = int(idx)
+            page_i = self._stage_page_index[i] if hasattr(self, "_stage_page_index") else i
+            self.stack.setCurrentIndex(int(page_i))
         except Exception:
             pass
         self._refresh_statusbar()
@@ -7245,9 +7469,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
     def _open_report_html(self) -> None:
         wd = self._get_work_dir()
-        p = wd / "qc" / "index.html"
+        p = wd / "index.html"
         if not p.exists():
-            p = wd / "report" / "index.html"
+            p = wd / "manifest" / "index.html"
         if p.exists():
             self._open_in_browser(p)
 

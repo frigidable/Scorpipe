@@ -17,43 +17,43 @@ class QCItem:
 
 
 DEFAULT_QC_ITEMS: list[QCItem] = [
-    QCItem("Manifest (JSON)", "qc/manifest.json", "text"),
-    QCItem("Products manifest (JSON)", "qc/products_manifest.json", "text"),
-    QCItem("Manifest (legacy)", "report/manifest.json", "text"),
-    QCItem("Products manifest (legacy)", "report/products_manifest.json", "text"),
-    QCItem("QC report (HTML)", "qc/index.html", "text"),
-    QCItem("QC report (legacy)", "report/index.html", "text"),
-    QCItem("QC summary (JSON)", "qc/qc_report.json", "text"),
-    QCItem("QC summary (legacy)", "report/qc_report.json", "text"),
-    QCItem("Timings (JSON)", "qc/timings.json", "text"),
-    QCItem("Timings (legacy)", "report/timings.json", "text"),
-    QCItem("Linearize QC (JSON)", "qc/linearize_qc.json", "text"),
-    QCItem("Linearize QC (legacy)", "report/linearize_qc.json", "text"),
-    QCItem("Linearize QC (JSON)", "qc/linearize_qc.json", "text"),
-    QCItem("Linearize QC (legacy)", "report/linearize_qc.json", "text"),
-    QCItem("Superbias (FITS)", "calibs/superbias.fits", "fits"),
+    # Canonical (v5.38.5): everything is local to run_root.
+    QCItem("Manifest (JSON)", "manifest/manifest.json", "text"),
+    QCItem("Products manifest (JSON)", "manifest/products_manifest.json", "text"),
+    QCItem("QC report (HTML)", "index.html", "text"),
+    QCItem("QC summary (JSON)", "manifest/qc_report.json", "text"),
+    QCItem("Timings (JSON)", "manifest/timings.json", "text"),
+    QCItem("Linearize QC (JSON)", "manifest/linearize_qc.json", "text"),
+    QCItem("Superbias (FITS)", "03_biascorr/superbias.fits", "fits"),
+    QCItem("Superflat (FITS)", "05_flatfield/superflat.fits", "fits"),
+    QCItem("Cosmics summary (JSON)", "04_cosmics/summary.json", "text"),
+
+    # Legacy locations (kept read-only; no auto-migration).
+    QCItem("Manifest (legacy)", "qc/manifest.json", "text"),
+    QCItem("Products manifest (legacy)", "qc/products_manifest.json", "text"),
+    QCItem("QC report (legacy)", "qc/index.html", "text"),
+    QCItem("QC summary (legacy)", "qc/qc_report.json", "text"),
+    QCItem("Timings (legacy)", "qc/timings.json", "text"),
+    QCItem("Linearize QC (legacy)", "qc/linearize_qc.json", "text"),
+    QCItem("Superbias (legacy)", "calibs/superbias.fits", "fits"),
     QCItem("Superbias (legacy)", "calib/superbias.fits", "fits"),
-    QCItem("Cosmics summary (JSON)", "cosmics/summary.json", "text"),
-    # legacy flat layout (still supported)
-    QCItem("Superneon (PNG)", "wavesol/superneon.png", "image"),
-    QCItem("Peaks candidates (CSV)", "wavesol/peaks_candidates.csv", "text"),
-    QCItem("Hand pairs (TXT)", "wavesol/hand_pairs.txt", "text"),
-    QCItem("1D wavesolution (PNG)", "wavesol/wavesolution_1d.png", "image"),
-    QCItem("1D residuals (CSV)", "wavesol/residuals_1d.csv", "text"),
-    QCItem("2D wavelength matrix (PNG)", "wavesol/wavelength_matrix.png", "image"),
-    QCItem("2D residuals (PNG)", "wavesol/residuals_2d.png", "image"),
-    QCItem("Lambda map (FITS)", "wavesol/lambda_map.fits", "fits"),
-    QCItem("2D fit summary (JSON)", "wavesol/wavesolution_2d.json", "text"),
+    QCItem("Superflat (legacy)", "calibs/superflat.fits", "fits"),
+    QCItem("Superflat (legacy)", "calib/superflat.fits", "fits"),
 ]
 
 
 def _collect_dynamic_items(work_dir: Path) -> list[QCItem]:
     """Collect QC artifacts from disperser subfolders.
 
-    New layout: work_dir/wavesol/<slug>/...
+    New layout: stage_dir(work_dir, "wavesol")/<slug>/...
     """
     out: list[QCItem] = []
-    base = work_dir / "wavesol"
+    try:
+        from scorpio_pipe.workspace_paths import stage_dir
+
+        base = stage_dir(work_dir, "wavesol")
+    except Exception:
+        base = work_dir / "wavesol"
     if not base.exists():
         return out
 

@@ -4,11 +4,11 @@ This module provides a small, explicit product registry used by QC/UI.
 It intentionally does NOT try to be exhaustive for every intermediate file;
 instead it lists stable, canonical artifacts users can expect.
 
-v5.28 notes
-----------
-- QC outputs live in work/qc/ (legacy mirror in work/report/)
-- Calibrations live in work/calibs/ (legacy mirror/compat in work/calib/)
-- Wavesolution products live in work/wavesol/<disperser_slug>/ (legacy flat layout supported)
+v5.38.4 notes
+-------------
+- Stage outputs live at workspace root: ``work/NN_slug/...``
+- QC outputs live in ``work/manifest/...`` and the HTML entry point is ``work/index.html``.
+- Legacy directories (``work/qc``, ``work/report``, ``work/products``) are not used by default.
 
 UI
 --
@@ -64,112 +64,72 @@ def list_products(cfg: dict[str, Any]) -> list[Product]:
     wd = resolve_work_dir(cfg)
     layout = ensure_work_layout(wd)
 
-    # Canonical (v5.38+): products/NN_slug
-    manifest_stage = stage_dir(wd, "manifest")
+    manifest_dir = layout.manifest
+
+    # Canonical stage dirs (work/NN_slug)
     superbias_stage = stage_dir(wd, "superbias")
     superflat_stage = stage_dir(wd, "superflat")
     flatfield_stage = stage_dir(wd, "flatfield")
     cosmics_stage = stage_dir(wd, "cosmics")
-    qc_stage = stage_dir(wd, "qc_report")
     lin_stage = stage_dir(wd, "linearize")
-    sky_stage = stage_dir(wd, "sky")
+    sky_stage = stage_dir(wd, "skyrect")
     stack_stage = stage_dir(wd, "stack2d")
     spec_stage = stage_dir(wd, "extract1d")
-
-    # Legacy roots (do not create them here).
-    qc_legacy = Path(wd) / "qc"
-    rep_legacy = Path(wd) / "report"
-    calibs_legacy = layout.calibs
-    calib_legacy = layout.calib_legacy
 
     # wavesolution: needs disperser subdir (important for tests and real data)
     wsol = wavesol_dir(cfg)
 
     out: list[Product] = [
-        # QC (canonical + legacy mirrors)
+        # Manifest + QC (canonical)
         Product(
             "manifest",
             "manifest",
-            manifest_stage / "manifest.json",
+            manifest_dir / "manifest.json",
             "json",
             optional=False,
             description="Reproducibility manifest",
         ),
         Product(
             "products_manifest",
-            "qc_report",
-            qc_stage / "products_manifest.json",
+            "manifest",
+            manifest_dir / "products_manifest.json",
             "json",
             optional=True,
             description="Products manifest (incl. per-exposure trees)",
         ),
         Product(
             "qc_json",
-            "qc_report",
-            qc_stage / "qc_report.json",
+            "manifest",
+            manifest_dir / "qc_report.json",
             "json",
             optional=True,
             description="QC summary (machine-readable)",
         ),
         Product(
             "qc_html",
-            "qc_report",
-            qc_stage / "index.html",
+            "manifest",
+            Path(wd) / "index.html",
             "html",
             optional=True,
             description="QC report (human-readable)",
         ),
         Product(
             "timings",
-            "qc_report",
-            qc_stage / "timings.json",
+            "manifest",
+            manifest_dir / "timings.json",
             "json",
             optional=True,
             description="Stage timings",
         ),
         Product(
             "linearize_qc",
-            "qc_report",
-            qc_stage / "linearize_qc.json",
+            "linearize",
+            manifest_dir / "linearize_qc.json",
             "json",
             optional=True,
             description="Linearize QC metrics (S/N, coverage, mask fractions)",
         ),
-        Product(
-            "manifest_legacy",
-            "report",
-            rep_legacy / "manifest.json",
-            "json",
-            optional=True,
-        ),
-        Product(
-            "products_manifest_legacy",
-            "report",
-            rep_legacy / "products_manifest.json",
-            "json",
-            optional=True,
-        ),
-        Product(
-            "qc_json_legacy",
-            "report",
-            rep_legacy / "qc_report.json",
-            "json",
-            optional=True,
-        ),
-        Product(
-            "qc_html_legacy", "report", rep_legacy / "index.html", "html", optional=True
-        ),
-        Product(
-            "timings_legacy", "report", rep_legacy / "timings.json", "json", optional=True
-        ),
-        Product(
-            "linearize_qc_legacy",
-            "linearize",
-            rep_legacy / "linearize_qc.json",
-            "json",
-            optional=True,
-        ),
-        # Calibrations (canonical + legacy)
+        # Calibrations
         Product(
             "superbias_fits",
             "superbias",
@@ -181,20 +141,6 @@ def list_products(cfg: dict[str, Any]) -> list[Product]:
             "superflat_fits",
             "superflat",
             superflat_stage / "superflat.fits",
-            "fits",
-            optional=True,
-        ),
-        Product(
-            "superbias_fits_legacy",
-            "superbias",
-            calibs_legacy / "superbias.fits",
-            "fits",
-            optional=True,
-        ),
-        Product(
-            "superflat_fits_legacy",
-            "superflat",
-            calibs_legacy / "superflat.fits",
             "fits",
             optional=True,
         ),
@@ -399,7 +345,7 @@ Product(
         # Sky subtraction artifacts
         Product(
             "sky_done",
-            "sky",
+            "skyrect",
             sky_stage / "sky_sub_done.json",
             "json",
             optional=True,
@@ -407,17 +353,25 @@ Product(
         ),
         Product(
             "qc_sky_json",
-            "sky",
+            "skyrect",
             sky_stage / "qc_sky.json",
             "json",
             optional=True,
             description="Sky QC (residual metrics + diag paths)",
         ),
         Product(
-            "sky_preview_fits", "sky", sky_stage / "preview.fits", "fits", optional=True
+            "sky_preview_fits",
+            "skyrect",
+            sky_stage / "preview.fits",
+            "fits",
+            optional=True,
         ),
         Product(
-            "sky_preview_png", "sky", sky_stage / "preview.png", "png", optional=True
+            "sky_preview_png",
+            "skyrect",
+            sky_stage / "preview.png",
+            "png",
+            optional=True,
         ),
         Product(
             "stack2d_done",
@@ -474,9 +428,9 @@ def group_by_stage(products: Iterable[Product]) -> dict[str, list[Product]]:
 
 _TASK_COMPLETION: dict[str, list[list[str]]] = {
     # Each inner list is an OR-group (any existing product from the group satisfies that requirement).
-    "manifest": [["manifest", "manifest_legacy"]],
-    "superbias": [["superbias_fits", "superbias_fits_legacy"]],
-    "superflat": [["superflat_fits", "superflat_fits_legacy"]],
+    "manifest": [["manifest"]],
+    "superbias": [["superbias_fits"]],
+    "superflat": [["superflat_fits"]],
     "flatfield": [["flatfield_done"]],
     "cosmics": [["cosmics_summary"]],
     "superneon": [["superneon_fits", "superneon_png"]],
@@ -484,10 +438,10 @@ _TASK_COMPLETION: dict[str, list[list[str]]] = {
     "lineid": [["hand_pairs_txt"]],
     "wavesolution": [["lambda_map"], ["wavesolution_2d_json"]],
     "linearize": [["lin_preview_fits"]],
-    "sky": [["sky_done"]],
+    "skyrect": [["sky_done"]],
     "stack2d": [["stacked2d_fits"]],
     "extract1d": [["spec1d_fits"]],
-    "qc_report": [["qc_json", "qc_json_legacy"], ["qc_html", "qc_html_legacy"]],
+    "qc_report": [["qc_json"], ["qc_html"]],
 }
 
 

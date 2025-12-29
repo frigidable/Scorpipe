@@ -38,9 +38,7 @@ def _rel(work_dir: Path, path: Path | str | None) -> str | None:
 def build_products_manifest(cfg: dict[str, Any]) -> dict[str, Any]:
     work_dir = resolve_work_dir(cfg)
     layout = ensure_work_layout(work_dir)
-
-    prod = layout.products
-    qc_stage = stage_dir(work_dir, "qc_report")
+    manifest_dir = layout.manifest
 
     def _stage_tree(stage_dir: Path) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -85,11 +83,11 @@ def build_products_manifest(cfg: dict[str, Any]) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "work_dir": str(work_dir),
-        "products_root": _rel(work_dir, prod),
-        "qc_root": _rel(work_dir, qc_stage),
+        "products_root": _rel(work_dir, work_dir),
+        "qc_root": _rel(work_dir, manifest_dir),
         "stages": {
             "linearize": _stage_tree(stage_dir(work_dir, "linearize")),
-            "sky": _stage_tree(stage_dir(work_dir, "sky")),
+            "skyrect": _stage_tree(stage_dir(work_dir, "skyrect")),
             "stack2d": _stage_tree(stage_dir(work_dir, "stack2d")),
             "extract1d": _stage_tree(stage_dir(work_dir, "extract1d")),
         },
@@ -100,7 +98,7 @@ def build_products_manifest(cfg: dict[str, Any]) -> dict[str, Any]:
     if grid.exists():
         payload["stages"]["linearize"]["wave_grid_json"] = _rel(work_dir, grid)
 
-    lin_qc = qc_stage / "linearize_qc.json"
+    lin_qc = manifest_dir / "linearize_qc.json"
     if lin_qc.exists():
         payload["stages"]["linearize"]["qc_json"] = _rel(work_dir, lin_qc)
 

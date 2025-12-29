@@ -1,193 +1,154 @@
 """Canonical workspace path helpers.
 
-This module implements the *single* canonical layout for stage outputs:
+Layout (v5.38.5)
+----------------
+Stage outputs live directly under the *run root*:
 
-    work_dir/
-      raw/
-      products/
-        NN_slug/
-          ...stage outputs...
-          <raw_stem>/   # per-exposure directory (when enabled)
-      manifest/
+    run_root/NN_slug/
 
-Reading uses a new→legacy resolver (see :func:`resolve_input_path`) so old
-workspaces remain usable.
+Per-exposure outputs (when enabled) live under the stage directory:
+
+    run_root/NN_slug/<stem_short>/
+
+There is intentionally **no** "products/" directory in the new layout.
+
+Compatibility
+-------------
+For old workspaces that have ``products/``, :func:`stage_dir` will transparently
+use it as a stage base.
+
+Notes
+-----
+We keep a small compatibility API surface for internal callers (e.g. QC) by
+providing :func:`resolve_input_path`. Legacy fallbacks are limited to selecting
+``run_root/products`` as a stage base when present.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
-from typing import Iterable
+from typing import Any
 
 from scorpio_pipe.stage_registry import REGISTRY
 
 
-def products_dir(work_dir: str | Path) -> Path:
-    """Return canonical products root."""
-
-    return Path(work_dir) / "products"
+_RE_STEM_SHORT = re.compile(r"^(s\d+)")
 
 
-def stage_dir(work_dir: str | Path, stage_key: str) -> Path:
-    """Return canonical stage directory: ``products/NN_slug``."""
-
-    wd = Path(work_dir)
-    return products_dir(wd) / REGISTRY.dir_name(stage_key)
-
-
-def per_exp_dir(work_dir: str | Path, stage_key: str, raw_stem: str) -> Path:
-    """Return per-exposure directory under a stage: ``products/NN_slug/<stem>/``."""
-
-    return stage_dir(work_dir, stage_key) / str(raw_stem)
+def _stage_base(run_root: str | Path) -> Path:
+    rr = Path(run_root)
+    legacy = rr / "products"
+    if legacy.is_dir():
+        return legacy
+    return rr
 
 
-def legacy_candidates(
-    work_dir: str | Path,
-    stage_key: str,
-    *,
-    relpath: str | Path | None = None,
-    raw_stem: str | None = None,
-    extra: Iterable[Path] | None = None,
-) -> list[Path]:
-    """Return a list of plausible legacy locations for a stage artifact.
+def stage_dir(run_root: str | Path, stage_key: str) -> Path:
+    """Return canonical stage directory: ``run_root/NN_slug``.
 
-    Parameters
-    ----------
-    relpath
-        Relative path inside the stage output directory (e.g. ``"lin_preview.fits"``).
-        If omitted, candidates will point at directories.
-    raw_stem
-        If set, include per-exposure legacy layouts.
-    extra
-        Additional explicit candidates (appended).
+    If ``run_root/products`` exists, returns ``run_root/products/NN_slug`` to
+    keep legacy workspaces functional.
     """
 
-    wd = Path(work_dir)
-    r = Path(relpath) if relpath is not None else None
+    base = _stage_base(run_root)
+    return base / REGISTRY.dir_name(stage_key)
 
-    def _join(base: Path) -> Path:
-        if r is None:
-            return base
-        return base / r
 
-    out: list[Path] = []
+def extract_stem_short(raw_path_or_stem: Any) -> str:
+    """Extract a compact per-exposure stem.
 
-    k = (stage_key or "").strip().lower()
+    Rules
+    -----
+    - If name matches ``^(s\d+)`` -> return that group.
+      Example: ``s23840510_obj`` -> ``s23840510``
+    - Else: return the filename stem.
+      Example: ``obj_0001.fits`` -> ``obj_0001``
+    """
 
-    # Common legacy roots.
-    prod = wd / "products"
+    if raw_path_or_stem is None:
+        return ""
 
-    if k == "linearize":
-        # Old canonical: products/lin/[per_exp/*]
-        if raw_stem:
-            out += [
-                _join(prod / "lin" / "per_exp" / raw_stem),
-                _join(wd / "lin" / "per_exp" / raw_stem),
-                _join(prod / "lin" / "per_exp"),
-                _join(wd / "lin" / "per_exp"),
-            ]
-        out += [
-            _join(prod / "lin"),
-            _join(wd / "lin"),
-        ]
-    elif k == "sky":
-        if raw_stem:
-            out += [
-                _join(prod / "sky" / "per_exp" / raw_stem),
-                _join(wd / "sky" / "per_exp" / raw_stem),
-                _join(prod / "sky" / "per_exp"),
-                _join(wd / "sky" / "per_exp"),
-            ]
-        out += [_join(prod / "sky"), _join(wd / "sky")]
-    elif k == "stack2d":
-        # Historical locations:
-        #   - work_dir/stack/ (very old)
-        #   - work_dir/products/stack/ (old)
-        #   - work_dir/products/10_stack2d/ (v5.38+ canonical)
-        out += [
-            _join(prod / "10_stack"),
-            _join(prod / "10_stack2d"),
-            _join(prod / "stack"),
-            _join(prod / "stack2d"),
-            _join(wd / "stack"),
-        ]
-    elif k == "extract1d":
-        out += [_join(prod / "spec"), _join(wd / "spec")]
-    elif k in {"superbias", "superflat"}:
-        out += [
-            _join(wd / "calibs"),
-            _join(wd / "calib"),
-        ]
-    elif k == "qc_report" or k == "qc":
-        out += [_join(wd / "qc"), _join(wd / "report"), _join(prod / "qc")]
-    elif k == "manifest":
-        out += [_join(wd / "qc"), _join(wd / "report"), _join(wd / "manifest")]
-    elif k in {"wavesolution", "wavesol"}:
-        # Wavesolution has a dedicated subtree; fallback handled in wavesol_paths.
-        out += [_join(wd / "wavesol")]
-    else:
-        # Generic: old style (work_dir/<stage_key>/) and products/<slug>/
-        try:
-            slug = REGISTRY.get(k).slug
-        except Exception:
-            slug = k
-        out += [_join(prod / slug), _join(wd / slug), _join(wd / k)]
+    p = Path(str(raw_path_or_stem))
+    stem = p.stem
+    m = _RE_STEM_SHORT.match(stem)
+    if m:
+        return str(m.group(1))
+    return stem
 
-    if extra is not None:
-        out += [Path(p) for p in extra]
 
-    # Remove obvious duplicates while keeping order.
-    seen: set[str] = set()
-    uniq: list[Path] = []
-    for p in out:
-        s = str(p)
-        if s in seen:
-            continue
-        seen.add(s)
-        uniq.append(p)
-    return uniq
+def per_exp_dir(run_root: str | Path, stage_key: str, raw_path_or_stem: str | Path) -> Path:
+    """Return per-exposure directory: ``run_root/NN_slug/<stem_short>/``."""
+
+    return stage_dir(run_root, stage_key) / extract_stem_short(raw_path_or_stem)
 
 
 def resolve_input_path(
     product_key: str,
-    work_dir: str | Path,
+    run_root: str | Path,
     stage_key: str,
     *,
     relpath: str | Path | None = None,
+    raw_path: str | Path | None = None,
     raw_stem: str | None = None,
-    extra_candidates: Iterable[Path] | None = None,
+    extra_candidates: list[str | Path] | None = None,
+    strict: bool = False,
 ) -> Path:
-    """Resolve an input artifact path using new→legacy fallback.
+    """Resolve an input artifact path.
+
+    Canonical layout uses stage dirs directly under ``run_root``.
+    If this ``run_root`` is a legacy workspace (has ``products/``), stage dirs
+    are resolved under ``run_root/products`` via :func:`stage_dir`.
 
     Parameters
     ----------
     product_key
-        A short stable key used for debugging/logging. The resolver doesn't need
-        to know semantics of the key.
+        Debug label for error messages (unused by resolver logic).
     stage_key
-        Canonical stage key.
+        Stage key (canonical or alias).
     relpath
-        Relative path under the stage directory.
-    raw_stem
-        Optional raw stem for per-exposure directories.
+        Relative path inside stage dir / per-exp dir.
+    raw_path
+        If provided, resolves under per-exp dir.
     """
 
-    wd = Path(work_dir)
-    r = Path(relpath) if relpath is not None else None
+    _ = product_key  # reserved for future diagnostics
 
-    if raw_stem is not None:
-        base = per_exp_dir(wd, stage_key, raw_stem)
+    rel = Path(relpath) if relpath is not None else None
+    cands: list[Path] = []
+
+    # Per-exposure location
+    if raw_path is not None and rel is not None:
+        cands.append(per_exp_dir(run_root, stage_key, raw_path) / rel)
+    if raw_stem and rel is not None:
+        cands.append(per_exp_dir(run_root, stage_key, raw_stem) / rel)
+
+    # Stage root location
+    if rel is not None:
+        cands.append(stage_dir(run_root, stage_key) / rel)
     else:
-        base = stage_dir(wd, stage_key)
-    p_new = base if r is None else (base / r)
-    if p_new.exists():
-        return p_new
+        cands.append(stage_dir(run_root, stage_key))
 
-    for cand in legacy_candidates(
-        wd, stage_key, relpath=r, raw_stem=raw_stem, extra=extra_candidates
-    ):
-        if cand.exists():
-            return cand
+    # Extra candidates (already relative to run_root or absolute)
+    if extra_candidates:
+        for x in extra_candidates:
+            p = Path(x)
+            if not p.is_absolute():
+                p = Path(run_root) / p
+            cands.append(p)
 
-    # Nothing exists; return canonical path (useful for error messages).
-    return p_new
+    # First existing wins
+    for p in cands:
+        try:
+            if p.exists():
+                return p
+        except Exception:
+            continue
+
+    if strict:
+        raise FileNotFoundError(
+            f"{product_key}: expected input not found; tried: " + ", ".join(str(x) for x in cands[:8])
+        )
+
+    # Return canonical even if missing
+    return cands[0] if cands else stage_dir(run_root, stage_key)
