@@ -28,6 +28,7 @@ from scorpio_pipe.paths import resolve_work_dir
 from scorpio_pipe.wavesol_paths import wavesol_dir
 from scorpio_pipe.work_layout import ensure_work_layout
 from scorpio_pipe.workspace_paths import stage_dir, per_exp_dir, resolve_input_path
+from scorpio_pipe.stage_registry import REGISTRY
 
 log = logging.getLogger(__name__)
 
@@ -427,6 +428,21 @@ def canonical_task_name(name: str) -> str:
     return aliases.get(n, n)
 
 
+def _task_label(task: str) -> str:
+    """Human-friendly label for logs.
+
+    If the task maps to a stage, returns e.g. ``10 Sky Subtraction [sky]``.
+    Otherwise returns the raw task name.
+    """
+
+    t = (task or "").strip().lower()
+    try:
+        st = REGISTRY.get(t)
+        return f"{st.title} [{t}]"
+    except Exception:
+        return t
+
+
 def _stage_cfg_for_hash(cfg: dict[str, Any], task: str) -> dict[str, Any]:
     # map task -> config section
     sec_map = {
@@ -648,7 +664,7 @@ def run_sequence(
     )
     for it in plan:
         if cancel_token is not None and cancel_token.cancelled:
-            log.warning("Cancelled before task %s", it.task)
+            log.warning("Cancelled before %s", _task_label(it.task))
             record_stage_result(
                 out_dir,
                 it.task,
@@ -661,7 +677,7 @@ def run_sequence(
 
         t = it.task
         if it.action == "skip":
-            log.info("Skip %s (%s)", t, it.reason)
+            log.info("Skip %s (%s)", _task_label(t), it.reason)
             results[t] = None
             try:
                 from scorpio_pipe.qc.metrics_store import update_after_stage
@@ -681,7 +697,7 @@ def run_sequence(
             input_paths=_input_paths_for_hash(cfg, t, out_dir),
         )
 
-        log.info("Run %s...", t)
+        log.info("Run %s...", _task_label(t))
         try:
             res = _call_maybe_with_cancel(
                 fn,

@@ -72,7 +72,7 @@ def list_products(cfg: dict[str, Any]) -> list[Product]:
     flatfield_stage = stage_dir(wd, "flatfield")
     cosmics_stage = stage_dir(wd, "cosmics")
     lin_stage = stage_dir(wd, "linearize")
-    sky_stage = stage_dir(wd, "skyrect")
+    sky_stage = stage_dir(wd, "sky")
     stack_stage = stage_dir(wd, "stack2d")
     spec_stage = stage_dir(wd, "extract1d")
 
@@ -345,7 +345,7 @@ Product(
         # Sky subtraction artifacts
         Product(
             "sky_done",
-            "skyrect",
+            "sky",
             sky_stage / "sky_sub_done.json",
             "json",
             optional=True,
@@ -353,7 +353,7 @@ Product(
         ),
         Product(
             "qc_sky_json",
-            "skyrect",
+            "sky",
             sky_stage / "qc_sky.json",
             "json",
             optional=True,
@@ -361,14 +361,14 @@ Product(
         ),
         Product(
             "sky_preview_fits",
-            "skyrect",
+            "sky",
             sky_stage / "preview.fits",
             "fits",
             optional=True,
         ),
         Product(
             "sky_preview_png",
-            "skyrect",
+            "sky",
             sky_stage / "preview.png",
             "png",
             optional=True,
@@ -438,7 +438,7 @@ _TASK_COMPLETION: dict[str, list[list[str]]] = {
     "lineid": [["hand_pairs_txt"]],
     "wavesolution": [["lambda_map"], ["wavesolution_2d_json"]],
     "linearize": [["lin_preview_fits"]],
-    "skyrect": [["sky_done"]],
+    "sky": [["sky_done"]],
     "stack2d": [["stacked2d_fits"]],
     "extract1d": [["spec1d_fits"]],
     "qc_report": [["qc_json"], ["qc_html"]],

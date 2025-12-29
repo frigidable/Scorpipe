@@ -57,7 +57,7 @@
 ## Быстрый старт (GUI)
 
 ### 1) Установить
-На Windows для обычного пользователя рекомендуемый путь — **готовый `setup.exe` из Releases** (см. раздел [Установка](#установка)).
+На Windows для обычного пользователя рекомендуемый путь — **готовый установщик из Releases** (см. раздел [Установка](#установка)).
 
 ### 2) Запустить Scorpipe
 После установки запускайте **Scorpipe** из Start Menu (или ярлыка).
@@ -118,13 +118,15 @@ scorpio-pipe run --data-dir <PATH_TO_NIGHT> --object "<OBJECT_NAME>" --execute
 
 ## Установка
 
-### Вариант A (рекомендуется): Windows `setup.exe` из Releases
+### Вариант A (рекомендуется): Windows инсталлятор из Releases
 1. Откройте вкладку **Releases** вашего репозитория.
-2. Скачайте архив вида `Scorpipe-Windows-x64.zip`.
-3. Внутри будет `setup.exe` → запустите установку.
+2. Скачайте установщик вида `ScorpioPipe-Setup-x64-<версия>.exe` (версия соответствует тегу `vX.Y.Z`).
+3. Запустите установщик.
 4. Запускайте **Scorpipe** из Start Menu.
 
-Важно: **Code → Download ZIP** на GitHub скачивает *исходники* и **не** содержит `setup.exe`.
+Если нужна portable‑сборка без установки — скачайте `Scorpipe-Windows-x64-<версия>.zip`.
+
+Важно: **Code → Download ZIP** на GitHub скачивает *исходники* и **не** содержит установщик.
 
 Подробности: [`INSTALL.md`](INSTALL.md), [`GET_SETUP_EXE.md`](docs/GET_SETUP_EXE.md).
 
@@ -256,7 +258,7 @@ work/
 Ключевые файлы:
 - `setup.bat` / `setup_debug.bat` — сборка/запуск на Windows
 - `packaging/windows/scorpipe.spec` — PyInstaller
-- `packaging/windows/scorpipe.iss` — Inno Setup (`setup.exe`)
+- `packaging/windows/scorpipe.iss` — Inno Setup (установщик)
 - `.github/workflows/windows_release.yml` — сборка релиз‑артефактов (CI)
 
 Быстрые команды (из корня проекта):

@@ -57,6 +57,20 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      - name: Resolve build version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.release.tag_name }}"
+          if ($tag) {
+            $ver = $tag.TrimStart('v')
+          } else {
+            $ver = (python -c "import re, pathlib; p=pathlib.Path('src/scorpio_pipe/version.py'); m=re.search(r"__version__\s*=\s*['\"]([^'\"]+)['\"]", p.read_text(encoding='utf-8')); print(m.group(1) if m else '')").Trim()
+          }
+          if (-not $ver) { throw "Failed to resolve APP_VERSION" }
+          "APP_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "[Scorpipe] APP_VERSION=$ver" -ForegroundColor DarkCyan
+
+
       - name: Install Inno Setup
         shell: pwsh
         run: |
@@ -73,12 +87,12 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path release | Out-Null
 
-          $setup = "packaging/windows/Output/ScorpioPipe-Setup-x64.exe"
+          $setup = "packaging/windows/Output/ScorpioPipe-Setup-x64-$env:APP_VERSION.exe"
           if (-not (Test-Path $setup)) { throw "Setup EXE not found: $setup" }
-          Copy-Item $setup "release/ScorpioPipe-Setup-x64.exe" -Force
+          Copy-Item $setup "release/ScorpioPipe-Setup-x64-$env:APP_VERSION.exe" -Force
 
           if (-not (Test-Path "dist/scorpipe")) { throw "PyInstaller dist not found: dist/scorpipe" }
-          Compress-Archive -Path "dist/scorpipe/*" -DestinationPath "release/Scorpipe-Windows-x64.zip" -Force
+          Compress-Archive -Path "dist/scorpipe/*" -DestinationPath "release/Scorpipe-Windows-x64-$env:APP_VERSION.zip" -Force
 
           $out = "release/SHA256SUMS.txt"
           Remove-Item $out -ErrorAction SilentlyContinue
@@ -114,6 +128,20 @@ jobs:
           name: windows-release-assets
           path: release
 
+      - name: Resolve release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.release.tag_name }}"
+          ver="${tag#v}"
+          if [ -z "$ver" ]; then
+            echo "Failed to resolve APP_VERSION from tag: $tag" >&2
+            exit 1
+          fi
+          echo "APP_VERSION=$ver" >> "$GITHUB_ENV"
+          echo "[Scorpipe] APP_VERSION=$ver"
+
+
       - name: Detect extra release artifacts (wheel/sdist)
         id: py_dist
         shell: bash
@@ -134,18 +162,18 @@ jobs:
       - name: Generate SBOM (installer)
         uses: anchore/sbom-action@a930d0ac434e3182448fe678398ba5713717112a # v0.21.0
         with:
-          file: release/ScorpioPipe-Setup-x64.exe
+          file: release/ScorpioPipe-Setup-x64-${{ env.APP_VERSION }}.exe
           format: spdx-json
-          output-file: release/ScorpioPipe-Setup-x64.sbom.spdx.json
+          output-file: release/ScorpioPipe-Setup-x64-${{ env.APP_VERSION }}.sbom.spdx.json
           upload-artifact: false
           upload-release-assets: false
 
       - name: Generate SBOM (portable bundle)
         uses: anchore/sbom-action@a930d0ac434e3182448fe678398ba5713717112a # v0.21.0
         with:
-          file: release/Scorpipe-Windows-x64.zip
+          file: release/Scorpipe-Windows-x64-${{ env.APP_VERSION }}.zip
           format: spdx-json
-          output-file: release/Scorpipe-Windows-x64.sbom.spdx.json
+          output-file: release/Scorpipe-Windows-x64-${{ env.APP_VERSION }}.sbom.spdx.json
           upload-artifact: false
           upload-release-assets: false
 
@@ -182,14 +210,14 @@ jobs:
       - name: Attest SBOM (installer)
         uses: actions/attest-sbom@4651f806c01d8637787e274ac3bdf724ef169f34 # v3.0.0
         with:
-          subject-path: release/ScorpioPipe-Setup-x64.exe
-          sbom-path: release/ScorpioPipe-Setup-x64.sbom.spdx.json
+          subject-path: release/ScorpioPipe-Setup-x64-${{ env.APP_VERSION }}.exe
+          sbom-path: release/ScorpioPipe-Setup-x64-${{ env.APP_VERSION }}.sbom.spdx.json
 
       - name: Attest SBOM (portable bundle)
         uses: actions/attest-sbom@4651f806c01d8637787e274ac3bdf724ef169f34 # v3.0.0
         with:
-          subject-path: release/Scorpipe-Windows-x64.zip
-          sbom-path: release/Scorpipe-Windows-x64.sbom.spdx.json
+          subject-path: release/Scorpipe-Windows-x64-${{ env.APP_VERSION }}.zip
+          sbom-path: release/Scorpipe-Windows-x64-${{ env.APP_VERSION }}.sbom.spdx.json
 
       - name: Attest SBOM (wheel)
         if: ${{ steps.py_dist.outputs.wheel != '' }}

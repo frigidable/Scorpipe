@@ -10,19 +10,21 @@ if (-not $ProjectRoot) {
   $ProjectRoot = (Resolve-Path $ProjectRoot)
 }
 
-$setup = Join-Path $ProjectRoot "packaging\windows\Output\setup.exe"
+$ver = (python -c "from scorpio_pipe.version import __version__; print(__version__)").Trim()
+
+$setup = Join-Path $ProjectRoot "packaging\windows\Output\ScorpioPipe-Setup-x64-$ver.exe"
 if (-not (Test-Path $setup)) {
-  throw "setup.exe not found: $setup (run: setup.bat --installer)"
+  throw "Installer not found: $setup (run: setup.bat --installer)"
 }
 
-$bundleName = "Scorpipe-Windows-x64"
+$bundleName = "Scorpipe-Windows-x64-$ver"
 $bundleRoot = Join-Path $ProjectRoot "release\$bundleName"
 $docsDir    = Join-Path $bundleRoot "docs"
 
 if (Test-Path $bundleRoot) { Remove-Item $bundleRoot -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $docsDir | Out-Null
 
-Copy-Item $setup (Join-Path $bundleRoot "setup.exe") -Force
+Copy-Item $setup (Join-Path $bundleRoot (Split-Path $setup -Leaf)) -Force
 Copy-Item (Join-Path $ProjectRoot "INSTALL.md") (Join-Path $bundleRoot "INSTALL.md") -Force
 
 # docs

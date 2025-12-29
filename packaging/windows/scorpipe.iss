@@ -4,7 +4,7 @@
 #define AppName "Scorpipe"
 #define AppExeName "scorpipe.exe"
 #ifndef AppVersion
-#define AppVersion "4.13.3"
+#error AppVersion is not defined. Pass /DAppVersion=<version> to ISCC.
 #endif
 #define AppPublisher "Scorpipe"
 
@@ -16,7 +16,7 @@ AppPublisher={#AppPublisher}
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
-OutputBaseFilename=setup
+OutputBaseFilename=ScorpioPipe-Setup-x64-{#AppVersion}
 OutputDir={#SourcePath}\Output
 Compression=lzma
 SolidCompression=yes

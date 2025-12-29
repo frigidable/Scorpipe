@@ -4,7 +4,6 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scorpio-pipe"
-version = "5.38.5"
 requires-python = ">=3.10"
 readme = "README.md"
 # NOTE: setuptools (as used in CI) validates PEP 621 `license` as a string.
@@ -22,6 +21,7 @@ dependencies = [
   "matplotlib",
 ]
 
+dynamic = ["version"]
 [project.optional-dependencies]
 # GUI stack for interactive LineID (and embedded PDF viewing)
 gui = [
@@ -54,6 +54,9 @@ scorpipe = "scorpio_pipe.ui.launcher_app:main"
 package-dir = {"" = "src"}
 include-package-data = true
 license-files = ["LICENSE"]
+
+[tool.setuptools.dynamic]
+version = { attr = "scorpio_pipe.version.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]

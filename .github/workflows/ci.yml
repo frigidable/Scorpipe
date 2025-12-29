@@ -110,6 +110,32 @@ jobs:
       - name: Dependency Review
         uses: actions/dependency-review-action@3c4e3dcb1aa7874d2c16be7d79418e9b7efd6261 # v4.8.2 (tag v4)
 
+  pr_title:
+    name: pr_title
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'pull_request'
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Validate PR title follows Conventional Commits
+        uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            docs
+            style
+            refactor
+            perf
+            test
+            build
+            ci
+            chore
+            revert
+
   gate:
     name: gate
     runs-on: ubuntu-latest
@@ -119,6 +145,7 @@ jobs:
       - meta_validate
       - tests
       - build_check
+      - pr_title
       - dependency_review
     steps:
       - name: Summarize required jobs
@@ -129,7 +156,7 @@ jobs:
           import json, os, sys
           needs = json.loads(os.environ["NEEDS_JSON"])
           # dependency_review may be "skipped" on push events; that's OK.
-          allow_skipped = {"dependency_review"}
+          allow_skipped = {"dependency_review", "pr_title"}
           bad = []
           for job_id, meta in needs.items():
             res = meta.get("result")

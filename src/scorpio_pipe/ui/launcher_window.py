@@ -297,8 +297,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         ]:
             self.stack.addWidget(p)
 
-        # Map canonical stage list (01..13) to actual UI pages.
-        # Some stages are currently represented by the same page (e.g. two sky stages).
+        # Map canonical stage list (01..12) to actual UI pages.
         _page_by_stage_key = {
             "project": 0,
             "setup": 1,
@@ -308,9 +307,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
             "superneon": 5,
             "arclineid": 6,
             "wavesol": 7,
-            "skyraw": 9,
             "linearize": 8,
-            "skyrect": 9,
+            "sky": 9,
             "stack2d": 10,
             "extract1d": 11,
         }
@@ -1278,6 +1276,39 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     "This folder looks like a legacy workspace (products/...).\n"
                     "It will be opened as-is; no files will be moved automatically.",
                 )
+        except Exception:
+            pass
+
+        # Legacy stage numbering/slugs hint (v5.38.5 and earlier)
+        try:
+            from scorpio_pipe.workspace_migrate import (
+                detect_legacy_stage_layout,
+                migrate_run_to_v5386,
+            )
+
+            info = detect_legacy_stage_layout(run_root)
+            if info.is_legacy:
+                details = "\n".join(f"- {n}" for n in (info.found or ()))
+                box = QtWidgets.QMessageBox(self)
+                box.setIcon(QtWidgets.QMessageBox.Icon.Information)
+                box.setWindowTitle("Legacy run layout")
+                box.setText(info.reason)
+                if details:
+                    box.setInformativeText("Detected:\n" + details)
+
+                btn_open = box.addButton("Open as-is", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+                btn_migrate = box.addButton(
+                    "Migrate copy", QtWidgets.QMessageBox.ButtonRole.ActionRole
+                )
+                box.addButton("Cancel", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+                box.exec()
+
+                clicked = box.clickedButton()
+                if clicked == btn_migrate:
+                    new_root = migrate_run_to_v5386(run_root)
+                    run_root = Path(new_root)
+                elif clicked != btn_open:
+                    return
         except Exception:
             pass
 

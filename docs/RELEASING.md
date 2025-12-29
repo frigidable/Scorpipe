@@ -1,93 +1,64 @@
-# RELEASING — Scorpio Pipe
+# RELEASING — Scorpipe
 
-Короткий, практичный чек‑лист релиза (без лишней магии). Идея простая:
-**сначала** убеждаемся, что сборка/установка/тесты проходят, **потом** создаём тег/релиз.
-
----
-
-## 0) Перед релизом (локально)
-
-1) Обнови окружение
-```bash
-python -m pip install -U pip
-```
-
-2) Прогони линтер и тесты
-```bash
-ruff check .
-pytest -q
-```
-
-3) Проверь, что пакет собирается и устанавливается из wheel
-```bash
-python -m pip install -U build
-python -m build
-python -m pip install dist/*.whl
-scorpio-pipe --help
-python -c "import importlib.metadata as m; print(m.version('scorpio-pipe'))"
-```
+Короткий, практичный ритуал релиза без ручного “подкручивания версии”.
+Релизы делает **Release Please** (Release PR → merge → published GitHub Release → Windows артефакты).
 
 ---
 
-## 1) Версия
+## 0) Один раз настроить (после внедрения Release Please)
 
-- Версия задаётся в `pyproject.toml`:
-  - `[project].version = "X.Y.Z"`
-
-Правило: версия в `pyproject.toml` и заголовок в `CHANGELOG.md` должны быть синхронизированы.
-
----
-
-## 2) CHANGELOG
-
-1) Добавь секцию **в начало** файла `CHANGELOG.md`:
-- `## vX.Y.Z`
-- короткие пункты по изменениям (пользователь‑ориентированные + внутренние)
-
-2) Если изменение касается UI/научных стадий — добавь 1–2 строки “почему это важно”.
+1) Добавьте секрет репозитория `RELEASE_PLEASE_TOKEN` (fine‑grained PAT).
+2) Включите: **Settings → Actions → General → “Allow GitHub Actions to create and approve pull requests”**.
+3) Убедитесь, что workflow `release-please` зелёный.
 
 ---
 
-## 3) CI / PR
+## 1) Как выпускать релиз (обычный день)
 
-- Убедись, что на GitHub зелёные:
-  - `lint`
-  - `tests`
-  - `build_check` (сборка sdist/wheel + установка из wheel + smoke)
+### Шаг A — разработка
+- Делайте изменения через PR.
+- PR title должен быть **Conventional** (`fix: ...`, `feat: ...`, `feat!: ...`).
+- Merge делайте через **Squash & Merge**.
 
----
+### Шаг B — Release PR
+Release Please автоматически откроет PR вида “release …”.
+В нём будут:
+- обновление версии,
+- обновление `CHANGELOG.md`.
 
-## 4) Тег и релиз на GitHub
+### Шаг C — публикация релиза
+1) Проверьте CI на Release PR.
+2) **Squash & Merge** Release PR в `main`.
+3) Release Please опубликует GitHub Release с тегом `vX.Y.Z` (publish сразу).
 
-Рекомендуемый поток:
-
-1) Создай тег и запушь его
-```bash
-git tag vX.Y.Z
-git push origin vX.Y.Z
-```
-
-2) Создай GitHub Release по тегу `vX.Y.Z` и вставь краткие notes из `CHANGELOG.md`.
-
-3) Убедись, что workflow релиза публикует полный набор артефактов:
-- Windows: `*.exe`, `*.zip`
-- Python (если присутствуют): `*.whl`, `*.tar.gz`
-- Доверие: `*.sbom.spdx.json`, `SHA256SUMS.txt` (и соответствующие attestations)
-
-
-### Пакет доверия (обязательный чек)
-
-- [ ] Для **каждого** артефакта в Assets (`*.exe`, `*.zip`, и при наличии `*.whl`, `*.tar.gz`) опубликованы:
-  - `*.sbom.spdx.json` (SBOM)
-  - `SHA256SUMS.txt` с хэшами **артефакта и SBOM**
-  - Attestations: **Attest SBOM** и **Attest build provenance**
-
+После публикации автоматически запустится `Windows Release` и прикрепит артефакты к релизу.
 
 ---
 
-## 5) После релиза
+## 2) Что должно появиться в GitHub Release
 
-- Проверь, что артефакты релиза загрузились (setup.exe / zip и т.п.).
-- Проверь **пакет доверия** по чек‑листу из раздела выше (SBOM + SHA256SUMS + attestations для каждого артефакта).
-- Если в релизе присутствуют Python‑дистрибутивы (`*.whl`, `*.tar.gz`), они должны публиковаться вместе с соответствующими SBOM/attestations (по умолчанию это уже поддержано release‑workflow’ом; важно лишь, чтобы файлы лежали в `release/`).
-- Если релиз включает миграции форматов/папок: добавь заметку в `docs/RUNBOOK.md`.
+Assets (имена без `v`, версия = `X.Y.Z`):
+- `ScorpioPipe-Setup-x64-X.Y.Z.exe`
+- `Scorpipe-Windows-x64-X.Y.Z.zip`
+- `SHA256SUMS.txt`
+- `*.sbom.spdx.json` для каждого артефакта
+
+Attestations (на странице релиза):
+- SBOM attestation
+- Build provenance attestation
+
+---
+
+## 3) Если что-то пошло не так
+
+- Если Release PR не появляется: проверьте, что PR title/коммиты соответствуют Conventional Commits и что Release Please workflow зелёный.
+- Если Windows Release не стартует: проверьте, что релиз **published** (не draft) и что тег имеет вид `vX.Y.Z`.
+- Если “installer not found”: значит mismatch имён/путей (смотрите шаги сборки Inno Setup в `Windows Release` логах).
+
+---
+
+## 4) Мини‑чек перед нажатием Merge на Release PR
+
+- [ ] `CI` зелёный.
+- [ ] В `CHANGELOG.md` корректно описаны изменения.
+- [ ] Версия в `src/scorpio_pipe/version.py` соответствует Release PR.

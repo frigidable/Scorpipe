@@ -304,8 +304,8 @@ def build_autoconfig(
 
     calib = {
         # Canonical outputs live in numbered stage directories (not calibs/).
-        "superbias_path": "03_biascorr/superbias.fits",
-        "superflat_path": "05_flatfield/superflat.fits",
+        "superbias_path": "03_bias/superbias.fits",
+        "superflat_path": "04_flat/superflat.fits",
     }
     return AutoConfig(
         data_dir=str(data_dir),

@@ -87,7 +87,7 @@ def build_products_manifest(cfg: dict[str, Any]) -> dict[str, Any]:
         "qc_root": _rel(work_dir, manifest_dir),
         "stages": {
             "linearize": _stage_tree(stage_dir(work_dir, "linearize")),
-            "skyrect": _stage_tree(stage_dir(work_dir, "skyrect")),
+            "sky": _stage_tree(stage_dir(work_dir, "sky")),
             "stack2d": _stage_tree(stage_dir(work_dir, "stack2d")),
             "extract1d": _stage_tree(stage_dir(work_dir, "extract1d")),
         },

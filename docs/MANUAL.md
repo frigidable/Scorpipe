@@ -122,7 +122,7 @@ $env:CONFIG=(Resolve-Path .\work\ngc2146sat\config.yaml).Path
 
 После этого `./scorpipe.exe` можно запускать двойным кликом.
 
-> Для обычных пользователей проще поставить **setup.exe** из GitHub Releases —
+> Для обычных пользователей проще поставить `ScorpioPipe-Setup-x64-<версия>.exe` из GitHub Releases —
 > он установит Scorpipe и создаст ярлык.
 
 ---

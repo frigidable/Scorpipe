@@ -355,7 +355,7 @@
   - Uses an **absolute** `--add-data` input path (prevents resolution relative to the `.spec` directory).
   - Added strict exit-code checks (no more "Done" after a failed build).
 - `scripts/windows/setup.bat` now supports `--installer` mode:
-  - builds `scorpipe.exe` and then builds `packaging/windows/Output/setup.exe` via Inno Setup.
+  - builds `scorpipe.exe` and then builds `packaging/windows/Output/ScorpioPipe-Setup-x64-<версия>.exe` via Inno Setup.
 - `packaging/windows/build.ps1` now fails fast on non-zero exit codes from both PyInstaller and ISCC.
 
 ## v4.8
@@ -372,8 +372,8 @@
   - pushed tags (`v*` and `*.*`), and
   - **published GitHub Releases**.
 - The workflow builds and uploads Release assets:
-  - `setup.exe`
-  - `Scorpipe-Windows-x64.zip` (contains `setup.exe` + `INSTALL.md`)
+  - `ScorpioPipe-Setup-x64-<версия>.exe`
+  - `Scorpipe-Windows-x64-<версия>.zip` (contains `ScorpioPipe-Setup-x64-<версия>.exe` + `INSTALL.md`)
 
 ## v4.7
 
@@ -396,4 +396,4 @@
 
 ### Packaging / Release
 - Version bump: pipeline **4.7**, python package **0.2.7**.
-- Clarified the distribution model in docs: `setup.exe` is produced by the Windows build (GitHub Actions / local Windows build), and is not present in source archives.
+- Clarified the distribution model in docs: `ScorpioPipe-Setup-x64-<версия>.exe` is produced by the Windows build (GitHub Actions / local Windows build), and is not present in source archives.

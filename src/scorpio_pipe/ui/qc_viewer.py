@@ -17,16 +17,16 @@ class QCItem:
 
 
 DEFAULT_QC_ITEMS: list[QCItem] = [
-    # Canonical (v5.38.5): everything is local to run_root.
+    # Canonical (v5.38.6): everything is local to run_root.
     QCItem("Manifest (JSON)", "manifest/manifest.json", "text"),
     QCItem("Products manifest (JSON)", "manifest/products_manifest.json", "text"),
     QCItem("QC report (HTML)", "index.html", "text"),
     QCItem("QC summary (JSON)", "manifest/qc_report.json", "text"),
     QCItem("Timings (JSON)", "manifest/timings.json", "text"),
     QCItem("Linearize QC (JSON)", "manifest/linearize_qc.json", "text"),
-    QCItem("Superbias (FITS)", "03_biascorr/superbias.fits", "fits"),
-    QCItem("Superflat (FITS)", "05_flatfield/superflat.fits", "fits"),
-    QCItem("Cosmics summary (JSON)", "04_cosmics/summary.json", "text"),
+    QCItem("Superbias (FITS)", "03_bias/superbias.fits", "fits"),
+    QCItem("Superflat (FITS)", "04_flat/superflat.fits", "fits"),
+    QCItem("Cosmics summary (JSON)", "05_cosmics/summary.json", "text"),
 
     # Legacy locations (kept read-only; no auto-migration).
     QCItem("Manifest (legacy)", "qc/manifest.json", "text"),

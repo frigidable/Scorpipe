@@ -67,7 +67,7 @@ Invoke-Logged -FilePath "python" -ArgumentList @(
 ) -LogPath "packaging\windows\Output\pyinstaller.log" -StepName "PyInstaller"
 
 if (-not $SkipInstaller) {
-  Write-Host "[Scorpipe] Inno Setup (setup.exe)..." -ForegroundColor Cyan
+  Write-Host "[Scorpipe] Inno Setup (installer)..." -ForegroundColor Cyan
 
   $iscc = (Get-Command iscc.exe -ErrorAction SilentlyContinue).Source
   if (-not $iscc) { $iscc = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source }
@@ -87,15 +87,33 @@ if (-not $SkipInstaller) {
     throw "ISCC.exe not found. Install Inno Setup 6 (e.g. choco install innosetup -y) and retry."
   }
 
+
+  $detectedVersion = (python -c "from scorpio_pipe.version import __version__; print(__version__)").Trim()
+  if (-not $detectedVersion) {
+    throw "Failed to determine AppVersion from scorpio_pipe.version.__version__. Ensure the package is installed (pip install -e .[gui]) before building the installer."
+  }
+
+  $appVersion = $env:APP_VERSION
+  if ($appVersion) {
+    if ($appVersion -ne $detectedVersion) {
+      throw "Version mismatch: tag/workflow APP_VERSION=$appVersion, but Python package reports __version__=$detectedVersion. Bump src/scorpio_pipe/version.py to match the release tag."
+    }
+  } else {
+    $appVersion = $detectedVersion
+  }
+  Write-Host "[Scorpipe] AppVersion: $appVersion" -ForegroundColor DarkCyan
+
   Invoke-Logged -FilePath $iscc -ArgumentList @(
+    "/DAppVersion=$appVersion"
     "packaging\windows\scorpipe.iss"
   ) -LogPath "packaging\windows\Output\iscc.log" -StepName "ISCC"
 
-  if (-not (Test-Path packaging\windows\Output\setup.exe)) {
-    throw "setup.exe was not produced (expected: packaging\\windows\\Output\\setup.exe). Check packaging\\windows\\Output\\iscc.log"
+  $setupExe = "packaging\windows\Output\ScorpioPipe-Setup-x64-$appVersion.exe"
+  if (-not (Test-Path $setupExe)) {
+    throw "Installer EXE was not produced (expected: $setupExe). Check packaging\windows\Output\iscc.log"
   }
 
-  Write-Host "Built: packaging\\windows\\Output\\setup.exe" -ForegroundColor Green
+  Write-Host "Built: $setupExe" -ForegroundColor Green
 }
 
 Write-Host "Done." -ForegroundColor Green
