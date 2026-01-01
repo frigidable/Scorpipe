@@ -468,6 +468,74 @@ def _make_bspline_knot_vector(lam_min: float, lam_max: float, *, knot_step_A: fl
     return t
 
 
+def _bspline_design_matrix(x: np.ndarray, t: np.ndarray, k: int) -> csr_matrix:
+    """Return a CSR design matrix for a B-spline basis.
+
+    We prefer :meth:`scipy.interpolate.BSpline.design_matrix` when available.
+    However, SciPy's sparse API and return types have changed over time
+    (csr_matrix vs csr_array, broadcasting semantics, etc.). In addition, some
+    downstream environments may ship a SciPy build where this helper is absent
+    or behaves differently.
+
+    This wrapper provides a stable CSR *matrix* output for the rest of the
+    pipeline.
+    """
+
+    x = np.asarray(x, dtype=float)
+    t = np.asarray(t, dtype=float)
+    k = int(k)
+
+    n_basis = int(len(t) - k - 1)
+    if n_basis <= 0:
+        raise ValueError("Invalid knot vector for B-spline design matrix")
+
+    # Preferred path (fast, robust, sparse).
+    try:
+        B = BSpline.design_matrix(x, t, k)
+        # Convert to a classic csr_matrix for broad compatibility.
+        return csr_matrix(B)
+    except Exception:
+        pass
+
+    # Fallback: Cox–de Boor basis evaluation (local support => k+1 non-zeros/row).
+    # This is slower than the SciPy helper but keeps the stage functional.
+    dom_lo = float(t[k])
+    dom_hi = float(t[-k - 1])
+    xx = np.clip(x, dom_lo, dom_hi)
+    n = int(xx.size)
+
+    spans = np.searchsorted(t, xx, side="right") - 1
+    spans = np.clip(spans, k, n_basis - 1).astype(np.int64)
+    spans = np.where(xx >= dom_hi, n_basis - 1, spans)
+
+    def _basis_funs(span: int, x0: float) -> np.ndarray:
+        # Algorithm A2.2 from The NURBS Book (Piegl & Tiller).
+        N = np.zeros(k + 1, dtype=float)
+        left = np.zeros(k + 1, dtype=float)
+        right = np.zeros(k + 1, dtype=float)
+        N[0] = 1.0
+        for j in range(1, k + 1):
+            left[j] = x0 - float(t[span + 1 - j])
+            right[j] = float(t[span + j]) - x0
+            saved = 0.0
+            for r in range(0, j):
+                denom = right[r + 1] + left[j - r]
+                temp = 0.0 if denom == 0.0 else (N[r] / denom)
+                N[r] = saved + right[r + 1] * temp
+                saved = left[j - r] * temp
+            N[j] = saved
+        return N
+
+    rows = np.repeat(np.arange(n, dtype=np.int64), k + 1)
+    cols = (spans[:, None] - k + np.arange(k + 1, dtype=np.int64)[None, :]).reshape(-1)
+    data = np.empty(n * (k + 1), dtype=float)
+
+    for i in range(n):
+        data[i * (k + 1) : (i + 1) * (k + 1)] = _basis_funs(int(spans[i]), float(xx[i]))
+
+    return csr_matrix((data, (rows, cols)), shape=(n, n_basis))
+
+
 def _eval_bspline(t: np.ndarray, c: np.ndarray, k: int, lam: np.ndarray) -> np.ndarray:
     """Evaluate a BSpline safely on an array of λ."""
 
@@ -503,7 +571,7 @@ def _fit_kelson_bspline(
       S(λ,y) = Σ_j c0_j B_j(λ) + (y_norm) Σ_j c1_j B_j(λ)   (if y_order=1)
     """
 
-    from scipy.sparse import hstack
+    from scipy.sparse import diags, hstack
 
     lam = np.asarray(lam, dtype=float)
     y_norm = np.asarray(y_norm, dtype=float)
@@ -542,17 +610,19 @@ def _fit_kelson_bspline(
         d_k = d_ok[idx]
         var_k = var_ok[idx]
 
-        # Design matrix for B-spline basis
-        B = BSpline.design_matrix(lam_k, t, k)  # sparse
+        # Design matrix for B-spline basis.
+        # Use a stable wrapper and avoid sparse broadcasting assumptions.
+        B = _bspline_design_matrix(lam_k, t, k)
         if int(y_order) <= 0:
             A = B
         else:
-            By = B.multiply(y_k[:, None])
+            # By = diag(y) @ B
+            By = diags(y_k.astype(float), 0, format="csr") @ B
             A = hstack([B, By], format="csr")
 
-        # Weighted LS via lsqr on row-scaled system
+        # Weighted LS via lsqr on row-scaled system: Aw = diag(w) @ A
         w_sqrt = (1.0 / np.sqrt(np.maximum(var_k, 1e-20))).astype(float)
-        Aw = A.multiply(w_sqrt[:, None])
+        Aw = diags(w_sqrt, 0, format="csr") @ A
         dw = (d_k * w_sqrt).astype(float)
 
         sol = lsqr(Aw, dw, atol=1e-10, btol=1e-10, iter_lim=2000)
@@ -589,14 +659,14 @@ def _fit_kelson_bspline(
     y_k = y_ok[idx]
     d_k = d_ok[idx]
     var_k = var_ok[idx]
-    B = BSpline.design_matrix(lam_k, t, k)
+    B = _bspline_design_matrix(lam_k, t, k)
     if int(y_order) <= 0:
         A = B
     else:
-        By = B.multiply(y_k[:, None])
+        By = diags(y_k.astype(float), 0, format="csr") @ B
         A = hstack([B, By], format="csr")
     w_sqrt = (1.0 / np.sqrt(np.maximum(var_k, 1e-20))).astype(float)
-    Aw = A.multiply(w_sqrt[:, None])
+    Aw = diags(w_sqrt, 0, format="csr") @ A
     dw = (d_k * w_sqrt).astype(float)
     sol = lsqr(Aw, dw, atol=1e-10, btol=1e-10, iter_lim=2000)
     c = np.asarray(sol[0], dtype=float)

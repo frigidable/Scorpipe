@@ -1,3 +1,8 @@
+## v5.40.16
+
+### Fixes
+- Sky Subtraction (Kelson RAW): fixed missing outputs in some CI environments by using a compatibility wrapper around the B-spline design matrix and avoiding sparse broadcasting assumptions during weighted least-squares.
+
 ## v5.40.14
 
 ### Fixes
