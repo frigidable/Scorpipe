@@ -351,7 +351,8 @@ def _estimate_trace_blocks(
         yc, m = _centroid_from_profile(
             prof, y_mask=y_mask, sky_windows=sky_windows, min_snr=float(trace_min_snr)
         )
-        wc = float(np.nanmean(wave[x0:x1]))
+        wsl = wave[x0:x1]
+        wc = float(np.nanmean(wsl)) if wsl.size else float("nan")
         w_c.append(wc)
         y_c.append(yc)
         blocks_meta.append(
@@ -383,7 +384,7 @@ def _smooth_trace_spline(
     y = y_c[good]
     meta: dict[str, Any] = {"initial_points": int(w.size)}
     if w.size < int(min_points):
-        return np.full_like(wave_full, float(np.nanmedian(y_c))), {
+        return np.full_like(wave_full, float(np.nanmedian(y_c)) if np.any(np.isfinite(y_c)) else 0.0), {
             **meta,
             "fallback": True,
             "reason": "too_few_points",
@@ -431,7 +432,7 @@ def _smooth_trace_spline(
         )
         return np.asarray(y_full, dtype=float), meta
     except Exception as e:
-        return np.full_like(wave_full, float(np.nanmedian(y_c))), {
+        return np.full_like(wave_full, float(np.nanmedian(y_c)) if np.any(np.isfinite(y_c)) else 0.0), {
             **meta,
             "fallback": True,
             "reason": f"spline_failed: {e}",
@@ -493,7 +494,7 @@ def _build_trace_model(
         if isinstance(y0, (int, float)) and isinstance(y1, (int, float)):
             y_fixed_center = 0.5 * (float(y0) + float(y1))
         else:
-            y_fixed_center = float(np.nanmedian(y_c))
+            y_fixed_center = float(np.nanmedian(y_c)) if np.any(np.isfinite(y_c)) else (0.5 * float(ny - 1))
     y_fixed_center = float(np.clip(y_fixed_center, 0.0, float(ny - 1)))
 
     # Decide trace: fallback if too few valid blocks

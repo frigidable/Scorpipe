@@ -1195,6 +1195,19 @@ def _run_sky_sub_impl(cfg: dict[str, Any]) -> dict[str, Path]:
                 write_sci_var_mask(skymodel_path, model, var, mask, header=hdr0)
                 write_sci_var_mask(skysub_path, skysub, var, mask, header=hdr0)
 
+                # Backward-compatible aliases (synthetic smoke tests / legacy scripts).
+                # Keep these as plain copies to avoid cross-platform symlink issues.
+                for _alias in (f"{stem}_skysub.fits", f"{stem}_sky_sub.fits"):
+                    try:
+                        shutil.copy2(skysub_path, out_dir / _alias)
+                    except Exception:
+                        pass
+                for _alias in (f"{stem}_skymodel.fits", f"{stem}_sky_model.fits"):
+                    try:
+                        shutil.copy2(skymodel_path, out_dir / _alias)
+                    except Exception:
+                        pass
+
                 # Quicklook PNGs (robust stretch, fatal-mask aware)
                 skysub_png = out_dir / f"{stem}_skysub_raw.png"
                 skymodel_png = out_dir / f"{stem}_skymodel_raw.png"

@@ -29,6 +29,7 @@ from scipy import ndimage as _ndi
 
 
 @dataclass(frozen=True)
+@dataclass(frozen=True)
 class ROISelection:
     """User ROI description.
 
@@ -81,24 +82,41 @@ def roi_from_cfg(cfg: dict[str, Any]) -> ROISelection | None:
     2-element lists.
     """
 
-    sky = cfg.get("sky") if isinstance(cfg.get("sky"), dict) else {}
-    roi = sky.get("roi") if isinstance(sky.get("roi"), dict) else {}
+    # New GUI schema: cfg['sky']['roi']
+    roi: dict[str, Any] = {}
+    if isinstance(cfg.get("sky"), dict) and isinstance(cfg["sky"].get("roi"), dict):
+        roi = cfg["sky"]["roi"]
+    # Legacy schema (tests/older configs): cfg['roi']
+    elif isinstance(cfg.get("roi"), dict):
+        roi = cfg["roi"]
+
     if not roi:
         return None
 
-    # preferred schema
     obj = None
+    # preferred: obj_y0..obj_y1
     if roi.get("obj_y0") is not None and roi.get("obj_y1") is not None:
         obj = (int(roi.get("obj_y0")), int(roi.get("obj_y1")))
+    # legacy: obj_y1..obj_y2
+    elif roi.get("obj_y1") is not None and roi.get("obj_y2") is not None:
+        obj = (int(roi.get("obj_y1")), int(roi.get("obj_y2")))
 
     top = None
     bot = None
+
+    # preferred schema: sky_top_y0..y1 and sky_bot_y0..y1
     if roi.get("sky_top_y0") is not None and roi.get("sky_top_y1") is not None:
         top = (int(roi.get("sky_top_y0")), int(roi.get("sky_top_y1")))
     if roi.get("sky_bot_y0") is not None and roi.get("sky_bot_y1") is not None:
         bot = (int(roi.get("sky_bot_y0")), int(roi.get("sky_bot_y1")))
 
-    # legacy alternate keys
+    # legacy schema (tests): sky_y1..y2 and sky2_y1..y2
+    if bot is None and roi.get("sky_y1") is not None and roi.get("sky_y2") is not None:
+        bot = (int(roi.get("sky_y1")), int(roi.get("sky_y2")))
+    if top is None and roi.get("sky2_y1") is not None and roi.get("sky2_y2") is not None:
+        top = (int(roi.get("sky2_y1")), int(roi.get("sky2_y2")))
+
+    # legacy alternate keys: sky_top / sky_bot as 2-element lists
     if top is None:
         t = roi.get("sky_top")
         if isinstance(t, (list, tuple)) and len(t) == 2:
@@ -107,7 +125,6 @@ def roi_from_cfg(cfg: dict[str, Any]) -> ROISelection | None:
         b = roi.get("sky_bot")
         if isinstance(b, (list, tuple)) and len(b) == 2:
             bot = (int(b[0]), int(b[1]))
-
     return ROISelection(
         obj_band=obj,
         sky_band_low=bot,
@@ -220,8 +237,14 @@ def compute_sky_geometry(
         M = np.zeros((ny, nx), dtype=np.uint16)
 
     edge = int(max(0, edge_margin_px))
+    # Clamp edge so that the core window is not empty (important for small ny in synthetic tests).
+    edge = min(edge, max(0, (ny - 1) // 2))
+    lo = int(edge)
+    hi = int(ny - edge)
+    if hi <= lo:
+        lo, hi = 0, ny
     core = np.zeros(ny, dtype=bool)
-    core[edge : max(edge, ny - edge)] = True
+    core[lo:hi] = True
 
     flags: list[dict[str, Any]] = []
 

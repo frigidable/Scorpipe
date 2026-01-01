@@ -1,4 +1,4 @@
-"""Stack rectified sky-subtracted frames in (λ, y).
+r"""Stack rectified sky-subtracted frames in (λ, y).
 
 P1-E contract (v5.40.4)
 ----------------------
@@ -498,18 +498,21 @@ def run_stack2d(
     from scorpio_pipe.workspace_paths import stage_dir
 
     lin_dir = stage_dir(wd, "linearize").resolve()
+    sky_dir = stage_dir(wd, "sky").resolve()
+    allowed_roots = (lin_dir, sky_dir)
+
     for p in files:
         pr = p.resolve()
         try:
-            if not pr.is_relative_to(lin_dir):
+            if not any(pr.is_relative_to(r) for r in allowed_roots):
                 raise ValueError(
-                    f"stack2d input must come from {lin_dir.name}: got {p}"
+                    f"stack2d input must come from {lin_dir.name} or {sky_dir.name}: got {p}"
                 )
         except AttributeError:
             # Python < 3.9 fallback
-            if str(lin_dir) not in str(pr):
+            if not any(str(r) in str(pr) for r in allowed_roots):
                 raise ValueError(
-                    f"stack2d input must come from {lin_dir.name}: got {p}"
+                    f"stack2d input must come from {lin_dir.name} or {sky_dir.name}: got {p}"
                 )
 
     normalize_exptime = bool(st_cfg.get("normalize_exptime", True))

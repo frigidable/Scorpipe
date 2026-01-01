@@ -17,7 +17,7 @@ import subprocess
 import sys
 
 
-__version__ = "5.40.11"
+__version__ = "5.40.12"
 PIPELINE_VERSION = f"v{__version__}"
 
 
@@ -93,14 +93,28 @@ def get_version_info() -> VersionInfo:
 
 
 def as_header_cards(prefix: str = "SCORP") -> dict[str, str]:
-    """Key-value cards to store in FITS/JSON provenance."""
+    """Key-value cards to store in FITS/JSON provenance.
+
+    FITS keyword names are limited to 8 characters, so we avoid underscores and
+    compact keys when needed.
+    """
+
     v = get_version_info()
+
+    p = (prefix or "SCORP").strip().upper()
+
+    def _k(suffix: str) -> str:
+        suf = (suffix or "").strip().upper()
+        max_p = max(1, 8 - len(suf))
+        pp = p[:max_p]
+        return f"{pp}{suf}"[:8]
+
     cards = {
-        f"{prefix}_VER": v.pipeline_version,
-        f"{prefix}_PKG": v.package_version,
-        f"{prefix}_PY": v.python,
-        f"{prefix}_PLAT": v.platform,
+        _k("VER"): v.pipeline_version,
+        _k("PKG"): v.package_version,
+        _k("PY"): v.python,
+        _k("PLT"): v.platform,
     }
     if v.git_commit:
-        cards[f"{prefix}_GIT"] = v.git_commit
+        cards[_k("GIT")] = v.git_commit
     return cards

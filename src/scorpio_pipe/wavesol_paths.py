@@ -73,18 +73,16 @@ def wavesol_dir(cfg: dict[str, Any]) -> Path:
         return base
 
     # For multiple dispersers, we optionally keep a per-disperser subdir.
-    if slug != "default" and (_has_core_artifacts(sub) or sub.exists()):
+    # Only treat it as "selected" for reading if it contains the expected artifacts;
+    # empty directories can appear transiently in synthetic runs.
+    if slug != "default" and _has_core_artifacts(sub):
         return sub
 
-    # Legacy compatibility:
+# Legacy compatibility:
     # - old base: work_dir/wavesol/
     # - old per-disperser: work_dir/wavesol/<slug>/
     legacy_base = wd / "wavesol"
     legacy_sub = legacy_base / slug
-
-    # If new location has files, prefer it.
-    if sub.exists() or _has_core_artifacts(sub):
-        return sub
 
     # Legacy: prefer per-disperser legacy if it contains core artifacts.
     if legacy_sub.exists() and _has_core_artifacts(legacy_sub):

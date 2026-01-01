@@ -1785,6 +1785,10 @@ def run_linearize(
 
 
         # ------------------------------------------------------------
+        # Preserve the nominal (pre-flexure) wavelength grid for provenance/QC.
+        wave0_nominal = float(wave0)
+        wmax_nominal = float(wmax)
+
         # Apply delta_lambda (flexure correction) from Sky Subtraction
         # ------------------------------------------------------------
         delta_lambda_A = None

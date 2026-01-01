@@ -36,5 +36,5 @@ def add_provenance(
         else:
             ohdr[k] = v
     if stage:
-        ohdr["SCORP_STG"] = (str(stage), "Pipeline stage")
+        ohdr["SCORPSTG"] = (str(stage), "Pipeline stage")
     return ohdr
