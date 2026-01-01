@@ -1018,7 +1018,22 @@ def _run_sky_sub_impl(cfg: dict[str, Any]) -> dict[str, Path]:
 
                 # build sky pixel list
                 ny, nx = sci.shape
-                y_idx, x_idx = np.where(geom.mask_sky_y[:, None])
+                sky_rows = np.flatnonzero(np.asarray(geom.mask_sky_y, dtype=bool))
+                if sky_rows.size == 0:
+                    stage_flags.append(
+                        make_flag(
+                            'NO_SKY_WINDOWS',
+                            'ERROR',
+                            'No valid sky windows could be defined',
+                            hint='Provide ROI (sky_top/sky_bot) or ensure the slit is not filled',
+                            stem=stem,
+                        )
+                    )
+                    raise RuntimeError('No sky pixels')
+
+                # Use all X columns for the selected sky rows.
+                y_idx = np.repeat(sky_rows.astype(int), nx)
+                x_idx = np.tile(np.arange(nx, dtype=int), int(sky_rows.size))
                 if y_idx.size == 0:
                     stage_flags.append(
                         make_flag(

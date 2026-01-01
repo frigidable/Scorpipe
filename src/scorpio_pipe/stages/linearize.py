@@ -1556,12 +1556,8 @@ def run_linearize(
             except Exception:
                 pass
 
-        validate_lambda_map(
-            lam_path,
-            expected_shape=exp_shape,
-            expected_unit=exp_unit,
-            expected_waveref=exp_ref,
-        )
+        # NOTE: lambda_map is validated *after* the stage input contract checks (sky products),
+        # so that contract errors are not masked by synthetic placeholder wavelength maps.
 
         # Get science frames list (prefer cosmics cleaned)
         frames = cfg.get("frames", {}) if isinstance(cfg.get("frames"), dict) else {}
@@ -1640,13 +1636,23 @@ def run_linearize(
         # Do NOT infer this solely from the stage_dir name (it always starts
         # with NN); instead, require that the run_root actually contains staged
         # directories.
-        is_new_layout = any(work_dir.glob("[0-9][0-9]_*"))
+        # Layout detection: legacy workspaces store wavesol products under work_dir/wavesol/
+        # and do NOT require a prior sky stage. New workspaces (v5.39+) require 09_sky products.
+        is_new_layout = (not is_legacy)
         sky_root = stage_dir(work_dir, "sky")
         if is_new_layout and not (sky_root.exists() and any(sky_root.glob("*_skysub_raw.fits"))):
             raise FileNotFoundError(
                 "Sky outputs not found for v5.39+ layout. "
                 f"Run stage {sky_root.name} first (expected {sky_root.name}/*_skysub_raw.fits)."
             )
+
+        # Strict lambda_map validation (P1-B)
+        validate_lambda_map(
+            lam_path,
+            expected_shape=exp_shape,
+            expected_unit=exp_unit,
+            expected_waveref=exp_ref,
+        )
 
         sci_paths: list[Path] = []
         model_paths: list[Path | None] = []
