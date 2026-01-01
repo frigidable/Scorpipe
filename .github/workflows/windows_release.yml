@@ -239,12 +239,20 @@ jobs:
           subject-checksums: release/SHA256SUMS.txt
 
       - name: Publish assets to GitHub Release
-        uses: softprops/action-gh-release@a06a81a0d0ce0ef6c9f2ce57b1b89e4f563b6993 # v2.5.0
-        with:
-          files: |
-            release/*.exe
-            release/*.zip
-            release/*.whl
-            release/*.tar.gz
-            release/*.sbom.spdx.json
-            release/SHA256SUMS.txt
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = '${{ github.event.release.tag_name }}'
+          if (-not $tag) { $tag = '${{ github.ref_name }}' }
+          if (-not $tag) { throw "Failed to resolve release tag name" }
+
+          $assets = Get-ChildItem -Path release -File | Where-Object {
+            ($_.Name -match '\.(exe|zip|whl|tar\.gz|sbom\.spdx\.json)$') -or ($_.Name -eq 'SHA256SUMS.txt')
+          } | ForEach-Object { $_.FullName }
+
+          if (-not $assets -or $assets.Count -eq 0) {
+            throw "No release assets found in ./release (expected .exe/.zip/.whl/.tar.gz/.sbom.spdx.json/SHA256SUMS.txt)"
+          }
+
+          gh release upload $tag $assets --clobber

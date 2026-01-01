@@ -1,3 +1,8 @@
+## v5.40.19
+
+### Fixes
+- CI (Windows Release): replaced `softprops/action-gh-release` with `gh release upload` to avoid intermittent/permission-related 404s when fetching the third-party action; release assets are now uploaded using the official GitHub CLI.
+
 ## v5.40.18
 
 ### Fixes
