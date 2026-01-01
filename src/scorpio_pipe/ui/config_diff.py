@@ -22,7 +22,8 @@ class ConfigDiffDialog(QtWidgets.QDialog):
         except Exception:
             pass
 
-        lay = QtWidgets.QVBoxLayout(self)
+        lay = QtWidgets.QVBoxLayout()
+        self.setLayout(lay)
         lay.setContentsMargins(10, 10, 10, 10)
         lay.setSpacing(8)
 

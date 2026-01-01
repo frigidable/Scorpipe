@@ -18,7 +18,8 @@ class InstrumentBrowserDialog(QtWidgets.QDialog):
         except Exception:
             pass
 
-        outer = QtWidgets.QVBoxLayout(self)
+        outer = QtWidgets.QVBoxLayout()
+        self.setLayout(outer)
         outer.setContentsMargins(12, 12, 12, 12)
         outer.setSpacing(10)
 

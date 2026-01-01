@@ -1,0 +1,20 @@
+{
+  "qc": {
+    "max_severity": "OK",
+    "flag_codes": []
+  },
+  "navigator": {
+    "qc_summary": {
+      "max_severity": "OK",
+      "n_warn": 0,
+      "n_error": 0
+    },
+    "stages_status": {
+      "wavesol": "NOT_RUN",
+      "sky": "DONE_OK",
+      "linearize": "DONE_OK",
+      "stack2d": "DONE_OK",
+      "extract1d": "DONE_OK"
+    }
+  }
+}

@@ -39,6 +39,7 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 import numpy as np
 from astropy.io import fits
 from scipy.interpolate import UnivariateSpline
+from scipy.ndimage import gaussian_filter1d
 
 from scorpio_pipe.paths import resolve_work_dir
 from scorpio_pipe.provenance import add_provenance
@@ -669,6 +670,168 @@ def _boxcar_extract(
 # ------------------------------- IO helpers -------------------------------
 
 
+
+def _optimal_extract(
+    sci: np.ndarray,
+    var: Optional[np.ndarray],
+    mask: Optional[np.ndarray],
+    y_center: np.ndarray,
+    *,
+    ap_hw: int,
+    fatal_bits: int,
+    min_good_frac: float,
+    sky_resid: Optional[np.ndarray],
+    apply_local_sky: bool,
+    smooth_lambda_sigma: float = 3.0,
+    clip_negative_profile: bool = True,
+    min_profile_sum: float = 1e-6,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    """Horne-like optimal extraction (weights by spatial profile + honest VAR).
+
+    Notes
+    -----
+    We implement the classical weighted estimator:
+
+      F(λ)   = Σ_y P(y|λ) * D(y,λ) / V(y,λ)  /  Σ_y P(y|λ)^2 / V(y,λ)
+      Var(λ) = 1 / Σ_y P(y|λ)^2 / V(y,λ)
+
+    where D is the input 2D data (background/sky already subtracted) and P is the
+    normalized spatial profile within the extraction aperture.
+
+    The profile is estimated from the data in a moving aperture around `y_center`
+    and smoothed along λ with a Gaussian filter to reduce 'learning on noise'.
+    """
+    ny, nlam = sci.shape
+    ap_hw = int(max(1, ap_hw))
+    nwin = int(2 * ap_hw + 1)
+    min_good_frac = float(np.clip(min_good_frac, 0.0, 1.0))
+
+    have_var = var is not None and var.shape == sci.shape
+    have_mask = mask is not None and mask.shape == sci.shape
+    if not have_var:
+        # Without VAR optimal extraction is undefined; fall back to VAR=1.
+        var = np.ones_like(sci, dtype=float)
+
+    # Build a profile cube in aperture coordinates (k=0..nwin-1, λ).
+    prof = np.zeros((nwin, nlam), dtype=float)
+    good_prof = np.zeros((nwin, nlam), dtype=bool)
+
+    for j in range(nlam):
+        yc = float(y_center[j]) if j < len(y_center) else float(np.nanmedian(y_center))
+        y0 = _clamp_int(yc - ap_hw, 0, ny - 1)
+        y1 = _clamp_int(yc + ap_hw, 0, ny - 1)
+        sl = sci[y0 : y1 + 1, j].astype(float, copy=False)
+        vv = var[y0 : y1 + 1, j].astype(float, copy=False)
+        good = np.isfinite(sl) & np.isfinite(vv) & (vv > 0)
+        if have_mask:
+            mm = mask[y0 : y1 + 1, j]
+            good &= (mm & fatal_bits) == 0
+
+        if sl.size == 0:
+            continue
+
+        p = sl.copy()
+        if clip_negative_profile:
+            p = np.where(np.isfinite(p), np.maximum(p, 0.0), 0.0)
+        else:
+            p = np.where(np.isfinite(p), p, 0.0)
+
+        # Map into fixed aperture grid.
+        k0 = int(y0 - (int(round(yc)) - ap_hw))
+        k0 = int(np.clip(k0, 0, nwin - 1))
+        k1 = min(nwin, k0 + sl.size)
+        prof[k0:k1, j] = p[: (k1 - k0)]
+        good_prof[k0:k1, j] = good[: (k1 - k0)]
+
+    # Smooth along λ (each spatial offset independently).
+    try:
+        sig = float(max(0.0, smooth_lambda_sigma))
+    except Exception:
+        sig = 3.0
+    if sig > 0:
+        for k in range(nwin):
+            prof[k, :] = gaussian_filter1d(prof[k, :], sigma=sig, mode="nearest")
+
+    # Normalize profile to Σ P = 1 per λ on good pixels.
+    P = np.zeros_like(prof, dtype=float)
+    n_fallback = 0
+    for j in range(nlam):
+        g = good_prof[:, j]
+        s = float(np.sum(prof[g, j])) if np.any(g) else 0.0
+        if not (s > min_profile_sum):
+            # Fallback: uniform on good pixels (or full aperture if nothing is good).
+            n_fallback += 1
+            if np.any(g):
+                P[g, j] = 1.0 / float(np.sum(g))
+            else:
+                P[:, j] = 1.0 / float(nwin)
+        else:
+            P[g, j] = prof[g, j] / s
+
+    # Now compute the optimal estimator per λ.
+    flux = np.full(nlam, np.nan, dtype=float)
+    out_var = np.full(nlam, np.nan, dtype=float)
+    out_mask = np.zeros(nlam, dtype=np.uint16)
+    out_npix = np.zeros(nlam, dtype=np.int16)
+
+    from scorpio_pipe.maskbits import NO_COVERAGE
+
+    meta: dict[str, Any] = {
+        "profile_smooth_lambda_sigma": float(sig),
+        "profile_clip_negative": bool(clip_negative_profile),
+        "profile_fallback_frac": float(n_fallback) / float(max(1, nlam)),
+    }
+
+    for j in range(nlam):
+        yc = float(y_center[j]) if j < len(y_center) else float(np.nanmedian(y_center))
+        y0 = _clamp_int(yc - ap_hw, 0, ny - 1)
+        y1 = _clamp_int(yc + ap_hw, 0, ny - 1)
+        sl = sci[y0 : y1 + 1, j].astype(float, copy=False)
+        vv = var[y0 : y1 + 1, j].astype(float, copy=False)
+        good = np.isfinite(sl) & np.isfinite(vv) & (vv > 0)
+        if have_mask:
+            mm = mask[y0 : y1 + 1, j]
+            good &= (mm & fatal_bits) == 0
+
+        n_tot = int(y1 - y0 + 1)
+        n_good = int(np.sum(good))
+        out_npix[j] = np.int16(n_good)
+
+        if n_tot <= 0 or n_good <= 0:
+            out_mask[j] |= np.uint16(NO_COVERAGE)
+            continue
+        if n_good < int(math.ceil(min_good_frac * n_tot)):
+            out_mask[j] |= np.uint16(NO_COVERAGE)
+
+        # Map P (aperture coords) to this slice.
+        k0 = int(y0 - (int(round(yc)) - ap_hw))
+        k0 = int(np.clip(k0, 0, nwin - 1))
+        k1 = min(nwin, k0 + sl.size)
+        Pj = np.zeros_like(sl, dtype=float)
+        Pj[: (k1 - k0)] = P[k0:k1, j][: (k1 - k0)]
+
+        # Classical estimator.
+        denom = float(np.sum((Pj[good] ** 2) / vv[good])) if np.any(good) else 0.0
+        if not (denom > 0):
+            out_mask[j] |= np.uint16(NO_COVERAGE)
+            continue
+        num = float(np.sum(Pj[good] * sl[good] / vv[good]))
+
+        f = num / denom
+
+        if apply_local_sky and sky_resid is not None and np.isfinite(sky_resid[j]):
+            # Subtract additive residual sky offset properly for the weighted estimator.
+            corr = float(np.sum(Pj[good] / vv[good])) / denom
+            f = f - float(sky_resid[j]) * corr
+
+        flux[j] = f
+        out_var[j] = 1.0 / denom
+
+    sky_out = np.asarray(sky_resid, dtype=float) if sky_resid is not None else np.full(nlam, np.nan, dtype=float)
+    return flux, out_var, out_mask, sky_out, out_npix, meta
+
+
+
 def _write_spec1d_fits(
     out_path: Path,
     *,
@@ -1014,16 +1177,76 @@ def _run_extract1d_impl(
     apply_local_sky = bool(ecfg.get("local_sky_correction", False))
 
     # ------------------------------ extraction -----------------------------
-    method = str(ecfg.get("method", "boxcar")).strip().lower()
+    # Accept both modern 'method' and legacy 'mode' keys (UI historically used 'mode').
+    method = str(ecfg.get("method", ecfg.get("mode", "boxcar"))).strip().lower()
     if method == "sum":
         method = "boxcar"
-    if method not in {"boxcar", "mean"}:
-        # NOTE: we intentionally keep extraction deterministic and transparent.
-        # Optimal extraction is a separate R&D topic; for now, treat it as boxcar.
+    if method in {"horne", "optimal_extraction"}:
+        method = "optimal"
+    if method not in {"boxcar", "mean", "optimal"}:
         method = "boxcar"
+
     min_good_frac = float(ecfg.get("min_good_frac", 0.6))
 
-    flux_tr, var_tr, mask_tr, sky_tr, npix_tr = _boxcar_extract(
+    opt_meta: dict[str, Any] = {}
+    if method == "optimal":
+        ocfg = ecfg.get("optimal") if isinstance(ecfg.get("optimal"), dict) else {}
+        smooth_sig = float(ocfg.get("profile_smooth_lambda_sigma", 3.0))
+        clip_neg = bool(ocfg.get("clip_negative_profile", True))
+        min_ps = float(ocfg.get("min_profile_sum", 1e-6))
+        flux_tr, var_tr, mask_tr, sky_tr, npix_tr, m_tr = _optimal_extract(
+            sci,
+            var,
+            mask,
+            trace.y_trace,
+            ap_hw=trace.aperture_half_width,
+            fatal_bits=fatal_bits,
+            min_good_frac=min_good_frac,
+            sky_resid=sky_resid,
+            apply_local_sky=apply_local_sky,
+            smooth_lambda_sigma=smooth_sig,
+            clip_negative_profile=clip_neg,
+            min_profile_sum=min_ps,
+        )
+        flux_fx, var_fx, mask_fx, sky_fx, npix_fx, m_fx = _optimal_extract(
+            sci,
+            var,
+            mask,
+            trace.y_fixed,
+            ap_hw=trace.aperture_half_width,
+            fatal_bits=fatal_bits,
+            min_good_frac=min_good_frac,
+            sky_resid=sky_resid,
+            apply_local_sky=apply_local_sky,
+            smooth_lambda_sigma=smooth_sig,
+            clip_negative_profile=clip_neg,
+            min_profile_sum=min_ps,
+        )
+        opt_meta = {"trace": m_tr, "fixed": m_fx}
+    else:
+        flux_tr, var_tr, mask_tr, sky_tr, npix_tr = _boxcar_extract(
+            sci,
+            var,
+            mask,
+            trace.y_trace,
+            ap_hw=trace.aperture_half_width,
+            fatal_bits=fatal_bits,
+            min_good_frac=min_good_frac,
+            sky_resid=sky_resid,
+            apply_local_sky=apply_local_sky,
+        )
+        flux_fx, var_fx, mask_fx, sky_fx, npix_fx = _boxcar_extract(
+            sci,
+            var,
+            mask,
+            trace.y_fixed,
+            ap_hw=trace.aperture_half_width,
+            fatal_bits=fatal_bits,
+            min_good_frac=min_good_frac,
+            sky_resid=sky_resid,
+            apply_local_sky=apply_local_sky,
+        )
+(
         sci,
         var,
         mask,
@@ -1263,6 +1486,19 @@ def _run_extract1d_impl(
                 "blocks_valid": int(trace.meta.get("blocks_valid", 0)),
                 "valid_frac": float(trace.meta.get("blocks_valid", 0))
                 / max(1.0, float(trace.meta.get("blocks_total", 0))),
+            },
+            "extract": {
+                "method": method,
+                "input_mode": mode,
+                "snr_trace_median": (
+                    float(np.nanmedian(np.where(np.isfinite(var_tr) & (var_tr > 0), flux_tr / np.sqrt(var_tr), np.nan)))
+                    if flux_tr.size else None
+                ),
+                "snr_fixed_median": (
+                    float(np.nanmedian(np.where(np.isfinite(var_fx) & (var_fx > 0), flux_fx / np.sqrt(var_fx), np.nan)))
+                    if flux_fx.size else None
+                ),
+                "optimal_meta": _safe_json(opt_meta) if opt_meta else None,
             },
             "warnings": [w for w in [eta_warn, geo_meta.get("warning")] if w],
             # Backward-compatible code list

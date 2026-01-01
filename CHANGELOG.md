@@ -1,3 +1,19 @@
+## [5.40.25] - 2026-01-01
+
+### Added
+- CI: split tests into a fast pytest suite and a separate synthetic smoke-test suite (`-m smoke`). The smoke job uploads `qc_report.json` and `ui/navigator/data.json` as CI artifacts (always uploaded, even on failures).
+- UI/QC: added a **Recommended actions** panel in the inspector, mapping QC flag codes to conservative next steps (no auto-run).
+- P3: implemented optional Sky-frame scaling (Skycorr-like) when explicit sky frames are provided; writes metrics and safe no-gain flags.
+- P3: added optional optimal extraction (Horne-like) with honest variance propagation; writes a per-λ profile diagnostic.
+- P3: added explicit η(λ) diagnostics in Stack2D (robust sigma before/after η) with QC flagging when calibration looks wrong.
+- P3: added `export-package` to bundle spec1d + QC + navigator into a single zip for archival/sharing.
+
+## [5.40.24] - 2026-01-01
+
+### Fixed
+- UI: eliminated sporadic PySide6 ownership/use-after-delete crashes by avoiding parented Q*Layout constructors and adding defensive layout re-creation in stage pages (Cosmics and others).
+- UI: removed duplicate `lay.addWidget(left, 1)` blocks that could cause unpredictable layout behavior.
+
 ## v5.40.23
 
 ### Fixes

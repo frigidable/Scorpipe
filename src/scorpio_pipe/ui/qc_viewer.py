@@ -142,7 +142,8 @@ class QCViewer(QtWidgets.QMainWindow):
 
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
-        lay = QtWidgets.QVBoxLayout(central)
+        lay = QtWidgets.QVBoxLayout()
+        central.setLayout(lay)
         lay.setContentsMargins(8, 8, 8, 8)
 
         # toolbar
@@ -170,7 +171,8 @@ class QCViewer(QtWidgets.QMainWindow):
 
         # left: list
         left = QtWidgets.QWidget()
-        llay = QtWidgets.QVBoxLayout(left)
+        llay = QtWidgets.QVBoxLayout()
+        left.setLayout(llay)
         llay.setContentsMargins(0, 0, 0, 0)
         self.list_items = QtWidgets.QListWidget()
         self.list_items.setAlternatingRowColors(True)
@@ -179,7 +181,8 @@ class QCViewer(QtWidgets.QMainWindow):
 
         # right: viewer
         right = QtWidgets.QWidget()
-        rlay = QtWidgets.QVBoxLayout(right)
+        rlay = QtWidgets.QVBoxLayout()
+        right.setLayout(rlay)
         rlay.setContentsMargins(0, 0, 0, 0)
 
         self.lbl_title = QtWidgets.QLabel("—")

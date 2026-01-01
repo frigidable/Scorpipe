@@ -44,6 +44,39 @@ MASK_ROBUST_REJECTED = REJECTED
 FATAL_BITS = np.uint16(NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER)
 
 
+def _robust_sigma_r(x: np.ndarray) -> float | None:
+    """Robust sigma estimate via MAD (Gaussian equivalent)."""
+    x = np.asarray(x, dtype=float)
+    x = x[np.isfinite(x)]
+    if x.size < 10:
+        return None
+    med = float(np.median(x))
+    mad = float(np.median(np.abs(x - med)))
+    if not (mad > 0):
+        return None
+    return float(1.4826 * mad)
+
+
+def _sigma_sci_over_sqrtvar(
+    sci: np.ndarray,
+    var: np.ndarray,
+    mask: np.ndarray | None,
+    *,
+    fatal_bits: int,
+) -> float | None:
+    """robust_sigma( SCI/sqrt(VAR) ) over valid pixels."""
+    sci = np.asarray(sci, dtype=float)
+    var = np.asarray(var, dtype=float)
+    good = np.isfinite(sci) & np.isfinite(var) & (var > 0)
+    if mask is not None:
+        mm = np.asarray(mask, dtype=np.uint16)
+        good &= (mm & int(fatal_bits)) == 0
+    if not np.any(good):
+        return None
+    r = sci[good] / np.sqrt(var[good])
+    return _robust_sigma_r(r)
+
+
 def _get_primary_header(hdul: fits.HDUList) -> fits.Header:
     try:
         return hdul[0].header
@@ -983,6 +1016,12 @@ def run_stack2d(
                     & (out_cov > 0)
                     & ((out_mask & FATAL_BITS) == 0)
                 )
+
+                # P3-LIN-010: diagnostics of correlated noise / η(λ) calibration.
+                eta_meta["sigma_before_eta"] = _robust_sigma_r(
+                    (out_sci[good] / np.sqrt(out_var[good])).astype(float, copy=False)
+                )
+
                 if np.count_nonzero(sky_rows_mask) >= 8 and np.count_nonzero(good) >= 256:
                     Z = np.where(good, out_sci, np.nan)
                     med = np.nanmedian(Z, axis=0)
@@ -1007,6 +1046,10 @@ def run_stack2d(
 
                     # Apply in-place.
                     out_var *= eta_s[None, :]
+                    good2 = good & np.isfinite(out_var) & (out_var > 0)
+                    eta_meta["sigma_after_eta"] = _robust_sigma_r(
+                        (out_sci[good2] / np.sqrt(out_var[good2])).astype(float, copy=False)
+                    )
 
                     # Write eta(lambda) to a sidecar FITS.
                     eh = fits.Header()
@@ -1294,6 +1337,33 @@ def run_stack2d(
                                     value=float(medf) if medf is not None else None,
                                 )
                             )
+
+
+# P3-LIN-010 QC: if after-eta normalized sky scatter is far from 1,
+# treat η as badly calibrated (correlated noise not captured).
+sig_after = eta_meta.get("sigma_after_eta")
+if sig_after is not None and np.isfinite(sig_after):
+    dev = abs(float(sig_after) - 1.0)
+    dev_warn = float(getattr(thr, "eta_sigma_dev_warn", 0.25))
+    dev_bad = float(getattr(thr, "eta_sigma_dev_bad", 0.50))
+    if dev > dev_bad:
+        stage_flags.append(
+            make_flag(
+                "ETA_BAD_CALIBRATION",
+                "ERROR",
+                "after-eta robust_sigma(SCI/sqrt(VAR)) on sky is far from 1; η may be miscalibrated",
+                value=float(sig_after),
+            )
+        )
+    elif dev > dev_warn:
+        stage_flags.append(
+            make_flag(
+                "ETA_BAD_CALIBRATION",
+                "WARN",
+                "after-eta robust_sigma(SCI/sqrt(VAR)) on sky deviates from 1; verify η and sky windows",
+                value=float(sig_after),
+            )
+        )
             except Exception:
                 pass
 

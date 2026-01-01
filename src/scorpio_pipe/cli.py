@@ -355,6 +355,36 @@ def cmd_products(args: argparse.Namespace) -> int:
     return 0
 
 
+
+def cmd_export_package(args: argparse.Namespace) -> int:
+    """Export a compact 'science package' ZIP: spec1d + qc + navigator + key PNG."""
+    from scorpio_pipe.export_package import export_science_package
+    from scorpio_pipe.config import load_config
+    from scorpio_pipe.paths import resolve_work_dir
+
+    work_dir: Path | None = None
+    if getattr(args, "work_dir", None):
+        work_dir = Path(args.work_dir).expanduser().resolve()
+    elif getattr(args, "config", None):
+        cfg = load_config(Path(args.config).expanduser().resolve())
+        work_dir = resolve_work_dir(cfg)
+
+    if work_dir is None:
+        raise SystemExit("Need --work-dir or --config")
+
+    out = Path(args.out).expanduser().resolve() if getattr(args, "out", None) else None
+    zip_path = export_science_package(
+        work_dir,
+        out_zip=out,
+        include_html=not bool(getattr(args, "no_html", False)),
+        include_png=not bool(getattr(args, "no_png", False)),
+        overwrite=bool(getattr(args, "overwrite", False)),
+    )
+    print(str(zip_path))
+    return 0
+
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="scorpio-pipe")
     p.add_argument(
@@ -397,6 +427,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_prod.add_argument("--config", required=True)
     p_prod.set_defaults(func=cmd_products)
+
+p_exp = sub.add_parser(
+        "export-package", help="Export a compact result ZIP: spec1d + qc + navigator"
+    )
+    g = p_exp.add_mutually_exclusive_group(required=True)
+    g.add_argument("--work-dir", default=None, help="Run work_dir (workplace/<date>/<obj>_...>)")
+    g.add_argument("--config", default=None, help="Config path (work_dir resolved from config)")
+    p_exp.add_argument("--out", default=None, help="Output zip path (default: <work_dir>/science_package.zip)")
+    p_exp.add_argument("--overwrite", action="store_true", help="Overwrite existing zip")
+    p_exp.add_argument("--no-html", action="store_true", help="Do not include navigator HTML")
+    p_exp.add_argument("--no-png", action="store_true", help="Do not include PNG quicklooks")
+    p_exp.set_defaults(func=cmd_export_package)
+
 
     p_run = sub.add_parser(
         "run", help="Auto-config + (optional) execute pipeline tasks"

@@ -1053,15 +1053,10 @@ def _run_sky_sub_impl(cfg: dict[str, Any]) -> dict[str, Path]:
             if sky_frames:
                 sky_template, _hdr_t = _median_template([Path(str(p)) for p in sky_frames])
             else:
-                stage_flags.append(
-                    make_flag(
-                        "NO_SKY_FRAMES",
-                        "ERROR",
-                        "primary_method=sky_scale_raw but cfg.frames.sky is empty",
-                        hint="Provide dedicated sky frames or switch to kelson_raw",
-                    )
+                raise RuntimeError(
+                    "primary_method=sky_scale_raw is an explicit mode and requires cfg.frames.sky (a non-empty list of sky frames). "
+                    "Provide dedicated sky frames or switch to kelson_raw."
                 )
-                primary = "kelson_raw"
 
         # process exposures
         for p in raw_inputs:
@@ -1450,6 +1445,28 @@ def _run_sky_sub_impl(cfg: dict[str, Any]) -> dict[str, Path]:
                     "flexure_sigma_A": flex.get("sigma_delta_A") if flex is not None else None,
                     "flexure_score": flex.get("flexure_score") if flex is not None else None,
                 }
+
+                # P3-SKY-010: flag if sky-frame scaling did not improve the sky scatter.
+                try:
+                    if method_used == "sky_scale_raw":
+                        sb = metrics.get("robust_sigma_r_before")
+                        sa = metrics.get("robust_sigma_r_after")
+                        if sb is not None and sa is not None:
+                            sb = float(sb)
+                            sa = float(sa)
+                            if np.isfinite(sb) and np.isfinite(sa) and sa >= sb:
+                                stage_flags.append(
+                                    make_flag(
+                                        "SKY_SCALE_NO_GAIN",
+                                        "WARN",
+                                        "Sky scaling did not reduce robust scatter on sky windows",
+                                        stem=stem,
+                                        sigma_before=sb,
+                                        sigma_after=sa,
+                                    )
+                                )
+                except Exception:
+                    pass
 
                 per_exp.append(
                     {

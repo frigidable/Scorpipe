@@ -41,7 +41,8 @@ class _FilesBrowser(QtWidgets.QWidget):
         splitter.addWidget(self._stack)
         splitter.setStretchFactor(1, 1)
 
-        layout = QtWidgets.QVBoxLayout(self)
+        layout = QtWidgets.QVBoxLayout()
+        self.setLayout(layout)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(splitter)
 

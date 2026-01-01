@@ -40,7 +40,8 @@ class RunPlanWidget(QtWidgets.QWidget):
         super().__init__(parent)
         self._cfg: dict[str, Any] | None = None
 
-        lay = QtWidgets.QVBoxLayout(self)
+        lay = QtWidgets.QVBoxLayout()
+        self.setLayout(lay)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(6)
 
@@ -138,7 +139,8 @@ class QCAlertsWidget(QtWidgets.QWidget):
         super().__init__(parent)
         self._work_dir: Path | None = None
 
-        lay = QtWidgets.QVBoxLayout(self)
+        lay = QtWidgets.QVBoxLayout()
+        self.setLayout(lay)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(6)
 
@@ -157,6 +159,18 @@ class QCAlertsWidget(QtWidgets.QWidget):
         self.lbl_counts.setWordWrap(True)
         lay.addWidget(self.lbl_counts)
 
+        # QC-guided suggestions (P3): show safe recommended actions based on QC flags.
+        self.grp_actions = QtWidgets.QGroupBox("Recommended actions")
+        ga = QtWidgets.QVBoxLayout()
+        ga.setContentsMargins(8, 6, 8, 8)
+        ga.setSpacing(4)
+        self.grp_actions.setLayout(ga)
+        self.lbl_actions = QtWidgets.QLabel("—")
+        self.lbl_actions.setWordWrap(True)
+        ga.addWidget(self.lbl_actions)
+        self.grp_actions.setVisible(False)
+        lay.addWidget(self.grp_actions)
+
         self.list = QtWidgets.QListWidget()
         self.list.setAlternatingRowColors(True)
         lay.addWidget(self.list, 1)
@@ -171,8 +185,12 @@ class QCAlertsWidget(QtWidgets.QWidget):
 
     def refresh(self) -> None:
         self.list.clear()
+        # Reset suggestions to avoid stale guidance when switching runs
+        self.grp_actions.setVisible(False)
+        self.lbl_actions.setText("—")
         if not self._work_dir:
             self.lbl_counts.setText("—")
+            self.grp_actions.setVisible(False)
             return
 
         # Canonical path (P1-G UI-050): work_dir/qc/qc_report.json
@@ -183,6 +201,7 @@ class QCAlertsWidget(QtWidgets.QWidget):
             qc_json = self._work_dir / "report" / "qc_report.json"
         if not qc_json.exists():
             self.lbl_counts.setText("QC report not built yet")
+            self.grp_actions.setVisible(False)
             return
 
         try:
@@ -191,6 +210,7 @@ class QCAlertsWidget(QtWidgets.QWidget):
             self.lbl_counts.setText(
                 f"Failed to read qc_report.json: {type(e).__name__}"
             )
+            self.grp_actions.setVisible(False)
             return
 
         qc = payload.get("qc", {}) if isinstance(payload, dict) else {}
@@ -237,6 +257,22 @@ class QCAlertsWidget(QtWidgets.QWidget):
             f"bad: {_i('bad')}  |  warn: {_i('warn')}  |  info: {_i('info')}  |  total: {_i('total')}"
         )
 
+        # Recommended actions from QC flags
+        actions = []
+        try:
+            from scorpio_pipe.qc_suggestions import extract_flag_codes, recommend_actions
+
+            codes = extract_flag_codes(items)
+            actions = recommend_actions(codes)
+        except Exception:
+            actions = []
+
+        if actions:
+            self.lbl_actions.setText('\n'.join([f"• {a}" for a in actions]))
+            self.grp_actions.setVisible(True)
+        else:
+            self.grp_actions.setVisible(False)
+
         if not items:
             self.list.addItem("(No alerts)")
             return
@@ -277,7 +313,8 @@ class InspectorPanel(QtWidgets.QWidget):
         self._cfg: dict[str, Any] | None = None
         self._stage: str | None = None
 
-        lay = QtWidgets.QVBoxLayout(self)
+        lay = QtWidgets.QVBoxLayout()
+        self.setLayout(lay)
         lay.setContentsMargins(6, 6, 6, 6)
         lay.setSpacing(8)
 
