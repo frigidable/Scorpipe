@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from rich import print
+from rich.markup import escape
 from rich.table import Table
 
 from scorpio_pipe.autocfg import build_autoconfig
@@ -17,6 +18,18 @@ from scorpio_pipe.version import PIPELINE_VERSION, __version__
 
 
 log = logging.getLogger("scorpio")
+
+
+def _esc(s: object) -> str:
+    """Escape dynamic strings for Rich markup contexts.
+
+    Many pipeline messages legitimately contain square brackets (e.g. frames[obj]),
+    which Rich would otherwise interpret as markup tags.
+    """
+
+    if s is None:
+        return ""
+    return escape(str(s))
 
 
 def _comma_list(raw: str | None) -> list[str]:
@@ -44,7 +57,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         if res.open_errors:
             print("[yellow]First errors:[/yellow]")
             for s in res.open_errors[:10]:
-                print(f" - {s}")
+                print(f" - {s}", markup=False)
         return 2
 
     print("\n[bold]Objects found (science frames):[/bold]")
@@ -160,22 +173,22 @@ def cmd_run(args: argparse.Namespace) -> int:
     work_dir.mkdir(parents=True, exist_ok=True)
     cfg_path = work_dir / "config.yaml"
     cfg_model.to_yaml(cfg_path)
-    print(f"[green]Wrote autoconfig:[/green] {cfg_path}")
+    print(f"[green]Wrote autoconfig:[/green] {_esc(cfg_path)}")
 
     rep = validate_config(str(cfg_path), strict_paths=False)
     if rep.warnings:
         print("\n[yellow]Config warnings:[/yellow]")
         for w in rep.warnings[:20]:
-            print(f" - [{w.code}] {w.message}")
+            print(f" - [{w.code}] {w.message}", markup=False)
             if w.hint:
-                print(f"   hint: {w.hint}")
+                print(f"   hint: {w.hint}", markup=False)
 
     if not rep.ok:
         print("\n[red]Config errors:[/red]")
         for e in rep.errors:
-            print(f" - [{e.code}] {e.message}")
+            print(f" - [{e.code}] {e.message}", markup=False)
             if e.hint:
-                print(f"   hint: {e.hint}")
+                print(f"   hint: {e.hint}", markup=False)
         return 2
 
     if not args.execute:
@@ -201,7 +214,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
     print("\n[green]Done.[/green]")
     for k, v in out.items():
-        print(f" - {k}: {v}")
+        print(f" - {k}: {v}", markup=False)
     return 0
 
 
@@ -214,15 +227,16 @@ def cmd_validate(args: argparse.Namespace) -> int:
     if rep.warnings:
         print("\n[yellow]Warnings:[/yellow]")
         for w in rep.warnings:
-            print(f" - [{w.code}] {w.message}")
+            # Use markup=False so bracketed codes/messages render literally.
+            print(f" - [{w.code}] {w.message}", markup=False)
             if w.hint:
-                print(f"   hint: {w.hint}")
+                print(f"   hint: {w.hint}", markup=False)
     if rep.errors:
         print("\n[red]Errors:[/red]")
         for e in rep.errors:
-            print(f" - [{e.code}] {e.message}")
+            print(f" - [{e.code}] {e.message}", markup=False)
             if e.hint:
-                print(f"   hint: {e.hint}")
+                print(f"   hint: {e.hint}", markup=False)
     return 0 if rep.ok else 2
 
 
@@ -241,7 +255,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print("[green]GUI deps:[/green] OK")
     else:
         miss = ", ".join(gui.get("missing", []) or [])
-        print(f"[yellow]GUI deps:[/yellow] missing {miss} ({gui.get('hint', '')})")
+        hint = gui.get("hint", "") or ""
+        print(f"[yellow]GUI deps:[/yellow] missing {_esc(miss)} ({_esc(hint)})")
 
     for r in rep.get("resources", []) or []:
         if r.get("found"):
@@ -255,26 +270,38 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if cfg:
         sch = cfg.get("schema") or {}
         val = cfg.get("validate") or {}
-        print(f"\n[bold]Config:[/bold] {cfg.get('path')}")
+        print(f"\n[bold]Config:[/bold] {_esc(cfg.get('path'))}")
         print(
             f"Schema: {'OK' if sch.get('ok') else 'FAIL'} | Validate: {'OK' if val.get('ok') else 'FAIL'}"
         )
         if sch.get("warnings"):
             print("\n[yellow]Schema warnings:[/yellow]")
             for w in sch.get("warnings", [])[:15]:
-                print(f" - [{w.get('code')}] {w.get('message')}")
+                print(
+                    f" - [{w.get('code')}] {w.get('message')}",
+                    markup=False,
+                )
         if sch.get("errors"):
             print("\n[red]Schema errors:[/red]")
             for e in sch.get("errors", [])[:15]:
-                print(f" - [{e.get('code')}] {e.get('message')}")
+                print(
+                    f" - [{e.get('code')}] {e.get('message')}",
+                    markup=False,
+                )
         if val.get("warnings"):
             print("\n[yellow]Validation warnings:[/yellow]")
             for w in val.get("warnings", [])[:15]:
-                print(f" - [{w.get('code')}] {w.get('message')}")
+                print(
+                    f" - [{w.get('code')}] {w.get('message')}",
+                    markup=False,
+                )
         if val.get("errors"):
             print("\n[red]Validation errors:[/red]")
             for e in val.get("errors", [])[:15]:
-                print(f" - [{e.get('code')}] {e.get('message')}")
+                print(
+                    f" - [{e.get('code')}] {e.get('message')}",
+                    markup=False,
+                )
 
     if rep.get("fixes"):
         print("\n[bold]Autofixes:[/bold]")

@@ -962,10 +962,13 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 QtWidgets.QSlider,
                 QtWidgets.QDateTimeEdit,
             )
-            for child in w.findChildren(interactive):
-                # Presence of any interactive control means Advanced is meaningful,
-                # even if that control is currently hidden by a mode/method.
-                return False
+            # NOTE: PySide6.QObject.findChildren does *not* accept a tuple of types
+            # (unlike some PyQt variants). Keep this compatible by querying per-type.
+            for t in interactive:
+                if w.findChildren(t):
+                    # Presence of any interactive control means Advanced is meaningful,
+                    # even if that control is currently hidden by a mode/method.
+                    return False
 
             # Otherwise, treat a single note label as empty.
             lay = w.layout()

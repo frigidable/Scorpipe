@@ -1,3 +1,14 @@
+## v5.40.23
+
+### Fixes
+- Packaging: migrated license file declaration from deprecated `tool.setuptools.license-files` to `project.license-files` to avoid upcoming setuptools build breakage.
+- CLI: ensured diagnostic output renders literally under Rich markup (error codes/messages like `frames[obj]` are no longer eaten as markup). This also fixes the Doctor hint displaying `scorpio-pipe[gui]` correctly.
+
+## v5.40.22
+
+### Fixes
+- GUI (PySide6): fixed a crash in the Calibration page where `QObject.findChildren()` was called with a tuple of widget types (unsupported by PySide6). Advanced-tab emptiness detection now queries per-type.
+
 ## v5.40.21
 
 ### Fixes

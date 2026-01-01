@@ -7,8 +7,9 @@ name = "scorpio-pipe"
 requires-python = ">=3.10"
 readme = "README.md"
 # NOTE: setuptools (as used in CI) validates PEP 621 `license` as a string.
-# The license text is shipped via [tool.setuptools].license-files below.
+# We ship the license file via `project.license-files` (setuptools>=77).
 license = "BSD-3-Clause"
+license-files = ["LICENSE"]
 dependencies = [
   "astropy>=6",
   "numpy",
@@ -57,7 +58,6 @@ scorpipe = "scorpio_pipe.ui.launcher_app:main"
 [tool.setuptools]
 package-dir = {"" = "src"}
 include-package-data = true
-license-files = ["LICENSE"]
 
 [tool.setuptools.dynamic]
 version = { attr = "scorpio_pipe.version.__version__" }
