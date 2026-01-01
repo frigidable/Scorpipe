@@ -48,16 +48,35 @@ REJECTED = np.uint16(1 << 6)
 
 
 def header_cards(prefix: str = "SCORP") -> dict[str, str]:
-    """FITS header cards describing the mask schema."""
+    """FITS header cards describing the mask schema.
+
+    FITS keyword names are limited to 8 characters. Astropy will auto-convert
+    longer keywords into ``HIERARCH`` cards and emit ``VerifyWarning``.
+
+    We keep the semantic prefix (default: ``SCORP``) but compact the keywords
+    to stay within 8 characters:
+
+    - ``SCORPMKV``  : schema version
+    - ``SCORPMB0``..: bit names
+    """
+
+    p = (prefix or "SCORP").strip().upper()
+
+    def _k(suffix: str) -> str:
+        suf = (suffix or "").strip().upper()
+        max_p = max(1, 8 - len(suf))
+        pp = p[:max_p]
+        return f"{pp}{suf}"[:8]
+
     return {
-        f"{prefix}_MKV": MASK_SCHEMA_VERSION,
-        f"{prefix}_MB0": "NO_COVERAGE",
-        f"{prefix}_MB1": "BADPIX",
-        f"{prefix}_MB2": "COSMIC",
-        f"{prefix}_MB3": "SATURATED",
-        f"{prefix}_MB4": "EDGE",
-        f"{prefix}_MB5": "USER",
-        f"{prefix}_MB6": "REJECTED",
+        _k("MKV"): MASK_SCHEMA_VERSION,
+        _k("MB0"): "NO_COVERAGE",
+        _k("MB1"): "BADPIX",
+        _k("MB2"): "COSMIC",
+        _k("MB3"): "SATURATED",
+        _k("MB4"): "EDGE",
+        _k("MB5"): "USER",
+        _k("MB6"): "REJECTED",
     }
 
 

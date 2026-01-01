@@ -1,3 +1,9 @@
+## v5.40.14
+
+### Fixes
+- Fixed JSON manifest writing to support small dataclasses/paths/numpy scalars in metadata (prevents crashes when `done.json` contains `ROISelection`).
+- Fixed FITS header keyword warnings by compacting MASK schema cards to 8-character FITS-safe keywords (no more Astropy `VerifyWarning`).
+
 ## v5.40.13
 
 ### Fixes

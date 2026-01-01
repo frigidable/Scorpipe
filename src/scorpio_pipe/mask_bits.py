@@ -23,7 +23,9 @@ class MaskBits(IntEnum):
     SATURATED = int(_mb.SATURATED)
     USER = int(_mb.USER)
     REJECTED = int(_mb.REJECTED)
-    SKY = int(_mb.SKY)
+    # Older experimental builds used a SKY bit; keep the enum importable even
+    # if the authoritative schema does not define it.
+    SKY = int(getattr(_mb, "SKY", 1 << 7))
 
 
 MASK_SCHEMA_VERSION = _mb.MASK_SCHEMA_VERSION
