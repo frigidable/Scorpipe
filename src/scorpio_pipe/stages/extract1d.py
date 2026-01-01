@@ -858,7 +858,7 @@ def _write_quicklook_png(
 # ---------------------------------- API ----------------------------------
 
 
-def run_extract1d(
+def _run_extract1d_impl(
     cfg: Dict[str, Any],
     *,
     in_fits: Optional[Path] = None,
@@ -1158,77 +1158,110 @@ def run_extract1d(
             return None
         return float(1.4826 * mad)
 
-    flags: list[str] = []
+    # Stage-level QC flags (P2 schema)
+    from scorpio_pipe.qc.flags import make_flag, max_severity
+
+    flag_codes: list[str] = []
     # geometry flags from compute_sky_geometry (if any)
     try:
         gf = geo_meta.get("metrics", {}).get("flags", []) if isinstance(geo_meta.get("metrics"), dict) else []
         for f in gf:
             if isinstance(f, dict) and f.get("code"):
-                flags.append(str(f.get("code")))
+                flag_codes.append(str(f.get("code")))
     except Exception:
         pass
 
     if not sky_windows:
-        flags.append("NO_SKY_WINDOWS")
+        flag_codes.append("NO_SKY_WINDOWS")
     if trace_method == "fallback_fixed":
-        flags.append("TRACE_FALLBACK_USED")
+        flag_codes.append("TRACE_FALLBACK_USED")
 
     # 1D mask coverage diagnostics
     from scorpio_pipe.maskbits import NO_COVERAGE
     mask_no_cov_tr = float(((np.asarray(mask_tr, dtype=int) & int(NO_COVERAGE)) != 0).mean())
     mask_no_cov_fx = float(((np.asarray(mask_fx, dtype=int) & int(NO_COVERAGE)) != 0).mean())
     if max(mask_no_cov_tr, mask_no_cov_fx) > 0.05:
-        flags.append("LOW_COVERAGE_1D")
+        flag_codes.append("LOW_COVERAGE_1D")
 
-    done = {
-        "ok": True,
-        "stage": "extract1d",
-        "pipeline_version": str(PIPELINE_VERSION),
-        "input": {
+    # Materialize P2 flags.
+    _flag_meta = {
+        "NO_SKY_WINDOWS": (
+            "WARN",
+            "No sky windows were available; sky residual QC is unreliable.",
+            "Define sky bands (ROI) away from the object, or widen them.",
+        ),
+        "TRACE_FALLBACK_USED": (
+            "WARN",
+            "Trace model fell back to a fixed aperture center.",
+            "Check object visibility and the trace window; consider a wider ROI.",
+        ),
+        "LOW_COVERAGE_1D": (
+            "WARN",
+            "Large fraction of 1D spectrum has NO_COVERAGE mask.",
+            "Verify slit illumination/coverage and earlier stages (linearize/stack).",
+        ),
+    }
+    stage_flags = []
+    for c in sorted(set(flag_codes)):
+        sev, msg, hint = _flag_meta.get(c, ("WARN", c, ""))
+        stage_flags.append(make_flag(c, sev, msg, hint=hint))
+
+    qc = {"flags": stage_flags, "max_severity": max_severity(stage_flags)}
+
+    from scorpio_pipe.io.done_json import write_done_json
+
+    done = write_done_json(
+        stage="extract",
+        stage_dir=out_dir,
+        status="ok",
+        inputs={
             "fits": str(in_fits),
             "mode": mode,
             "shape": [int(ny), int(nlam)],
+        },
+        params={
             "eta_applied_in_input": bool(eta_appl),
             "eta_warning": eta_warn,
+            "trace_method": trace_method,
+            "aperture_half_width": int(trace.aperture_half_width),
         },
-        "outputs": {
+        outputs={
             "spec1d_fits": str(out_fits),
             "trace_json": str(trace_json),
             "spec1d_png": str(out_png) if bool(ecfg.get("save_png", True)) else None,
         },
-        "products": {
-            "TRACE": {
-                "frac_finite": _frac_finite(flux_tr),
-                "npix_median": float(np.nanmedian(npix_tr)),
-                "no_coverage_frac": mask_no_cov_tr,
+        metrics={
+            "trace_frac_finite": _frac_finite(flux_tr),
+            "fixed_frac_finite": _frac_finite(flux_fx),
+            "trace_npix_median": float(np.nanmedian(npix_tr)),
+            "fixed_npix_median": float(np.nanmedian(npix_fx)),
+            "trace_no_coverage_frac": mask_no_cov_tr,
+            "fixed_no_coverage_frac": mask_no_cov_fx,
+            "sky_residual_robust_sigma": _robust_sigma(sky_resid),
+        },
+        flags=stage_flags,
+        qc=qc,
+        extra={
+            "ok": True,
+            "pipeline_version": str(PIPELINE_VERSION),
+            "trace": {
+                "method": trace_method,
+                "aperture_half_width": int(trace.aperture_half_width),
+                "y_fixed": float(trace.y_fixed[0]) if trace.y_fixed.size else None,
+                "model_meta": _safe_json(trace_model_meta),
+                "blocks_total": int(trace.meta.get("blocks_total", 0)),
+                "blocks_valid": int(trace.meta.get("blocks_valid", 0)),
+                "valid_frac": float(trace.meta.get("blocks_valid", 0))
+                / max(1.0, float(trace.meta.get("blocks_total", 0))),
             },
-            "FIXED": {
-                "frac_finite": _frac_finite(flux_fx),
-                "npix_median": float(np.nanmedian(npix_fx)),
-                "no_coverage_frac": mask_no_cov_fx,
-            },
+            "warnings": [w for w in [eta_warn, geo_meta.get("warning")] if w],
+            # Backward-compatible code list
+            "flag_codes": sorted(set(flag_codes)),
         },
-        "trace": {
-            "method": trace_method,
-            "aperture_half_width": int(trace.aperture_half_width),
-            "y_fixed": float(trace.y_fixed[0]) if trace.y_fixed.size else None,
-            "model_meta": _safe_json(trace_model_meta),
-            "blocks_total": int(trace.meta.get("blocks_total", 0)),
-            "blocks_valid": int(trace.meta.get("blocks_valid", 0)),
-            "valid_frac": float(trace.meta.get("blocks_valid", 0)) / max(1.0, float(trace.meta.get("blocks_total", 0))),
-        },
-        "sky_residual": {
-            "robust_sigma": _robust_sigma(sky_resid),
-        },
-        "flags": sorted(set(flags)),
-        "warnings": [w for w in [eta_warn, geo_meta.get("warning")] if w],
-    }
-    done_json.write_text(json.dumps(done, indent=2, ensure_ascii=False), encoding="utf-8")
-    # Legacy alias to not break old tooling.
-    try:
-        shutil.copy2(done_json, done_legacy)
-    except Exception:
-        pass
+        legacy_paths=[done_json, done_legacy],
+        indent=2,
+        ensure_ascii=False,
+    )
 
     # Optional quicklook PNG
     if bool(ecfg.get("save_png", True)):
@@ -1271,3 +1304,71 @@ def run_extract1d(
         "etaappl": bool(eta_appl),
         "products": ["TRACE", "FIXED"],
     }
+
+
+def run_extract1d(
+    cfg: Dict[str, Any],
+    *,
+    in_fits: Optional[Path] = None,
+    stacked_fits: Optional[Path] = None,  # legacy alias
+    out_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Extraction stage with P2 reliability guard.
+
+    Guarantees that ``done.json`` is written even if the stage fails.
+    """
+
+    try:
+        return _run_extract1d_impl(
+            cfg,
+            in_fits=in_fits,
+            stacked_fits=stacked_fits,
+            out_dir=out_dir,
+        )
+    except Exception as e:
+        from datetime import datetime, timezone
+
+        from scorpio_pipe.io.done_json import write_done_json
+        from scorpio_pipe.qc.flags import make_flag, max_severity
+        from scorpio_pipe.workspace_paths import stage_dir
+
+        wd = resolve_work_dir(cfg)
+        od = out_dir or stage_dir(wd, "extract")
+        od.mkdir(parents=True, exist_ok=True)
+
+        in_path = in_fits or stacked_fits
+        flags = [
+            make_flag(
+                "STAGE_FAILED",
+                "ERROR",
+                f"{type(e).__name__}: {e}",
+                hint="See traceback/log for the exact failure location.",
+            )
+        ]
+        qc = {"flags": flags, "max_severity": max_severity(flags)}
+
+        write_done_json(
+            stage="extract",
+            stage_dir=od,
+            status="fail",
+            inputs={"fits": str(in_path) if in_path else None},
+            params={"extract1d": cfg.get("extract1d", {})},
+            outputs={},
+            metrics={},
+            flags=flags,
+            qc=qc,
+            error={
+                "type": type(e).__name__,
+                "message": str(e),
+                "repr": repr(e),
+            },
+            extra={
+                "created_utc": datetime.now(timezone.utc).isoformat(),
+                "ok": False,
+            },
+            legacy_paths=[od / "extract_done.json", od / "extract1d_done.json"],
+            indent=2,
+            ensure_ascii=False,
+        )
+
+        raise

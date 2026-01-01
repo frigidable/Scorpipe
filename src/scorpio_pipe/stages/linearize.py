@@ -3015,10 +3015,22 @@ def run_linearize(
     except Exception as e:
         try:
             import json as _json
+            from scorpio_pipe.qc.flags import make_flag, max_severity
+
             payload_err = dict(payload) if isinstance(payload, dict) else {"stage": "linearize"}
             payload_err["stage"] = "linearize"
             payload_err["status"] = "fail"
             payload_err["error"] = {"type": type(e).__name__, "message": str(e)}
+            flags = [
+                make_flag(
+                    "STAGE_FAILED",
+                    "ERROR",
+                    f"{type(e).__name__}: {e}",
+                    hint="See traceback/log for the exact failure location.",
+                )
+            ]
+            payload_err["flags"] = flags
+            payload_err["qc"] = {"flags": flags, "max_severity": max_severity(flags)}
             out_dir.mkdir(parents=True, exist_ok=True)
             done_json.write_text(_json.dumps(payload_err, indent=2), encoding="utf-8")
             done_json_legacy.write_text(_json.dumps(payload_err, indent=2), encoding="utf-8")

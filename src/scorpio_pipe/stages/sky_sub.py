@@ -840,7 +840,7 @@ def _median_template(frames: Iterable[Path]) -> Tuple[np.ndarray, fits.Header]:
     return np.nanmedian(stack, axis=0).astype(np.float32), (hdr0 or fits.Header())
 
 
-def run_sky_sub(cfg: dict[str, Any]) -> dict[str, Path]:
+def _run_sky_sub_impl(cfg: dict[str, Any]) -> dict[str, Path]:
     """Entry point used by the pipeline runner."""
 
     work_dir = resolve_work_dir(cfg)
@@ -1369,30 +1369,33 @@ def run_sky_sub(cfg: dict[str, Any]) -> dict[str, Path]:
         lin_cfg = cfg.get("linearize") if isinstance(cfg.get("linearize"), dict) else {}
         residual_cleanup = str((lin_cfg or {}).get("cleanup") or (lin_cfg or {}).get("residual_cleanup") or "auto").lower()
 
-        done = {
-            "stage": "sky",
-            "status": status,
-            "version": PIPELINE_VERSION,
-            "created_utc": created_utc,
-            "method": {
-                "primary": str(primary),
-                "secondary": None,
-                "params": {
-                    "geometry": geom_cfg,
-                    "kelson_raw": kel_cfg,
-                    "sky_scale_raw": scl_cfg,
-                },
-                "residual_cleanup_requested": residual_cleanup,
-            },
-            "roi": roi_summary,
-            "inputs": {
+        from scorpio_pipe.io.done_json import write_done_json
+
+        done = write_done_json(
+            stage="sky",
+            stage_dir=out_dir,
+            status=status,
+            inputs={
                 "science_files": [str(p) for p in raw_inputs],
                 "sky_files": [str(p) for p in sky_frames],
                 "lambda_map_path": str(lam_map_path),
                 "lambda_map_diagnostics": lam_diag,
             },
-            "flexure": flexure_summary,
-            "metrics": {
+            params={
+                "primary_method": str(primary),
+                "geometry": geom_cfg,
+                "kelson_raw": kel_cfg,
+                "sky_scale_raw": scl_cfg,
+                "residual_cleanup_requested": residual_cleanup,
+            },
+            outputs={
+                "skymodel_raw_path": skymodel_map,
+                "skysub_raw_path": skysub_map,
+                "preview_fits": str(outs["sky_preview_fits"]) if outs.get("sky_preview_fits") and outs["sky_preview_fits"].exists() else None,
+                "preview_png": str(outs["sky_preview_png"]) if outs.get("sky_preview_png") and outs["sky_preview_png"].exists() else None,
+                "qc_sky_json": str(qc_path),
+            },
+            metrics={
                 "robust_sigma_r_before_median": _med("robust_sigma_r_before"),
                 "robust_sigma_r_after_median": _med("robust_sigma_r_after"),
                 "clipped_frac_median": _med("clipped_frac"),
@@ -1400,27 +1403,28 @@ def run_sky_sub(cfg: dict[str, Any]) -> dict[str, Path]:
                 "sky_coverage_frac_median": sky_coverage_frac,
                 "object_eating_metric_median": _med("object_eating_metric"),
             },
-            "outputs": {
-                "skymodel_raw_path": skymodel_map,
-                "skysub_raw_path": skysub_map,
-                "preview_fits": str(outs["sky_preview_fits"]) if outs.get("sky_preview_fits") and outs["sky_preview_fits"].exists() else None,
-                "preview_png": str(outs["sky_preview_png"]) if outs.get("sky_preview_png") and outs["sky_preview_png"].exists() else None,
-                "qc_sky_json": str(qc_path),
-            },
-            "qc": {
+            flags=stage_flags,
+            qc={
                 "flags": stage_flags,
                 "max_severity": qc_max,
                 "thresholds": thr.to_dict() if hasattr(thr, "to_dict") else {},
                 "thresholds_meta": thr_meta,
                 "per_exposure": qc_rows,
             },
-            "per_exposure": per_exp,
-            # compatibility alias
-            "per_exp": per_exp,
-        }
-
-        atomic_write_json(sky_done_path, done, indent=2, ensure_ascii=False)
-        atomic_write_json(done_path, done, indent=2, ensure_ascii=False)
+            extra={
+                "version": PIPELINE_VERSION,
+                "created_utc": created_utc,
+                "roi": roi_summary,
+                "flexure": flexure_summary,
+                "method": {
+                    "primary": str(primary),
+                    "secondary": None,
+                },
+                "per_exposure": per_exp,
+                "per_exp": per_exp,
+            },
+            legacy_paths=[sky_done_path],
+        )
 
         qc = {
             "stage": "sky",
@@ -1469,3 +1473,47 @@ def run_sky_sub(cfg: dict[str, Any]) -> dict[str, Path]:
                 pass
 
     return outs
+
+
+def run_sky_sub(cfg: dict[str, Any]) -> dict[str, Path]:
+    """Sky subtraction stage with P2 reliability guard.
+
+    Guarantees that ``done.json`` is written even if the stage fails.
+    """
+
+    # Run the main implementation first; it already writes rich done.json on success.
+    try:
+        return _run_sky_sub_impl(cfg)
+    except Exception as e:
+        # Best-effort failure marker (must not swallow the exception).
+        from scorpio_pipe.io.done_json import write_done_json
+        from scorpio_pipe.qc.flags import make_flag
+        from scorpio_pipe.workspace_paths import stage_dir
+
+        work_dir = resolve_work_dir(cfg)
+        out_dir = stage_dir(work_dir, "sky")
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        fl = make_flag(
+            "STAGE_FAILED",
+            "ERROR",
+            f"{type(e).__name__}: {e}",
+            hint="Check the traceback and the stage log; verify inputs (lambda-map, ROI, frames).",
+        )
+        try:
+            write_done_json(
+                stage="sky",
+                stage_dir=out_dir,
+                status="fail",
+                flags=[fl],
+                qc={"flags": [fl], "max_severity": "ERROR"},
+                error={
+                    "type": type(e).__name__,
+                    "message": str(e),
+                    "repr": repr(e),
+                },
+                legacy_paths=[out_dir / "sky_done.json"],
+            )
+        except Exception:
+            pass
+        raise

@@ -1879,7 +1879,7 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
             flags.append(
                 make_flag(
                     "WAVESOL_META",
-                    "FATAL",
+                    "ERROR",
                     "lambda_map.fits is missing WAVEUNIT/WAVEREF metadata",
                 )
             )
@@ -1902,7 +1902,7 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
 
         done_payload: dict[str, Any] = {
             "stage": "wavesolution",
-            "ok": bool(sev not in {"FATAL"}),
+            "ok": bool(sev not in {"ERROR"}),
             "frame_signature": frame_sig.to_dict(),
             "lambda_map": lam_diag.as_dict(),
             "products": {
@@ -1947,9 +1947,9 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
 
         # P1-B canonical marker
         status = "ok"
-        if sev == "FATAL":
+        if sev == "ERROR":
             status = "fail"
-        elif sev in {"ERROR", "WARN"}:
+        elif sev == "WARN":
             status = "warn"
 
         wave_done = {

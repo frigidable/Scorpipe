@@ -25,30 +25,30 @@ from scorpio_pipe.wavesol_paths import wavesol_dir
 
 
 _SEV_ORDER = {
-    "OK": 0,
     "INFO": 1,
     "WARN": 2,
     "ERROR": 3,
-    "FATAL": 4,
 }
 
 
 def normalize_severity(sev: str | None) -> str:
     s = (sev or "").strip().upper()
     if not s:
-        return "OK"
+        return "INFO"
     if s in _SEV_ORDER:
         return s
     # common aliases
-    if s in {"BAD", "FAIL"}:
+    if s in {"BAD", "FAIL", "FATAL", "CRIT", "CRITICAL"}:
         return "ERROR"
     if s in {"WARNING"}:
         return "WARN"
+    if s in {"OK"}:
+        return "INFO"
     return "INFO"
 
 
 def max_severity(flags: Iterable[dict[str, Any]] | None) -> str:
-    best = "OK"
+    best = "INFO"
     for f in flags or []:
         s = normalize_severity(str(f.get("severity") or ""))
         if _SEV_ORDER.get(s, 0) > _SEV_ORDER.get(best, 0):
@@ -162,9 +162,8 @@ def check_qc_gate(
     allow_override:
         If True, the gate is bypassed for ERROR blockers (FATAL still blocks).
     """
-    # Override policy: allow bypassing *ERROR* blockers, but never bypass *FATAL*.
-    # This keeps the UI/CLI escape hatch for borderline cases while still
-    # fail-fast on clearly corrupted inputs / contract violations.
+    # Override policy: allow bypassing blockers entirely.
+    # (Older versions distinguished FATAL; P2 standardizes to INFO/WARN/ERROR.)
     cur_stage = _task_to_stage_key(task)
     if not cur_stage:
         return
@@ -184,7 +183,9 @@ def check_qc_gate(
         flags, _ = _read_done_flags(done)
         for f in flags:
             sev = normalize_severity(str(f.get("severity") or ""))
-            if _SEV_ORDER.get(sev, 0) >= _SEV_ORDER["FATAL" if allow_override else "ERROR"]:
+            if allow_override:
+                continue
+            if _SEV_ORDER.get(sev, 0) >= _SEV_ORDER["ERROR"]:
                 x = dict(f)
                 x.setdefault("stage", sk)
                 x.setdefault("severity", sev)

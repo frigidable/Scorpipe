@@ -47,6 +47,25 @@ class QCReportOutput(dict[str, Path]):
         if legacy_html is not None:
             self["legacy_html"] = Path(legacy_html)
 
+    # ------------------------------------------------------------------
+    # Backward-compatible attribute aliases
+    # ------------------------------------------------------------------
+    @property
+    def json_path(self) -> Path:
+        """Alias for the JSON report path.
+
+        Some legacy callers/tests expect ``out.json_path`` instead of
+        mapping access ``out['json']``.
+        """
+
+        return self["json"]
+
+    @property
+    def html_path(self) -> Path:
+        """Alias for the HTML report path (same as ``out['html']``)."""
+
+        return self["html"]
+
     def __getattr__(self, name: str) -> Any:  # pragma: no cover
         # Delegate unknown attributes to the HTML path to preserve old behaviour.
         return getattr(self["html"], name)
@@ -120,7 +139,8 @@ def _collect_stage_flags(work_dir: Path) -> list[dict[str, Any]]:
         "QC_STACK2D_REJECTED": "REJECTED_FRAC_HIGH",
     }
 
-    for stg in ("sky", "linearize", "stack"):
+    # Include extract so that NO_SKY_WINDOWS and other object-level QC appears.
+    for stg in ("wavesol", "sky", "linearize", "stack", "extract"):
         try:
             d = _read_json_safely(stage_dir(work_dir, stg) / "done.json")
             if not d:
