@@ -1,3 +1,8 @@
+## v5.40.20
+
+### Fixes
+- CI (Windows Release): generate SBOM for the portable Windows ZIP by extracting it first and scanning the resulting directory (avoids Syft failures when scanning the ZIP directly).
+
 ## v5.40.19
 
 ### Fixes

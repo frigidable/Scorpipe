@@ -168,10 +168,18 @@ jobs:
           upload-artifact: false
           upload-release-assets: false
 
+      - name: Extract portable bundle (for SBOM)
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf release/portable_unpacked
+          mkdir -p release/portable_unpacked
+          unzip -q "release/Scorpipe-Windows-x64-${{ env.APP_VERSION }}.zip" -d release/portable_unpacked
+
       - name: Generate SBOM (portable bundle)
         uses: anchore/sbom-action@a930d0ac434e3182448fe678398ba5713717112a # v0.21.0
         with:
-          file: release/Scorpipe-Windows-x64-${{ env.APP_VERSION }}.zip
+          path: release/portable_unpacked
           format: spdx-json
           output-file: release/Scorpipe-Windows-x64-${{ env.APP_VERSION }}.sbom.spdx.json
           upload-artifact: false
