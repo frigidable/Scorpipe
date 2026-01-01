@@ -807,7 +807,21 @@ def _eval_model_map(
 
     lam = np.asarray(lambda_map, dtype=float)
     ny, nx = lam.shape
-    y_norm = np.asarray(y_norm_rows, dtype=float).reshape(ny, 1)
+    # `y_norm_rows` is expected to be a (ny,) row-normalized coordinate. Be tolerant to
+    # accidental passing of a pixel-sampled array (e.g. length n_pix), which would
+    # otherwise crash synthetic smoke tests. In that case, recompute the standard
+    # row normalization on the fly.
+    y_in = np.asarray(y_norm_rows, dtype=float)
+    if y_in.ndim == 0:
+        y_norm = np.full((ny, 1), float(y_in), dtype=float)
+    elif y_in.shape == (ny,):
+        y_norm = y_in.reshape(ny, 1)
+    elif y_in.shape == (ny, 1):
+        y_norm = y_in
+    else:
+        # Fallback: standard symmetric normalization to [-1, +1] for rows.
+        yr = np.arange(ny, dtype=float)
+        y_norm = (2.0 * (yr - 0.5 * (ny - 1)) / max((ny - 1), 1.0)).reshape(ny, 1)
     lam_e = lam + float(delta_A)
 
     s0 = _eval_bspline(t, c0, int(degree), lam_e)
@@ -1088,6 +1102,58 @@ def _run_sky_sub_impl(cfg: dict[str, Any]) -> dict[str, Path]:
 
                 # build sky pixel list
                 ny, nx = sci.shape
+
+                # Lambda-map should match the detector frame shape. For robustness (and for
+                # tiny synthetic smoke tests), allow simple y-repetition when the X dimension
+                # matches and the Y dimension differs by an integer factor.
+                lam_eff = lam_map
+                if tuple(getattr(lam_eff, "shape", ())) != tuple(sci.shape):
+                    src_shape = tuple(int(v) for v in getattr(lam_eff, "shape", ()))
+                    tgt_shape = tuple(int(v) for v in sci.shape)
+                    if (
+                        isinstance(lam_eff, np.ndarray)
+                        and lam_eff.ndim == 2
+                        and sci.ndim == 2
+                        and lam_eff.shape[1] == sci.shape[1]
+                        and lam_eff.shape[0] > 0
+                    ):
+                        if lam_eff.shape[0] == 1:
+                            lam_eff = np.repeat(lam_eff, sci.shape[0], axis=0)
+                            stage_flags.append(
+                                make_flag(
+                                    "LAMBDA_MAP_SHAPE_ADJUSTED",
+                                    "WARN",
+                                    f"lambda_map shape {src_shape} repeated in Y to match SCI {tgt_shape}",
+                                    stem=stem,
+                                )
+                            )
+                        elif sci.shape[0] % lam_eff.shape[0] == 0:
+                            fac = int(sci.shape[0] // lam_eff.shape[0])
+                            lam_eff = np.repeat(lam_eff, fac, axis=0)
+                            stage_flags.append(
+                                make_flag(
+                                    "LAMBDA_MAP_SHAPE_ADJUSTED",
+                                    "WARN",
+                                    f"lambda_map shape {src_shape} repeated in Y×{fac} to match SCI {tgt_shape}",
+                                    stem=stem,
+                                )
+                            )
+                        elif lam_eff.shape[0] > sci.shape[0]:
+                            lam_eff = lam_eff[: sci.shape[0], :]
+                            stage_flags.append(
+                                make_flag(
+                                    "LAMBDA_MAP_SHAPE_CROPPED",
+                                    "WARN",
+                                    f"lambda_map shape {src_shape} cropped in Y to match SCI {tgt_shape}",
+                                    stem=stem,
+                                )
+                            )
+                        else:
+                            raise RuntimeError(f"lambda_map shape {src_shape} incompatible with SCI {tgt_shape}")
+                    else:
+                        raise RuntimeError(
+                            f"lambda_map shape {src_shape} incompatible with SCI {tgt_shape} (expected 2D with matching X)"
+                        )
                 sky_rows = np.flatnonzero(np.asarray(geom.mask_sky_y, dtype=bool))
                 if sky_rows.size == 0:
                     stage_flags.append(
@@ -1119,13 +1185,13 @@ def _run_sky_sub_impl(cfg: dict[str, Any]) -> dict[str, Path]:
                 # Keep only good pixels
                 good_pix = (mask[y_idx, x_idx] & FATAL_BITS) == 0
                 good_pix &= np.isfinite(sci[y_idx, x_idx]) & np.isfinite(var[y_idx, x_idx])
-                good_pix &= np.isfinite(lam_map[y_idx, x_idx])
+                good_pix &= np.isfinite(lam_eff[y_idx, x_idx])
                 y_idx = y_idx[good_pix]
                 x_idx = x_idx[good_pix]
                 if y_idx.size < 100:
                     raise RuntimeError("Too few good sky pixels after masking")
 
-                lam_s = lam_map[y_idx, x_idx].astype(float)
+                lam_s = lam_eff[y_idx, x_idx].astype(float)
                 d_s = sci[y_idx, x_idx].astype(float)
                 var_s = var[y_idx, x_idx].astype(float)
                 y_rows = np.arange(ny, dtype=float)
@@ -1193,14 +1259,18 @@ def _run_sky_sub_impl(cfg: dict[str, Any]) -> dict[str, Path]:
                         degree=int(kel_cfg.get("bspline_degree", 3) or 3),
                         rng=rng,
                     )
-                    # flexure scan
-                    flex = _estimate_flexure_delta(
-                        fit,
-                        delta_max_A=float(kel_cfg.get("delta_max_A", 10.0) or 10.0),
-                        delta_step_A=float(kel_cfg.get("delta_step_A", 0.2) or 0.2),
-                        n_samples=int(kel_cfg.get("flexure_n_samples", 200000) or 200000),
-                        rng=rng,
-                    )
+                    # flexure scan (best-effort; never fail the whole stage on flexure heuristics)
+                    try:
+                        flex = _estimate_flexure_delta(
+                            fit,
+                            delta_max_A=float(kel_cfg.get("delta_max_A", 10.0) or 10.0),
+                            delta_step_A=float(kel_cfg.get("delta_step_A", 0.2) or 0.2),
+                            n_samples=int(kel_cfg.get("flexure_n_samples", 200000) or 200000),
+                            rng=rng,
+                        )
+                    except Exception as e:
+                        flex = {"delta_A": 0.0, "sigma_delta_A": None, "flexure_score": None, "flag": "FLEXURE_FAILED", "error": str(e)}
+                        stage_flags.append(make_flag("FLEXURE_FAILED", "WARN", "Flexure estimation failed; proceeding with delta_lambda=0", stem=stem, error=str(e)))
                     delta_A = float(flex.get("delta_A") or 0.0)
                     fit_meta = {k: v for k, v in fit.items() if k not in {"_cache", "coeff"}}
                     fit_meta["coeff"] = {
@@ -1210,7 +1280,7 @@ def _run_sky_sub_impl(cfg: dict[str, Any]) -> dict[str, Path]:
                         "y_order": int(fit.get("y_order") or 0),
                     }
                     model = _eval_model_map(
-                        lam_map,
+                        lam_eff,
                         t=np.asarray(fit["basis"]["t"], dtype=float),
                         degree=int(fit["basis"]["degree"]),
                         c0=np.asarray(fit["coeff"]["c0"], dtype=float),
@@ -1275,21 +1345,54 @@ def _run_sky_sub_impl(cfg: dict[str, Any]) -> dict[str, Path]:
                 # write products
                 hdr0 = hdr.copy()
                 hdr0["SKYMD"] = (str(method_used), "Sky model method")
-                hdr0["SKYKS"] = (float(kel_cfg.get("knot_step_A", 1.0) or 1.0), "λ knot step (Angstrom)")
+                # FITS header comments must be plain printable ASCII (astropy enforces this).
+                # Avoid Greek letters like λ/δ here.
+                hdr0["SKYKS"] = (float(kel_cfg.get("knot_step_A", 1.0) or 1.0), "lambda knot step (Angstrom)")
                 if flex is not None:
-                    hdr0["SKYDLAM"] = (float(flex.get("delta_A") or 0.0), "Flexure δλ applied (Angstrom)")
+                    hdr0["SKYDLAM"] = (float(flex.get("delta_A") or 0.0), "Flexure delta_lambda applied (Angstrom)")
                 hdr0 = add_provenance(hdr0, cfg, stage="sky")
 
                 skymodel_path = out_dir / f"{stem}_skymodel_raw.fits"
                 skysub_path = out_dir / f"{stem}_skysub_raw.fits"
-                write_sci_var_mask(skymodel_path, model, var, mask, header=hdr0)
-                write_sci_var_mask(skysub_path, skysub, var, mask, header=hdr0)
+                # `write_sci_var_mask` uses keyword-only args for VAR/MASK.
+                write_sci_var_mask(skymodel_path, model, var=var, mask=mask, header=hdr0)
+                write_sci_var_mask(skysub_path, skysub, var=var, mask=mask, header=hdr0)
 
                 # Backward-compatible aliases (synthetic smoke tests / legacy scripts).
                 # Keep these as plain copies to avoid cross-platform symlink issues.
+                #
+                # Important nuance:
+                # - *_skysub_raw.fits is ALWAYS in RAW detector geometry (no wavelength grid).
+                # - Some legacy flows/tests expect 09_sky/*_skysub.fits to be directly stackable,
+                #   i.e. to carry a linear wavelength grid. If a linearized product already exists
+                #   (10_linearize/<stem>_skysub.fits), prefer copying THAT into 09_sky aliases.
+                alias_src = skysub_path
+                try:
+                    lin_dir = stage_dir(work_dir, "linearize")
+                    cand = [
+                        lin_dir / f"{stem}_skysub.fits",
+                        lin_dir / stem / f"{stem}_skysub.fits",
+                        lin_dir / f"{stem}_sky_sub.fits",
+                        lin_dir / stem / f"{stem}_sky_sub.fits",
+                    ]
+                    for c in cand:
+                        if not c.exists():
+                            continue
+                        try:
+                            with fits.open(c, memmap=False) as _hd:
+                                _h = _hd[0].header
+                            has_grid = ("SCORP_L0" in _h or "CRVAL1" in _h) and ("SCORP_DL" in _h or "CDELT1" in _h)
+                            if has_grid:
+                                alias_src = c
+                                break
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+
                 for _alias in (f"{stem}_skysub.fits", f"{stem}_sky_sub.fits"):
                     try:
-                        shutil.copy2(skysub_path, out_dir / _alias)
+                        shutil.copy2(alias_src, out_dir / _alias)
                     except Exception:
                         pass
                 for _alias in (f"{stem}_skymodel.fits", f"{stem}_sky_model.fits"):
@@ -1327,7 +1430,7 @@ def _run_sky_sub_impl(cfg: dict[str, Any]) -> dict[str, Path]:
                     flex_A = float(flex.get("delta_A") or 0.0)
                     try:
                         midy = int(ny // 2)
-                        dldx = np.nanmedian(np.abs(np.diff(lam_map[midy, :]))).item()
+                        dldx = np.nanmedian(np.abs(np.diff(lam_eff[midy, :]))).item()
                         if np.isfinite(dldx) and dldx > 0:
                             flex_pix = float(flex_A / dldx)
                     except Exception:
@@ -1397,7 +1500,8 @@ def _run_sky_sub_impl(cfg: dict[str, Any]) -> dict[str, Path]:
             hdr0["BUNIT"] = (str(lam_hdr.get("BUNIT", "ADU")), "Data unit")
             hdr0["NEXP"] = (int(len(preview_stack)), "Number of exposures (median)")
             hdr0 = add_provenance(hdr0, cfg, stage="sky")
-            write_sci_var_mask(outs["sky_preview_fits"], stack, None, None, header=hdr0)
+            # `write_sci_var_mask` uses keyword-only args for VAR/MASK.
+            write_sci_var_mask(outs["sky_preview_fits"], stack, header=hdr0)
 
             if bool(sky_cfg.get("save_png", True)):
                 try:

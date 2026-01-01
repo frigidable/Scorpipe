@@ -17,7 +17,7 @@ import subprocess
 import sys
 
 
-__version__ = "5.40.16"
+__version__ = "5.40.17"
 PIPELINE_VERSION = f"v{__version__}"
 
 

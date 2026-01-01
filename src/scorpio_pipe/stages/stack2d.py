@@ -1160,6 +1160,15 @@ def run_stack2d(
             }
         )
 
+
+
+        # Stable top-level output keys (used by tests and downstream convenience wrappers).
+        # These mirror the skip-payload schema.
+        report["stack2d_fits"] = str(out_fits)
+        report["stacked2d_fits"] = str(out_fits_legacy) if out_fits_legacy.exists() else str(out_fits)
+        report.setdefault("coverage_png", str(out_cov_png) if out_cov_png.exists() else None)
+        # qc_png is a generic quicklook; we use the stacked SCI PNG when present.
+        report.setdefault("qc_png", str(out_stack_png) if out_stack_png.exists() else None)
         # Backward-friendly top-level shortcuts (used by pipeline_runner / UI).
         report["stack2d"] = str(out_fits)
         report["stacked2d"] = (

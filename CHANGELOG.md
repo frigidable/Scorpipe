@@ -1,3 +1,10 @@
+## v5.40.17
+
+### Fixes
+- Sky Subtraction: when legacy aliases `*_skysub.fits` are written in the Sky stage, prefer copying an existing rectified product from Linearize (if present) so downstream stages/tests get a proper wavelength grid.
+- Sky Subtraction (Kelson RAW): flexure estimation is now best-effort; failures no longer prevent writing `*_skysub_raw.fits`.
+- Stack2D: restored stable top-level return keys (`stack2d_fits`, `stacked2d_fits`, `coverage_png`, `qc_png`) in the function result for downstream convenience/tests.
+
 ## v5.40.16
 
 ### Fixes
