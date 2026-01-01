@@ -2102,6 +2102,8 @@ def run_linearize(
 
                 roi = roi_from_cfg(cfg)
                 sky_cfg = cfg.get("sky", {}) if isinstance(cfg.get("sky"), dict) else {}
+                if not sky_cfg and isinstance(cfg.get("sky_sub"), dict):
+                    sky_cfg = cfg.get("sky_sub") or {}
                 gcfg = sky_cfg.get("geometry") if isinstance(sky_cfg.get("geometry"), dict) else {}
 
                 fatal_bits = int(NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED)
@@ -2186,6 +2188,8 @@ def run_linearize(
 
             # --- optional post-rectification residual cleanup (runs here, after resampling) ---
             sky_cfg = cfg.get("sky", {}) if isinstance(cfg.get("sky"), dict) else {}
+            if not sky_cfg and isinstance(cfg.get("sky_sub"), dict):
+                sky_cfg = cfg.get("sky_sub") or {}
             # Accept config in two places for backward compatibility:
             #   - linearize.post_sky_cleanup (preferred)
             #   - sky.post_cleanup (legacy)

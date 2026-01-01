@@ -766,10 +766,19 @@ def _write_spec1d_fits(
     hf = fits.BinTableHDU.from_columns(cols_fixed, name="SPEC_FIXED")
     hf.header["WUNIT"] = (hdr0.get("CUNIT1", "Angstrom"), "Wavelength unit")
     hf.header["FUNIT"] = (hdr0.get("BUNIT", "ADU"), "Flux unit")
-    hf.header["YFIX"] = (
-        float(trace.y_fixed[0]) if trace.y_fixed.size else float("nan"),
-        "Fixed center y (pix)",
-    )
+    # FITS headers do not allow NaN/Inf keyword values. When the fixed center
+    # is unavailable, store the keyword as undefined rather than crashing.
+    if trace.y_fixed.size:
+        try:
+            yfix = float(trace.y_fixed[0])
+        except Exception:
+            yfix = None
+        if yfix is not None and np.isfinite(yfix):
+            hf.header["YFIX"] = (yfix, "Fixed center y (pix)")
+        else:
+            hf.header["YFIX"] = (None, "Fixed center y (pix)")
+    else:
+        hf.header["YFIX"] = (None, "Fixed center y (pix)")
     hf.header["APHW"] = (int(trace.aperture_half_width), "Aperture half-width (pix)")
 
     # --------------------------- preview images --------------------------

@@ -35,11 +35,14 @@ def write_done_json(
     outputs: Mapping[str, Any] | None = None,
     metrics: Mapping[str, Any] | None = None,
     flags: Sequence[Any] | None = None,
+    qc: Mapping[str, Any] | None = None,
     error: Mapping[str, Any] | None = None,
     created_utc: str | None = None,
     version: str | None = None,
     extra: Mapping[str, Any] | None = None,
     legacy_paths: Sequence[str | Path] | None = None,
+    indent: int = 2,
+    ensure_ascii: bool = False,
 ) -> dict[str, Any]:
     """Write a stage ``done.json`` in a consistent format.
 
@@ -73,12 +76,37 @@ def write_done_json(
     if error is not None:
         payload["error"] = dict(error)
 
-    fl = coerce_flags(flags)
-    if fl:
-        payload.setdefault("qc", {})
-        if isinstance(payload["qc"], dict):
-            payload["qc"]["flags"] = fl
-            payload["qc"]["max_severity"] = max_severity(fl)
+    # Merge QC info.
+    qc_payload: dict[str, Any] = {}
+    if isinstance(qc, Mapping):
+        qc_payload.update(dict(qc))
+
+    # Flags may be provided either in the top-level ``flags`` parameter or
+    # inside qc['flags']; we merge them into qc.flags and recompute
+    # qc.max_severity to stay consistent.
+    fl_top = coerce_flags(flags)
+    fl_qc = coerce_flags(qc_payload.get("flags"))
+    if fl_top or fl_qc:
+        merged: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+
+        def _add_all(items: list[dict[str, Any]]) -> None:
+            for it in items:
+                code = str(it.get("code", ""))
+                sev = str(it.get("severity", ""))
+                key = (code, sev)
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(it)
+
+        _add_all(fl_top)
+        _add_all(fl_qc)
+        qc_payload["flags"] = merged
+        qc_payload["max_severity"] = max_severity(merged)
+
+    if qc_payload:
+        payload["qc"] = qc_payload
 
     if extra:
         # Do not overwrite the stable keys above.
@@ -88,12 +116,12 @@ def write_done_json(
             payload[k] = v
 
     # Canonical path
-    atomic_write_json(out_dir / "done.json", payload, indent=2, ensure_ascii=False)
+    atomic_write_json(out_dir / "done.json", payload, indent=int(indent), ensure_ascii=bool(ensure_ascii))
 
     # Optional mirrors
     for p in legacy_paths or []:
         try:
-            atomic_write_json(Path(p), payload, indent=2, ensure_ascii=False)
+            atomic_write_json(Path(p), payload, indent=int(indent), ensure_ascii=bool(ensure_ascii))
         except Exception:
             pass
 

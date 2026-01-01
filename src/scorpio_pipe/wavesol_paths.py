@@ -44,16 +44,37 @@ def wavesol_dir(cfg: dict[str, Any]) -> Path:
     """Return a disperser-specific wavesolution directory.
 
     New convention (v5.38+):
-      work_dir/products/07_wavesol/<disperser_slug>/...
+      work_dir/08_wavesol[/<disperser_slug>]/...
 
     Backward-compatible fallback:
       if work_dir/wavesol exists and the subdir doesn't, we still allow reading
       from the legacy flat layout.
     """
     wd = resolve_work_dir(cfg)
-    base = stage_dir(wd, "wavesolution")
+    # Canonical stage directory (v5.40+ layout): 08_wavesol/
+    base = stage_dir(wd, "wavesol")
     slug = slugify_disperser(get_selected_disperser(cfg))
     sub = base / slug
+
+    def _has_core_artifacts(p: Path) -> bool:
+        names = (
+            "lambda_map.fits",
+            "rectification_model.json",
+            "superneon.fits",
+        )
+        try:
+            return any((p / n).exists() for n in names)
+        except Exception:
+            return False
+
+    # If artifacts are already stored directly in the stage root, use that.
+    # This is the default for most runs and for P2 synthetic tests.
+    if _has_core_artifacts(base):
+        return base
+
+    # For multiple dispersers, we optionally keep a per-disperser subdir.
+    if slug != "default" and (_has_core_artifacts(sub) or sub.exists()):
+        return sub
 
     # Legacy compatibility:
     # - old base: work_dir/wavesol/
@@ -62,8 +83,12 @@ def wavesol_dir(cfg: dict[str, Any]) -> Path:
     legacy_sub = legacy_base / slug
 
     # If new location has files, prefer it.
-    if sub.exists() or any((sub / n).exists() for n in ("lambda_map.fits", "rectification_model.json", "superneon.fits")):
+    if sub.exists() or _has_core_artifacts(sub):
         return sub
+
+    # Default: keep artifacts directly in the stage root.
+    if slug == "default":
+        return base
 
     # If old files exist directly in wavesol/, keep it usable.
     if (legacy_base / "superneon.fits").exists() and not legacy_sub.exists():

@@ -852,6 +852,9 @@ def _run_sky_sub_impl(cfg: dict[str, Any]) -> dict[str, Path]:
     qc_path = out_dir / "qc_sky.json"
 
     sky_cfg = cfg.get("sky") if isinstance(cfg.get("sky"), dict) else {}
+    # Backward/UX compatibility: some configs use a stage-like section name.
+    if not sky_cfg and isinstance(cfg.get("sky_sub"), dict):
+        sky_cfg = cfg.get("sky_sub") or {}
     geom_cfg = sky_cfg.get("geometry") if isinstance(sky_cfg.get("geometry"), dict) else {}
     kel_cfg = sky_cfg.get("kelson_raw") if isinstance(sky_cfg.get("kelson_raw"), dict) else {}
     scl_cfg = sky_cfg.get("sky_scale_raw") if isinstance(sky_cfg.get("sky_scale_raw"), dict) else {}
