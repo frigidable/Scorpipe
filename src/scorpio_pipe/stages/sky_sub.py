@@ -1068,6 +1068,16 @@ def _run_sky_sub_impl(cfg: dict[str, Any]) -> dict[str, Path]:
                 fit_meta: dict[str, Any] = {}
                 if method_used == "sky_scale_raw" and sky_template is not None:
                     T_s = sky_template[y_idx, x_idx].astype(float)
+                    _ok = np.isfinite(lam_s) & np.isfinite(T_s) & np.isfinite(d_s) & np.isfinite(var_s) & (var_s > 0)
+                    n_ok = int(_ok.sum())
+                    min_cfg = int(scl_cfg.get("min_sky_pixels", 2000) or 2000)
+                    if n_ok < 64:
+                        raise RuntimeError("Too few valid sky pixels for sky_scale_raw fit")
+                    if n_ok < min_cfg:
+                        min_eff = max(64, int(0.5 * n_ok))
+                        stage_flags.append(make_flag("MIN_SKY_PIXELS_RELAXED", "WARN", "min_sky_pixels relaxed for small sky_scale_raw sample", stem=stem, min_cfg=min_cfg, n_ok=n_ok, min_eff=min_eff))
+                    else:
+                        min_eff = min_cfg
                     fit = _fit_sky_scale(
                         lam_s,
                         T_s,
@@ -1076,7 +1086,7 @@ def _run_sky_sub_impl(cfg: dict[str, Any]) -> dict[str, Path]:
                         knot_step_A=float(scl_cfg.get("knot_step_A", 1.0) or 1.0),
                         clip_sigma=float(scl_cfg.get("robust_clip_sigma", 4.5) or 4.5),
                         max_iter=int(scl_cfg.get("max_iter", 4) or 4),
-                        min_pixels=int(scl_cfg.get("min_sky_pixels", 2000) or 2000),
+                        min_pixels=int(min_eff),
                     )
                     fit_meta = dict(fit)
                     a_nodes = np.asarray(fit["a_nodes"], dtype=float)
@@ -1090,6 +1100,16 @@ def _run_sky_sub_impl(cfg: dict[str, Any]) -> dict[str, Path]:
                     model = (amp * sky_template.astype(np.float32)).astype(np.float32)
                 else:
                     # kelson_raw
+                    _ok = np.isfinite(lam_s) & np.isfinite(y_s_norm) & np.isfinite(d_s) & np.isfinite(var_s) & (var_s > 0)
+                    n_ok = int(_ok.sum())
+                    min_cfg = int(kel_cfg.get("min_sky_pixels", 2000) or 2000)
+                    if n_ok < 64:
+                        raise RuntimeError("Too few valid sky pixels for kelson_raw fit")
+                    if n_ok < min_cfg:
+                        min_eff = max(64, int(0.5 * n_ok))
+                        stage_flags.append(make_flag("MIN_SKY_PIXELS_RELAXED", "WARN", "min_sky_pixels relaxed for small kelson_raw sample", stem=stem, min_cfg=min_cfg, n_ok=n_ok, min_eff=min_eff))
+                    else:
+                        min_eff = min_cfg
                     fit = _fit_kelson_bspline(
                         lam_s,
                         y_s_norm,
@@ -1099,7 +1119,7 @@ def _run_sky_sub_impl(cfg: dict[str, Any]) -> dict[str, Path]:
                         y_order=int(kel_cfg.get("y_order", 0) or 0),
                         clip_sigma=float(kel_cfg.get("robust_clip_sigma", 4.5) or 4.5),
                         max_iter=int(kel_cfg.get("max_iter", 4) or 4),
-                        min_pixels=int(kel_cfg.get("min_sky_pixels", 2000) or 2000),
+                        min_pixels=int(min_eff),
                         degree=int(kel_cfg.get("bspline_degree", 3) or 3),
                         rng=rng,
                     )

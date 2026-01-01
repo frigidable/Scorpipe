@@ -235,15 +235,13 @@ def compute_sky_geometry(
     else:
         M = np.zeros((ny, nx), dtype=np.uint16)
 
-    edge = int(max(0, edge_margin_px))
-    # Clamp edge so that the core window is not empty (important for small ny in synthetic tests).
-    edge = min(edge, max(0, (ny - 1) // 2))
-    lo = int(edge)
-    hi = int(ny - edge)
-    if hi <= lo:
-        lo, hi = 0, ny
-    core = np.zeros(ny, dtype=bool)
-    core[lo:hi] = True
+    x_edge = int(max(0, edge_margin_px))
+    # Clamp edge so that the valid X window is not empty (important for small nx in synthetic tests).
+    x_edge = min(x_edge, max(0, (nx - 1) // 2))
+
+    # 'core' is a Y-mask used for robust profile statistics. Do not apply the X-edge margin to Y.
+    core = np.ones(ny, dtype=bool)
+
 
     flags: list[dict[str, Any]] = []
 
@@ -256,12 +254,18 @@ def compute_sky_geometry(
     except Exception:
         S_med = np.full(nx, np.nan, dtype=float)
 
-    if np.isfinite(S_med).sum() >= 4:
-        p = float(np.nanpercentile(S_med, float(profile_x_percentile)))
-        X_win = np.where(S_med <= p)[0]
-    else:
-        X_win = np.arange(nx, dtype=int)
+    valid_x = np.arange(nx, dtype=int)
+    if (nx - 2 * x_edge) >= 4:
+        valid_x = np.arange(x_edge, nx - x_edge, dtype=int)
 
+    if np.isfinite(S_med[valid_x]).sum() >= 4:
+        p = float(np.nanpercentile(S_med[valid_x], float(profile_x_percentile)))
+        X_win = valid_x[np.where(S_med[valid_x] <= p)[0]]
+    else:
+        X_win = valid_x
+
+    if X_win.size < 4:
+        X_win = valid_x
     if X_win.size < 4:
         X_win = np.arange(nx, dtype=int)
 
@@ -285,6 +289,12 @@ def compute_sky_geometry(
     sky_high: tuple[int, int] | None = None
 
     def _validate_user_roi(r: ROISelection) -> tuple[bool, str]:
+        """Validate and normalize a user ROI.
+
+        The ROI is treated as authoritative as long as the bands exist and do not overlap.
+        Width/edge heuristics are reported as WARNs (not hard failures) because
+        narrow ROIs are common in synthetic QA and can be useful in real reductions.
+        """
         nonlocal obj_band, sky_low, sky_high
         # clip
         obj = _clip_pair(r.obj_band, ny)
@@ -292,25 +302,47 @@ def compute_sky_geometry(
         hi = _clip_pair(r.sky_band_high, ny)
         if obj is None or lo is None or hi is None:
             return False, "missing bands"
-        # sort pairs
+        # sort pairs (defensive; _clip_pair already does it)
         if obj[0] > obj[1] or lo[0] > lo[1] or hi[0] > hi[1]:
             return False, "invalid endpoints"
-        # enforce margins
-        for name, (y0, y1) in ("obj", obj), ("sky_low", lo), ("sky_high", hi):
-            if y0 < edge or y1 > (ny - 1 - edge):
-                return False, f"{name} touches edge margin"
-        # widths
-        if (obj[1] - obj[0] + 1) < int(min_obj_width_px):
-            return False, "object band too thin"
-        sky_width = (lo[1] - lo[0] + 1) + (hi[1] - hi[0] + 1)
-        if sky_width < int(min_sky_width_px):
-            return False, "sky bands too thin"
-        # non-overlap
+
+        # non-overlap is a hard requirement
         def _overlap(a: tuple[int, int], b: tuple[int, int]) -> bool:
             return not (a[1] < b[0] or b[1] < a[0])
 
         if _overlap(obj, lo) or _overlap(obj, hi) or _overlap(lo, hi):
             return False, "bands overlap"
+
+        # heuristic warnings (do not invalidate the ROI)
+        obj_w = int(obj[1] - obj[0] + 1)
+        if obj_w < int(min_obj_width_px):
+            flags.append({
+                "code": "ROI_OBJECT_THIN",
+                "severity": "WARN",
+                "message": "Object band is thinner than the recommended minimum",
+                "value": obj_w,
+                "recommended_min": int(min_obj_width_px),
+            })
+
+        sky_w = int((lo[1] - lo[0] + 1) + (hi[1] - hi[0] + 1))
+        if sky_w < int(min_sky_width_px):
+            flags.append({
+                "code": "ROI_SKY_THIN",
+                "severity": "WARN",
+                "message": "Sky bands are thinner than the recommended minimum",
+                "value": sky_w,
+                "recommended_min": int(min_sky_width_px),
+            })
+
+        for name, (y0, y1) in ("obj", obj), ("sky_low", lo), ("sky_high", hi):
+            if y0 == 0 or y1 == (ny - 1):
+                flags.append({
+                    "code": "ROI_TOUCH_EDGE",
+                    "severity": "WARN",
+                    "message": f"{name} band touches the detector edge",
+                    "band": name,
+                })
+
         obj_band, sky_low, sky_high = obj, lo, hi
         return True, "ok"
 
@@ -429,7 +461,8 @@ def compute_sky_geometry(
     metrics: dict[str, Any] = {
         "ny": int(ny),
         "nx": int(nx),
-        "edge_margin_px": int(edge),
+        "edge_margin_px": int(x_edge),
+        "x_edge_margin_px": int(x_edge),
         "profile_x_percentile": float(profile_x_percentile),
         "baseline": float(baseline) if np.isfinite(baseline) else None,
         "sigma": float(sigma) if np.isfinite(sigma) else None,
