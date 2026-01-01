@@ -1,3 +1,8 @@
+## v5.40.18
+
+### Fixes
+- Packaging/CLI: added `scorpio_pipe.__main__` so `python -m scorpio_pipe` works (defaults to `version` when invoked without arguments).
+
 ## v5.40.17
 
 ### Fixes
