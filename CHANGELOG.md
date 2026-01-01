@@ -1,3 +1,8 @@
+## v5.40.21
+
+### Fixes
+- CI (Windows Release): fixed `gh release upload` failing on the `publish` job with `fatal: not a git repository` by adding an explicit checkout and passing `--repo`.
+
 ## v5.40.20
 
 ### Fixes

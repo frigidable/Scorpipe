@@ -3,7 +3,7 @@ message: "If you use Scorpio Pipe (Scorpipe) in your research, please cite it."
 title: "Scorpio Pipe (Scorpipe)"
 type: software
 license: BSD-3-Clause
-version: "5.40.20"
+version: "5.40.21"
 authors:
   - name: "Scorpio Pipe contributors"
 abstract: >
