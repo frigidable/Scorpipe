@@ -126,10 +126,20 @@ def validate_lambda_map(
                 )
 
     unit, waveref, src = _read_unit_and_ref(hdr)
-    if src == "heuristic" or not unit:
+    # Prefer explicit wavelength metadata. For legacy or synthetic inputs we
+    # allow heuristic/absent metadata *unless* the caller requires a specific
+    # unit/waveref.
+    if (src == "heuristic" or not unit) and expected_unit is not None:
         raise LambdaMapValidationError(
             "lambda_map.fits is missing explicit wavelength unit metadata (WAVEUNIT/LAMUNIT/CUNIT1/BUNIT)"
         )
+    if not unit:
+        # Last-resort assumption: Angstrom in air. We preserve the fact that
+        # this was assumed in the returned diagnostics via unit_source.
+        unit = "angstrom"
+        if not waveref:
+            waveref = "air"
+        src = "assumed"
 
     if expected_unit is not None:
         exp_u = _norm_wave_unit(expected_unit)

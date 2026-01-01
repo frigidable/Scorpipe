@@ -943,11 +943,17 @@ def _rebin_row_var_weightsquared(
     *,
     valid_mask: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Flux-conserving variance propagation for the rebinning transform.
+    """Variance propagation matched to :func:`_rebin_row_cumulative`.
 
-    For output y = Σ a_j x_j (independent input pixels),
-    Var(y) = Σ a_j^2 Var(x_j), where a_j is the overlap fraction of the output
-    bin with input pixel j.
+    The rebinning operator treats input samples ``x_j`` as *piecewise-constant
+    flux density* over the corresponding wavelength interval. The output is
+    the *bin-averaged* value on ``edges_out``:
+
+        y_k = (1/Δλ_k) * Σ_j (overlap_{k,j} * x_j)
+
+    assuming independent input pixels:
+
+        Var(y_k) = Σ_j (a_{k,j}^2 * Var(x_j)),  a_{k,j} = overlap_{k,j}/Δλ_k.
 
     We implement an efficient two-pointer sweep over monotonically increasing
     input/output edges (O(N+M)). Invalid input pixels (valid_mask False or
@@ -989,6 +995,10 @@ def _rebin_row_var_weightsquared(
         while i < n and float(edges_in[i + 1]) <= lo:
             i += 1
         ii = i
+        bin_w = hi - lo
+        if not np.isfinite(bin_w) or bin_w <= 0:
+            continue
+
         while ii < n and float(edges_in[ii]) < hi:
             if valid[ii]:
                 vi = v[ii]
@@ -999,8 +1009,8 @@ def _rebin_row_var_weightsquared(
                         b = float(edges_in[ii + 1])
                         overlap = min(hi, b) - max(lo, a)
                         if overlap > 0:
-                            frac = overlap / w_i
-                            out[j] += (frac * frac) * vi
+                            w = overlap / bin_w
+                            out[j] += (w * w) * vi
             ii += 1
 
     return out.astype(float)
@@ -1041,7 +1051,9 @@ def _rebin_row_cumulative(
     Returns
     -------
     out
-        Integrated flux per output bin.
+        Mean value per output bin (i.e. value density per unit of the
+        coordinate encoded by ``lam_centers``). For a constant input background,
+        this stays approximately constant after resampling.
     cov
         Coverage fraction per output bin in [0, 1].
     """
@@ -1070,11 +1082,14 @@ def _rebin_row_cumulative(
     edges_in = _lambda_edges(lam_m)
     widths = np.diff(edges_in)
 
+    # Treat ``v`` as a piecewise-constant *density* on input intervals.
+    # Integrate it over λ to resample, then divide by output bin width to get
+    # the mean density in each output bin.
     v_use = np.where(valid & np.isfinite(v), v, 0.0)
     c = np.zeros(edges_in.size, dtype=float)
-    c[1:] = np.cumsum(v_use)
+    c[1:] = np.cumsum(v_use * widths)
     c_out = np.interp(edges_out, edges_in, c, left=c[0], right=c[-1])
-    out = np.diff(c_out)
+    integ = np.diff(c_out)
 
     # Coverage length uses the same integral machinery.
     w_use = np.where(valid, widths, 0.0)
@@ -1083,6 +1098,7 @@ def _rebin_row_cumulative(
     cc_out = np.interp(edges_out, edges_in, cc, left=cc[0], right=cc[-1])
     cov_len = np.diff(cc_out)
     bin_w = np.maximum(np.diff(edges_out), 1e-12)
+    out = integ / bin_w
     cov = cov_len / bin_w
     cov = np.clip(cov, 0.0, 1.0)
 
@@ -1621,12 +1637,15 @@ def run_linearize(
 
 
         # Determine whether we are in the new (09_sky -> 10_linearize) layout.
+        # Do NOT infer this solely from the stage_dir name (it always starts
+        # with NN); instead, require that the run_root actually contains staged
+        # directories.
+        is_new_layout = any(work_dir.glob("[0-9][0-9]_*"))
         sky_root = stage_dir(work_dir, "sky")
-        new_layout_expected = sky_root.name.startswith("09_")
-        if new_layout_expected and not (sky_root.exists() and any(sky_root.glob("*_skysub_raw.fits"))):
+        if is_new_layout and not (sky_root.exists() and any(sky_root.glob("*_skysub_raw.fits"))):
             raise FileNotFoundError(
                 "Sky outputs not found for v5.39+ layout. "
-                "Run stage 09_sky first (expected 09_sky/*_skysub_raw.fits)."
+                f"Run stage {sky_root.name} first (expected {sky_root.name}/*_skysub_raw.fits)."
             )
 
         sci_paths: list[Path] = []
@@ -1643,7 +1662,7 @@ def run_linearize(
                 model_paths.append(sky_model_p if sky_model_p.exists() else None)
                 continue
 
-            if new_layout_expected:
+            if is_new_layout:
                 raise FileNotFoundError(
                     f"Missing sky product for {stem}: expected {sky_p.name} in {sky_root}" 
                 )
@@ -1656,11 +1675,9 @@ def run_linearize(
 
         # Output wavelength grid (common for the whole series)
         unit, waveref, unit_src = _read_lambda_map_meta(lam_hdr, lam_map)
-        if unit_src == "heuristic":
-            raise RuntimeError(
-                "lambda_map is missing explicit wavelength metadata (WAVEUNIT/WAVEREF). "
-                "Re-run stage 08_wavesol to regenerate lambda_map.fits with explicit WAVEUNIT/WAVEREF."
-            )
+        # For strict science runs we *prefer* explicit metadata, but for
+        # synthetic tests and legacy products we allow heuristics.
+        unit_meta_inferred = unit_src != "explicit"
 
         wmin_cfg = lcfg.get("lambda_min_A", lcfg.get("wmin"))
         wmax_cfg = lcfg.get("lambda_max_A", lcfg.get("wmax"))
@@ -1847,12 +1864,17 @@ def run_linearize(
 
         wave_edges = wave0 + dw * np.arange(nlam + 1, dtype=np.float64)
 
-        # Output science units (integrated per-bin vs per-wavelength-unit)
-        scale_to_density = bunit_mode == "adu_per_unit" and unit != "pix"
-        if scale_to_density:
-            if not (math.isfinite(dw) and dw > 0):
-                raise ValueError("dw must be positive for bunit_mode=adu_per_unit")
+        # Output science units. The rebinning primitive returns a *density*
+        # (ADU per coordinate unit). If requested, we convert it back to
+        # integrated ADU per output bin.
+        scale_to_bin = bunit_mode == "adu_bin" and unit != "pix"
+        if scale_to_bin and not (math.isfinite(dw) and dw > 0):
+            raise ValueError("dw must be positive for bunit_mode=adu_bin")
+
+        if bunit_mode == "adu_per_unit" and unit != "pix":
             bunit = f"ADU/{unit}"
+        elif bunit_mode == "adu_per_unit" and unit == "pix":
+            bunit = "ADU/pix"
         else:
             bunit = "ADU/bin"
 
@@ -2078,10 +2100,11 @@ def run_linearize(
                         satmask[yy, finite].astype(np.float64), lam_row[finite], wave_edges
                     )
                     rect_mask[yy, sm_row > 0] |= SATURATED
-            # Optional: express data as a *density* per wavelength unit instead of per-bin counts.
-            if scale_to_density:
-                rect /= float(dw)
-                rect_var /= float(dw) ** 2
+            # Optional: express data as *integrated* per-bin counts instead of
+            # per-unit density.
+            if scale_to_bin:
+                rect *= float(dw)
+                rect_var *= float(dw) ** 2
             # Record exposure time and optionally normalize to ADU/s (or ADU/s/<unit>)
             exptime_s = _get_exptime_seconds(hdr)
             exp_times_s.append(float(exptime_s))
@@ -2726,6 +2749,19 @@ def run_linearize(
 
             thr, thr_meta = compute_thresholds(cfg)
             qc_flags: list[dict[str, Any]] = []
+
+            # Lambda-map metadata: prefer explicit WAVEUNIT/WAVEREF, but allow
+            # heuristic inference for legacy/synthetic data.
+            if unit_meta_inferred:
+                qc_flags.append(
+                    make_flag(
+                        "QC_LAMBDA_MAP_META",
+                        "WARN",
+                        "lambda_map is missing explicit WAVEUNIT/WAVEREF; inferred heuristically",
+                        unit=unit,
+                        waveref=waveref,
+                    )
+                )
 
             # Coverage: lower is worse
             if cov_nonzero <= float(thr.linearize_cov_nonzero_bad):

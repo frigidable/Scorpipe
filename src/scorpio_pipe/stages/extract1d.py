@@ -885,7 +885,7 @@ def _run_extract1d_impl(
     from scorpio_pipe.workspace_paths import stage_dir
 
     wd = resolve_work_dir(cfg)
-    out_dir = Path(out_dir) if out_dir is not None else stage_dir(wd, "extract1d")
+    out_dir = Path(out_dir) if out_dir is not None else stage_dir(wd, "extract")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # ----------------------- resolve input (explicit) -----------------------

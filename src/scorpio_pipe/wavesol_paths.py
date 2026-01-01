@@ -86,15 +86,16 @@ def wavesol_dir(cfg: dict[str, Any]) -> Path:
     if sub.exists() or _has_core_artifacts(sub):
         return sub
 
+    # Legacy: prefer per-disperser legacy if it contains core artifacts.
+    if legacy_sub.exists() and _has_core_artifacts(legacy_sub):
+        return legacy_sub
+
+    # Legacy: if core artifacts exist directly in work_dir/wavesol/, keep it usable.
+    if legacy_base.exists() and _has_core_artifacts(legacy_base):
+        return legacy_base
+
     # Default: keep artifacts directly in the stage root.
     if slug == "default":
         return base
-
-    # If old files exist directly in wavesol/, keep it usable.
-    if (legacy_base / "superneon.fits").exists() and not legacy_sub.exists():
-        return legacy_base
-    # Prefer per-disperser legacy if present.
-    if legacy_sub.exists():
-        return legacy_sub
     # Default to new target (even if it doesn't exist yet).
     return sub

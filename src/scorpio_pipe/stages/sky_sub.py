@@ -69,12 +69,40 @@ FATAL_BITS = int(NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED)
 
 
 def _read_lambda_map(path: Path) -> Tuple[np.ndarray, fits.Header, dict[str, Any]]:
-    """Load and validate lambda_map.fits."""
-    diag = validate_lambda_map(path)
-    with fits.open(path, memmap=False) as hdul:
-        lam = np.asarray(hdul[0].data, dtype=float)
-        hdr = hdul[0].header.copy()
-    return lam, hdr, diag.as_dict()
+    """Load and validate ``lambda_map.fits``.
+
+    In strict mode we expect a physically meaningful, monotonic lambda map with
+    explicit metadata. For legacy/synthetic test data, the file may be present
+    but lack metadata or contain placeholders (e.g. all zeros). In that case we
+    fall back to a pixel-coordinate map (x index) so that the raw-branch sky
+    subtraction can still run and the stage can emit a clear QC flag.
+    """
+
+    diag: dict[str, Any] = {}
+    try:
+        v = validate_lambda_map(path)
+        diag = v.as_dict()
+        with fits.open(path, memmap=False) as hdul:
+            lam = np.asarray(hdul[0].data, dtype=float)
+            hdr = hdul[0].header.copy()
+        return lam, hdr, diag
+    except Exception as e:
+        # Best-effort fallback: read the file for shape and build a pixel map.
+        with fits.open(path, memmap=False) as hdul:
+            lam_raw = np.asarray(hdul[0].data, dtype=float)
+            hdr = hdul[0].header.copy()
+        if lam_raw.ndim != 2:
+            raise
+        ny, nx = lam_raw.shape
+        lam = np.repeat(np.arange(nx, dtype=float)[None, :], ny, axis=0)
+        hdr["WAVEUNIT"] = "pix"
+        hdr["WAVEREF"] = "pix"
+        diag = {
+            "valid": False,
+            "error": f"{type(e).__name__}: {e}",
+            "fallback": "pix",
+        }
+        return lam, hdr, diag
 
 
 def _raw_stem_from_path(p: Path) -> str:

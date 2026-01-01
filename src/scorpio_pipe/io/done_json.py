@@ -82,12 +82,15 @@ def write_done_json(
         qc_payload.update(dict(qc))
 
     # Flags may be provided either in the top-level ``flags`` parameter or
-    # inside qc['flags']; we merge them into qc.flags and recompute
-    # qc.max_severity to stay consistent.
+    # inside qc['flags']; we merge them and publish in two places:
+    #   - payload['flags'] (stable, easy to grep)
+    #   - payload['qc']['flags'] (rich QC section)
+    # This is deliberately redundant to keep legacy callers and P2 tests
+    # happy.
     fl_top = coerce_flags(flags)
     fl_qc = coerce_flags(qc_payload.get("flags"))
+    merged: list[dict[str, Any]] = []
     if fl_top or fl_qc:
-        merged: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
 
         def _add_all(items: list[dict[str, Any]]) -> None:
@@ -102,6 +105,11 @@ def write_done_json(
 
         _add_all(fl_top)
         _add_all(fl_qc)
+
+    # Always publish a top-level flags list for a stable contract.
+    payload["flags"] = merged
+
+    if merged:
         qc_payload["flags"] = merged
         qc_payload["max_severity"] = max_severity(merged)
 
