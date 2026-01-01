@@ -1,3 +1,8 @@
+## v5.40.13
+
+### Fixes
+- Fixed Python 3.12 test collection crash caused by an accidental duplicate `@dataclass(frozen=True)` decorator on `ROISelection` in `sky_geometry.py`.
+
 ## v5.40.7
 
 ### P2 — Workspace validator + StageRegistry regressions

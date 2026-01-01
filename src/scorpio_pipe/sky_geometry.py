@@ -29,7 +29,6 @@ from scipy import ndimage as _ndi
 
 
 @dataclass(frozen=True)
-@dataclass(frozen=True)
 class ROISelection:
     """User ROI description.
 
