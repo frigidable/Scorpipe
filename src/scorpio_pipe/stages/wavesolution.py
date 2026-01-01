@@ -1455,6 +1455,9 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
     )
     wrms2d_A = _weighted_rms(resid2d[used_active], scores[used_active])
     sig_mad_2d_A = _mad_sigma(resid_used)
+    resid2d_p95_A = (
+        float(np.percentile(np.abs(resid_used), 95)) if resid_used.size else float("nan")
+    )
 
     disp2d_A_per_px = float("nan")
     if lam_map.shape[1] > 1:
@@ -1626,7 +1629,9 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
     lam_hdr["CTYPE1"] = ("WAVE", "Data are wavelengths (lookup map)")
     lam_hdr["CUNIT1"] = (wave_unit, "Wavelength unit")
     lam_hdr["WAVEUNIT"] = (wave_unit, "Wavelength unit (explicit)")
+    lam_hdr["LAMUNIT"] = (wave_unit, "Wavelength unit (alias)")
     lam_hdr["WAVEREF"] = (waveref, "Wavelength reference (air/vacuum)")
+    lam_hdr["LAMREF"] = (waveref, "Wavelength reference (alias)")
     lam_hdr["BUNIT"] = (wave_unit, "Unit of lambda_map pixel values")
 
     # QC summary (2D fit)
@@ -1642,6 +1647,334 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
     fits.PrimaryHDU(data=lam_map_out, header=lam_hdr).writeto(
         lambda_map_fits, overwrite=True
     )
+
+    # --- strict contract validation + rectification model (formal artifact for sky/linearization) ---
+    #
+    # Downstream stages MUST not guess.
+    # We therefore (1) validate lambda_map.fits strictly, and (2) write a stable
+    # rectification_model.json that ties the solution to a frame signature and
+    # fixes VAR/MASK propagation policies.
+
+    from scorpio_pipe.frame_signature import FrameSignature
+    from scorpio_pipe.qc.lambda_map import validate_lambda_map
+
+    frame_sig = FrameSignature.from_path(superneon_fits)
+
+    lam_diag = validate_lambda_map(
+        lambda_map_fits,
+        expected_shape=(int(lam_map_out.shape[0]), int(lam_map_out.shape[1])),
+        expected_unit=wave_unit,
+        expected_waveref=waveref,
+    )
+
+    rect_model_json = outdir / "rectification_model.json"
+
+    # Build an explicit output wavelength grid for Linearization.
+    lcfg = cfg.get("linearize", {}) if isinstance(cfg.get("linearize"), dict) else {}
+    dw_raw = lcfg.get("dlambda_A", lcfg.get("dw", "auto"))
+    dw = None
+    try:
+        if isinstance(dw_raw, str) and dw_raw.strip().lower() in {"auto", "data", "from_data"}:
+            # Use the measured dispersion from 1D fit; convert to output unit.
+            dw = float(dlamdx_med) * unit_scale
+        else:
+            dw = float(dw_raw)
+    except Exception:
+        dw = float(dlamdx_med) * unit_scale
+    if not (np.isfinite(dw) and dw > 0):
+        dw = float(dlamdx_med) * unit_scale
+
+    # Optional explicit limits from config (kept compatible with Angstrom keys).
+    wmin_cfg = lcfg.get("lambda_min_A", lcfg.get("wmin"))
+    wmax_cfg = lcfg.get("lambda_max_A", lcfg.get("wmax"))
+    if wave_unit == "nm":
+        # If user supplied Angstrom-style keys, convert for consistency.
+        try:
+            if wmin_cfg is not None:
+                wmin_cfg = float(wmin_cfg) * 0.1
+            if wmax_cfg is not None:
+                wmax_cfg = float(wmax_cfg) * 0.1
+        except Exception:
+            pass
+
+    lam_start = float(wmin_cfg) if wmin_cfg is not None else float(lam_diag.lam_min)
+    lam_stop = float(wmax_cfg) if wmax_cfg is not None else float(lam_diag.lam_max)
+    if not (np.isfinite(lam_start) and np.isfinite(lam_stop) and lam_stop > lam_start):
+        lam_start = float(lam_diag.lam_min)
+        lam_stop = float(lam_diag.lam_max)
+
+    nlam = int(max(16, np.ceil((lam_stop - lam_start) / float(dw))))
+    lam_end = float(lam_start + float(dw) * nlam)
+
+    y_crop_top = int(lcfg.get("y_crop_top", 0) or 0)
+    y_crop_bottom = int(lcfg.get("y_crop_bottom", 0) or 0)
+    ny_in, nx_in = int(lam_map_out.shape[0]), int(lam_map_out.shape[1])
+    ny_out = int(max(1, ny_in - max(0, y_crop_top) - max(0, y_crop_bottom)))
+
+    # Hash lambda_map for strict reproducibility.
+    import hashlib
+    from datetime import datetime, timezone
+
+    def _sha256(p: Path) -> str:
+        h = hashlib.sha256()
+        with open(p, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    from scorpio_pipe.maskbits import (
+        NO_COVERAGE,
+        BADPIX,
+        COSMIC,
+        SATURATED,
+        USER,
+        REJECTED,
+        MASK_SCHEMA_VERSION,
+    )
+    from scorpio_pipe.version import PIPELINE_VERSION
+
+    rect_model = {
+        "model_version": "1",
+        "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "pipeline_version": str(PIPELINE_VERSION),
+        "stage": "wavesolution",
+        "frame_signature": frame_sig.to_dict(),
+        "input_shape": [ny_in, nx_in],
+        "output_shape": [ny_out, int(nlam)],
+        "y_crop": {"top": int(y_crop_top), "bottom": int(y_crop_bottom)},
+        "lambda_map": {
+            "path": "lambda_map.fits",
+            "sha256": _sha256(lambda_map_fits),
+            "shape": [ny_in, nx_in],
+            "dtype": str(lam_map_out.dtype),
+            "unit": str(wave_unit),
+            "waveref": str(waveref),
+            "range": [float(lam_diag.lam_min), float(lam_diag.lam_max)],
+            "monotonic_sign": int(lam_diag.monotonic_sign),
+            "monotonic_bad_frac": float(lam_diag.monotonic_bad_frac),
+            "valid_frac": float(lam_diag.valid_frac),
+        },
+        "wavelength_grid": {
+            "unit": str(wave_unit),
+            "type": "linear",
+            "lam_start": float(lam_start),
+            "lam_step": float(dw),
+            "nlam": int(nlam),
+            "lam_end": float(lam_end),
+        },
+        "mapping": {
+            "type": "lambda_map",
+            "method": "bin_integral",
+            "boundary_policy": "mask_no_coverage",
+        },
+        "var_policy": {
+            "rule": "sum_a2_var",
+            "formula": "VAR_out = Σ_k (a_k^2 * VAR_k)",
+        },
+        "mask_policy": {
+            "combine": "OR",
+            "fatal_bits": [
+                {"name": "NO_COVERAGE", "value": int(NO_COVERAGE)},
+                {"name": "BADPIX", "value": int(BADPIX)},
+                {"name": "COSMIC", "value": int(COSMIC)},
+                {"name": "SATURATED", "value": int(SATURATED)},
+                {"name": "USER", "value": int(USER)},
+                {"name": "REJECTED", "value": int(REJECTED)},
+            ],
+            "no_coverage_bit": {"name": "NO_COVERAGE", "value": int(NO_COVERAGE)},
+            "schema_version": int(MASK_SCHEMA_VERSION),
+        },
+        "provenance": {
+            "created_from": {
+                "superneon_fits": str(Path(superneon_fits).name),
+                "wavesolution_1d_json": str(Path(wavesol1d_json).name) if wavesol1d_json else None,
+                "wavesolution_2d_json": str(Path(wavesol2d_json).name) if wavesol2d_json else None,
+            },
+        },
+    }
+
+    rect_model_json.write_text(json.dumps(rect_model, indent=2), encoding="utf-8")
+
+    # --- stage done / QC flags (used by the pipeline gate) ---
+    try:
+        from scorpio_pipe.qc_thresholds import compute_thresholds
+        from scorpio_pipe.qc.flags import make_flag, max_severity
+
+        thr, _thr_meta = compute_thresholds(cfg)
+        flags: list[dict[str, Any]] = []
+
+        # 1D fit quality
+        if np.isfinite(rms1d):
+            if float(rms1d) >= float(thr.wavesol_1d_rms_bad):
+                flags.append(
+                    make_flag(
+                        "WAVESOL_1D_RMS",
+                        "ERROR",
+                        f"1D RMS is high: {float(rms1d):.3g} Å",
+                        value_A=float(rms1d),
+                        bad_A=float(thr.wavesol_1d_rms_bad),
+                        warn_A=float(thr.wavesol_1d_rms_warn),
+                    )
+                )
+            elif float(rms1d) >= float(thr.wavesol_1d_rms_warn):
+                flags.append(
+                    make_flag(
+                        "WAVESOL_1D_RMS",
+                        "WARN",
+                        f"1D RMS is above warn: {float(rms1d):.3g} Å",
+                        value_A=float(rms1d),
+                        warn_A=float(thr.wavesol_1d_rms_warn),
+                    )
+                )
+
+        # 2D fit quality
+        if np.isfinite(rms2d_A):
+            if float(rms2d_A) >= float(thr.wavesol_2d_rms_bad):
+                flags.append(
+                    make_flag(
+                        "WAVESOL_2D_RMS",
+                        "ERROR",
+                        f"2D RMS is high: {float(rms2d_A):.3g} Å",
+                        value_A=float(rms2d_A),
+                        bad_A=float(thr.wavesol_2d_rms_bad),
+                        warn_A=float(thr.wavesol_2d_rms_warn),
+                    )
+                )
+            elif float(rms2d_A) >= float(thr.wavesol_2d_rms_warn):
+                flags.append(
+                    make_flag(
+                        "WAVESOL_2D_RMS",
+                        "WARN",
+                        f"2D RMS is above warn: {float(rms2d_A):.3g} Å",
+                        value_A=float(rms2d_A),
+                        warn_A=float(thr.wavesol_2d_rms_warn),
+                    )
+                )
+
+        if np.isfinite(resid2d_p95_A):
+            if float(resid2d_p95_A) >= float(thr.resid_2d_p95_bad):
+                flags.append(
+                    make_flag(
+                        "WAVESOL_2D_P95",
+                        "ERROR",
+                        f"2D residual |dλ| P95 is high: {float(resid2d_p95_A):.3g} Å",
+                        p95_A=float(resid2d_p95_A),
+                        bad_A=float(thr.resid_2d_p95_bad),
+                        warn_A=float(thr.resid_2d_p95_warn),
+                    )
+                )
+            elif float(resid2d_p95_A) >= float(thr.resid_2d_p95_warn):
+                flags.append(
+                    make_flag(
+                        "WAVESOL_2D_P95",
+                        "WARN",
+                        f"2D residual |dλ| P95 above warn: {float(resid2d_p95_A):.3g} Å",
+                        p95_A=float(resid2d_p95_A),
+                        warn_A=float(thr.resid_2d_p95_warn),
+                    )
+                )
+
+        # Hard contract checks
+        if "WAVEUNIT" not in lam_hdr or "WAVEREF" not in lam_hdr:
+            flags.append(
+                make_flag(
+                    "WAVESOL_META",
+                    "FATAL",
+                    "lambda_map.fits is missing WAVEUNIT/WAVEREF metadata",
+                )
+            )
+
+        sev = max_severity(flags)
+
+        # --- quicklook for lambda_map (navigator-friendly) ---
+        lambda_map_png = outdir / "lambda_map.png"
+        try:
+            from astropy.io import fits
+            import numpy as np
+            from scorpio_pipe.io.quicklook import write_quicklook_png
+
+            with fits.open(lambda_map_fits, memmap=False) as hdul:
+                lm = np.asarray(hdul[0].data, dtype=np.float64)
+            # Lambda map is smooth; use a wider k to avoid banding.
+            write_quicklook_png(lm, lambda_map_png, k=8.0, method="linear", meta={"kind": "lambda_map"})
+        except Exception:
+            pass
+
+        done_payload: dict[str, Any] = {
+            "stage": "wavesolution",
+            "ok": bool(sev not in {"FATAL"}),
+            "frame_signature": frame_sig.to_dict(),
+            "lambda_map": lam_diag.as_dict(),
+            "products": {
+                "lambda_map_fits": str(lambda_map_fits),
+                "lambda_map_png": str(lambda_map_png),
+                "rectification_model_json": str(rect_model_json),
+                "wavesolution_1d_json": str(wavesol1d_json),
+                "wavesolution_2d_json": str(wavesol2d_json),
+                "report_txt": str(report_txt),
+                "residuals_2d_png": str(resid2d_png),
+                "residuals_hist_png": str(resid_hist_png),
+            },
+            "metrics": {
+                "rms1d_A": float(rms1d) if np.isfinite(rms1d) else None,
+                "rms2d_A": float(rms2d_A) if np.isfinite(rms2d_A) else None,
+                "resid2d_p95_A": float(resid2d_p95_A) if np.isfinite(resid2d_p95_A) else None,
+                "dispersion_A_per_px": float(dlamdx_med) if np.isfinite(dlamdx_med) else None,
+                "n_lines_used": int(n_lines_used),
+                "n_lines_rejected": int(n_lines_rejected),
+            },
+            "qc": {
+                "flags": flags,
+                "max_severity": sev,
+            },
+            "versioning": {
+                "wavesol_model_version": "1",
+            },
+        }
+
+        # Canonical + legacy names
+        (outdir / "done.json").write_text(json.dumps(done_payload, indent=2), encoding="utf-8")
+        (outdir / "wavesolution_done.json").write_text(
+            json.dumps(done_payload, indent=2), encoding="utf-8"
+        )
+        # P1-G navigator contract expects this alias.
+        try:
+            (outdir / "wavesol_done.json").write_text(
+                json.dumps(done_payload, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            pass
+
+        # P1-B canonical marker
+        status = "ok"
+        if sev == "FATAL":
+            status = "fail"
+        elif sev in {"ERROR", "WARN"}:
+            status = "warn"
+
+        wave_done = {
+            "stage": "wavesolution",
+            "status": status,
+            "frame_signature": frame_sig.to_dict(),
+            "lambda_map": lam_diag.as_dict(),
+            "errors": {
+                "rms_arc_fit": float(rms1d) if np.isfinite(rms1d) else None,
+                "rms_2d_fit": float(rms2d_A) if np.isfinite(rms2d_A) else None,
+                "dispersion_A_per_px": float(dlamdx_med) if np.isfinite(dlamdx_med) else None,
+            },
+            "flags": flags,
+            "products": {
+                "lambda_map_fits": "lambda_map.fits",
+                "rectification_model_json": "rectification_model.json",
+                "done_json": "done.json",
+            },
+            "versioning": {
+                "wavesol_model_version": "1",
+            },
+        }
+        (outdir / "wave_done.json").write_text(json.dumps(wave_done, indent=2), encoding="utf-8")
+    except Exception:
+        pass
 
     return WaveSolutionResult(
         wavesol_dir=outdir,

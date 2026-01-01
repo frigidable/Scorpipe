@@ -272,6 +272,21 @@ def _task_qc_report(
     return Path(res)
 
 
+def _task_navigator(
+    cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None
+) -> Path:
+    """Build static HTML navigator (ui/navigator).
+
+    This is lightweight and safe to run at any time.
+    """
+
+    _ = cancel_token
+    _ = ensure_work_layout(out_dir)
+    from scorpio_pipe.navigator import build_navigator
+
+    return build_navigator(out_dir)
+
+
 def _task_linearize(
     cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None
 ) -> Path:
@@ -298,14 +313,14 @@ def _task_stack2d(
 ) -> Path:
     """Stack rectified, sky-subtracted frames.
 
-    Contract (v5.39+)
-    --------------
-    - Sky stage writes RAW products in ``09_sky``.
-    - Linearization writes rectified products in ``10_linearize``.
-    - Stack2D consumes *only* ``10_linearize/*_skysub.fits``.
+    Contract (P1-E / v5.40.4)
+    -------------------------
+    Stack2D consumes **only** rectified, sky-subtracted frames produced by
+    Linearization:
 
-    For backward compatibility, we also try a few legacy locations if the
-    canonical rectified products are not found.
+      10_linearize/<stem>_skysub.fits
+
+    No hidden fallbacks to other stage folders are allowed.
     """
 
     from scorpio_pipe.stages.stack2d import run_stack2d
@@ -326,35 +341,9 @@ def _task_stack2d(
         if isinstance(x, str) and x.strip()
     ]
 
-    def _pick_existing(cands: list[Path]) -> Path:
-        for c in cands:
-            if c.exists():
-                return c
-        return cands[0]
-
     def _find_rectified_skysub(stem: str) -> Path:
-        name = sky_sub_fits_name(stem)
-        alt = name.replace("_skysub.fits", "_sky_sub.fits")
-        cands: list[Path] = [
-            # canonical flat outputs
-            lin_stage / name,
-            lin_stage / alt,
-            # possible per-exp layouts
-            lin_stage / stem / name,
-            lin_stage / stem / alt,
-            lin_stage / "per_exp" / name,
-            lin_stage / "per_exp" / alt,
-            # legacy roots
-            wd / "products" / "lin" / "per_exp" / name,
-            wd / "products" / "lin" / "per_exp" / alt,
-            wd / "lin" / "per_exp" / name,
-            wd / "lin" / "per_exp" / alt,
-            wd / "products" / "lin" / name,
-            wd / "products" / "lin" / alt,
-            wd / "lin" / name,
-            wd / "lin" / alt,
-        ]
-        return _pick_existing(cands)
+        # Hard contract: only 10_linearize/<stem>_skysub.fits
+        return lin_stage / sky_sub_fits_name(stem)
 
     if stems:
         inputs: list[Path] = []
@@ -369,41 +358,21 @@ def _task_stack2d(
             raise FileNotFoundError(
                 "Stack2D: missing rectified sky-subtracted inputs for stems: "
                 + ", ".join(missing)
-                + ". Expected 10_linearize/*_skysub.fits. Run Linearization first."
+                + ". Expected 10_linearize/<stem>_skysub.fits. Run Linearization first."
             )
     else:
-        # Fallback: scan for any rectified sky-subtracted products.
+        # Scan only the Linearization stage root (non-recursive).
         inputs = sorted(p for p in lin_stage.glob("*_skysub.fits") if p.is_file())
-        if not inputs:
-            inputs = sorted(p for p in lin_stage.glob("*_sky_sub.fits") if p.is_file())
-        if not inputs and lin_stage.exists():
-            inputs = sorted(p for p in lin_stage.rglob("*_skysub.fits") if p.is_file())
-        if not inputs and lin_stage.exists():
-            inputs = sorted(p for p in lin_stage.rglob("*_sky_sub.fits") if p.is_file())
-
-        if not inputs:
-            legacy_dirs = [
-                wd / "products" / "lin" / "per_exp",
-                wd / "lin" / "per_exp",
-            ]
-            for d in legacy_dirs:
-                if d.exists():
-                    inputs = sorted(p for p in d.glob("*_skysub.fits") if p.is_file())
-                    if not inputs:
-                        inputs = sorted(
-                            p for p in d.glob("*_sky_sub.fits") if p.is_file()
-                        )
-                    if inputs:
-                        break
 
         if not inputs:
             raise FileNotFoundError(
-                f"No rectified sky-subtracted frames found (tried {lin_stage} and legacy locations)"
+                f"No rectified sky-subtracted frames found in {lin_stage}. Expected 10_linearize/*_skysub.fits. Run Linearization first."
             )
 
     out_p = stage_dir(out_dir, "stack2d")
     res = run_stack2d(cfg, inputs=inputs, out_dir=out_p)
-    return Path(res.get("stacked2d", out_p / "stacked2d.fits"))
+    # Canonical new name is stack2d.fits; keep legacy stacked2d.fits as well.
+    return Path(res.get("stack2d", res.get("stacked2d", out_p / "stack2d.fits")))
 
 
 def _task_extract1d(
@@ -432,12 +401,14 @@ TASKS: dict[str, TaskFn] = {
     "stack2d": _task_stack2d,
     "extract1d": _task_extract1d,
     "qc_report": _task_qc_report,
+    "navigator": _task_navigator,
     # aliases (backward compatibility)
     "wavesol": _task_wavesolution,
     "wavesolution2d": _task_wavesolution,
     "sky_sub": _task_sky,
     "stack": _task_stack2d,
     "qc": _task_qc_report,
+    "nav": _task_navigator,
 }
 
 
@@ -450,6 +421,8 @@ def canonical_task_name(name: str) -> str:
         "wavelength_solution": "wavesolution",
         "lineid": "lineid_prepare",
         "qc": "qc_report",
+        "nav": "navigator",
+        "navigator": "navigator",
     }
     return aliases.get(n, n)
 
@@ -676,6 +649,7 @@ def run_sequence(
     *,
     resume: bool = True,
     force: bool = False,
+    qc_override: bool = False,
     cancel_token: CancelToken | None = None,
     config_path: Path | None = None,
 ) -> dict[str, Any]:
@@ -693,6 +667,18 @@ def run_sequence(
     work_dir = resolve_work_dir(cfg)
     out_dir = Path(work_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # P2 safety belt: ensure minimal layout + validate workspace/run passport.
+    try:
+        from scorpio_pipe.work_layout import ensure_work_layout
+        from scorpio_pipe.run_validate import validate_run_dir
+
+        ensure_work_layout(out_dir)
+        validate_run_dir(out_dir, strict=True)
+    except Exception as e:
+        raise RuntimeError(
+            f"Invalid run folder layout: {out_dir}\n{e}"
+        ) from e
 
     results: dict[str, Any] = {}
 
@@ -728,6 +714,26 @@ def run_sequence(
         if fn is None:
             raise KeyError(f"Unknown task: {t}")
 
+        # QC gate: block downstream execution if any upstream stage wrote ERROR/FATAL flags.
+        try:
+            from scorpio_pipe.qc.gate import QCGateError, check_qc_gate
+
+            check_qc_gate(cfg, task=t, allow_override=bool(qc_override))
+        except QCGateError as ge:
+            record_stage_result(
+                out_dir,
+                t,
+                status="blocked",
+                stage_hash=None,
+                message=ge.summary(),
+                trace=None,
+                meta={"qc_override": bool(qc_override)},
+            )
+            raise
+        except Exception:
+            # Never let gating crash the runner; it should only gate when data exists.
+            pass
+
         stage_hash = compute_stage_hash(
             stage=t,
             stage_cfg=_stage_cfg_for_hash(cfg, t),
@@ -745,9 +751,55 @@ def run_sequence(
             )
             results[t] = res
             record_stage_result(
-                out_dir, t, status="ok", stage_hash=stage_hash, message=None, trace=None
+                out_dir,
+                t,
+                status="ok",
+                stage_hash=stage_hash,
+                message=None,
+                trace=None,
+                meta={"qc_override": bool(qc_override)} if qc_override else None,
             )
             try:
+                # UI session + history snapshot (P1-G UI-020).
+                try:
+                    from scorpio_pipe.ui.session_store import snapshot, update_stage
+                    from scorpio_pipe.workspace_paths import stage_dir
+
+                    done_name_map = {
+                        "sky": "sky_done.json",
+                        "linearize": "linearize_done.json",
+                        "stack2d": "stack_done.json",
+                        "extract1d": "extract_done.json",
+                    }
+                    cfg_section_map = {
+                        "sky": "sky",
+                        "linearize": "linearize",
+                        "stack2d": "stack2d",
+                        "extract1d": "extract1d",
+                    }
+                    done_path = None
+                    if t in done_name_map:
+                        dp = stage_dir(out_dir, t) / done_name_map[t]
+                        if dp.is_file():
+                            done_path = dp
+                    sect = cfg_section_map.get(t)
+                    stage_cfg_obj = None
+                    if sect and isinstance(cfg, dict):
+                        v = cfg.get(sect)
+                        if isinstance(v, dict):
+                            stage_cfg_obj = v
+
+                    update_stage(
+                        out_dir,
+                        t,
+                        cfg_section=stage_cfg_obj,
+                        done_path=str(done_path) if done_path else None,
+                        status="ok",
+                    )
+                    snapshot(out_dir, reason=f"stage_{t}_ok")
+                except Exception:
+                    pass
+
                 from scorpio_pipe.qc.metrics_store import (
                     mirror_qc_to_products,
                     update_after_stage,
@@ -787,8 +839,18 @@ def run_sequence(
                 stage_hash=stage_hash,
                 message=str(e),
                 trace=tb,
+                meta={"qc_override": bool(qc_override)} if qc_override else None,
             )
             try:
+                # UI session + history snapshot (P1-G UI-020).
+                try:
+                    from scorpio_pipe.ui.session_store import snapshot, update_stage
+
+                    update_stage(out_dir, t, status="failed", message=str(e))
+                    snapshot(out_dir, reason=f"stage_{t}_failed")
+                except Exception:
+                    pass
+
                 from scorpio_pipe.qc.metrics_store import update_after_stage
 
                 update_after_stage(
@@ -811,5 +873,6 @@ def run_one(
     *,
     resume: bool = True,
     force: bool = False,
+    qc_override: bool = False,
 ) -> None:
-    run_sequence(cfg_or_path, [task_name], resume=resume, force=force)
+    run_sequence(cfg_or_path, [task_name], resume=resume, force=force, qc_override=qc_override)

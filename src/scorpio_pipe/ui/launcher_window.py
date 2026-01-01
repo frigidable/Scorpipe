@@ -24,7 +24,10 @@ from scorpio_pipe.ui.qc_viewer import QCViewer
 from scorpio_pipe.ui.pair_rejector import clean_pairs_interactively
 from scorpio_pipe.ui.cosmics_manual import CosmicsManualDialog
 from scorpio_pipe.ui.frame_browser import SelectedFrame
-from scorpio_pipe.ui.outputs_panel import OutputsPanel
+from scorpio_pipe.ui.outputs_panel import OutputsToolDialog
+from scorpio_pipe.ui.config_defaults import schema_default
+from scorpio_pipe.ui.param_metadata import get_param_meta
+from scorpio_pipe.ui.delayed_tooltip import install_delayed_tooltip
 from scorpio_pipe.ui.run_plan_dialog import RunPlanDialog
 from scorpio_pipe.ui.config_diff import ConfigDiffDialog
 from scorpio_pipe.paths import resolve_work_dir
@@ -40,23 +43,84 @@ from scorpio_pipe.pairs_library import (
 )
 from scorpio_pipe.ui.theme import apply_theme, load_ui_settings
 from scorpio_pipe.instrument_db import find_grism
+from scorpio_pipe.qc.gate import QCGateError
+
 
 
 # --------------------------- tiny widgets ---------------------------
 
 
-class HelpButton(QtWidgets.QToolButton):
-    def __init__(self, text_ru: str, parent: QtWidgets.QWidget | None = None):
-        super().__init__(parent)
-        self._text_ru = text_ru
-        self.setText("?")
-        self.setCursor(QtCore.Qt.PointingHandCursor)
-        self.setFixedSize(22, 22)
-        self.setToolTip("Описание")
-        self.clicked.connect(self._show)
+class ParamLabel(QtWidgets.QLabel):
+    """Focusable, eliding label with delayed tooltip.
 
-    def _show(self) -> None:
-        QtWidgets.QToolTip.showText(QtGui.QCursor.pos(), self._text_ru, self)
+    Tooltip shows after ~200 ms on hover or keyboard focus.
+    """
+
+    def __init__(self, text: str, tooltip: str, parent: QtWidgets.QWidget | None = None):
+        super().__init__(parent)
+        self._full_text = str(text)
+        self._tooltip_text = str(tooltip or "")
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
+        self.setCursor(QtCore.Qt.WhatsThisCursor)
+        self.setToolTip("" if not self._tooltip_text else self._tooltip_text)
+        self.setTextInteractionFlags(QtCore.Qt.NoTextInteraction)
+        self.setAlignment(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft)
+
+        self._show_delay_ms = 200
+        self._hide_delay_ms = 200
+
+        self._t_show = QtCore.QTimer(self)
+        self._t_show.setSingleShot(True)
+        self._t_show.timeout.connect(self._show_tooltip_now)
+
+        self._t_hide = QtCore.QTimer(self)
+        self._t_hide.setSingleShot(True)
+        self._t_hide.timeout.connect(lambda: QtWidgets.QToolTip.hideText())
+
+        self._update_elide()
+
+    def set_full_text(self, text: str) -> None:
+        self._full_text = str(text)
+        self._update_elide()
+
+    def _update_elide(self) -> None:
+        fm = self.fontMetrics()
+        el = fm.elidedText(self._full_text, QtCore.Qt.TextElideMode.ElideRight, max(10, self.width()))
+        super().setText(el)
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._update_elide()
+
+    def enterEvent(self, event: QtCore.QEvent) -> None:
+        super().enterEvent(event)
+        self._t_hide.stop()
+        if self._tooltip_text:
+            self._t_show.start(self._show_delay_ms)
+
+    def leaveEvent(self, event: QtCore.QEvent) -> None:
+        super().leaveEvent(event)
+        self._t_show.stop()
+        if self._tooltip_text:
+            self._t_hide.start(self._hide_delay_ms)
+
+    def focusInEvent(self, event: QtGui.QFocusEvent) -> None:
+        super().focusInEvent(event)
+        self._t_hide.stop()
+        if self._tooltip_text:
+            self._t_show.start(self._show_delay_ms)
+
+    def focusOutEvent(self, event: QtGui.QFocusEvent) -> None:
+        super().focusOutEvent(event)
+        self._t_show.stop()
+        if self._tooltip_text:
+            self._t_hide.start(self._hide_delay_ms)
+
+    def _show_tooltip_now(self) -> None:
+        if not self._tooltip_text:
+            return
+        pos = self.mapToGlobal(QtCore.QPoint(self.width() // 2, self.height()))
+        QtWidgets.QToolTip.showText(pos, self._tooltip_text, self)
 
 
 @dataclass(frozen=True)
@@ -235,6 +299,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._stage_apply_btns: dict[str, QtWidgets.QPushButton] = {}
         self._stage_dirty_labels: dict[str, QtWidgets.QLabel] = {}
 
+        # Param UI: default-icon reset bindings (refreshed after config sync)
+        self._param_default_buttons: list[callable] = []
+
+        # Outputs panels registered per stage page (for in-page drawers).
+
         # -------------- central layout --------------
         root = QtWidgets.QWidget()
         self.setCentralWidget(root)
@@ -268,6 +337,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
         splitter.addWidget(self.stack)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
+
+        # Per-page Outputs drawer state
+        # Outputs are shown in a detached tool window (not inside stage pages).
 
         # Create pages
         self.page_project = self._build_page_project()
@@ -351,6 +423,16 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._build_menus()
         self._build_toolbar()
 
+        # Outputs: a detached tool window (keeps stage pages layout stable).
+        self.outputs_tool = OutputsToolDialog(parent=self)
+        self.outputs_tool.hide()
+        try:
+            self.outputs_tool.visibilityChanged.connect(
+                self._on_outputs_tool_visibility_changed
+            )
+        except Exception:
+            pass
+
         self._build_statusbar_widgets()
         self._install_shortcuts()
 
@@ -426,18 +508,389 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
     # --------------------------- small UI helpers ---------------------------
 
-    def _param_label(self, title: str, help_ru: str) -> QtWidgets.QWidget:
-        # A compact label widget for QFormLayout with a help tooltip.
-        w = QtWidgets.QWidget()
-        h = QtWidgets.QHBoxLayout(w)
+    def _format_tooltip(self, text: str, default_line: str | None = None) -> str:
+        """Normalize tooltip text.
+
+        Rules:
+        - max 4 non-empty lines
+        - concrete, no wall-of-text
+        - if ``default_line`` provided and the text does not mention Default/По умолчанию,
+          ensure a Default line is present.
+        """
+        raw = [ln.strip() for ln in (text or "").splitlines()]
+        lines = [ln for ln in raw if ln]
+        if not lines and not default_line:
+            return ""
+
+        def _has_default(ls: list[str]) -> bool:
+            joined = " ".join(ls).lower()
+            return ("default" in joined) or ("по умолч" in joined)
+
+        if default_line and not _has_default(lines):
+            if len(lines) >= 4:
+                lines = lines[:3]
+            lines.append(default_line)
+
+        lines = lines[:4]
+        return "\n".join(lines)
+
+    def _param_label(
+        self,
+        title: str,
+        help_ru: str,
+        cfg_path: str | None = None,
+        units: str | None = None,
+    ) -> QtWidgets.QWidget:
+        """Label column for parameter rows.
+
+        - Tooltip on hover/focus (label itself)
+        - Fixed width, single-line, ellipsis
+        """
+        # Prefer centralized UI metadata when available.
+        typical: str | None = None
+        if cfg_path:
+            meta = get_param_meta(cfg_path)
+            if meta is not None:
+                title = meta.label or title
+                help_ru = meta.tooltip or help_ru
+                units = meta.units if meta.units else units
+                typical = (meta.typical or None)
+
+        # Units are shown next to the parameter name in square brackets.
+        # Do not invent units: only schema/metadata may provide them.
+        t = str(title)
+        if units:
+            u = str(units).strip()
+            if u and ("[" not in t):
+                t = f"{t} [{u}]"
+
+        default_line = None
+        if cfg_path:
+            try:
+                dv = schema_default(cfg_path)
+                dv_s = self._fmt_default_value(dv)
+                default_line = f"Default: {dv_s}"
+                if typical:
+                    default_line = f"{default_line} • Usually: {typical}"
+            except Exception:
+                # Not all labels have a schema entry (e.g. composite/pseudo rows).
+                default_line = None
+
+        lbl = ParamLabel(t, self._format_tooltip(help_ru, default_line=default_line))
+        lbl.setFixedWidth(240)
+        lbl.setMinimumHeight(28)
+        return lbl
+
+    def _param_field(
+        self,
+        field: QtWidgets.QWidget,
+        cfg_path: str | None = None,
+        *,
+        show_default_icon: bool = True,
+    ) -> QtWidgets.QWidget:
+        """Wrap a parameter control with a compact "default" icon.
+
+        The icon is always visible:
+        - when value == schema default → grey, not clickable
+        - when value != schema default → highlighted, click resets to the schema default
+        """
+        # QFormLayout supports adding QLayout directly, but for consistent
+        # rendering (and for the default-icon wrapper) we normalize layouts
+        # into widgets here.
+        if isinstance(field, QtWidgets.QLayout):
+            w = QtWidgets.QWidget()
+            w.setLayout(field)
+            field = w
+
+        root = QtWidgets.QWidget()
+        h = QtWidgets.QHBoxLayout(root)
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(6)
-        lbl = QtWidgets.QLabel(title)
-        hb = HelpButton(help_ru)
-        h.addWidget(lbl)
-        h.addStretch(1)
-        h.addWidget(hb)
-        return w
+        h.addWidget(field, 1)
+
+        if not show_default_icon:
+            return root
+
+        btn = QtWidgets.QToolButton()
+        btn.setAutoRaise(True)
+        btn.setFixedSize(18, 18)
+        _base_icon = self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_BrowserReload)
+
+        def _grey_icon(icon: QtGui.QIcon) -> QtGui.QIcon:
+            try:
+                pm = icon.pixmap(16, 16)
+                out = QtGui.QPixmap(pm.size())
+                out.fill(QtCore.Qt.transparent)
+                p = QtGui.QPainter(out)
+                p.setOpacity(0.35)
+                p.drawPixmap(0, 0, pm)
+                p.end()
+                return QtGui.QIcon(out)
+            except Exception:
+                return icon
+
+        _greyed_icon = _grey_icon(_base_icon)
+        btn.setIcon(_greyed_icon)
+        btn.setToolTip("Default")
+        btn.setCursor(QtCore.Qt.ArrowCursor)
+        btn.setProperty("active", False)
+        btn.setStyleSheet(
+            "QToolButton { border: 1px solid transparent; border-radius: 4px; padding: 0px; }"
+            "QToolButton:hover { border-color: rgba(127,127,127,120); }"
+            "QToolButton[active=\"true\"] { background: rgba(0,120,215,40); border-color: rgba(0,120,215,140); }"
+        )
+        h.addWidget(btn, 0, QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+
+        # Collect bindable widgets (the control itself or descendants for composite rows).
+        bindables: list[tuple[QtWidgets.QWidget, object, object, object, str]] = []
+
+        _MISSING = object()
+        cfg_default: object = _MISSING
+        if cfg_path:
+            try:
+                cfg_default = schema_default(cfg_path)
+            except Exception:
+                cfg_default = _MISSING
+
+        def _bind_one(w: QtWidgets.QWidget) -> None:
+
+            if isinstance(w, QtWidgets.QSpinBox):
+
+                get = w.value
+
+                setv = w.setValue
+
+                if cfg_default is _MISSING:
+
+                    dv_value = int(w.value())
+
+                    dv_disp = str(dv_value)
+
+                elif cfg_default is None:
+
+                    # Many optional numeric params use 0 / min as 'auto' in UI.
+
+                    if w.specialValueText():
+
+                        dv_value = int(w.minimum())
+
+                        dv_disp = str(w.specialValueText())
+
+                    elif int(w.minimum()) == 0:
+
+                        dv_value = 0
+
+                        dv_disp = 'auto'
+
+                    else:
+
+                        dv_value = int(w.minimum())
+
+                        dv_disp = str(dv_value)
+
+                else:
+
+                    dv_value = int(cfg_default) if isinstance(cfg_default, (int, float)) else int(w.value())
+
+                    dv_disp = str(dv_value)
+
+            elif isinstance(w, QtWidgets.QDoubleSpinBox):
+
+                get = w.value
+
+                setv = w.setValue
+
+                if cfg_default is _MISSING:
+
+                    dv_value = float(w.value())
+
+                    dv_disp = str(dv_value)
+
+                elif cfg_default is None:
+
+                    if w.specialValueText():
+
+                        dv_value = float(w.minimum())
+
+                        dv_disp = str(w.specialValueText())
+
+                    elif float(w.minimum()) == 0.0:
+
+                        dv_value = 0.0
+
+                        dv_disp = 'auto'
+
+                    else:
+
+                        dv_value = float(w.minimum())
+
+                        dv_disp = str(dv_value)
+
+                else:
+
+                    dv_value = float(cfg_default) if isinstance(cfg_default, (int, float)) else float(w.value())
+
+                    dv_disp = str(dv_value)
+
+            elif isinstance(w, QtWidgets.QComboBox):
+
+                get = w.currentText
+
+                setv = w.setCurrentText
+
+                dv_value = str(cfg_default) if isinstance(cfg_default, str) else str(w.currentText())
+
+                # If the schema default is not in options, fall back to current.
+
+                if dv_value and w.findText(dv_value) < 0:
+
+                    dv_value = str(w.currentText())
+
+                dv_disp = str(dv_value)
+
+            elif isinstance(w, QtWidgets.QCheckBox):
+
+                get = w.isChecked
+
+                setv = w.setChecked
+
+                if cfg_default is _MISSING:
+
+                    dv_value = bool(w.isChecked())
+
+                elif isinstance(cfg_default, bool):
+
+                    dv_value = bool(cfg_default)
+
+                elif isinstance(cfg_default, (list, tuple, set)):
+
+                    token = w.property('list_token')
+
+                    if token is None:
+
+                        token = (w.text() or '').strip()
+
+                    dv_value = str(token) in {str(x) for x in cfg_default}
+
+                else:
+
+                    dv_value = bool(w.isChecked())
+
+                dv_disp = 'on' if dv_value else 'off'
+
+            elif isinstance(w, QtWidgets.QLineEdit):
+
+                get = w.text
+
+                setv = w.setText
+
+                if cfg_default is _MISSING:
+
+                    dv_value = str(w.text())
+
+                elif cfg_default is None:
+
+                    dv_value = ''
+
+                else:
+
+                    dv_value = str(cfg_default)
+
+                dv_disp = str(dv_value) if dv_value != '' else 'empty'
+
+            else:
+
+                return
+
+            bindables.append((w, get, setv, dv_value, dv_disp))
+
+
+        # Try to bind the field itself first
+        _bind_one(field)
+        # Then bind any descendants
+        for w in field.findChildren(QtWidgets.QWidget):
+            _bind_one(w)
+
+        def _values_equal(a: object, b: object) -> bool:
+            try:
+                if isinstance(a, float) or isinstance(b, float):
+                    return abs(float(a) - float(b)) <= 1e-12
+            except Exception:
+                pass
+            return a == b
+
+        def _is_default() -> bool:
+            if not bindables:
+                return True
+            for _, get, _, dv, _ in bindables:
+                try:
+                    if not _values_equal(get(), dv):
+                        return False
+                except Exception:
+                    return False
+            return True
+
+        def _update_btn() -> None:
+            active = not _is_default()
+            btn.setProperty("active", bool(active))
+            btn.setIcon(_base_icon if active else _greyed_icon)
+            btn.setCursor(QtCore.Qt.PointingHandCursor if active else QtCore.Qt.ArrowCursor)
+            try:
+                btn.style().unpolish(btn)
+                btn.style().polish(btn)
+            except Exception:
+                pass
+            # Always keep tooltip visible; show defaults when we can.
+            if bindables:
+                if len(bindables) == 1:
+                    tip = f"Default: {bindables[0][4]}"
+                    if cfg_path:
+                        meta = get_param_meta(cfg_path)
+                        if meta is not None and meta.typical:
+                            tip = f"{tip} • Usually: {meta.typical}"
+                    btn.setToolTip(tip)
+                else:
+                    # Compact summary for composite controls (e.g. apply_to).
+                    parts = []
+                    for w, _, _, _, dv_display in bindables[:4]:
+                        token = w.property("list_token")
+                        token = token if token is not None else ((w.text() or w.objectName()) or "")
+                        parts.append(f"{token}={dv_display}")
+                    suffix = "" if len(bindables) <= 4 else f" (+{len(bindables)-4})"
+                    btn.setToolTip("Default: " + ", ".join(parts) + suffix)
+            else:
+                btn.setToolTip("Default")
+
+        def _reset() -> None:
+            if not bool(btn.property("active")):
+                return
+            for _, _, setv, dv, _ in bindables:
+                try:
+                    setv(dv)
+                except Exception:
+                    pass
+            _update_btn()
+
+        btn.clicked.connect(_reset)
+
+        # Track value changes
+        for w, _, _, _, _ in bindables:
+            try:
+                if isinstance(w, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
+                    w.valueChanged.connect(lambda *_: _update_btn())
+                elif isinstance(w, QtWidgets.QComboBox):
+                    w.currentTextChanged.connect(lambda *_: _update_btn())
+                elif isinstance(w, QtWidgets.QCheckBox):
+                    w.toggled.connect(lambda *_: _update_btn())
+                elif isinstance(w, QtWidgets.QLineEdit):
+                    w.textChanged.connect(lambda *_: _update_btn())
+            except Exception:
+                pass
+
+        # Store for later refresh after config sync (signals might be blocked).
+        self._param_default_buttons.append(_update_btn)
+        _update_btn()
+        return root
 
     def _small_note(self, text: str) -> QtWidgets.QWidget:
         """A small muted note used in parameter panels."""
@@ -477,15 +930,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
         return root
 
     def _mk_basic_advanced_tabs(
-        self, basic: QtWidgets.QWidget, advanced: QtWidgets.QWidget
+        self, basic: QtWidgets.QWidget, advanced: QtWidgets.QWidget | None
     ) -> QtWidgets.QWidget:
         """Compact Basic/Advanced parameter container.
 
-        The old collapsible sections waste vertical space and often make long
-        parameter lists unreadable. Tabs are denser and predictable.
-
-        Each tab is wrapped into a scroll area so *everything* stays accessible
-        even on small screens.
+        Scroll is allowed *only* inside the parameter area. If a stage has no
+        meaningful Advanced parameters, we omit the Advanced tab entirely.
         """
 
         def _wrap_scroll(w: QtWidgets.QWidget) -> QtWidgets.QScrollArea:
@@ -495,6 +945,50 @@ class LauncherWindow(QtWidgets.QMainWindow):
             sa.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
             sa.setWidget(w)
             return sa
+
+        def _is_effectively_empty(w: QtWidgets.QWidget) -> bool:
+            """Return True when `advanced` contains no interactive controls.
+
+            Many stages keep a placeholder note label instead of real advanced
+            parameters. We omit the Advanced tab in that case.
+            """
+            # Any interactive widgets present? then it's not empty.
+            interactive = (
+                QtWidgets.QSpinBox,
+                QtWidgets.QDoubleSpinBox,
+                QtWidgets.QComboBox,
+                QtWidgets.QCheckBox,
+                QtWidgets.QLineEdit,
+                QtWidgets.QSlider,
+                QtWidgets.QDateTimeEdit,
+            )
+            for child in w.findChildren(interactive):
+                # Presence of any interactive control means Advanced is meaningful,
+                # even if that control is currently hidden by a mode/method.
+                return False
+
+            # Otherwise, treat a single note label as empty.
+            lay = w.layout()
+            if lay is None:
+                return True
+            if lay.count() == 0:
+                return True
+            # If the only content is a label-like note, consider empty.
+            only_widgets: list[QtWidgets.QWidget] = []
+            for i in range(lay.count()):
+                it = lay.itemAt(i)
+                if it is None:
+                    continue
+                ww = it.widget()
+                if ww is None:
+                    continue
+                only_widgets.append(ww)
+            if len(only_widgets) == 1 and isinstance(only_widgets[0], QtWidgets.QLabel):
+                return True
+            return False
+
+        if advanced is None or _is_effectively_empty(advanced):
+            return _wrap_scroll(basic)
 
         tabs = QtWidgets.QTabWidget()
         tabs.setDocumentMode(True)
@@ -517,6 +1011,88 @@ class LauncherWindow(QtWidgets.QMainWindow):
         sa.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         sa.setWidget(inner)
         return sa
+
+    def _current_outputs_stage(self) -> str | None:
+        """Stage key for Outputs viewer.
+
+        Outputs are tied to pipeline stages (01..12). For UI-only pages
+        (Project/Setup) there are no products, so stage=None.
+        """
+
+        try:
+            row = int(self.steps.currentRow())
+        except Exception:
+            row = -1
+        if row < 0 or row >= len(getattr(self, "_stage_keys", [])):
+            return None
+        stage_key = str(self._stage_keys[row])
+        if stage_key in {"project", "setup"}:
+            return None
+        return stage_key
+
+    def _update_outputs_tool_context(self) -> None:
+        try:
+            if getattr(self, "outputs_tool", None) is None:
+                return
+            if not self.outputs_tool.isVisible():
+                return
+            stage = self._current_outputs_stage()
+            if getattr(self, "_cfg", None) is None:
+                return
+            self.outputs_tool.set_context(self._cfg, stage=stage)
+        except Exception:
+            pass
+
+    def _on_outputs_tool_visibility_changed(self, visible: bool) -> None:
+        # Keep toolbar action in sync (avoid recursion).
+        if not hasattr(self, "act_outputs"):
+            return
+        self.act_outputs.blockSignals(True)
+        try:
+            self.act_outputs.setChecked(bool(visible))
+        finally:
+            self.act_outputs.blockSignals(False)
+
+    def _sync_outputs_action_state(self) -> None:
+        """Enable/disable Outputs action and keep its checked state in sync."""
+        if not hasattr(self, "act_outputs"):
+            return
+        enabled = getattr(self, "_cfg", None) is not None
+        try:
+            self.act_outputs.setEnabled(bool(enabled))
+        except Exception:
+            pass
+        if not enabled:
+            self.act_outputs.blockSignals(True)
+            try:
+                self.act_outputs.setChecked(False)
+            finally:
+                self.act_outputs.blockSignals(False)
+            return
+        # When enabled, reflect real visibility of the tool window.
+        shown = bool(getattr(self, "outputs_tool", None) is not None and self.outputs_tool.isVisible())
+        self.act_outputs.blockSignals(True)
+        try:
+            self.act_outputs.setChecked(shown)
+        finally:
+            self.act_outputs.blockSignals(False)
+
+    def _toggle_outputs(self, checked: bool) -> None:
+        if getattr(self, "outputs_tool", None) is None:
+            return
+        if bool(checked):
+            self._update_outputs_tool_context()
+            try:
+                self.outputs_tool.show()
+                self.outputs_tool.raise_()
+                self.outputs_tool.activateWindow()
+            except Exception:
+                self.outputs_tool.show()
+        else:
+            try:
+                self.outputs_tool.hide()
+            except Exception:
+                pass
 
     def _mk_stage_apply_row(self, stage: str) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
@@ -621,11 +1197,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
         # (Frames Browser is exposed via a compact button and a global toolbar action.)
 
         # Actions
-        act = QtWidgets.QHBoxLayout()
-        lay.addLayout(act)
-        self.btn_to_config = QtWidgets.QPushButton("Go to Config →")
-        act.addStretch(1)
-        act.addWidget(self.btn_to_config)
         # no stretch: the frame browser gets the remaining vertical space
 
         # signals
@@ -635,7 +1206,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_frames_project.clicked.connect(
             lambda: self._open_frames_window("project")
         )
-        self.btn_to_config.clicked.connect(lambda: self.steps.setCurrentRow(1))
         self.edit_data_dir.textChanged.connect(lambda *_: self._update_enables())
         self.edit_data_dir.textChanged.connect(lambda *_: self._refresh_statusbar())
 
@@ -1017,46 +1587,28 @@ class LauncherWindow(QtWidgets.QMainWindow):
             QtWidgets.QComboBox.AdjustToContentsOnFirstShow
         )
         row_obj.addWidget(self.combo_object, 1)
-        row_obj.addWidget(
-            HelpButton("Имя научного объекта (как в ночном логе / в FITS-заголовке).")
-        )
-        fl.addRow("Object", row_obj)
+        fl.addRow(self._param_label("Object", "Имя научного объекта (как в ночном логе / FITS header).\nЕсли пусто: autodetect из header.\nОбычно: как в логе ночи."), row_obj)
 
         # Disperser
         row_disp = QtWidgets.QHBoxLayout()
         self.combo_disperser = QtWidgets.QComboBox()
         self.combo_disperser.setEditable(False)
         row_disp.addWidget(self.combo_disperser, 1)
-        row_disp.addWidget(
-            HelpButton(
-                "Выбор решётки/дисперсера. Если у объекта несколько решёток — выбери нужную."
-            )
-        )
-        fl.addRow("Disperser", row_disp)
+        fl.addRow(self._param_label("Disperser", "Решётка/дисперсер для этого run.\nОпределяет дисперсию и набор калибровок.\nЕсли в ночи несколько — выбери нужную."), row_disp)
 
         # Slit
         row_slit = QtWidgets.QHBoxLayout()
         self.combo_slit = QtWidgets.QComboBox()
         self.combo_slit.setEditable(False)
         row_slit.addWidget(self.combo_slit, 1)
-        row_slit.addWidget(
-            HelpButton(
-                "Щель (ширина). Если в данных встречается несколько щелей — выбери нужную."
-            )
-        )
-        fl.addRow("Slit", row_slit)
+        fl.addRow(self._param_label("Slit", "Ширина щели.\nВлияет на спектральное разрешение и подбор line-list.\nЕсли встречается несколько — выбери нужную."), row_slit)
 
         # Binning
         row_bin = QtWidgets.QHBoxLayout()
         self.combo_binning = QtWidgets.QComboBox()
         self.combo_binning.setEditable(False)
         row_bin.addWidget(self.combo_binning, 1)
-        row_bin.addWidget(
-            HelpButton(
-                "Биннинг ПЗС. Мы используем его как часть setup, чтобы не смешивать разные режимы."
-            )
-        )
-        fl.addRow("Binning", row_bin)
+        fl.addRow(self._param_label("Binning", "Биннинг CCD.\nВлияет на масштаб [px] и шум.\nНе смешивай разные binning в одном run."), row_bin)
 
         # Workspace root (top-level base)
         row_ws = QtWidgets.QHBoxLayout()
@@ -1071,12 +1623,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_pick_workspace_root.setCursor(QtCore.Qt.PointingHandCursor)
         row_ws.addWidget(self.edit_workspace_root, 1)
         row_ws.addWidget(self.btn_pick_workspace_root)
-        row_ws.addWidget(
-            HelpButton(
-                "Верхняя база workspace. Новый layout: <DD_MM_YYYY>/<OBJECT>_<DISPERSER>_<RUN>/<NN_stage>/."
-            )
-        )
-        fl.addRow("Workspace root", row_ws)
+        fl.addRow(self._param_label("Workspace root", "Верхняя база workspace.\nLayout: <Night>/<Object>_<Disperser>_<Run>/<NN_stage>/.\nЗдесь живут все проекты."), row_ws)
 
         # Run controls
         row_run = QtWidgets.QHBoxLayout()
@@ -1087,12 +1634,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_init_run = QtWidgets.QPushButton("Initialize run")
         row_run.addWidget(self.spin_run_id)
         row_run.addWidget(self.btn_init_run)
-        row_run.addWidget(
-            HelpButton(
-                "Создать/выбрать run-folder по representative FITS header: ночь, OBJECT и GRISM."
-            )
-        )
-        fl.addRow("Run", row_run)
+        fl.addRow(self._param_label("Run", "Номер run в рамках ночи/объекта/решётки.\nAuto = следующий свободный _01/_02/...\nInitialize создаёт/выбирает run-folder."), row_run)
 
         # Recent runs (last 10) + Open…
         row_recent = QtWidgets.QHBoxLayout()
@@ -1103,12 +1645,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         row_recent.addWidget(self.combo_recent_runs, 1)
         row_recent.addWidget(self.btn_switch_run)
         row_recent.addWidget(self.btn_open_run)
-        row_recent.addWidget(
-            HelpButton(
-                "Recent показывает последние 10 run-folder. Open… — выбрать любой run-folder через проводник."
-            )
-        )
-        fl.addRow("Recent runs", row_recent)
+        fl.addRow(self._param_label("Recent runs", "Последние 10 run-folder.\nSwitch — открыть выбранный.\nOpen… — выбрать любой через проводник."), row_recent)
 
         # Work dir (run-root)
         row_wd = QtWidgets.QHBoxLayout()
@@ -1122,12 +1659,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_pick_work_dir.setCursor(QtCore.Qt.PointingHandCursor)
         row_wd.addWidget(self.edit_work_dir, 1)
         row_wd.addWidget(self.btn_pick_work_dir)
-        row_wd.addWidget(
-            HelpButton(
-                "Run-folder: сюда пишутся все стадии как <NN_stage>/. Метаданные — в manifest/."
-            )
-        )
-        fl.addRow("Run folder", row_wd)
+        fl.addRow(self._param_label("Run folder", "Текущий run-folder (root для стадий).\nВнутри создаются папки <NN_stage>/.\nМетаданные — в manifest/."), row_wd)
 
         # Create/Load config actions
         row_cfg = QtWidgets.QHBoxLayout()
@@ -1166,10 +1698,15 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_diff_cfg = QtWidgets.QPushButton("Diff")
         self.btn_save_cfg = QtWidgets.QPushButton("Save")
         self.btn_save_cfg.setProperty("primary", True)
+        self.btn_prev_state = QtWidgets.QPushButton("Previous state")
+        self.btn_prev_state.setToolTip(
+            "Restore the last saved session/config snapshot (ui/history)."
+        )
         self.lbl_cfg_state = QtWidgets.QLabel("—")
         bar.addWidget(self.btn_validate_yaml)
         bar.addWidget(self.btn_diff_cfg)
         bar.addWidget(self.btn_save_cfg)
+        bar.addWidget(self.btn_prev_state)
         bar.addStretch(1)
         bar.addWidget(self.lbl_cfg_state)
 
@@ -1191,18 +1728,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_validate_yaml.clicked.connect(self._validate_yaml)
         self.btn_diff_cfg.clicked.connect(self._show_cfg_diff)
         self.btn_save_cfg.clicked.connect(self._do_save_cfg)
+        self.btn_prev_state.clicked.connect(self._show_prev_state_menu)
         self.editor_yaml.textChanged.connect(self._on_yaml_changed)
 
         # Initial population of Recent runs.
         QtCore.QTimer.singleShot(0, self._refresh_recent_runs)
 
-        lay.addWidget(_hline())
-        foot = QtWidgets.QHBoxLayout()
-        lay.addLayout(foot)
-        self.btn_to_calib = QtWidgets.QPushButton("Go to Calibrations →")
-        foot.addStretch(1)
-        foot.addWidget(self.btn_to_calib)
-        self.btn_to_calib.clicked.connect(lambda: self.steps.setCurrentRow(2))
 
         return w
 
@@ -1272,6 +1803,19 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._log_error(f"Run folder does not exist: {run_root}")
             return
 
+        # Ensure minimal run skeleton (manifest/qc/ui) and passport/session.
+        try:
+            from scorpio_pipe.work_layout import ensure_work_layout
+
+            ensure_work_layout(run_root)
+            from scorpio_pipe.run_passport import ensure_run_passport
+            from scorpio_pipe.ui.session_store import load_session, save_session
+
+            ensure_run_passport(run_root)
+            save_session(run_root, load_session(run_root))
+        except Exception:
+            pass
+
         # Legacy layout hint (do not migrate automatically)
         try:
             from scorpio_pipe.run_root import detect_legacy_layout
@@ -1319,6 +1863,60 @@ class LauncherWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
+        # P2 safety belt: validate workspace layout + run.json (passport).
+        try:
+            from scorpio_pipe.run_validate import RunLayoutError, validate_run_dir
+            from scorpio_pipe.run_passport import rewrite_run_passport_from_dir
+
+            v = validate_run_dir(run_root, strict=False)
+            if v.mismatches:
+                # Offer a one-click fix: rewrite run.json to match folder naming.
+                box = QtWidgets.QMessageBox(self)
+                box.setIcon(QtWidgets.QMessageBox.Warning)
+                box.setWindowTitle("run.json mismatch")
+                box.setText(
+                    "This run folder has a valid structure, but fields in run.json do not match "
+                    "the folder name. This may lead to confusing UI/runner behavior."
+                )
+                box.setInformativeText("\n".join(v.mismatches))
+                btn_fix = box.addButton(
+                    "Fix run.json", QtWidgets.QMessageBox.ButtonRole.ActionRole
+                )
+                btn_continue = box.addButton(
+                    "Open as-is", QtWidgets.QMessageBox.ButtonRole.AcceptRole
+                )
+                box.addButton("Cancel", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+                box.exec()
+                if box.clickedButton() == btn_fix:
+                    try:
+                        rewrite_run_passport_from_dir(run_root)
+                    except Exception as e:
+                        QtWidgets.QMessageBox.critical(
+                            self,
+                            "Failed to fix run.json",
+                            str(e),
+                        )
+                        return
+                elif box.clickedButton() != btn_continue:
+                    return
+
+            # Non-fatal warnings: show once so the user is aware.
+            if v.warnings:
+                self._show_msgbox_lines(
+                    "Workspace validation",
+                    list(v.warnings),
+                    icon="warn",
+                )
+        except RunLayoutError as e:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Invalid run folder",
+                str(e),
+            )
+            return
+        except Exception:
+            pass
+
         self.edit_work_dir.setText(str(run_root))
         self._workdir_user_edited = True
 
@@ -1328,13 +1926,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.edit_cfg_path.setText(str(cfg_p))
             self._do_reload_cfg()
         else:
-            # Still ensure manifest/config skeleton exists.
-            try:
-                from scorpio_pipe.work_layout import ensure_work_layout
-
-                ensure_work_layout(run_root)
-            except Exception:
-                pass
+            # No config yet; keep a reasonable default.
+            self._cfg_path = cfg_p
 
     def _initialize_run(self) -> None:
         """Compute run_root from representative header + auto-increment."""
@@ -1843,6 +2436,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         self._update_enables()
         self._refresh_statusbar()
+        self._sync_outputs_action_state()
 
         try:
             if hasattr(self, "stack") and int(self.stack.currentIndex()) == 7:
@@ -1903,6 +2497,61 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._log_info("YAML ok")
         self._cfg = cfg
 
+    def _show_prev_state_menu(self) -> None:
+        """Show history snapshots and allow restoring a previous state."""
+
+        try:
+            rr_txt = (self.edit_work_dir.text() or "").strip()
+            if not rr_txt:
+                self._log_error("No run folder selected")
+                return
+            run_root = Path(rr_txt).expanduser().resolve()
+
+            from scorpio_pipe.ui.session_store import list_snapshots, restore_snapshot
+
+            items = list_snapshots(run_root, limit=15)
+            if not items:
+                self._show_msg(
+                    "Previous state",
+                    ["No snapshots yet.", "Save the config or run a stage to create snapshots."],
+                    icon="info",
+                )
+                return
+
+            menu = QtWidgets.QMenu(self)
+            for it in items:
+                ts = str(it.get("timestamp", ""))
+                rs = str(it.get("reason", ""))
+                rel = str(it.get("path", ""))
+                if not rel:
+                    continue
+                txt = f"{ts} — {rs}" if rs else ts
+                act = menu.addAction(txt)
+                act.setData(rel)
+
+            act = menu.exec(self.btn_prev_state.mapToGlobal(QtCore.QPoint(0, self.btn_prev_state.height())))
+            if not act:
+                return
+            rel = act.data()
+            if not rel:
+                return
+            ok = restore_snapshot(run_root, str(rel))
+            if not ok:
+                self._log_error("Restore failed")
+                return
+            # Reload config/session into UI.
+            try:
+                self.edit_cfg_path.setText(str(run_root / "config.yaml"))
+            except Exception:
+                pass
+            self._do_reload_cfg()
+            self._refresh_outputs_panels()
+            self._update_enables()
+            self._refresh_statusbar()
+            self._log_info(f"Restored snapshot: {rel}")
+        except Exception as e:
+            self._log_exception(e)
+
     def _sync_cfg_from_editor(self) -> bool:
         cfg, err = _safe_parse_yaml(self.editor_yaml.toPlainText())
         if err:
@@ -1923,22 +2572,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         return True
 
     def _refresh_outputs_panels(self) -> None:
-        mapping = [
-            ("outputs_calib", None),
-            ("outputs_cosmics", "cosmics"),
-            ("outputs_flatfield", "flatfield"),
-            ("outputs_superneon", "wavesol"),
-            ("outputs_lineid", "wavesol"),
-            ("outputs_wavesol", "wavesol"),
-        ]
-        for attr, stage in mapping:
-            try:
-                if hasattr(self, attr):
-                    panel = getattr(self, attr)
-                    if isinstance(panel, OutputsPanel):
-                        panel.set_context(self._cfg, stage=stage)
-            except Exception:
-                pass
+        # Keep the detached Outputs tool window in sync.
+        self._update_outputs_tool_context()
 
     def _do_save_cfg(self) -> None:
         # Resolve target path.
@@ -2016,6 +2651,42 @@ class LauncherWindow(QtWidgets.QMainWindow):
             pass
         self._update_enables()
         self._refresh_statusbar()
+        self._sync_outputs_action_state()
+
+        # Persist GUI session + a rollback snapshot (ui/history).
+        try:
+            rr_txt = (self.edit_work_dir.text() or "").strip()
+            if rr_txt:
+                rr = Path(rr_txt).expanduser().resolve()
+                from scorpio_pipe.run_passport import ensure_run_passport
+                from scorpio_pipe.ui.session_store import snapshot, update_stage
+
+                ensure_run_passport(rr)
+                cfg_obj = self._cfg or {}
+                if isinstance(cfg_obj, dict):
+                    update_stage(
+                        rr,
+                        "sky",
+                        cfg_section=cfg_obj.get("sky") if isinstance(cfg_obj.get("sky"), dict) else None,
+                    )
+                    update_stage(
+                        rr,
+                        "linearize",
+                        cfg_section=cfg_obj.get("linearize") if isinstance(cfg_obj.get("linearize"), dict) else None,
+                    )
+                    update_stage(
+                        rr,
+                        "stack2d",
+                        cfg_section=cfg_obj.get("stack2d") if isinstance(cfg_obj.get("stack2d"), dict) else None,
+                    )
+                    update_stage(
+                        rr,
+                        "extract1d",
+                        cfg_section=cfg_obj.get("extract1d") if isinstance(cfg_obj.get("extract1d"), dict) else None,
+                    )
+                snapshot(rr, reason="config_save")
+        except Exception:
+            pass
 
         try:
             if hasattr(self, "stack") and int(self.stack.currentIndex()) == 7:
@@ -2867,18 +3538,32 @@ class LauncherWindow(QtWidgets.QMainWindow):
             _set_checked(
                 getattr(self, "chk_ex1d_enabled", None), bool(ex.get("enabled", True))
             )
+
+            # Input mode (stack2d vs single_frame)
+            if hasattr(self, "combo_ex1d_input_mode"):
+                mode = str(ex.get("input_mode", "stack2d") or "stack2d")
+                if bool(ex.get("allow_sky_fallback", False)) and mode == "stack2d":
+                    mode = "single_frame"
+                _set_combo_text(getattr(self, "combo_ex1d_input_mode", None), mode)
+            if hasattr(self, "edit_ex1d_single_stem"):
+                stem = str(ex.get("single_frame_stem", "") or "")
+                if not stem and ex.get("single_frame_path"):
+                    try:
+                        p = Path(str(ex.get("single_frame_path")))
+                        stem = p.name.replace("_skysub.fits", "")
+                    except Exception:
+                        pass
+                _set_text(getattr(self, "edit_ex1d_single_stem", None), stem)
             if hasattr(self, "combo_ex1d_method"):
                 m = str(ex.get("method", "boxcar") or "boxcar")
                 _set_combo_text(getattr(self, "combo_ex1d_method", None), m)
             if hasattr(self, "spin_ex1d_ap_hw"):
-                _set_value(
-                    getattr(self, "spin_ex1d_ap_hw", None),
-                    _safe_int(ex.get("aperture_half_width", 6), 6),
-                )
+                ahw = ex.get("aperture_half_width", None)
+                _set_value(getattr(self, "spin_ex1d_ap_hw", None), _safe_int(ahw, 0))
             if hasattr(self, "dspin_ex1d_trace_bin"):
                 _set_value(
                     getattr(self, "dspin_ex1d_trace_bin", None),
-                    _safe_float(ex.get("trace_bin_A", 50.0), 50.0),
+                    _safe_float(ex.get("trace_bin_A", 60.0), 60.0),
                 )
             if hasattr(self, "spin_ex1d_trace_deg"):
                 _set_value(
@@ -2914,14 +3599,23 @@ class LauncherWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
+        try:
+            self._update_wavesol_model2d_enables()
+        except Exception:
+            pass
+
+
+        # Refresh 'default' icons: sync uses blocked signals for stability.
+        for _upd in getattr(self, "_param_default_buttons", []):
+            try:
+                _upd()
+            except Exception:
+                pass
+
     def _build_page_calib(self) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(w)
         lay.setSpacing(12)
-
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        splitter.setChildrenCollapsible(False)
-        lay.addWidget(splitter, 1)
 
         # left: controls
         left = QtWidgets.QWidget()
@@ -2956,8 +3650,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Способ объединения bias-кадров.\n"
                 "median — устойчив к выбросам, mean — чуть выше S/N при чистых данных.\n"
                 "Типично: median.",
+                cfg_path="calib.bias_combine",
             ),
-            self.combo_bias_combine,
+            self._param_field(self.combo_bias_combine, cfg_path="calib.bias_combine"),
         )
 
         self.spin_bias_sigma_clip = QtWidgets.QDoubleSpinBox()
@@ -2971,8 +3666,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Сигма-клиппинг при построении superbias.\n"
                 "0 = отключить.\n"
                 "Типично: 0–3.",
+                cfg_path="calib.bias_sigma_clip",
+                units="σ",
             ),
-            self.spin_bias_sigma_clip,
+            self._param_field(self.spin_bias_sigma_clip, cfg_path="calib.bias_sigma_clip"),
         )
 
         adv = QtWidgets.QWidget()
@@ -3016,27 +3713,16 @@ class LauncherWindow(QtWidgets.QMainWindow):
         gl.addLayout(row)
         left_layout.addStretch(1)
 
-        splitter.addWidget(self._mk_scroll_panel(left))
+        # Outputs are shown in a detached tool window.
+        lay.addWidget(left, 1)
 
-        # right: outputs
-        self.outputs_calib = OutputsPanel()
-        self.outputs_calib.set_context(self._cfg, stage=None)
-        splitter.addWidget(self.outputs_calib)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([650, 480])
+        # Outputs are shown in a detached tool window (toolbar: Outputs).
+        lay.addWidget(left, 1)
 
-        lay.addWidget(_hline())
-        foot = QtWidgets.QHBoxLayout()
-        lay.addLayout(foot)
-        self.btn_to_cosmics = QtWidgets.QPushButton("Go to Cosmics →")
-        foot.addStretch(1)
-        foot.addWidget(self.btn_to_cosmics)
 
         self.btn_run_calib.clicked.connect(self._do_run_calib)
         self.btn_qc_calib.clicked.connect(self._open_qc_viewer)
         self.btn_frames_calib.clicked.connect(lambda: self._open_frames_window("calib"))
-        self.btn_to_cosmics.clicked.connect(lambda: self.steps.setCurrentRow(self._stage_row_index("cosmics")))
 
         try:
             self._refresh_pair_sets_combo()
@@ -3053,13 +3739,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._set_step_status(self._stage_row_index("biascorr"), "running")
         try:
             ctx = load_context(self._cfg_path)
-            run_sequence(ctx, ["manifest", "superbias"])
+            self._run_sequence_with_qc_prompt(ctx, ["manifest", "superbias"])
             self._log_info("Calibrations done")
-            try:
-                if hasattr(self, "outputs_calib"):
-                    self.outputs_calib.set_context(self._cfg, stage=None)
-            except Exception:
-                pass
             self._set_step_status(self._stage_row_index("biascorr"), "ok")
             self._maybe_auto_qc()
         except Exception as e:
@@ -3072,10 +3753,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
         w = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(w)
         lay.setSpacing(12)
-
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        splitter.setChildrenCollapsible(False)
-        lay.addWidget(splitter, 1)
 
         left = QtWidgets.QWidget()
         left_layout = QtWidgets.QVBoxLayout(left)
@@ -3106,14 +3783,16 @@ class LauncherWindow(QtWidgets.QMainWindow):
         bf.setLabelAlignment(QtCore.Qt.AlignLeft)
         bf.setHorizontalSpacing(12)
 
-        self.chk_cosmics_enabled = QtWidgets.QCheckBox("Enable")
+        # Keep checkbox text empty: the label column is the single source of truth.
+        self.chk_cosmics_enabled = QtWidgets.QCheckBox("")
         bf.addRow(
             self._param_label(
                 "Enabled",
                 "Включает/отключает этап Clean Cosmics.\n"
                 "Типично: включено для obj/sky (и sunsky при наличии).",
+                cfg_path="cosmics.enabled",
             ),
-            self.chk_cosmics_enabled,
+            self._param_field(self.chk_cosmics_enabled, cfg_path="cosmics.enabled"),
         )
 
         self.combo_cosmics_method = QtWidgets.QComboBox()
@@ -3129,8 +3808,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "two_frame_diff — разностный метод для 2 экспозиций.\n"
                 "laplacian — одиночный кадр (fallback).\n"
                 "Типично: auto (по умолчанию).",
+                cfg_path="cosmics.method",
             ),
-            self.combo_cosmics_method,
+            self._param_field(self.combo_cosmics_method, cfg_path="cosmics.method"),
         )
 
         apply_row_w = QtWidgets.QWidget()
@@ -3145,8 +3825,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._param_label(
                 "Apply to",
                 "К каким типам кадров применять очистку.\nТипично: obj + sky.",
+                cfg_path="cosmics.apply_to",
             ),
-            apply_row_w,
+            self._param_field(apply_row_w, cfg_path="cosmics.apply_to"),
         )
 
         self.spin_cosmics_k = QtWidgets.QDoubleSpinBox()
@@ -3165,8 +3846,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Меньше k → агрессивнее чистка (может резать сигнал).\n"
                 "Больше k → мягче (может оставлять космики).\n"
                 "Ориентир: 3–8. Советы: недочищает → уменьшить k; режет полезное → увеличить k.",
+                cfg_path="cosmics.k",
             ),
-            self.spin_cosmics_k,
+            self._param_field(self.spin_cosmics_k, cfg_path="cosmics.k"),
         )
 
         self.spin_cosmics_dilate = QtWidgets.QSpinBox()
@@ -3178,11 +3860,13 @@ class LauncherWindow(QtWidgets.QMainWindow):
         )
         bf.addRow(
             self._param_label(
-                "Dilate (px)",
+                "Dilate",
                 "Радиус расширения маски космиков (в пикселях).\n"
                 "0 — отключено; 1–2 — типично; больше — агрессивно.",
+                cfg_path="cosmics.dilate",
+                units="px",
             ),
-            self.spin_cosmics_dilate,
+            self._param_field(self.spin_cosmics_dilate, cfg_path="cosmics.dilate"),
         )
         adv = QtWidgets.QWidget()
         af = QtWidgets.QFormLayout(adv)
@@ -3194,8 +3878,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._param_label(
                 "Bias subtract",
                 "Вычитать superbias перед поиском космиков.\nТипично: включено.",
+                cfg_path="cosmics.bias_subtract",
             ),
-            self.chk_cosmics_bias,
+            self._param_field(self.chk_cosmics_bias, cfg_path="cosmics.bias_subtract"),
         )
 
         self.chk_cosmics_png = QtWidgets.QCheckBox("Yes")
@@ -3204,8 +3889,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Save PNG",
                 "Сохранять QC-картинки (coverage/sum).\n"
                 "Типично: включено для диагностики.",
+                cfg_path="cosmics.save_png",
             ),
-            self.chk_cosmics_png,
+            self._param_field(self.chk_cosmics_png, cfg_path="cosmics.save_png"),
         )
 
         self.chk_cosmics_mask_fits = QtWidgets.QCheckBox("Yes")
@@ -3214,8 +3900,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Save mask FITS",
                 "Сохранять FITS-маски космиков (по кадрам) в work_dir/cosmics/.../masks_fits/.\n"
                 "Полезно для диагностики и повторной обработки.",
+                cfg_path="cosmics.save_mask_fits",
             ),
-            self.chk_cosmics_mask_fits,
+            self._param_field(self.chk_cosmics_mask_fits, cfg_path="cosmics.save_mask_fits"),
         )
 
         # --- method-specific advanced tuning ---
@@ -3234,8 +3921,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "MAD scale",
                 "Масштаб для MAD в stack_mad: |x-med|/(mad_scale*MAD) > k.\n"
                 "1.0 — оставить поведение прежним; 1.4826 — приблизить к σ.",
+                cfg_path="cosmics.mad_scale",
             ),
-            self.dspin_cosmics_mad_scale,
+            self._param_field(self.dspin_cosmics_mad_scale, cfg_path="cosmics.mad_scale"),
         )
 
         self.dspin_cosmics_min_mad = QtWidgets.QDoubleSpinBox()
@@ -3251,8 +3939,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "min MAD",
                 "Нижняя граница для MAD (floor).\n"
                 "0 — авто (eps); увеличить, если видишь неадекватно большую маску.",
+                cfg_path="cosmics.min_mad",
             ),
-            self.dspin_cosmics_min_mad,
+            self._param_field(self.dspin_cosmics_min_mad, cfg_path="cosmics.min_mad"),
         )
 
         self.dspin_cosmics_max_frac = QtWidgets.QDoubleSpinBox()
@@ -3268,8 +3957,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "max masked frac",
                 "Лимит доли замаскированных пикселей (на кадр) для stack_mad.\n"
                 "0 — отключено; например 0.02 = максимум 2% пикселей.",
+                cfg_path="cosmics.max_frac_per_frame",
             ),
-            self.dspin_cosmics_max_frac,
+            self._param_field(self.dspin_cosmics_max_frac, cfg_path="cosmics.max_frac_per_frame"),
         )
 
         af.addRow(QtWidgets.QLabel("<b>two_frame_diff</b>"))
@@ -3285,8 +3975,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "local r",
                 "Радиус локального окна для оценки локального масштаба |diff| (two_frame_diff / laplacian).\n"
                 "2 ⇒ 5×5; типично 1–3.",
+                cfg_path="cosmics.local_r",
+                units="px",
             ),
-            self.spin_cosmics_local_r,
+            self._param_field(self.spin_cosmics_local_r, cfg_path="cosmics.local_r"),
         )
 
         self.dspin_cosmics_k2_scale = QtWidgets.QDoubleSpinBox()
@@ -3297,8 +3989,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._param_label(
                 "k2 scale",
                 "two_frame_diff: k2 = max(k2_min, k2_scale*k).\nТипично: 0.8.",
+                cfg_path="cosmics.two_diff_k2_scale",
             ),
-            self.dspin_cosmics_k2_scale,
+            self._param_field(self.dspin_cosmics_k2_scale, cfg_path="cosmics.two_diff_k2_scale"),
         )
 
         self.dspin_cosmics_k2_min = QtWidgets.QDoubleSpinBox()
@@ -3309,8 +4002,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._param_label(
                 "k2 min",
                 "two_frame_diff: нижняя граница для k2.\nТипично: 5.",
+                cfg_path="cosmics.two_diff_k2_min",
             ),
-            self.dspin_cosmics_k2_min,
+            self._param_field(self.dspin_cosmics_k2_min, cfg_path="cosmics.two_diff_k2_min"),
         )
 
         self.dspin_cosmics_thr_a = QtWidgets.QDoubleSpinBox()
@@ -3321,8 +4015,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._param_label(
                 "local a",
                 "two_frame_diff: thr_local = a*loc + b*sigma.\nТипично: a=4.",
+                cfg_path="cosmics.two_diff_thr_local_a",
             ),
-            self.dspin_cosmics_thr_a,
+            self._param_field(self.dspin_cosmics_thr_a, cfg_path="cosmics.two_diff_thr_local_a"),
         )
 
         self.dspin_cosmics_thr_b = QtWidgets.QDoubleSpinBox()
@@ -3333,8 +4028,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._param_label(
                 "local b",
                 "two_frame_diff: thr_local = a*loc + b*sigma.\nТипично: b=2.5.",
+                cfg_path="cosmics.two_diff_thr_local_b",
             ),
-            self.dspin_cosmics_thr_b,
+            self._param_field(self.dspin_cosmics_thr_b, cfg_path="cosmics.two_diff_thr_local_b"),
         )
 
         af.addRow(QtWidgets.QLabel("<b>laplacian</b>"))
@@ -3348,8 +4044,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "lap k scale",
                 "laplacian: thr = max(lap_k_min, lap_k_scale*k) * sigma(lap).\n"
                 "Типично: 0.8.",
+                cfg_path="cosmics.lap_k_scale",
             ),
-            self.dspin_cosmics_lap_k_scale,
+            self._param_field(self.dspin_cosmics_lap_k_scale, cfg_path="cosmics.lap_k_scale"),
         )
 
         self.dspin_cosmics_lap_k_min = QtWidgets.QDoubleSpinBox()
@@ -3360,8 +4057,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._param_label(
                 "lap k min",
                 "laplacian: нижняя граница для k-терма.\nТипично: 5.",
+                cfg_path="cosmics.lap_k_min",
             ),
-            self.dspin_cosmics_lap_k_min,
+            self._param_field(self.dspin_cosmics_lap_k_min, cfg_path="cosmics.lap_k_min"),
         )
 
         # locale for doubles
@@ -3402,20 +4100,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
         gl.addLayout(row)
         left_layout.addStretch(1)
 
-        splitter.addWidget(self._mk_scroll_panel(left))
-        self.outputs_cosmics = OutputsPanel()
-        self.outputs_cosmics.set_context(self._cfg, stage="cosmics")
-        splitter.addWidget(self.outputs_cosmics)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([650, 480])
+        # Outputs are shown in a detached tool window (toolbar: Outputs).
+        lay.addWidget(left, 1)
 
-        lay.addWidget(_hline())
-        foot = QtWidgets.QHBoxLayout()
-        lay.addLayout(foot)
-        self.btn_to_flatfield = QtWidgets.QPushButton("Go to Flat-fielding →")
-        foot.addStretch(1)
-        foot.addWidget(self.btn_to_flatfield)
 
         self.btn_run_cosmics.clicked.connect(self._do_run_cosmics)
         self.btn_qc_cosmics.clicked.connect(self._open_qc_viewer)
@@ -3423,7 +4110,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_frames_cosmics.clicked.connect(
             lambda: self._open_frames_window("cosmics")
         )
-        self.btn_to_flatfield.clicked.connect(lambda: self.steps.setCurrentRow(self._stage_row_index("flatfield")))
 
         # wire per-stage controls (pending → Apply)
         def _apply_to_from_ui() -> list[str]:
@@ -3520,13 +4206,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._set_step_status(self._stage_row_index("cosmics"), "running")
         try:
             ctx = load_context(self._cfg_path)
-            run_sequence(ctx, ["cosmics"])
+            self._run_sequence_with_qc_prompt(ctx, ["cosmics"])
             self._log_info("Cosmics cleaning done")
-            try:
-                if hasattr(self, "outputs_cosmics"):
-                    self.outputs_cosmics.set_context(self._cfg, stage="cosmics")
-            except Exception:
-                pass
             self._set_step_status(self._stage_row_index("cosmics"), "ok")
             self._maybe_auto_qc()
         except Exception as e:
@@ -3541,11 +4222,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
             dlg = CosmicsManualDialog(self._cfg_path, parent=self)
             dlg.exec()
             # Refresh outputs panel (masks/clean may have changed)
-            try:
-                if hasattr(self, "outputs_cosmics"):
-                    self.outputs_cosmics.set_context(self._cfg, stage="cosmics")
-            except Exception:
-                pass
             self._maybe_auto_qc()
         except Exception as e:
             self._log_exception(e)
@@ -3556,10 +4232,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
         w = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(w)
         lay.setSpacing(12)
-
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        splitter.setChildrenCollapsible(False)
-        lay.addWidget(splitter, 1)
 
         left = QtWidgets.QWidget()
         left_layout = QtWidgets.QVBoxLayout(left)
@@ -3596,8 +4268,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._param_label(
                 "Enabled",
                 "Типично: включать только если в ночи есть корректные flat.\n\nЗначения: True/False.",
+                cfg_path="flatfield.enabled",
             ),
-            self.chk_flat_enabled,
+            self._param_field(self.chk_flat_enabled, cfg_path="flatfield.enabled"),
         )
 
         apply_row = QtWidgets.QHBoxLayout()
@@ -3621,8 +4294,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "К каким типам кадров применять flat-fielding.\n"
                 "Типично: obj+sky (+sunsky при наличии).\n"
                 "neon — включать только если это нужно для вашей схемы обработки.",
+                cfg_path="flatfield.apply_to",
             ),
-            apply_w,
+            self._param_field(apply_w, cfg_path="flatfield.apply_to"),
         )
 
         self.chk_flat_bias = QtWidgets.QCheckBox("Subtract superbias")
@@ -3635,8 +4309,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Вычитать superbias при построении и применении superflat.\n"
                 "Типично: True.\n"
                 "Если вы используете продукт, где bias уже вычтен, можно выключить.",
+                cfg_path="flatfield.bias_subtract",
             ),
-            self.chk_flat_bias,
+            self._param_field(self.chk_flat_bias, cfg_path="flatfield.bias_subtract"),
         )
 
         self.chk_flat_png = QtWidgets.QCheckBox("Save QC PNGs")
@@ -3645,8 +4320,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "QC PNG",
                 "Сохранять диагностические PNG.\n"
                 "Типично: True (полезно для контроля качества).",
+                cfg_path="flatfield.save_png",
             ),
-            self.chk_flat_png,
+            self._param_field(self.chk_flat_png, cfg_path="flatfield.save_png"),
         )
 
         adv = QtWidgets.QWidget()
@@ -3676,21 +4352,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
         gl.addLayout(row)
 
         left_layout.addStretch(1)
-        splitter.addWidget(self._mk_scroll_panel(left))
 
-        self.outputs_flatfield = OutputsPanel()
-        self.outputs_flatfield.set_context(self._cfg, stage="flatfield")
-        splitter.addWidget(self.outputs_flatfield)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([650, 480])
+        # Outputs are shown in a detached tool window (toolbar: Outputs).
+        lay.addWidget(left, 1)
 
-        lay.addWidget(_hline())
-        foot = QtWidgets.QHBoxLayout()
-        lay.addLayout(foot)
-        self.btn_to_superneon = QtWidgets.QPushButton("Go to SuperNeon →")
-        foot.addStretch(1)
-        foot.addWidget(self.btn_to_superneon)
 
         # actions
         self.btn_run_flatfield.clicked.connect(self._do_run_flatfield)
@@ -3698,7 +4363,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_frames_flatfield.clicked.connect(
             lambda: self._open_frames_window("flatfield")
         )
-        self.btn_to_superneon.clicked.connect(lambda: self.steps.setCurrentRow(self._stage_row_index("superneon")))
 
         # ---- pending wiring (Apply button governs persistence) ----
         def _apply_to_from_ui() -> list[str]:
@@ -3749,13 +4413,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._set_step_status(self._stage_row_index("flatfield"), "running")
         try:
             ctx = load_context(self._cfg_path)
-            run_sequence(ctx, ["flatfield"])
+            self._run_sequence_with_qc_prompt(ctx, ["flatfield"])
             self._log_info("Flat-fielding done")
-            try:
-                if hasattr(self, "outputs_flatfield"):
-                    self.outputs_flatfield.set_context(self._cfg, stage="flatfield")
-            except Exception:
-                pass
             self._set_step_status(self._stage_row_index("flatfield"), "ok")
             self._maybe_auto_qc()
         except Exception as e:
@@ -3768,10 +4427,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
         w = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(w)
         lay.setSpacing(12)
-
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        splitter.setChildrenCollapsible(False)
-        lay.addWidget(splitter, 1)
 
         left = QtWidgets.QWidget()
         left_layout = QtWidgets.QVBoxLayout(left)
@@ -3805,8 +4460,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Вычитать superbias из NEON перед суммированием.\n"
                 "Типично: True.\n\n"
                 "Если у вас уже bias-вычтенные кадры — можно выключить.",
+                cfg_path="superneon.bias_sub",
             ),
-            self.chk_sn_bias_sub,
+            self._param_field(self.chk_sn_bias_sub, cfg_path="superneon.bias_sub"),
         )
 
         self.spin_sn_y_half = QtWidgets.QSpinBox()
@@ -3814,12 +4470,14 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.spin_sn_y_half.setSingleStep(1)
         bform.addRow(
             self._param_label(
-                "Profile half-height (px)",
+                "Profile half-height",
                 "Полувысота окна по Y для построения 1D профиля (суммирование по щели).\n"
                 "Типично: 10–40 px (зависит от binning и ширины LSF).\n"
                 "Слишком мало → шумно; слишком много → смешивание фоновых градиентов.",
+                cfg_path="wavesol.y_half",
+                units="px",
             ),
-            self.spin_sn_y_half,
+            self._param_field(self.spin_sn_y_half, cfg_path="wavesol.y_half"),
         )
 
         self.spin_sn_xshift = QtWidgets.QSpinBox()
@@ -3827,12 +4485,14 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.spin_sn_xshift.setSingleStep(1)
         bform.addRow(
             self._param_label(
-                "Max |x-shift| (px)",
+                "Max |x-shift|",
                 "Ограничение на модуль сдвига по X при выравнивании NEON кадров.\n"
                 "Типично: 2–8 px (если стабильная механика).\n"
                 "Если кадры гуляют сильнее — увеличьте.",
+                cfg_path="wavesol.xshift_max_abs",
+                units="px",
             ),
-            self.spin_sn_xshift,
+            self._param_field(self.spin_sn_xshift, cfg_path="wavesol.xshift_max_abs"),
         )
 
         # peak thresholds
@@ -3842,12 +4502,14 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.dspin_sn_peak_snr.setSingleStep(0.25)
         bform.addRow(
             self._param_label(
-                "Peak SNR (sigma)",
+                "Peak SNR",
                 "Порог детекции пиков в единицах робастной сигмы.\n"
                 "Типично: 4–8.\n"
                 "Меньше → больше ложных линий; больше → можно потерять слабые линии.",
+                cfg_path="wavesol.peak_snr",
+                units="σ",
             ),
-            self.dspin_sn_peak_snr,
+            self._param_field(self.dspin_sn_peak_snr, cfg_path="wavesol.peak_snr"),
         )
 
         self.dspin_sn_peak_prom = QtWidgets.QDoubleSpinBox()
@@ -3856,12 +4518,14 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.dspin_sn_peak_prom.setSingleStep(0.25)
         bform.addRow(
             self._param_label(
-                "Prominence (sigma)",
+                "Prominence",
                 "Требуемая prominence для пика (в сигмах).\n"
                 "Типично: 3–7.\n"
                 "Полезно для подавления мелких шумовых бугорков.",
+                cfg_path="wavesol.peak_prom_snr",
+                units="σ",
             ),
-            self.dspin_sn_peak_prom,
+            self._param_field(self.dspin_sn_peak_prom, cfg_path="wavesol.peak_prom_snr"),
         )
 
         self.dspin_sn_peak_floor = QtWidgets.QDoubleSpinBox()
@@ -3870,10 +4534,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.dspin_sn_peak_floor.setSingleStep(0.25)
         bform.addRow(
             self._param_label(
-                "Floor (sigma)",
+                "Floor",
                 "Минимальная высота над локальным фоном (в сигмах).\nТипично: 2–5.",
+                cfg_path="wavesol.peak_floor_snr",
+                units="σ",
             ),
-            self.dspin_sn_peak_floor,
+            self._param_field(self.dspin_sn_peak_floor, cfg_path="wavesol.peak_floor_snr"),
         )
 
         self.spin_sn_peak_dist = QtWidgets.QSpinBox()
@@ -3881,11 +4547,13 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.spin_sn_peak_dist.setSingleStep(1)
         bform.addRow(
             self._param_label(
-                "Min distance (px)",
+                "Min distance",
                 "Минимальная дистанция между пиками (в пикселях по X).\n"
                 "Типично: 2–6 (зависит от дисперсии и ширины линий).",
+                cfg_path="wavesol.peak_distance",
+                units="px",
             ),
-            self.spin_sn_peak_dist,
+            self._param_field(self.spin_sn_peak_dist, cfg_path="wavesol.peak_distance"),
         )
 
         self.chk_sn_autotune = QtWidgets.QCheckBox("Auto-tune threshold")
@@ -3894,8 +4562,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Auto-tune",
                 "Автоматически подстраивать порог, если найдено слишком мало/слишком много пиков.\n"
                 "Типично: True (удобно в реальных данных).",
+                cfg_path="wavesol.peak_autotune",
             ),
-            self.chk_sn_autotune,
+            self._param_field(self.chk_sn_autotune, cfg_path="wavesol.peak_autotune"),
         )
 
         self.spin_sn_target_min = QtWidgets.QSpinBox()
@@ -3906,21 +4575,24 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.spin_sn_target_max.setSingleStep(10)
         tgt_row = QtWidgets.QHBoxLayout()
         tgt_row.addWidget(QtWidgets.QLabel("min"))
-        tgt_row.addWidget(self.spin_sn_target_min)
+        tgt_row.addWidget(
+            self._param_field(self.spin_sn_target_min, cfg_path="wavesol.peak_target_min")
+        )
         tgt_row.addSpacing(12)
         tgt_row.addWidget(QtWidgets.QLabel("max"))
-        tgt_row.addWidget(self.spin_sn_target_max)
+        tgt_row.addWidget(
+            self._param_field(self.spin_sn_target_max, cfg_path="wavesol.peak_target_max")
+        )
         tgt_row.addStretch(1)
         tgt_w = QtWidgets.QWidget()
         tgt_w.setLayout(tgt_row)
         bform.addRow(
             self._param_label(
                 "Target peaks",
-                "Желаемый диапазон количества пиков для авто-подстройки.\n"
-                "0/0 = не использовать контроль по количеству.\n"
-                "Типично: (0,0) или (200,1200) в зависимости от решётки.",
+                "",
+                cfg_path="wavesol.peak_target_range",
             ),
-            tgt_w,
+            self._param_field(tgt_w, show_default_icon=False),
         )
 
         # ---------------- ADVANCED ----------------
@@ -3934,10 +4606,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.spin_sn_bl_bin.setSingleStep(4)
         aform.addRow(
             self._param_label(
-                "Baseline bin (px)",
+                "Baseline bin",
                 "Размер бина по X при оценке базовой линии.\nТипично: 20–80.",
+                cfg_path="wavesol.noise.baseline_bin_size",
+                units="px",
             ),
-            self.spin_sn_bl_bin,
+            self._param_field(self.spin_sn_bl_bin, cfg_path="wavesol.noise.baseline_bin_size"),
         )
 
         self.dspin_sn_bl_q = QtWidgets.QDoubleSpinBox()
@@ -3948,8 +4622,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._param_label(
                 "Baseline quantile",
                 "Квантиль для базовой линии (0..1).\nТипично: 0.2–0.5.",
+                cfg_path="wavesol.noise.baseline_quantile",
             ),
-            self.dspin_sn_bl_q,
+            self._param_field(self.dspin_sn_bl_q, cfg_path="wavesol.noise.baseline_quantile"),
         )
 
         self.spin_sn_bl_smooth = QtWidgets.QSpinBox()
@@ -3957,10 +4632,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.spin_sn_bl_smooth.setSingleStep(1)
         aform.addRow(
             self._param_label(
-                "Baseline smooth (bins)",
+                "Baseline smooth",
                 "Сглаживание базовой линии в бин-единицах.\nТипично: 2–8.",
+                cfg_path="wavesol.noise.baseline_smooth_bins",
+                units="bins",
             ),
-            self.spin_sn_bl_smooth,
+            self._param_field(self.spin_sn_bl_smooth, cfg_path="wavesol.noise.baseline_smooth_bins"),
         )
 
         self.dspin_sn_empty_q = QtWidgets.QDoubleSpinBox()
@@ -3971,8 +4648,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._param_label(
                 "Empty quantile",
                 "Квантиль для оценки 'пустого' уровня (0..1).\nТипично: 0.05–0.2.",
+                cfg_path="wavesol.noise.empty_quantile",
             ),
-            self.dspin_sn_empty_q,
+            self._param_field(self.dspin_sn_empty_q, cfg_path="wavesol.noise.empty_quantile"),
         )
 
         self.dspin_sn_clip = QtWidgets.QDoubleSpinBox()
@@ -3981,11 +4659,13 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.dspin_sn_clip.setSingleStep(0.5)
         aform.addRow(
             self._param_label(
-                "Noise clip (sigma)",
+                "Noise clip",
                 "Сигма-клиппинг при оценке робастной сигмы.\n"
                 "0 = выключено. Типично: 2–5.",
+                cfg_path="wavesol.noise.clip",
+                units="σ",
             ),
-            self.dspin_sn_clip,
+            self._param_field(self.dspin_sn_clip, cfg_path="wavesol.noise.clip"),
         )
 
         self.spin_sn_niter = QtWidgets.QSpinBox()
@@ -3995,8 +4675,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._param_label(
                 "Noise iters",
                 "Число итераций сигма-клиппинга.\nТипично: 2–8.",
+                cfg_path="wavesol.noise.n_iter",
             ),
-            self.spin_sn_niter,
+            self._param_field(self.spin_sn_niter, cfg_path="wavesol.noise.n_iter"),
         )
 
         self.spin_sn_gauss_hw = QtWidgets.QSpinBox()
@@ -4007,8 +4688,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Gaussian half-window",
                 "Полуокно (в пикселях) для гауссовой аппроксимации пика.\n"
                 "Типично: 3–8.",
+                cfg_path="wavesol.gauss_half_win",
+                units="px",
             ),
-            self.spin_sn_gauss_hw,
+            self._param_field(self.spin_sn_gauss_hw, cfg_path="wavesol.gauss_half_win"),
         )
 
         # autotune bounds
@@ -4022,20 +4705,24 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.dspin_sn_snr_max.setSingleStep(0.1)
         snr_row = QtWidgets.QHBoxLayout()
         snr_row.addWidget(QtWidgets.QLabel("min"))
-        snr_row.addWidget(self.dspin_sn_snr_min)
+        snr_row.addWidget(
+            self._param_field(self.dspin_sn_snr_min, cfg_path="wavesol.peak_snr_min")
+        )
         snr_row.addSpacing(12)
         snr_row.addWidget(QtWidgets.QLabel("max"))
-        snr_row.addWidget(self.dspin_sn_snr_max)
+        snr_row.addWidget(
+            self._param_field(self.dspin_sn_snr_max, cfg_path="wavesol.peak_snr_max")
+        )
         snr_row.addStretch(1)
         snr_w = QtWidgets.QWidget()
         snr_w.setLayout(snr_row)
         aform.addRow(
             self._param_label(
                 "Auto-tune SNR bounds",
-                "Ограничения на порог Peak SNR при авто-подстройке.\n"
-                "Типично: min=2–4, max=10–20.",
+                "",
+                cfg_path="wavesol.peak_snr_bounds",
             ),
-            snr_w,
+            self._param_field(snr_w, show_default_icon=False),
         )
 
         self.dspin_sn_relax = QtWidgets.QDoubleSpinBox()
@@ -4048,20 +4735,24 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.dspin_sn_boost.setSingleStep(0.01)
         rb_row = QtWidgets.QHBoxLayout()
         rb_row.addWidget(QtWidgets.QLabel("relax"))
-        rb_row.addWidget(self.dspin_sn_relax)
+        rb_row.addWidget(
+            self._param_field(self.dspin_sn_relax, cfg_path="wavesol.peak_snr_relax")
+        )
         rb_row.addSpacing(12)
         rb_row.addWidget(QtWidgets.QLabel("boost"))
-        rb_row.addWidget(self.dspin_sn_boost)
+        rb_row.addWidget(
+            self._param_field(self.dspin_sn_boost, cfg_path="wavesol.peak_snr_boost")
+        )
         rb_row.addStretch(1)
         rb_w = QtWidgets.QWidget()
         rb_w.setLayout(rb_row)
         aform.addRow(
             self._param_label(
                 "Relax/Boost",
-                "Множители для уменьшения/увеличения порога при авто-подстройке.\n"
-                "Типично: relax≈0.8–0.9, boost≈1.1–1.3.",
+                "",
+                cfg_path="wavesol.peak_snr_relax_boost",
             ),
-            rb_w,
+            self._param_field(rb_w, show_default_icon=False),
         )
 
         self.spin_sn_max_tries = QtWidgets.QSpinBox()
@@ -4071,8 +4762,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._param_label(
                 "Max tries",
                 "Максимум попыток авто-подстройки.\nТипично: 6–15.",
+                cfg_path="wavesol.peak_autotune_max_tries",
             ),
-            self.spin_sn_max_tries,
+            self._param_field(
+                self.spin_sn_max_tries, cfg_path="wavesol.peak_autotune_max_tries"
+            ),
         )
 
         # dot locale everywhere
@@ -4107,21 +4801,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
         gl.addLayout(row)
 
         left_layout.addStretch(1)
-        splitter.addWidget(self._mk_scroll_panel(left))
 
-        self.outputs_superneon = OutputsPanel()
-        self.outputs_superneon.set_context(self._cfg, stage="wavesol")
-        splitter.addWidget(self.outputs_superneon)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([650, 480])
+        # Outputs are shown in a detached tool window (toolbar: Outputs).
+        lay.addWidget(left, 1)
 
-        lay.addWidget(_hline())
-        foot = QtWidgets.QHBoxLayout()
-        lay.addLayout(foot)
-        self.btn_to_lineid = QtWidgets.QPushButton("Go to LineID →")
-        foot.addStretch(1)
-        foot.addWidget(self.btn_to_lineid)
 
         # actions
         self.btn_run_superneon.clicked.connect(self._do_run_superneon)
@@ -4129,7 +4812,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_frames_superneon.clicked.connect(
             lambda: self._open_frames_window("superneon")
         )
-        self.btn_to_lineid.clicked.connect(lambda: self.steps.setCurrentRow(self._stage_row_index("arclineid")))
 
         # pending wiring
         self.chk_sn_bias_sub.toggled.connect(
@@ -4251,13 +4933,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._set_step_status(self._stage_row_index("superneon"), "running")
         try:
             ctx = load_context(self._cfg_path)
-            run_sequence(ctx, ["superneon"])
+            self._run_sequence_with_qc_prompt(ctx, ["superneon"])
             self._log_info("SuperNeon done")
-            try:
-                if hasattr(self, "outputs_superneon"):
-                    self.outputs_superneon.set_context(self._cfg, stage="wavesol")
-            except Exception:
-                pass
             self._set_step_status(self._stage_row_index("superneon"), "ok")
             self._maybe_auto_qc()
         except Exception as e:
@@ -4270,9 +4947,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
         w = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(w)
         lay.setSpacing(12)
-
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        lay.addWidget(splitter)
 
         left = QtWidgets.QWidget()
         left_layout = QtWidgets.QVBoxLayout(left)
@@ -4323,19 +4997,23 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         form.addRow(
             self._param_label(
-                "Min amplitude (σ_k)",
+                "Min amp (auto)",
                 "Автопорог по шуму для показа/подбора линий.\n"
                 "Типичный диапазон: 3–8. Больше — меньше ложных пиков, но можно пропустить слабые.",
+                cfg_path="wavesol.gui_min_amp_sigma_k",
+                units="σ",
             ),
-            self.dspin_lineid_sigma_k,
+            self._param_field(self.dspin_lineid_sigma_k, cfg_path="wavesol.gui_min_amp_sigma_k"),
         )
         form.addRow(
             self._param_label(
-                "Min amplitude (abs)",
+                "Min amp (absolute)",
                 "Абсолютный порог амплитуды (ADU) для GUI. 0 = отключено (используется σ_k).\n"
                 "Ориентир: 0, либо ~500–5000 (зависит от экспозиции/усиления).",
+                cfg_path="wavesol.gui_min_amp",
+                units="ADU",
             ),
-            self.dspin_lineid_min_amp,
+            self._param_field(self.dspin_lineid_min_amp, cfg_path="wavesol.gui_min_amp"),
         )
 
         row_csv = QtWidgets.QHBoxLayout()
@@ -4346,8 +5024,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Line list (CSV)",
                 "CSV со справочными длинами волн неона (и др.).\n"
                 "Обычно: neon_lines.csv. Можно указать абсолютный путь.",
+                cfg_path="wavesol.neon_lines_csv",
             ),
-            row_csv,
+            self._param_field(row_csv, cfg_path="wavesol.neon_lines_csv"),
         )
 
         row_pdf = QtWidgets.QHBoxLayout()
@@ -4358,8 +5037,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Atlas (PDF)",
                 "PDF-атлас линий для справки в GUI.\n"
                 "Обычно: HeNeAr_atlas.pdf. Можно указать абсолютный путь.",
+                cfg_path="wavesol.atlas_pdf",
             ),
-            row_pdf,
+            self._param_field(row_pdf, cfg_path="wavesol.atlas_pdf"),
         )
 
         self._force_dot_locale(self.dspin_lineid_sigma_k, self.dspin_lineid_min_amp)
@@ -4427,21 +5107,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
         gl.addLayout(row2)
 
         left_layout.addStretch(1)
-        splitter.addWidget(self._mk_scroll_panel(left))
 
-        self.outputs_lineid = OutputsPanel()
-        self.outputs_lineid.set_context(self._cfg, stage="wavesol")
-        splitter.addWidget(self.outputs_lineid)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([650, 480])
+        # Outputs are shown in a detached tool window (toolbar: Outputs).
+        lay.addWidget(left, 1)
 
-        lay.addWidget(_hline())
-        foot = QtWidgets.QHBoxLayout()
-        lay.addLayout(foot)
-        self.btn_to_wavesol = QtWidgets.QPushButton("Go to Wavelength solution →")
-        foot.addStretch(1)
-        foot.addWidget(self.btn_to_wavesol)
 
         # --- Actions wiring ---
         self.btn_open_lineid.clicked.connect(self._do_open_lineid)
@@ -4460,7 +5129,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.act_export_user_library_zip.triggered.connect(
             self._do_export_user_library_zip
         )
-        self.btn_to_wavesol.clicked.connect(lambda: self.steps.setCurrentRow(self._stage_row_index("wavesol")))
 
         def _browse_csv() -> None:
             path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -4575,11 +5243,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._log_info(f"LineID wrote: {msg}")
 
             self._refresh_pairs_label()
-            try:
-                if hasattr(self, "outputs_lineid"):
-                    self.outputs_lineid.set_context(self._cfg, stage="wavesol")
-            except Exception:
-                pass
             self._maybe_auto_qc()
         except Exception as e:
             self._log_exception(e)
@@ -4635,7 +5298,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
             )
             if details:
                 box.setInformativeText(details)
-            btn_go = box.addButton("Go to Sky", QtWidgets.QMessageBox.ButtonRole.ActionRole)
             box.addButton("Close", QtWidgets.QMessageBox.ButtonRole.RejectRole)
             box.exec()
             if box.clickedButton() == btn_go:
@@ -5056,10 +5718,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
         lay = QtWidgets.QVBoxLayout(w)
         lay.setSpacing(12)
 
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        splitter.setChildrenCollapsible(False)
-        lay.addWidget(splitter, 1)
-
         left = QtWidgets.QWidget()
         left_layout = QtWidgets.QVBoxLayout(left)
         left_layout.setSpacing(12)
@@ -5125,9 +5783,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.lbl_ws31_status = QtWidgets.QLabel("—")
         self.lbl_ws31_status.setWordWrap(True)
         v31.addWidget(self.lbl_ws31_status)
-        self.btn_ws_go_superneon = QtWidgets.QPushButton("Go: SuperNeon")
-        self.btn_ws_go_superneon.setCursor(QtCore.Qt.PointingHandCursor)
-        v31.addWidget(self.btn_ws_go_superneon)
         self.lbl_ws31_reason = _mk_reason_label()
         v31.addWidget(self.lbl_ws31_reason)
         fl.addWidget(fr31, 1, 0)
@@ -5236,138 +5891,156 @@ class LauncherWindow(QtWidgets.QMainWindow):
         pl = QtWidgets.QVBoxLayout(gpar)
         pl.setSpacing(8)
 
-        # Basic
+        # -------- BASIC: Core / 2D model / Edge crop --------
         basic = QtWidgets.QWidget()
-        bf = QtWidgets.QFormLayout(basic)
-        bf.setLabelAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        bvl = QtWidgets.QVBoxLayout(basic)
+        bvl.setContentsMargins(0, 0, 0, 0)
+        bvl.setSpacing(10)
+
+        grp_core = _box("Core")
+        install_delayed_tooltip(
+            grp_core,
+            "High-level solution controls.\nMost users only adjust these.",
+        )
+        core = QtWidgets.QFormLayout(grp_core)
+        core.setLabelAlignment(QtCore.Qt.AlignLeft)
+        core.setHorizontalSpacing(12)
 
         self.spin_ws_poly_deg = QtWidgets.QSpinBox()
         self.spin_ws_poly_deg.setRange(1, 12)
-        bf.addRow(
-            self._param_label(
-                "1D poly degree",
-                "Степень полинома для 1D λ(x) по парам."
-                "Типичные значения: 3–6 (чем больше, тем гибче, но риск переобучения).",
-            ),
-            self.spin_ws_poly_deg,
+        core.addRow(
+            self._param_label("1D poly degree", "", cfg_path="wavesol.poly_deg_1d"),
+            self._param_field(self.spin_ws_poly_deg, cfg_path="wavesol.poly_deg_1d"),
         )
 
         self.dspin_ws_blend = QtWidgets.QDoubleSpinBox()
         self.dspin_ws_blend.setRange(0.0, 1.0)
         self.dspin_ws_blend.setSingleStep(0.05)
         self.dspin_ws_blend.setDecimals(2)
-        bf.addRow(
-            self._param_label(
-                "Blend weight",
-                "Вес бленд-линий (если они есть) при 1D решении."
-                "0 — игнорировать, 0.2–0.5 — обычно разумно.",
-            ),
-            self.dspin_ws_blend,
+        core.addRow(
+            self._param_label("Blend weight", "", cfg_path="wavesol.blend_weight"),
+            self._param_field(self.dspin_ws_blend, cfg_path="wavesol.blend_weight"),
         )
 
         self.dspin_ws_poly_clip = QtWidgets.QDoubleSpinBox()
         self.dspin_ws_poly_clip.setRange(0.0, 20.0)
         self.dspin_ws_poly_clip.setSingleStep(0.2)
         self.dspin_ws_poly_clip.setDecimals(2)
-        bf.addRow(
-            self._param_label(
-                "1D σ-clip",
-                "Сигма-клиппинг (σ) при робастной подгонке 1D полинома."
-                "0 — без клиппинга. Типично: 2.5–4.",
-            ),
-            self.dspin_ws_poly_clip,
+        core.addRow(
+            self._param_label("1D σ-clip", "", cfg_path="wavesol.poly_sigma_clip"),
+            self._param_field(self.dspin_ws_poly_clip, cfg_path="wavesol.poly_sigma_clip"),
         )
 
         self.spin_ws_poly_iter = QtWidgets.QSpinBox()
         self.spin_ws_poly_iter.setRange(1, 100)
-        bf.addRow(
-            self._param_label(
-                "1D maxiter",
-                "Максимум итераций клиппинга для 1D. Типично: 5–20.",
-            ),
-            self.spin_ws_poly_iter,
+        core.addRow(
+            self._param_label("1D maxiter", "", cfg_path="wavesol.poly_maxiter"),
+            self._param_field(self.spin_ws_poly_iter, cfg_path="wavesol.poly_maxiter"),
         )
 
         self.combo_ws_model2d = QtWidgets.QComboBox()
         self.combo_ws_model2d.addItem("auto", "auto")
         self.combo_ws_model2d.addItem("power", "power")
         self.combo_ws_model2d.addItem("cheb", "cheb")
-        bf.addRow(
-            self._param_label(
-                "2D model",
-                "Модель поверхности λ(x,y)."
-                "auto — выберет лучшее между power/cheb по качеству,"
-                "power — полином по (x,y), cheb — 2D Chebyshev.",
-            ),
-            self.combo_ws_model2d,
+        core.addRow(
+            self._param_label("2D model", "", cfg_path="wavesol.model2d"),
+            self._param_field(self.combo_ws_model2d, cfg_path="wavesol.model2d"),
         )
+
+        bvl.addWidget(grp_core)
+
+        grp_edge = _box("Edge crop")
+        install_delayed_tooltip(
+            grp_edge,
+            "Exclude slit edges from the 2D fit.\nHelps when edges are noisy/vignetted.",
+        )
+        edge = QtWidgets.QFormLayout(grp_edge)
+        edge.setLabelAlignment(QtCore.Qt.AlignLeft)
+        edge.setHorizontalSpacing(12)
 
         self.spin_ws_crop_x = QtWidgets.QSpinBox()
         self.spin_ws_crop_x.setRange(0, 200)
-        bf.addRow(
-            self._param_label(
-                "Edge crop X (px)",
-                "Обрезка краёв по X (пикс) перед 2D подгонкой.Типично: 6–20.",
-            ),
-            self.spin_ws_crop_x,
+        edge.addRow(
+            self._param_label("Edge crop X", "", cfg_path="wavesol.edge_crop_x"),
+            self._param_field(self.spin_ws_crop_x, cfg_path="wavesol.edge_crop_x"),
         )
 
         self.spin_ws_crop_y = QtWidgets.QSpinBox()
         self.spin_ws_crop_y.setRange(0, 200)
-        bf.addRow(
-            self._param_label(
-                "Edge crop Y (px)",
-                "Обрезка краёв по Y (пикс) перед 2D подгонкой.Типично: 6–20.",
-            ),
-            self.spin_ws_crop_y,
+        edge.addRow(
+            self._param_label("Edge crop Y", "", cfg_path="wavesol.edge_crop_y"),
+            self._param_field(self.spin_ws_crop_y, cfg_path="wavesol.edge_crop_y"),
         )
+
+        bvl.addWidget(grp_edge)
+
+        self.grp_ws_power_model = _box("Power model")
+        install_delayed_tooltip(
+            self.grp_ws_power_model,
+            "Parameters for the Power 2D model.\nEnabled when 2D model = power/auto.",
+        )
+        pmod = QtWidgets.QFormLayout(self.grp_ws_power_model)
+        pmod.setLabelAlignment(QtCore.Qt.AlignLeft)
+        pmod.setHorizontalSpacing(12)
 
         self.spin_ws_power_deg = QtWidgets.QSpinBox()
         self.spin_ws_power_deg.setRange(1, 12)
-        bf.addRow(
-            self._param_label(
-                "Power degree",
-                "Степень полинома для модели power (используется если 2D model=power)."
-                "Типично: 3–6.",
-            ),
-            self.spin_ws_power_deg,
+        pmod.addRow(
+            self._param_label("Power degree", "", cfg_path="wavesol.power_deg"),
+            self._param_field(self.spin_ws_power_deg, cfg_path="wavesol.power_deg"),
         )
+
+        bvl.addWidget(self.grp_ws_power_model)
+
+        self.grp_ws_cheb_model = _box("Chebyshev model")
+        install_delayed_tooltip(
+            self.grp_ws_cheb_model,
+            "Parameters for the Chebyshev 2D model.\nEnabled when 2D model = cheb/auto.",
+        )
+        cmod = QtWidgets.QFormLayout(self.grp_ws_cheb_model)
+        cmod.setLabelAlignment(QtCore.Qt.AlignLeft)
+        cmod.setHorizontalSpacing(12)
 
         self.spin_ws_cheb_x = QtWidgets.QSpinBox()
         self.spin_ws_cheb_x.setRange(1, 12)
+        cmod.addRow(
+            self._param_label("Cheb degX", "", cfg_path="wavesol.cheb_degx"),
+            self._param_field(self.spin_ws_cheb_x, cfg_path="wavesol.cheb_degx"),
+        )
         self.spin_ws_cheb_y = QtWidgets.QSpinBox()
         self.spin_ws_cheb_y.setRange(1, 12)
-        cheb_row = QtWidgets.QHBoxLayout()
-        cheb_row.setContentsMargins(0, 0, 0, 0)
-        cheb_row.addWidget(QtWidgets.QLabel("degX"))
-        cheb_row.addWidget(self.spin_ws_cheb_x)
-        cheb_row.addSpacing(12)
-        cheb_row.addWidget(QtWidgets.QLabel("degY"))
-        cheb_row.addWidget(self.spin_ws_cheb_y)
-        cheb_w = QtWidgets.QWidget()
-        cheb_w.setLayout(cheb_row)
-        bf.addRow(
-            self._param_label(
-                "Chebyshev degrees",
-                "Степени 2D Chebyshev (используется если 2D model=cheb)."
-                "Типично: degX 4–7, degY 2–4.",
-            ),
-            cheb_w,
+        cmod.addRow(
+            self._param_label("Cheb degY", "", cfg_path="wavesol.cheb_degy"),
+            self._param_field(self.spin_ws_cheb_y, cfg_path="wavesol.cheb_degy"),
         )
 
-        # Advanced
+        bvl.addWidget(self.grp_ws_cheb_model)
+        bvl.addStretch(1)
+
+        # -------- ADVANCED: Trace / Robust fit --------
         adv = QtWidgets.QWidget()
-        af = QtWidgets.QFormLayout(adv)
-        af.setLabelAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        avl = QtWidgets.QVBoxLayout(adv)
+        avl.setContentsMargins(0, 0, 0, 0)
+        avl.setSpacing(10)
+
+        grp_trace = _box("Trace")
+        install_delayed_tooltip(
+            grp_trace,
+            "How 2D lines are traced across Y before fitting λ(x,y).\nUsually safe to keep defaults.",
+        )
+        af = QtWidgets.QFormLayout(grp_trace)
+        af.setLabelAlignment(QtCore.Qt.AlignLeft)
+        af.setHorizontalSpacing(12)
 
         self.spin_ws_trace_template_hw = QtWidgets.QSpinBox()
         self.spin_ws_trace_template_hw.setRange(1, 64)
         af.addRow(
             self._param_label(
                 "Trace template HW",
-                "Половина окна (пикс) для шаблона линии при трассировке.Типично: 4–10.",
+                "",
+                cfg_path="wavesol.trace_template_hw",
             ),
-            self.spin_ws_trace_template_hw,
+            self._param_field(self.spin_ws_trace_template_hw, cfg_path="wavesol.trace_template_hw"),
         )
 
         self.spin_ws_trace_avg_half = QtWidgets.QSpinBox()
@@ -5375,19 +6048,21 @@ class LauncherWindow(QtWidgets.QMainWindow):
         af.addRow(
             self._param_label(
                 "Trace avg HW",
-                "Половина окна (пикс) для усреднения вдоль Y при шаблоне.Типично: 2–6.",
+                "",
+                cfg_path="wavesol.trace_avg_half",
             ),
-            self.spin_ws_trace_avg_half,
+            self._param_field(self.spin_ws_trace_avg_half, cfg_path="wavesol.trace_avg_half"),
         )
 
         self.spin_ws_trace_search_rad = QtWidgets.QSpinBox()
         self.spin_ws_trace_search_rad.setRange(1, 128)
         af.addRow(
             self._param_label(
-                "Trace search (px)",
-                "Радиус поиска центра линии между шагами по Y.Типично: 6–20.",
+                "Trace search",
+                "",
+                cfg_path="wavesol.trace_search_rad",
             ),
-            self.spin_ws_trace_search_rad,
+            self._param_field(self.spin_ws_trace_search_rad, cfg_path="wavesol.trace_search_rad"),
         )
 
         self.spin_ws_trace_y_step = QtWidgets.QSpinBox()
@@ -5395,10 +6070,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
         af.addRow(
             self._param_label(
                 "Trace Y step",
-                "Шаг по Y при трассировке линий."
-                "1 — максимум точности (обычно), 2–3 — быстрее.",
+                "",
+                cfg_path="wavesol.trace_y_step",
             ),
-            self.spin_ws_trace_y_step,
+            self._param_field(self.spin_ws_trace_y_step, cfg_path="wavesol.trace_y_step"),
         )
 
         self.dspin_ws_trace_amp_thresh = QtWidgets.QDoubleSpinBox()
@@ -5408,10 +6083,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
         af.addRow(
             self._param_label(
                 "Trace amp thresh",
-                "Порог амплитуды (в σ шума профиля) для включения линии в 2D подгонку."
-                "Типично: 10–50.",
+                "",
+                cfg_path="wavesol.trace_amp_thresh",
             ),
-            self.dspin_ws_trace_amp_thresh,
+            self._param_field(
+                self.dspin_ws_trace_amp_thresh, cfg_path="wavesol.trace_amp_thresh"
+            ),
         )
 
         self.spin_ws_trace_min_pts = QtWidgets.QSpinBox()
@@ -5419,10 +6096,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
         af.addRow(
             self._param_label(
                 "Trace min points",
-                "Минимум точек (Y-сэмплов) у линии, чтобы она пошла в 2D fit."
-                "Типично: 80–200.",
+                "",
+                cfg_path="wavesol.trace_min_pts",
             ),
-            self.spin_ws_trace_min_pts,
+            self._param_field(self.spin_ws_trace_min_pts, cfg_path="wavesol.trace_min_pts"),
         )
 
         self.spin_ws_trace_y0 = QtWidgets.QSpinBox()
@@ -5431,56 +6108,68 @@ class LauncherWindow(QtWidgets.QMainWindow):
         af.addRow(
             self._param_label(
                 "Trace y0",
-                "Стартовая строка Y для трассировки. auto — середина щели.",
+                "",
+                cfg_path="wavesol.trace_y0",
             ),
-            self.spin_ws_trace_y0,
+            self._param_field(self.spin_ws_trace_y0, cfg_path="wavesol.trace_y0"),
         )
+
+        avl.addWidget(grp_trace)
+
+        self.grp_ws_power_fit = _box("Power fit")
+        install_delayed_tooltip(
+            self.grp_ws_power_fit,
+            "Robust fitting controls for the Power 2D model.\nEnabled when 2D model = power/auto.",
+        )
+        pf = QtWidgets.QFormLayout(self.grp_ws_power_fit)
+        pf.setLabelAlignment(QtCore.Qt.AlignLeft)
+        pf.setHorizontalSpacing(12)
 
         self.dspin_ws_power_clip = QtWidgets.QDoubleSpinBox()
         self.dspin_ws_power_clip.setRange(0.0, 20.0)
         self.dspin_ws_power_clip.setSingleStep(0.2)
         self.dspin_ws_power_clip.setDecimals(2)
-        af.addRow(
-            self._param_label(
-                "2D σ-clip (power)",
-                "Сигма-клиппинг для 2D подгонки power. 0 — без клиппинга."
-                "Типично: 2.5–4.",
-            ),
-            self.dspin_ws_power_clip,
+        pf.addRow(
+            self._param_label("2D σ-clip (power)", "", cfg_path="wavesol.power_sigma_clip"),
+            self._param_field(self.dspin_ws_power_clip, cfg_path="wavesol.power_sigma_clip"),
         )
 
         self.spin_ws_power_iter = QtWidgets.QSpinBox()
         self.spin_ws_power_iter.setRange(1, 100)
-        af.addRow(
-            self._param_label(
-                "2D maxiter (power)",
-                "Максимум итераций клиппинга для power. Типично: 5–20.",
-            ),
-            self.spin_ws_power_iter,
+        pf.addRow(
+            self._param_label("2D maxiter (power)", "", cfg_path="wavesol.power_maxiter"),
+            self._param_field(self.spin_ws_power_iter, cfg_path="wavesol.power_maxiter"),
         )
+
+        avl.addWidget(self.grp_ws_power_fit)
+
+        self.grp_ws_cheb_fit = _box("Chebyshev fit")
+        install_delayed_tooltip(
+            self.grp_ws_cheb_fit,
+            "Robust fitting controls for the Chebyshev 2D model.\nEnabled when 2D model = cheb/auto.",
+        )
+        cf = QtWidgets.QFormLayout(self.grp_ws_cheb_fit)
+        cf.setLabelAlignment(QtCore.Qt.AlignLeft)
+        cf.setHorizontalSpacing(12)
 
         self.dspin_ws_cheb_clip = QtWidgets.QDoubleSpinBox()
         self.dspin_ws_cheb_clip.setRange(0.0, 20.0)
         self.dspin_ws_cheb_clip.setSingleStep(0.2)
         self.dspin_ws_cheb_clip.setDecimals(2)
-        af.addRow(
-            self._param_label(
-                "2D σ-clip (cheb)",
-                "Сигма-клиппинг для 2D подгонки Chebyshev. 0 — без клиппинга."
-                "Типично: 2.5–4.",
-            ),
-            self.dspin_ws_cheb_clip,
+        cf.addRow(
+            self._param_label("2D σ-clip (cheb)", "", cfg_path="wavesol.cheb_sigma_clip"),
+            self._param_field(self.dspin_ws_cheb_clip, cfg_path="wavesol.cheb_sigma_clip"),
         )
 
         self.spin_ws_cheb_iter = QtWidgets.QSpinBox()
         self.spin_ws_cheb_iter.setRange(1, 100)
-        af.addRow(
-            self._param_label(
-                "2D maxiter (cheb)",
-                "Максимум итераций клиппинга для Chebyshev. Типично: 5–20.",
-            ),
-            self.spin_ws_cheb_iter,
+        cf.addRow(
+            self._param_label("2D maxiter (cheb)", "", cfg_path="wavesol.cheb_maxiter"),
+            self._param_field(self.spin_ws_cheb_iter, cfg_path="wavesol.cheb_maxiter"),
         )
+
+        avl.addWidget(self.grp_ws_cheb_fit)
+        avl.addStretch(1)
 
         # locale for doubles
         self._force_dot_locale(
@@ -5517,12 +6206,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             if v is None:
                 v = self.combo_ws_model2d.currentText()
             self._stage_set_pending("wavesol", "wavesol.model2d", str(v))
-            try:
-                self.spin_ws_power_deg.setEnabled(str(v) in {"power", "auto"})
-                self.spin_ws_cheb_x.setEnabled(str(v) in {"cheb", "auto"})
-                self.spin_ws_cheb_y.setEnabled(str(v) in {"cheb", "auto"})
-            except Exception:
-                pass
+            self._update_wavesol_model2d_enables()
 
         self.combo_ws_model2d.currentIndexChanged.connect(_model_changed)
 
@@ -5615,15 +6299,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
         row.addStretch(1)
         gl.addLayout(row)
 
+
         left_layout.addStretch(1)
 
-        splitter.addWidget(self._mk_scroll_panel(left))
-        self.outputs_wavesol = OutputsPanel()
-        self.outputs_wavesol.set_context(self._cfg, stage="wavesol")
-        splitter.addWidget(self.outputs_wavesol)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([650, 480])
+        # Outputs are shown in a detached tool window (toolbar: Outputs).
+        lay.addWidget(left, 1)
 
         self.btn_clean_pairs.clicked.connect(self._do_clean_pairs)
         self.btn_clean_wavesol2d.clicked.connect(self._do_clean_wavesol2d)
@@ -5635,9 +6315,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         # stepper wiring (director's cut)
         try:
-            self.btn_ws_go_superneon.clicked.connect(
-                lambda: self.steps.setCurrentRow(self._stage_row_index("superneon"))
-            )
             self.btn_ws_open_lineid.clicked.connect(lambda: self.steps.setCurrentRow(self._stage_row_index("arclineid")))
             self.btn_ws_run_wavesol.clicked.connect(self._do_wavesolution)
             self.btn_ws_clean_pairs.clicked.connect(self._do_clean_pairs)
@@ -5653,8 +6330,38 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         # initial sync
         self._sync_stage_controls_from_cfg()
-        _model_changed()
+        self._update_wavesol_model2d_enables()
         return w
+
+    def _update_wavesol_model2d_enables(self) -> None:
+        """Enable/disable model-specific Wavesol sections without changing layout."""
+        if not hasattr(self, "combo_ws_model2d"):
+            return
+
+        try:
+            v = self.combo_ws_model2d.currentData()
+            if v is None:
+                v = self.combo_ws_model2d.currentText()
+            m = str(v).strip().lower()
+        except Exception:
+            m = "auto"
+
+        power_on = m in {"power", "auto"}
+        cheb_on = m in {"cheb", "auto"}
+
+        for attr in ("grp_ws_power_model", "grp_ws_power_fit"):
+            try:
+                if hasattr(self, attr):
+                    getattr(self, attr).setEnabled(power_on)
+            except Exception:
+                pass
+
+        for attr in ("grp_ws_cheb_model", "grp_ws_cheb_fit"):
+            try:
+                if hasattr(self, attr):
+                    getattr(self, attr).setEnabled(cheb_on)
+            except Exception:
+                pass
 
     def _update_wavesol_stepper(self) -> None:
         """Update director's-cut workflow widgets on the Wavelength solution page."""
@@ -5870,16 +6577,19 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._do_save_cfg()
         self._log_info(f"Pairs cleaned: {out}")
         self._refresh_pairs_label()
-        try:
-            if hasattr(self, "outputs_wavesol"):
-                self.outputs_wavesol.set_context(self._cfg, stage="wavesol")
-        except Exception:
-            pass
 
         try:
             self._update_wavesol_stepper()
         except Exception:
             pass
+
+
+        # Refresh 'default' icons: sync uses blocked signals for stability.
+        for _upd in getattr(self, "_param_default_buttons", []):
+            try:
+                _upd()
+            except Exception:
+                pass
 
     def _do_clean_wavesol2d(self) -> None:
         """Interactive rejection of bad lamp lines used in 2D fit.
@@ -5953,11 +6663,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.editor_yaml.blockSignals(False)
         self._do_save_cfg()
         self._log_info(f"Updated wavesol.rejected_lines_A (N={len(new_rej)})")
-        try:
-            if hasattr(self, "outputs_wavesol"):
-                self.outputs_wavesol.set_context(self._cfg, stage="wavesol")
-        except Exception:
-            pass
 
         # save a couple of diagnostic plots for reports/audit
         try:
@@ -5974,6 +6679,14 @@ class LauncherWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
+
+        # Refresh 'default' icons: sync uses blocked signals for stability.
+        for _upd in getattr(self, "_param_default_buttons", []):
+            try:
+                _upd()
+            except Exception:
+                pass
+
     def _do_wavesolution(self) -> None:
         if not self._ensure_stage_applied("wavesol", "Wavelength solution"):
             return
@@ -5984,11 +6697,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
             ctx = load_context(self._cfg_path)
             out = run_wavesolution(ctx)
             self._log_info("Wavelength solution done")
-            try:
-                if hasattr(self, "outputs_wavesol"):
-                    self.outputs_wavesol.set_context(self._cfg, stage="wavesol")
-            except Exception:
-                pass
             self._set_step_status(self._stage_row_index("wavesol"), "ok")
             self._log_info(
                 "Outputs:\n" + "\n".join(f"  {k}: {v}" for k, v in out.items())
@@ -6010,10 +6718,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
         w = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(w)
         lay.setSpacing(12)
-
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        splitter.setChildrenCollapsible(False)
-        lay.addWidget(splitter, 1)
 
         # left: controls
         left = QtWidgets.QWidget()
@@ -6037,111 +6741,127 @@ class LauncherWindow(QtWidgets.QMainWindow):
         pl = QtWidgets.QVBoxLayout(gpar)
         pl.setSpacing(10)
 
+        # -------- BASIC: Core / Geometry / Diagnostics --------
         basic = QtWidgets.QWidget()
-        bf = QtWidgets.QFormLayout(basic)
-        bf.setLabelAlignment(QtCore.Qt.AlignLeft)
-        bf.setHorizontalSpacing(12)
+        bvl = QtWidgets.QVBoxLayout(basic)
+        bvl.setContentsMargins(0, 0, 0, 0)
+        bvl.setSpacing(10)
 
-        self.chk_lin_enabled = QtWidgets.QCheckBox("Enabled")
-        bf.addRow(
-            self._param_label(
-                "Enabled",
-                "Включить этап линеаризации.\nТипично: включено.",
-            ),
-            self.chk_lin_enabled,
+        g_core = _box("Core")
+        install_delayed_tooltip(
+            g_core,
+            "Resampling grid and stage enable/disable.\nTune only if you need a fixed wavelength grid.",
+        )
+        core = QtWidgets.QFormLayout(g_core)
+        core.setLabelAlignment(QtCore.Qt.AlignLeft)
+        core.setHorizontalSpacing(12)
+
+        self.chk_lin_enabled = QtWidgets.QCheckBox("")
+        core.addRow(
+            self._param_label("Enable", "", cfg_path="linearize.enabled"),
+            self._param_field(self.chk_lin_enabled, cfg_path="linearize.enabled"),
         )
 
         self.dspin_lin_dlambda = QtWidgets.QDoubleSpinBox()
         self.dspin_lin_dlambda.setRange(0.0, 50.0)
         self.dspin_lin_dlambda.setDecimals(4)
         self.dspin_lin_dlambda.setSingleStep(0.05)
-        bf.addRow(
-            self._param_label(
-                "Δλ [Å]",
-                "Шаг по длине волны для линейной сетки.\n"
-                "0 = авто (по median dλ из lambda_map).\n"
-                "Типично: 0–2 Å.",
-            ),
-            self.dspin_lin_dlambda,
+        self.dspin_lin_dlambda.setSpecialValueText("auto")
+        core.addRow(
+            self._param_label("Δλ", "", cfg_path="linearize.dlambda_A"),
+            self._param_field(self.dspin_lin_dlambda, cfg_path="linearize.dlambda_A"),
         )
 
         self.dspin_lin_lmin = QtWidgets.QDoubleSpinBox()
         self.dspin_lin_lmin.setRange(0.0, 1_000_000.0)
         self.dspin_lin_lmin.setDecimals(2)
         self.dspin_lin_lmin.setSingleStep(50.0)
-        bf.addRow(
-            self._param_label(
-                "λ min [Å]",
-                "Минимальная λ для сетки.\n"
-                "0 = авто (по lambda_map).\n"
-                "Типично: 0 (авто).",
-            ),
-            self.dspin_lin_lmin,
+        self.dspin_lin_lmin.setSpecialValueText("auto")
+        core.addRow(
+            self._param_label("λ min", "", cfg_path="linearize.lambda_min_A"),
+            self._param_field(self.dspin_lin_lmin, cfg_path="linearize.lambda_min_A"),
         )
 
         self.dspin_lin_lmax = QtWidgets.QDoubleSpinBox()
         self.dspin_lin_lmax.setRange(0.0, 1_000_000.0)
         self.dspin_lin_lmax.setDecimals(2)
         self.dspin_lin_lmax.setSingleStep(50.0)
-        bf.addRow(
-            self._param_label(
-                "λ max [Å]",
-                "Максимальная λ для сетки.\n"
-                "0 = авто (по lambda_map).\n"
-                "Типично: 0 (авто).",
-            ),
-            self.dspin_lin_lmax,
+        self.dspin_lin_lmax.setSpecialValueText("auto")
+        core.addRow(
+            self._param_label("λ max", "", cfg_path="linearize.lambda_max_A"),
+            self._param_field(self.dspin_lin_lmax, cfg_path="linearize.lambda_max_A"),
         )
+
+        bvl.addWidget(g_core)
+
+        g_geom = _box("Geometry")
+        install_delayed_tooltip(
+            g_geom,
+            "Spatial (Y) cropping of the rectified frame.\nUse to exclude vignetted/noisy slit edges.",
+        )
+        geom = QtWidgets.QFormLayout(g_geom)
+        geom.setLabelAlignment(QtCore.Qt.AlignLeft)
+        geom.setHorizontalSpacing(12)
 
         self.spin_lin_crop_top = QtWidgets.QSpinBox()
         self.spin_lin_crop_top.setRange(0, 10000)
         self.spin_lin_crop_top.setSingleStep(10)
-        bf.addRow(
-            self._param_label(
-                "Crop top [px]",
-                "Обрезка сверху по Y перед сохранением.\n"
-                "0 = без обрезки.\n"
-                "Типично: 0–200.",
-            ),
-            self.spin_lin_crop_top,
+        geom.addRow(
+            self._param_label("Crop top", "", cfg_path="linearize.y_crop_top"),
+            self._param_field(self.spin_lin_crop_top, cfg_path="linearize.y_crop_top"),
         )
 
         self.spin_lin_crop_bot = QtWidgets.QSpinBox()
         self.spin_lin_crop_bot.setRange(0, 10000)
         self.spin_lin_crop_bot.setSingleStep(10)
-        bf.addRow(
-            self._param_label(
-                "Crop bottom [px]",
-                "Обрезка снизу по Y перед сохранением.\n"
-                "0 = без обрезки.\n"
-                "Типично: 0–200.",
-            ),
-            self.spin_lin_crop_bot,
+        geom.addRow(
+            self._param_label("Crop bottom", "", cfg_path="linearize.y_crop_bottom"),
+            self._param_field(self.spin_lin_crop_bot, cfg_path="linearize.y_crop_bottom"),
         )
 
-        self.chk_lin_png = QtWidgets.QCheckBox("Save quicklook PNG")
-        bf.addRow(
-            self._param_label(
-                "PNG",
-                "Сохранить диагностическую картинку 10_linearize/lin_preview.png (legacy mirror: lin/obj_sum_lin.png).\n"
-                "Типично: включено.",
-            ),
-            self.chk_lin_png,
+        bvl.addWidget(g_geom)
+
+        g_diag = _box("Diagnostics")
+        install_delayed_tooltip(
+            g_diag,
+            "Quicklook/QA outputs.\nThese do not affect the science result.",
+        )
+        diag = QtWidgets.QFormLayout(g_diag)
+        diag.setLabelAlignment(QtCore.Qt.AlignLeft)
+        diag.setHorizontalSpacing(12)
+
+        self.chk_lin_png = QtWidgets.QCheckBox("")
+        diag.addRow(
+            self._param_label("Save PNG", "", cfg_path="linearize.save_png"),
+            self._param_field(self.chk_lin_png, cfg_path="linearize.save_png"),
         )
 
+        bvl.addWidget(g_diag)
+        bvl.addStretch(1)
+
+        # -------- ADVANCED: Outputs --------
         adv = QtWidgets.QWidget()
-        adv_lay = QtWidgets.QVBoxLayout(adv)
-        adv_lay.setContentsMargins(0, 0, 0, 0)
-        adv_lay.setSpacing(8)
-        self.chk_lin_per_frame = QtWidgets.QCheckBox("Save per-frame linearized")
-        adv_lay.addWidget(
-            self._small_note(
-                "Сохранять линейризованные отдельные кадры в 10_linearize/per_exp/*.fits.\n"
-                "Полезно для отладки, но занимает место.\n"
-                "Типично: выключено."
-            )
+        avl = QtWidgets.QVBoxLayout(adv)
+        avl.setContentsMargins(0, 0, 0, 0)
+        avl.setSpacing(10)
+
+        g_out = _box("Outputs")
+        install_delayed_tooltip(
+            g_out,
+            "Debug outputs for each input exposure.\nUseful for debugging, but increases disk and time.",
         )
-        adv_lay.addWidget(self.chk_lin_per_frame)
+        out = QtWidgets.QFormLayout(g_out)
+        out.setLabelAlignment(QtCore.Qt.AlignLeft)
+        out.setHorizontalSpacing(12)
+
+        self.chk_lin_per_frame = QtWidgets.QCheckBox("")
+        out.addRow(
+            self._param_label("Save per frame", "", cfg_path="linearize.save_per_frame"),
+            self._param_field(self.chk_lin_per_frame, cfg_path="linearize.save_per_frame"),
+        )
+
+        avl.addWidget(g_out)
+        avl.addStretch(1)
 
         # locale for doubles
         self._force_dot_locale(
@@ -6164,22 +6884,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
         gl.addLayout(row)
 
         left_layout.addStretch(1)
-        splitter.addWidget(self._mk_scroll_panel(left))
+        # Outputs are shown in a detached tool window.
+        lay.addWidget(left, 1)
 
-        self.outputs_linearize = OutputsPanel()
-        # Products for the linearization stage are registered under stage name "lin".
-        self.outputs_linearize.set_context(self._cfg, stage="lin")
-        splitter.addWidget(self.outputs_linearize)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([650, 480])
-
-        lay.addWidget(_hline())
-        foot = QtWidgets.QHBoxLayout()
-        lay.addLayout(foot)
-        self.btn_to_sky = QtWidgets.QPushButton("Go to Stack2D →")
-        foot.addStretch(1)
-        foot.addWidget(self.btn_to_sky)
 
         # pending wiring
         self.chk_lin_enabled.stateChanged.connect(
@@ -6234,7 +6941,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_frames_linearize.clicked.connect(
             lambda: self._open_frames_window("lin")
         )
-        self.btn_to_sky.clicked.connect(lambda: self.steps.setCurrentRow(self._stage_row_index("stack2d")))
 
         self._sync_stage_controls_from_cfg()
         return w
@@ -6247,13 +6953,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._set_step_status(self._stage_row_index("linearize"), "running")
         try:
             ctx = load_context(self._cfg_path)
-            run_sequence(ctx, ["linearize"])
+            self._run_sequence_with_qc_prompt(ctx, ["linearize"])
             self._log_info("Linearize done")
-            try:
-                if hasattr(self, "outputs_linearize"):
-                    self.outputs_linearize.set_context(self._cfg, stage="lin")
-            except Exception:
-                pass
             self._set_step_status(self._stage_row_index("linearize"), "ok")
             self._maybe_auto_qc()
         except FileNotFoundError as e:
@@ -6281,10 +6982,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
         w = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(w)
         lay.setSpacing(12)
-
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        splitter.setChildrenCollapsible(False)
-        lay.addWidget(splitter, 1)
 
         left = QtWidgets.QWidget()
         left_layout = QtWidgets.QVBoxLayout(left)
@@ -6331,7 +7028,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Enabled",
                 "Включить этап вычитания ночного неба.\nТипично: включено.",
             ),
-            self.chk_sky_enabled,
+            self._param_field(self.chk_sky_enabled),
         )
 
 
@@ -6346,7 +7043,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Kelson RAW — универсальный режим по одному объектному кадру.\n"
                 "Sky-Scale RAW — масштабирование по отдельным sky-кадрам (если они есть).",
             ),
-            self.combo_sky_primary_method,
+            self._param_field(self.combo_sky_primary_method),
         )
 
         # Post-rectification residual cleanup (executed in Linearization)
@@ -6361,7 +7058,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Выполняется на Step 10 (Linearization) — уже на rectified кадре.\n"
                 "Off/Auto/On. Типично: Auto.",
             ),
-            self.combo_sky_post_cleanup,
+            self._param_field(self.combo_sky_post_cleanup),
         )
         self.chk_sky_per_exp = QtWidgets.QCheckBox("Per exposure (recommended)")
         bf.addRow(
@@ -6370,7 +7067,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Вычитать небо для каждого экспозиционного кадра отдельно (best practice).\n"
                 "Типично: включено.",
             ),
-            self.chk_sky_per_exp,
+            self._param_field(self.chk_sky_per_exp),
         )
 
         self.chk_sky_stack_after = QtWidgets.QCheckBox("Stack2D is a separate step (see Step 11)")
@@ -6382,7 +7079,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Небо (Step 09) больше не запускает stacking автоматически.\n"
                 "Запустите Step 11 Stack2D отдельно.",
             ),
-            self.chk_sky_stack_after,
+            self._param_field(self.chk_sky_stack_after),
         )
 
         self.chk_sky_save_models = QtWidgets.QCheckBox("Save per-exp sky model")
@@ -6393,7 +7090,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Полезно для отладки и QC, но занимает место.\n"
                 "Типично: выключено.",
             ),
-            self.chk_sky_save_models,
+            self._param_field(self.chk_sky_save_models),
         )
 
         self.dspin_sky_step = QtWidgets.QDoubleSpinBox()
@@ -6407,7 +7104,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Меньше шаг → точнее линии, но выше риск переобучения.\n"
                 "Типично: 1–5 Å.",
             ),
-            self.dspin_sky_step,
+            self._param_field(self.dspin_sky_step),
         )
 
         self.spin_sky_deg = QtWidgets.QSpinBox()
@@ -6418,7 +7115,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "B-spline degree",
                 "Степень B-сплайна (обычно 3).\nТипично: 3.",
             ),
-            self.spin_sky_deg,
+            self._param_field(self.spin_sky_deg),
         )
 
         self.dspin_sky_clip = QtWidgets.QDoubleSpinBox()
@@ -6430,7 +7127,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Sigma clip",
                 "Сигма-клиппинг при подгонке сплайна к S(λ).\nТипично: 2.5–4.",
             ),
-            self.dspin_sky_clip,
+            self._param_field(self.dspin_sky_clip),
         )
 
         self.spin_sky_maxiter = QtWidgets.QSpinBox()
@@ -6441,7 +7138,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Max iters",
                 "Максимум итераций клиппинга.\nТипично: 3–8.",
             ),
-            self.spin_sky_maxiter,
+            self._param_field(self.spin_sky_maxiter),
         )
 
         self.chk_sky_spatial = QtWidgets.QCheckBox("Spatial polynomial")
@@ -6451,7 +7148,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Моделировать изменение амплитуды неба вдоль щели: a(y)*S(λ)+b(y).\n"
                 "Типично: включено.",
             ),
-            self.chk_sky_spatial,
+            self._param_field(self.chk_sky_spatial),
         )
 
         self.spin_sky_poly = QtWidgets.QSpinBox()
@@ -6464,7 +7161,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "0 = константа, 1 = линейно, 2 = квадратично.\n"
                 "Типично: 0–1.",
             ),
-            self.spin_sky_poly,
+            self._param_field(self.spin_sky_poly),
         )
 
         adv = QtWidgets.QWidget()
@@ -6478,7 +7175,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         fl.setLabelAlignment(QtCore.Qt.AlignLeft)
         fl.setHorizontalSpacing(12)
 
-        self.chk_sky_flex_enabled = QtWidgets.QCheckBox("Enable")
+        # Keep checkbox text empty: the label column is the single source of truth.
+        self.chk_sky_flex_enabled = QtWidgets.QCheckBox("")
         fl.addRow(
             self._param_label(
                 "Flexure",
@@ -6486,7 +7184,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Рекомендовано, если есть флексия/дрейф.\n"
                 "Типично: включено.\n",
             ),
-            self.chk_sky_flex_enabled,
+            self._param_field(self.chk_sky_flex_enabled),
         )
 
         self.combo_sky_flex_mode = QtWidgets.QComboBox()
@@ -6498,7 +7196,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "windows: только выбранные окна (макс. S/N) — стабильнее.\n"
                 "Типично: windows.\n",
             ),
-            self.combo_sky_flex_mode,
+            self._param_field(self.combo_sky_flex_mode),
         )
 
         self.spin_sky_flex_max = QtWidgets.QSpinBox()
@@ -6510,7 +7208,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Максимальный допустимый сдвиг в пикселях по λ (субпиксельно внутри).\n"
                 "Типично: 2–10 pix.\n",
             ),
-            self.spin_sky_flex_max,
+            self._param_field(self.spin_sky_flex_max),
         )
 
         self.combo_sky_flex_windows_unit = QtWidgets.QComboBox()
@@ -6521,7 +7219,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Единицы окон: auto = Å если кадр уже в длинах волн, иначе пиксели.\n"
                 "Типично: auto.\n",
             ),
-            self.combo_sky_flex_windows_unit,
+            self._param_field(self.combo_sky_flex_windows_unit),
         )
 
         row_w = QtWidgets.QWidget()
@@ -6539,7 +7237,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Выбирайте окна с яркими и узкими линиями (макс. S/N).\n"
                 "Типично: 2–6 окон.\n",
             ),
-            row_w,
+            self._param_field(row_w),
         )
 
         self.chk_sky_flex_ydep = QtWidgets.QCheckBox("Δλ(y)")
@@ -6550,7 +7248,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Сглаженный низкий порядок полинома (макс. стабильность).\n"
                 "Типично: выключено (включать при явном градиенте).\n",
             ),
-            self.chk_sky_flex_ydep,
+            self._param_field(self.chk_sky_flex_ydep),
         )
 
         self.spin_sky_flex_y_poly = QtWidgets.QSpinBox()
@@ -6563,7 +7261,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "0 = константа, 1 = линейно.\n"
                 "Типично: 1.\n",
             ),
-            self.spin_sky_flex_y_poly,
+            self._param_field(self.spin_sky_flex_y_poly),
         )
 
         self.spin_sky_flex_y_smooth = QtWidgets.QSpinBox()
@@ -6576,7 +7274,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "1 = без сглаживания.\n"
                 "Типично: 3–7.\n",
             ),
-            self.spin_sky_flex_y_smooth,
+            self._param_field(self.spin_sky_flex_y_smooth),
         )
 
         self.dspin_sky_flex_min_score = QtWidgets.QDoubleSpinBox()
@@ -6589,7 +7287,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Минимальный score кросс-корреляции; ниже — сдвиг игнорируется.\n"
                 "Типично: 0.02–0.2.\n",
             ),
-            self.dspin_sky_flex_min_score,
+            self._param_field(self.dspin_sky_flex_min_score),
         )
 
         adv_l.addWidget(gflex)
@@ -6611,7 +7309,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Сигма-клиппинг при объединении (stack2d). 0 = отключить.\n"
                 "Типично: 2–4.\n",
             ),
-            self.dspin_stack_sigma,
+            self._param_field(self.dspin_stack_sigma),
         )
 
         self.spin_stack_maxiter = QtWidgets.QSpinBox()
@@ -6622,10 +7320,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Max iters",
                 "Итерации клиппинга.\nТипично: 3–8.\n",
             ),
-            self.spin_stack_maxiter,
+            self._param_field(self.spin_stack_maxiter),
         )
 
-        self.chk_stack_y_align = QtWidgets.QCheckBox("Enable")
+        # Keep checkbox text empty: the label column is the single source of truth.
+        self.chk_stack_y_align = QtWidgets.QCheckBox("")
         sl.addRow(
             self._param_label(
                 "y-align",
@@ -6633,7 +7332,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Полезно при дрейфе/дизеринге.\n"
                 "Типично: выключено, включать если заметен сдвиг.\n",
             ),
-            self.chk_stack_y_align,
+            self._param_field(self.chk_stack_y_align),
         )
 
         self.spin_stack_y_align_max = QtWidgets.QSpinBox()
@@ -6644,7 +7343,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Max y-shift [pix]",
                 "Ограничение для y-shift.\nТипично: 2–15.\n",
             ),
-            self.spin_stack_y_align_max,
+            self._param_field(self.spin_stack_y_align_max),
         )
 
         self.combo_stack_y_align_mode = QtWidgets.QComboBox()
@@ -6655,7 +7354,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "full: весь спектр. windows: только выбранные окна (макс. S/N).\n"
                 "Типично: windows.\n",
             ),
-            self.combo_stack_y_align_mode,
+            self._param_field(self.combo_stack_y_align_mode),
         )
 
         self.combo_stack_y_align_windows_unit = QtWidgets.QComboBox()
@@ -6665,7 +7364,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Windows units",
                 "auto = Å если есть WCS по λ, иначе пиксели.\nТипично: auto.\n",
             ),
-            self.combo_stack_y_align_windows_unit,
+            self._param_field(self.combo_stack_y_align_windows_unit),
         )
 
         row_sw = QtWidgets.QWidget()
@@ -6682,7 +7381,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Окна по X для построения профиля и y-xcorr.\n"
                 "Типично: те же, что и для flexure.\n",
             ),
-            row_sw,
+            self._param_field(row_sw),
         )
 
         self.chk_stack_y_align_pos = QtWidgets.QCheckBox("Use positive flux")
@@ -6692,7 +7391,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "В профиле учитывать только положительный поток (стабильнее при шуме).\n"
                 "Типично: включено.\n",
             ),
-            self.chk_stack_y_align_pos,
+            self._param_field(self.chk_stack_y_align_pos),
         )
 
         adv_l.addWidget(gstack)
@@ -6720,23 +7419,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
         row.addWidget(self.btn_frames_sky)
         row.addStretch(1)
         gl.addLayout(row)
-
         left_layout.addStretch(1)
-        splitter.addWidget(self._mk_scroll_panel(left))
+        lay.addWidget(left, 1)
 
-        self.outputs_sky = OutputsPanel()
-        self.outputs_sky.set_context(self._cfg, stage="sky")
-        splitter.addWidget(self.outputs_sky)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([650, 480])
-
-        lay.addWidget(_hline())
-        foot = QtWidgets.QHBoxLayout()
-        lay.addLayout(foot)
-        self.btn_to_extract1d = QtWidgets.QPushButton("Go to Linearize →")
-        foot.addStretch(1)
-        foot.addWidget(self.btn_to_extract1d)
 
         # pending wiring
         self.chk_sky_enabled.stateChanged.connect(
@@ -6887,7 +7572,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_run_sky.clicked.connect(self._do_run_sky)
         self.btn_qc_sky.clicked.connect(self._open_qc_viewer)
         self.btn_frames_sky.clicked.connect(lambda: self._open_frames_window("sky"))
-        self.btn_to_extract1d.clicked.connect(lambda: self.steps.setCurrentRow(self._stage_row_index("linearize")))
 
         self._sync_stage_controls_from_cfg()
         return w
@@ -6996,13 +7680,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
             # Sky runs as a standalone stage. Stack2D is executed explicitly
             # in its own step.
             tasks = ["sky"]
-            run_sequence(ctx, tasks)
+            self._run_sequence_with_qc_prompt(ctx, tasks)
             self._log_info("Sky subtraction done")
-            try:
-                if hasattr(self, "outputs_sky"):
-                    self.outputs_sky.set_context(self._cfg, stage="sky")
-            except Exception:
-                pass
             self._set_step_status(self._stage_row_index("sky"), "ok")
             self._maybe_auto_qc()
         except Exception as e:
@@ -7022,7 +7701,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
             ctx = load_context(self._cfg_path)
             work = resolve_work_dir(ctx.cfg)
 
-            # Sanity: Stack2D consumes ONLY rectified sky-subtracted frames from Linearization.
+            # Sanity (P1-E): Stack2D consumes ONLY rectified sky-subtracted frames from Linearization:
+            #   10_linearize/<stem>_skysub.fits
             lin_root = stage_dir(work, "linearize")
             frames = ctx.cfg.get("frames") if isinstance(ctx.cfg.get("frames"), dict) else {}
             obj_list = frames.get("obj") if isinstance(frames.get("obj"), list) else []
@@ -7031,36 +7711,24 @@ class LauncherWindow(QtWidgets.QMainWindow):
             if stems:
                 missing: list[str] = []
                 for stem in stems:
-                    cand = [
-                        lin_root / f"{stem}_skysub.fits",
-                        lin_root / "per_exp" / f"{stem}_skysub.fits",
-                        work / "products" / "lin" / "per_exp" / f"{stem}_skysub.fits",
-                        work / "lin" / "per_exp" / f"{stem}_skysub.fits",
-                        work / "products" / "lin" / f"{stem}_skysub.fits",
-                        work / "lin" / f"{stem}_skysub.fits",
-                    ]
-                    if not any(p.exists() for p in cand):
+                    p = lin_root / f"{stem}_skysub.fits"
+                    if not p.exists():
                         missing.append(stem)
                 if missing:
                     raise FileNotFoundError(
                         "Missing linearized sky-subtracted inputs for stems: "
                         + ", \n".join(missing)
-                        + ". Run 'Sky Subtraction' and then 'Linearization' first."
+                        + ". Expected 10_linearize/<stem>_skysub.fits. Run 'Linearization' first."
                     )
             else:
-                inputs = list(lin_root.rglob("*_skysub.fits"))
+                inputs = list(lin_root.glob("*_skysub.fits"))
                 if not inputs:
                     raise FileNotFoundError(
-                        "No linearized sky-subtracted frames found. Run 'Linearization' first."
+                        "No linearized sky-subtracted frames found in 10_linearize/. Run 'Linearization' first."
                     )
 
-            run_sequence(ctx, ["stack2d"])
+            self._run_sequence_with_qc_prompt(ctx, ["stack2d"])
             self._log_info("Stack2D done")
-            try:
-                if hasattr(self, "outputs_stack2d"):
-                    self.outputs_stack2d.set_context(self._cfg, stage="stack2d")
-            except Exception:
-                pass
             self._set_step_status(self._stage_row_index("stack2d"), "ok")
             self._maybe_auto_qc()
         except Exception as e:
@@ -7071,10 +7739,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
         w = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(w)
         lay.setSpacing(12)
-
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        splitter.setChildrenCollapsible(False)
-        lay.addWidget(splitter, 1)
 
         left = QtWidgets.QWidget()
         left_layout = QtWidgets.QVBoxLayout(left)
@@ -7087,7 +7751,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         lbl = QtWidgets.QLabel(
             "Robust 2D stacking of rectified sky-subtracted frames in (λ, y).\n"
             "Input: 10_linearize/<stem>_skysub.fits\n"
-            "Output: 11_stack/stacked2d.fits"
+            "Output: 11_stack/stack2d.fits"
         )
         lbl.setWordWrap(True)
         gl.addWidget(lbl)
@@ -7109,7 +7773,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Sigma clip",
                 "Sigma-clipping during stack. Typical: 2.5–4.",
             ),
-            self.dspin_stack2d_clip,
+            self._param_field(self.dspin_stack2d_clip),
         )
 
         self.spin_stack2d_maxiter = QtWidgets.QSpinBox()
@@ -7120,7 +7784,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Max iters",
                 "Max clipping iterations. Typical: 3–8.",
             ),
-            self.spin_stack2d_maxiter,
+            self._param_field(self.spin_stack2d_maxiter),
         )
 
         self.chk_stack2d_png = QtWidgets.QCheckBox("Save PNG")
@@ -7129,7 +7793,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Save PNG",
                 "Save diagnostic PNG of the stacked frame. Typical: enabled.",
             ),
-            self.chk_stack2d_png,
+            self._param_field(self.chk_stack2d_png),
         )
 
         pl.addLayout(form)
@@ -7144,18 +7808,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         row.addStretch(1)
         row.addWidget(self.btn_stack2d_run)
         gl.addLayout(row)
-
-        # Right: outputs
-        right = QtWidgets.QWidget()
-        right_layout = QtWidgets.QVBoxLayout(right)
-        right_layout.setSpacing(12)
-        self.outputs_stack2d = OutputsPanel(stage="stack2d")
-        right_layout.addWidget(self.outputs_stack2d, 1)
-
-        splitter.addWidget(left)
-        splitter.addWidget(right)
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 3)
+        lay.addWidget(left, 1)
 
         # Wire
         self.dspin_stack2d_clip.valueChanged.connect(
@@ -7179,10 +7832,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
         lay = QtWidgets.QVBoxLayout(w)
         lay.setSpacing(12)
 
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        splitter.setChildrenCollapsible(False)
-        lay.addWidget(splitter, 1)
-
         left = QtWidgets.QWidget()
         left_layout = QtWidgets.QVBoxLayout(left)
         left_layout.setSpacing(12)
@@ -7192,9 +7841,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
         gl = QtWidgets.QVBoxLayout(g)
 
         lbl = QtWidgets.QLabel(
-            "Extract a 1D spectrum F(λ) from the stacked 2D product in (λ, y).\n"
-            "Input: products/.../stack2d/stacked2d.fits (required).\n"
-            "Output: products/.../spec/spec1d.fits (+ trace.json and PNG quicklook)."
+            "Extract 1D spectra F(λ) from a rectified 2D product (y, λ).\n"
+            "Default input: 11_stack/stack2d.fits.\n"
+            "Expert input: 10_linearize/<stem>_skysub.fits (when Input mode = single_frame).\n"
+            "Outputs: 12_extract/spec1d.fits (+ trace.json and spec1d.png)."
         )
         lbl.setWordWrap(True)
         gl.addWidget(lbl)
@@ -7214,7 +7864,31 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Enabled",
                 "Включить этап извлечения 1D-спектра.\nТипично: включено.",
             ),
-            self.chk_ex1d_enabled,
+            self._param_field(self.chk_ex1d_enabled),
+        )
+
+        self.combo_ex1d_input_mode = QtWidgets.QComboBox()
+        self.combo_ex1d_input_mode.addItems(["stack2d", "single_frame"])
+        bf.addRow(
+            self._param_label(
+                "Input mode",
+                "Выбор входного 2D продукта для извлечения.\n"
+                "stack2d: 11_stack/stack2d.fits (рекомендуется, по умолчанию).\n"
+                "single_frame: 10_linearize/<stem>_skysub.fits (экспертный режим; задайте stem).",
+            ),
+            self._param_field(self.combo_ex1d_input_mode),
+        )
+
+        self.edit_ex1d_single_stem = QtWidgets.QLineEdit()
+        self.edit_ex1d_single_stem.setPlaceholderText("<stem>")
+        bf.addRow(
+            self._param_label(
+                "Single-frame stem",
+                "Используется только при Input mode = single_frame.\n"
+                "Файл: 10_linearize/<stem>_skysub.fits.\n"
+                "Важно: режим не включён по умолчанию.",
+            ),
+            self._param_field(self.edit_ex1d_single_stem),
         )
 
         self.combo_ex1d_method = QtWidgets.QComboBox()
@@ -7228,19 +7902,21 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "optimal = Horne-style optimal extraction (Advanced).\n"
                 "Типично: boxcar.",
             ),
-            self.combo_ex1d_method,
+            self._param_field(self.combo_ex1d_method),
         )
 
         self.spin_ex1d_ap_hw = QtWidgets.QSpinBox()
-        self.spin_ex1d_ap_hw.setRange(1, 10_000)
+        # 0 = auto-estimate aperture half-width.
+        self.spin_ex1d_ap_hw.setRange(0, 10_000)
         self.spin_ex1d_ap_hw.setSingleStep(1)
         bf.addRow(
             self._param_label(
                 "Aperture half-width [px]",
                 "Половина ширины апертуры вокруг trace (в пикселях по Y).\n"
+                "0 = auto (оценка из ROI/профиля).\n"
                 "Типично: 4–10 px (зависит от seeing и биннинга).",
             ),
-            self.spin_ex1d_ap_hw,
+            self._param_field(self.spin_ex1d_ap_hw),
         )
 
         self.dspin_ex1d_trace_bin = QtWidgets.QDoubleSpinBox()
@@ -7254,7 +7930,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Больше → стабильнее в шуме, меньше → точнее локальные изгибы.\n"
                 "Типично: 30–100 Å.",
             ),
-            self.dspin_ex1d_trace_bin,
+            self._param_field(self.dspin_ex1d_trace_bin),
         )
 
         self.chk_ex1d_png = QtWidgets.QCheckBox("Save plot PNG")
@@ -7263,7 +7939,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "PNG",
                 "Сохранить quicklook график products/spec/spec1d.png.\nТипично: включено.",
             ),
-            self.chk_ex1d_png,
+            self._param_field(self.chk_ex1d_png),
         )
 
         adv = QtWidgets.QWidget()
@@ -7281,7 +7957,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "0 = константа, 1 = линейно, 2–4 обычно достаточно.\n"
                 "Типично: 3.",
             ),
-            self.spin_ex1d_trace_deg,
+            self._param_field(self.spin_ex1d_trace_deg),
         )
 
         self.spin_ex1d_prof_hw = QtWidgets.QSpinBox()
@@ -7293,7 +7969,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Для optimal extraction: половина окна по Y для построения профиля.\n"
                 "Типично: 10–20 px.",
             ),
-            self.spin_ex1d_prof_hw,
+            self._param_field(self.spin_ex1d_prof_hw),
         )
 
         self.dspin_ex1d_opt_clip = QtWidgets.QDoubleSpinBox()
@@ -7305,7 +7981,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 "Optimal sigma clip",
                 "Sigma-clip при построении профиля (optimal).\nТипично: 4–6.",
             ),
-            self.dspin_ex1d_opt_clip,
+            self._param_field(self.dspin_ex1d_opt_clip),
         )
 
         # locale for doubles
@@ -7326,24 +8002,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
         row.addWidget(self.btn_frames_ex1d)
         row.addStretch(1)
         gl.addLayout(row)
-
         left_layout.addStretch(1)
-        splitter.addWidget(self._mk_scroll_panel(left))
+        lay.addWidget(left, 1)
 
-        self.outputs_extract1d = OutputsPanel()
-        # Products for 1D extraction are registered under stage name "spec".
-        self.outputs_extract1d.set_context(self._cfg, stage="spec")
-        splitter.addWidget(self.outputs_extract1d)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([650, 480])
-
-        lay.addWidget(_hline())
-        foot = QtWidgets.QHBoxLayout()
-        lay.addLayout(foot)
-        self.btn_to_qc_report = QtWidgets.QPushButton("Open QC viewer →")
-        foot.addStretch(1)
-        foot.addWidget(self.btn_to_qc_report)
 
         self.chk_ex1d_enabled.stateChanged.connect(
             lambda _: self._stage_set_pending(
@@ -7352,6 +8013,18 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 bool(self.chk_ex1d_enabled.isChecked()),
             )
         )
+        if hasattr(self, "combo_ex1d_input_mode"):
+            self.combo_ex1d_input_mode.currentTextChanged.connect(
+                lambda t: self._stage_set_pending(
+                    "extract1d", "extract1d.input_mode", str(t)
+                )
+            )
+        if hasattr(self, "edit_ex1d_single_stem"):
+            self.edit_ex1d_single_stem.textChanged.connect(
+                lambda t: self._stage_set_pending(
+                    "extract1d", "extract1d.single_frame_stem", str(t).strip()
+                )
+            )
         self.combo_ex1d_method.currentTextChanged.connect(
             lambda t: self._stage_set_pending("extract1d", "extract1d.method", str(t))
         )
@@ -7389,7 +8062,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_run_ex1d.clicked.connect(self._do_run_extract1d)
         self.btn_qc_ex1d.clicked.connect(self._open_qc_viewer)
         self.btn_frames_ex1d.clicked.connect(lambda: self._open_frames_window("spec"))
-        self.btn_to_qc_report.clicked.connect(self._open_qc_viewer)
 
         self._sync_stage_controls_from_cfg()
         return w
@@ -7401,15 +8073,20 @@ class LauncherWindow(QtWidgets.QMainWindow):
             return
         from scorpio_pipe.workspace_paths import stage_dir
 
-        # Enforce: Extract1D only after successful Stack2D.
+        # Default: Extract1D runs on top of Stack2D output.
+        # Expert: the user can explicitly choose a single_frame input.
         try:
             wd = resolve_work_dir(self._cfg)
-            if not (stage_dir(wd, "stack2d") / "stack2d_done.json").exists():
+            ex = (self._cfg or {}).get("extract1d", {}) if isinstance((self._cfg or {}).get("extract1d"), dict) else {}
+            mode = str(ex.get("input_mode", "stack2d") or "stack2d")
+            if bool(ex.get("allow_sky_fallback", False)) and mode == "stack2d":
+                mode = "single_frame"
+            if mode == "stack2d" and not (stage_dir(wd, "stack2d") / "stack2d_done.json").exists():
                 self._show_msg(
                     "Stack2D not complete",
                     [
-                        "Run Step 11: Stack2D first (it produces stacked2d.fits).",
-                        "If you really know what you're doing, you can run Extract1D via CLI and pass --in-fits.",
+                        "Run Step 11: Stack2D first (it produces stack2d.fits).",
+                        "Or switch Extract1D Input mode to single_frame and specify <stem>_skysub.fits.",
                     ],
                     icon="warn",
                 )
@@ -7422,13 +8099,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._set_step_status(self._stage_row_index("extract1d"), "running")
         try:
             ctx = load_context(self._cfg_path)
-            run_sequence(ctx, ["extract1d"])
+            self._run_sequence_with_qc_prompt(ctx, ["extract1d"])
             self._log_info("Extract 1D done")
-            try:
-                if hasattr(self, "outputs_extract1d"):
-                    self.outputs_extract1d.set_context(self._cfg, stage="spec")
-            except Exception:
-                pass
             self._set_step_status(self._stage_row_index("extract1d"), "ok")
             self._maybe_auto_qc()
         except Exception as e:
@@ -7512,19 +8184,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
             wd = (self._cfg_path.parent / wd).resolve()
         return wd
 
-    def _current_stage_for_step(self, idx: int) -> str | None:
-        # Map UI steps to product stages for the inspector outputs view
-        return {
-            0: None,
-            1: None,
-            2: "calib",
-            3: "cosmics",
-            4: "flatfield",
-            5: "wavesol",
-            6: "wavesol",
-            7: "wavesol",
-        }.get(int(idx), None)
-
     def _on_step_changed(self, idx: int) -> None:
         try:
             i = int(idx)
@@ -7533,6 +8192,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         self._refresh_statusbar()
+        self._sync_outputs_action_state()
+        self._update_outputs_tool_context()
+        # If Outputs tool window is open, keep it pinned to current stage.
+        self._update_outputs_tool_context()
 
         try:
             if hasattr(self, "stack") and int(self.stack.currentIndex()) == 7:
@@ -7575,6 +8238,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             pass
 
         self._refresh_statusbar()
+        self._sync_outputs_action_state()
 
         try:
             if hasattr(self, "stack") and int(self.stack.currentIndex()) == 7:
@@ -7746,6 +8410,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
         act_qc.triggered.connect(self._open_qc_viewer)
         tb.addAction(act_qc)
 
+        self.act_outputs = QtGui.QAction("Outputs", self)
+        self.act_outputs.setCheckable(True)
+        self.act_outputs.setChecked(False)
+        self.act_outputs.triggered.connect(self._toggle_outputs)
+        tb.addAction(self.act_outputs)
+
         # Frames Browser (per-stage, non-modal)
         frames_btn = QtWidgets.QToolButton()
         frames_btn.setText("Frames")
@@ -7912,6 +8582,88 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_run_superneon.setEnabled(self.btn_run_calib.isEnabled())
         self.btn_open_lineid.setEnabled(self.btn_run_calib.isEnabled())
         self.btn_run_wavesol.setEnabled(self.btn_run_calib.isEnabled())
+
+        # "Previous state" is available only when there is an opened run and at
+        # least one snapshot in ui/history.
+        try:
+            rr_txt = (self.edit_work_dir.text() or "").strip()
+            from scorpio_pipe.ui.session_store import list_snapshots
+
+            has_hist = bool(rr_txt) and bool(list_snapshots(Path(rr_txt), limit=1))
+            if hasattr(self, "btn_prev_state"):
+                self.btn_prev_state.setEnabled(bool(has_hist))
+        except Exception:
+            try:
+                if hasattr(self, "btn_prev_state"):
+                    self.btn_prev_state.setEnabled(False)
+            except Exception:
+                pass
+
+    def _run_sequence_with_qc_prompt(
+        self,
+        ctx_or_path: dict[str, Any] | Path,
+        tasks: list[str],
+        *,
+        resume: bool = True,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Run tasks with a QC gate dialog.
+
+        The runner enforces a fail-fast QC gate based on upstream ``done.json`` flags.
+        Here we provide an explicit UX: cancel or proceed with an override.
+        """
+        try:
+            return run_sequence(ctx_or_path, tasks, resume=resume, force=force, qc_override=False)
+        except QCGateError as ge:
+            sev = str(getattr(ge, "upstream_max_severity", "ERROR") or "ERROR").upper()
+            box = QtWidgets.QMessageBox(self)
+            box.setIcon(QtWidgets.QMessageBox.Warning)
+            box.setWindowTitle("QC gate остановил запуск")
+            if sev == "FATAL":
+                box.setText(
+                    "Запуск остановлен: предыдущие стадии помечены QC-флагами FATAL.\n\n"
+                    "Override недоступен: FATAL означает повреждённые данные/нарушение контракта.\n"
+                    "Исправьте входы или перегенерируйте продукты upstream и запустите заново."
+                )
+            else:
+                box.setText(
+                    "Запуск остановлен: предыдущие стадии помечены QC-флагами ERROR/FATAL.\n\n"
+                    "Рекомендуется исправить причину (входы/параметры) и запустить заново.\n"
+                    "Если вы уверены — можно продолжить с override (это будет записано в manifest)."
+                )
+
+            try:
+                box.setDetailedText(ge.summary(max_items=50))
+            except Exception:
+                box.setDetailedText(str(ge))
+
+            btn_override = None
+            if sev != "FATAL":
+                btn_override = box.addButton(
+                    "Запустить с override", QtWidgets.QMessageBox.DestructiveRole
+                )
+            box.addButton(QtWidgets.QMessageBox.Cancel)
+            box.exec()
+
+            if btn_override is not None and box.clickedButton() is btn_override:
+                self._log_warn("QC override enabled by user; proceeding.")
+                try:
+                    return run_sequence(
+                        ctx_or_path, tasks, resume=resume, force=force, qc_override=True
+                    )
+                except QCGateError as ge2:
+                    # Most likely: upstream has FATAL blockers.
+                    self._log_error("QC override refused (FATAL blockers).")
+                    QtWidgets.QMessageBox.critical(
+                        self,
+                        "QC gate: FATAL",
+                        "Override невозможен: обнаружены FATAL-флаги upstream.\n\n"
+                        + (ge2.summary(max_items=50) if hasattr(ge2, "summary") else str(ge2)),
+                    )
+                    return {}
+
+            self._log_warn("Run cancelled by QC gate.")
+            return {}
 
     # --------------------------- logging helpers ---------------------------
 

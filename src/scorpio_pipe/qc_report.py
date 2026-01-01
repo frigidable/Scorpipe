@@ -13,6 +13,9 @@ from scorpio_pipe.version import PIPELINE_VERSION
 from scorpio_pipe.paths import resolve_work_dir
 from scorpio_pipe.workspace_paths import resolve_input_path, stage_dir
 
+from scorpio_pipe.io.atomic import atomic_write_json, atomic_write_text
+from scorpio_pipe.qc.flags import max_severity
+
 
 class QCReportOutput(dict[str, Path]):
     """QC report output paths.
@@ -82,6 +85,67 @@ def _rel(work_dir: Path, p: Path) -> str:
         return str(p.resolve().relative_to(work_dir.resolve())).replace("\\", "/")
     except Exception:
         return str(p)
+
+
+def _read_json_safely(p: Path) -> dict[str, Any] | None:
+    try:
+        if not p.exists():
+            return None
+        obj = json.loads(p.read_text(encoding="utf-8", errors="replace"))
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None
+
+
+def _collect_stage_flags(work_dir: Path) -> list[dict[str, Any]]:
+    """Aggregate QC flags from stage ``done.json`` files.
+
+    Stages are the source of truth for the minimal mandatory flag set (P1-G).
+    Here we only gather them into the QC report payload for convenience.
+    """
+
+    work_dir = Path(work_dir)
+    out: list[dict[str, Any]] = []
+
+    # Map legacy/short codes to the names used in the spec.
+    code_map = {
+        # Sky subtraction
+        "OBJECT_EATING": "OBJECT_EATING_RISK",
+        "SKY_COVERAGE_TOO_LOW": "COVERAGE_LOW",
+        # Linearize
+        "QC_LINEARIZE_COVERAGE": "COVERAGE_LOW",
+        "QC_LINEARIZE_REJECTED": "REJECTED_FRAC_HIGH",
+        # Stack
+        "QC_STACK2D_COVERAGE": "COVERAGE_LOW",
+        "QC_STACK2D_REJECTED": "REJECTED_FRAC_HIGH",
+    }
+
+    for stg in ("sky", "linearize", "stack"):
+        try:
+            d = _read_json_safely(stage_dir(work_dir, stg) / "done.json")
+            if not d:
+                continue
+            flags = None
+            qc = d.get("qc") if isinstance(d.get("qc"), dict) else None
+            if qc and isinstance(qc.get("flags"), list):
+                flags = qc.get("flags")
+            if flags is None and isinstance(d.get("flags"), list):
+                flags = d.get("flags")
+            if not isinstance(flags, list):
+                continue
+            for fl in flags:
+                if not isinstance(fl, dict):
+                    continue
+                row = dict(fl)
+                row.setdefault("stage", stg)
+                code = str(row.get("code") or "").strip()
+                if code in code_map:
+                    row["code"] = code_map[code]
+                out.append(row)
+        except Exception:
+            continue
+
+    return out
 
 
 def _fmt_seconds(s: float) -> str:
@@ -646,26 +710,30 @@ def build_qc_report(
     """Build a lightweight QC report (JSON + HTML).
 
     Writes (canonical):
-      - work_dir/manifest/qc_report.json
+      - work_dir/qc/qc_report.json
       - work_dir/index.html
+
+    Backward compatibility:
+      - also mirrors JSON into work_dir/manifest/qc_report.json
     """
 
     if config_dir is not None and not cfg.get("config_dir"):
         cfg = dict(cfg)
         cfg["config_dir"] = str(config_dir)
     work_dir = resolve_work_dir(cfg)
-    if out_dir is None:
-        out_dir = work_dir / "manifest"
-    out_dir = Path(out_dir).expanduser().resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
+    qc_dir = Path(out_dir or (work_dir / "qc")).expanduser().resolve()
+    qc_dir.mkdir(parents=True, exist_ok=True)
+
+    legacy_dir = (work_dir / "manifest").expanduser().resolve()
+    legacy_dir.mkdir(parents=True, exist_ok=True)
 
     # Ensure products manifest exists (machine-readable index incl. per-exposure trees)
     try:
         from scorpio_pipe.products_manifest import write_products_manifest
         from scorpio_pipe.work_layout import ensure_work_layout
 
-        # Canonical output: manifest/products_manifest.json
-        write_products_manifest(cfg=cfg, out_path=out_dir / "products_manifest.json")
+        # Products manifest remains in "manifest" for historical consumers.
+        write_products_manifest(cfg=cfg, out_path=legacy_dir / "products_manifest.json")
     except Exception:
         pass
 
@@ -725,15 +793,15 @@ def build_qc_report(
         from scorpio_pipe.work_layout import ensure_work_layout
 
         layout = ensure_work_layout(work_dir)
-        p = out_dir / "linearize_qc.json"
-        if p.exists():
-            metrics["linearize"] = json.loads(p.read_text(encoding="utf-8"))
-        else:
-            # fallback to legacy locations
-            for q in (layout.qc / "linearize_qc.json", layout.report_legacy / "linearize_qc.json"):
-                if q.exists():
-                    metrics["linearize"] = json.loads(q.read_text(encoding="utf-8"))
-                    break
+        # Canonical: qc/linearize_qc.json (stage may also point to its own file)
+        for q in (
+            layout.qc / "linearize_qc.json",
+            legacy_dir / "linearize_qc.json",
+            stage_dir(work_dir, "linearize") / "linearize_qc.json",
+        ):
+            if q.exists():
+                metrics["linearize"] = json.loads(q.read_text(encoding="utf-8"))
+                break
     except Exception:
         pass
 
@@ -747,10 +815,16 @@ def build_qc_report(
 
     thresholds, thresholds_meta = compute_thresholds(cfg)
     alerts = build_alerts(metrics, products=products, thresholds=thresholds)
+    # Collect stage QC flags (minimal mandatory set is enforced by stage code;
+    # we just aggregate them here for the GUI).
+    stage_flags = _collect_stage_flags(work_dir)
+
     qc = {
         "thresholds": thresholds.to_dict(),
         "thresholds_meta": thresholds_meta,
         "alerts": alerts,
+        "flags": stage_flags,
+        "max_severity": max_severity(stage_flags),
     }
 
     alert_counts = {
@@ -771,10 +845,14 @@ def build_qc_report(
         "qc": qc,
     }
 
-    out_json = out_dir / "qc_report.json"
-    out_json.write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    out_json = qc_dir / "qc_report.json"
+    legacy_json = legacy_dir / "qc_report.json"
+    atomic_write_json(out_json, payload, indent=2, ensure_ascii=False)
+    # Mirror legacy for backwards compatibility.
+    try:
+        atomic_write_json(legacy_json, payload, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
 
     # --- HTML ---
     timings_total = None
@@ -892,21 +970,25 @@ def build_qc_report(
       {_render_gallery(work_dir, products)}
     </div>
 
-    <div class='meta' style='margin-top:16px'>Tip: open <code>manifest/qc_report.json</code> to feed QC into notebooks, or <code>manifest/timings.json</code> to profile the pipeline.</div>
+    <div class='meta' style='margin-top:16px'>Tip: open <code>qc/qc_report.json</code> to feed QC into notebooks. A legacy copy is also written into <code>manifest/qc_report.json</code>.</div>
   </div>
 </body>
 </html>"""
 
     # HTML is intentionally placed at the workspace root for easy access.
     out_html = work_dir / "index.html"
-    out_html.write_text(html, encoding="utf-8")
+    atomic_write_text(out_html, html, encoding="utf-8")
 
-    legacy_json: Path | None = None
-    legacy_html: Path | None = None
+    # Convenience mirrors
+    qc_html = qc_dir / "qc_report.html"
+    legacy_html = legacy_dir / "qc_report.html"
+    try:
+        atomic_write_text(qc_html, html, encoding="utf-8")
+    except Exception:
+        pass
+    try:
+        atomic_write_text(legacy_html, html, encoding="utf-8")
+    except Exception:
+        pass
 
-    return QCReportOutput(
-        json=out_json,
-        html=out_html,
-        legacy_json=legacy_json,
-        legacy_html=legacy_html,
-    )
+    return QCReportOutput(json=out_json, html=out_html, legacy_json=legacy_json, legacy_html=legacy_html)

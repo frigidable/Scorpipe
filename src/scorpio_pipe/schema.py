@@ -346,17 +346,49 @@ class Extract1DBlock(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     enabled: bool = True
-    # boxcar = aperture sum around trace; optimal = Horne-style (advanced).
-    method: str = "boxcar"  # boxcar|optimal|sum|mean (sum/mean kept for compat)
-    # Aperture half-width in pixels around the trace.
-    aperture_half_width: int = 6
-    # Trace estimation (centroid in bins along λ)
+
+    # ------------------------- input selection -------------------------
+    # Default (recommended): Stack2D output (11_stack/stack2d.fits).
+    # Expert: a chosen single rectified sky-subtracted frame
+    #         (10_linearize/<stem>_skysub.fits).
+    input_mode: str = "stack2d"  # stack2d|single_frame
+    single_frame_stem: Optional[str] = None
+    single_frame_path: Optional[str] = None
+    # Deprecated alias: kept for backward compatibility; maps to input_mode=single_frame.
+    allow_sky_fallback: bool = False
+
+    # --------------------------- extraction ----------------------------
+    # boxcar = aperture sum around trace; mean = mean in aperture;
+    # optimal is reserved for future R&D (kept as a valid value for compatibility).
+    method: str = "boxcar"  # boxcar|mean|optimal|sum
+    # Aperture half-width in pixels around the trace; if None, estimate automatically.
+    aperture_half_width: Optional[int] = None
+    # Minimum fraction of good pixels in the aperture, else set NO_COVERAGE bit.
+    min_good_frac: float = 0.6
+    # Optional local sky-residual correction inside the aperture.
+    local_sky_correction: bool = False
+
+    # ---------------------------- tracing ------------------------------
     trace_bin_A: float = 60.0
+    trace_min_snr: float = 3.0
+    trace_min_blocks: int = 5
+    trace_min_valid_frac: float = 0.25
+    trace_sigma_clip: float = 4.0
+    trace_spline_k: int = 3
+    trace_spline_sigma_pix: float = 0.7
+
+    # Fixed-center product: override fixed center in pixels, else uses ROI center.
+    fixed_center_y: Optional[float] = None
+
+    # Advanced: per-stage ROI override (normally taken from sky.roi)
+    roi: Optional[Dict[str, Any]] = None
+
+    save_png: bool = True
+
+    # Legacy (no longer used by the new trace model, kept for forward/back compat)
     trace_smooth_deg: int = 3
-    # For optimal extraction: build a single profile template from a λ-range.
     optimal_profile_half_width: int = 12
     optimal_sigma_clip: float = 5.0
-    save_png: bool = True
 
 
 class FramesBlock(BaseModel):

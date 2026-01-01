@@ -1,38 +1,57 @@
-"""1D extraction for long-slit products in (λ, y).
+"""Object Extraction: 2D → 1D spectra (TRACE + FIXED).
 
-Inputs
-------
-Prefer stacked 2D product:
-  11_stack/stacked2d.fits
+This stage extracts 1D spectra from a long-slit 2D product on a linear
+wavelength grid (axis-1 = λ, axis-0 = spatial y).
 
-Fallback (per-exposure rectified inputs):
+Inputs (default)
+----------------
+Prefer the stacked 2D product:
+  11_stack/stack2d.fits
+
+Explicit expert mode
+--------------------
+If the user explicitly enables ``extract1d.input_mode=single_frame``, the stage
+can extract from a chosen single rectified sky-subtracted exposure:
   10_linearize/<stem>_skysub.fits
 
 Outputs
 -------
-12_extract/spec/spec1d.fits (PRIMARY=FLUX, EXT=VAR, MASK)
-12_extract/spec/spec1d.png
-12_extract/spec/trace.json
+12_extract/spec1d.fits
+  - Image extensions for GUI preview (2×Nλ): FLUX2, VAR2, MASK2, NPIX2, SKY2
+  - Table HDUs with full column structure for both products:
+      * TRACE  (LAMBDA, FLUX_TRACE, VAR_TRACE, MASK_TRACE, SKY_TRACE, NPIX_TRACE)
+      * FIXED  (LAMBDA, FLUX_FIXED, VAR_FIXED, MASK_FIXED, SKY_FIXED, NPIX_FIXED)
+12_extract/trace.json
+12_extract/extract_done.json
+12_extract/spec1d.png (optional quicklook)
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import math
+import shutil
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 import numpy as np
 from astropy.io import fits
+from scipy.interpolate import UnivariateSpline
 
 from scorpio_pipe.paths import resolve_work_dir
 from scorpio_pipe.provenance import add_provenance
-from scorpio_pipe.io.mef import try_read_grid, write_sci_var_mask
+from scorpio_pipe.version import PIPELINE_VERSION
 
 log = logging.getLogger(__name__)
 
 
+# ------------------------------- utilities -------------------------------
+
+
 def _roi_from_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
+    """ROI is owned by the Sky stage; extraction reuses it for consistency."""
     sky = cfg.get("sky") if isinstance(cfg.get("sky"), dict) else {}
     roi = sky.get("roi") if isinstance(sky.get("roi"), dict) else {}
     return dict(roi)
@@ -41,24 +60,14 @@ def _roi_from_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
 def _read_mef(
     path: Path,
 ) -> Tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray], fits.Header]:
-    """Read a MEF product.
-
-    Historically some stages wrote the science image into the PRIMARY HDU,
-    while newer stages use EXTNAME=SCI (with PRIMARY header carrying
-    provenance/WCS). We support both.
-    """
-
+    """Read pipeline MEF products (PRIMARY or SCI for image; optional VAR/MASK)."""
     with fits.open(path, memmap=False) as hdul:
         hdr = hdul[0].header.copy()
 
         sci = hdul[0].data
-        # If PRIMARY has no data (common for our MEF writer), NumPy would turn
-        # it into a 0-d array (shape=()) which breaks downstream expectations.
         if sci is None or np.asarray(sci).ndim < 2:
             if "SCI" in hdul and hdul["SCI"].data is not None:
                 sci = hdul["SCI"].data
-                # Ensure wavelength WCS keywords are available in hdr for
-                # _linear_wave_axis(). Prefer existing primary cards.
                 shdr = hdul["SCI"].header
                 for k in ("CRVAL1", "CDELT1", "CD1_1", "CRPIX1", "CTYPE1", "CUNIT1"):
                     if k not in hdr and k in shdr:
@@ -85,7 +94,6 @@ def _read_mef(
 
 
 def _linear_wave_axis(hdr: fits.Header, nlam: int) -> np.ndarray:
-    # Common WCS keywords for linear 1D axis.
     crval = hdr.get("CRVAL1")
     cdelt = hdr.get("CDELT1", hdr.get("CD1_1"))
     crpix = hdr.get("CRPIX1", 1.0)
@@ -95,573 +103,1171 @@ def _linear_wave_axis(hdr: fits.Header, nlam: int) -> np.ndarray:
     return float(crval) + (i + 1.0 - float(crpix)) * float(cdelt)
 
 
-def _polyfit_trace(
-    wbin: np.ndarray, ycen: np.ndarray, w_full: np.ndarray, deg: int
-) -> np.ndarray:
-    good = np.isfinite(wbin) & np.isfinite(ycen)
-    if good.sum() < max(5, deg + 2):
-        # fallback: constant trace at median
-        y0 = (
-            float(np.nanmedian(ycen))
-            if np.isfinite(np.nanmedian(ycen))
-            else (w_full * 0 + 0)
+def _mad_sigma(x: np.ndarray) -> float:
+    x = np.asarray(x, dtype=float)
+    x = x[np.isfinite(x)]
+    if x.size < 3:
+        return float("nan")
+    med = float(np.median(x))
+    return float(1.4826 * np.median(np.abs(x - med)))
+
+
+def _clamp_int(v: float, lo: int, hi: int) -> int:
+    return int(np.clip(int(round(float(v))), lo, hi))
+
+
+def _safe_json(obj: Any) -> Any:
+    """Make numpy-ish payloads JSON-serializable."""
+    if isinstance(obj, (np.integer, np.floating)):
+        return obj.item()
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, dict):
+        return {str(k): _safe_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_safe_json(v) for v in obj]
+    return obj
+
+
+def _is_stack2d_input(path: Path, hdr: fits.Header) -> bool:
+    name = path.name.lower()
+    if name in {"stack2d.fits", "stacked2d.fits"}:
+        return True
+    parts = {p.lower() for p in path.parts}
+    if "11_stack" in parts:
+        return True
+    # heuristic: stack2d writes STKMETH
+    if "STKMETH" in hdr:
+        return True
+    return False
+
+
+# ------------------------------ trace model ------------------------------
+
+
+@dataclass
+class TraceModel:
+    y_trace: np.ndarray  # (nlam,)
+    y_fixed: np.ndarray  # (nlam,)
+    aperture_half_width: int
+    meta: dict[str, Any]
+
+
+def _estimate_aperture_half_width(
+    sci: np.ndarray,
+    mask: Optional[np.ndarray],
+    *,
+    roi: dict[str, Any],
+    y_center: float,
+    min_hw: int = 2,
+    max_hw: Optional[int] = None,
+) -> int:
+    """Estimate aperture half-width using ROI if available, else from profile FWHM."""
+    ny, nlam = sci.shape
+    max_hw = int(max_hw or max(6, ny // 4))
+
+    # 1) ROI (object band) if available.
+    y0 = roi.get("obj_y0")
+    y1 = roi.get("obj_y1")
+    if isinstance(y0, (int, float)) and isinstance(y1, (int, float)):
+        y0i = int(np.clip(int(round(y0)), 0, ny - 1))
+        y1i = int(np.clip(int(round(y1)), y0i + 1, ny))
+        hw = int(max(min_hw, round(0.5 * (y1i - y0i))))
+        return int(np.clip(hw, min_hw, max_hw))
+
+    # 2) Empirical from collapsed profile.
+    fatal = None
+    if mask is not None and mask.shape == sci.shape:
+        # treat any non-zero mask as invalid for this rough estimate
+        fatal = mask != 0
+
+    prof = np.nanmedian(sci, axis=1)
+    if fatal is not None:
+        tmp = sci.copy()
+        tmp[fatal] = np.nan
+        prof = np.nanmedian(tmp, axis=1)
+
+    if not np.isfinite(prof).any():
+        return int(np.clip(6, min_hw, max_hw))
+
+    # Remove a baseline using the outer quartiles.
+    yy = np.arange(ny, dtype=float)
+    q = np.nanpercentile(prof, [10.0, 50.0, 90.0])
+    baseline = float(q[1])
+    prof0 = prof - baseline
+    # find peak near y_center
+    ypk = int(np.clip(int(round(y_center)), 0, ny - 1))
+    # allow peak to slide within +/- 20 px
+    w = int(min(20, ny // 3))
+    a0 = max(0, ypk - w)
+    a1 = min(ny, ypk + w + 1)
+    sl = prof0[a0:a1]
+    if not np.isfinite(sl).any():
+        return int(np.clip(6, min_hw, max_hw))
+    ypk = int(np.nanargmax(sl) + a0)
+    peak = float(prof0[ypk])
+    if not np.isfinite(peak) or peak <= 0:
+        return int(np.clip(6, min_hw, max_hw))
+
+    half = 0.5 * peak
+    above = np.where(np.isfinite(prof0) & (prof0 >= half))[0]
+    if above.size < 2:
+        return int(np.clip(6, min_hw, max_hw))
+    # choose the contiguous segment containing the peak
+    # (simple approach: nearest indices around peak)
+    left = above[above <= ypk]
+    right = above[above >= ypk]
+    if left.size == 0 or right.size == 0:
+        return int(np.clip(6, min_hw, max_hw))
+    yL = int(left.min())
+    yR = int(right.max())
+    fwhm = max(1.0, float(yR - yL))
+    # Box aperture: ~1.5×(FWHM/2) is a reasonable default for long-slit
+    hw = int(math.ceil(1.5 * 0.5 * fwhm))
+    return int(np.clip(hw, min_hw, max_hw))
+
+
+def _centroid_from_profile(
+    prof: np.ndarray,
+    *,
+    y_mask: Optional[np.ndarray] = None,
+    sky_windows: Optional[list[tuple[int, int]]] = None,
+    min_snr: float = 3.0,
+) -> tuple[float, dict[str, Any]]:
+    """Robust centroid from a 1D spatial profile."""
+    ny = prof.size
+    yy = np.arange(ny, dtype=float)
+    p = np.asarray(prof, dtype=float)
+
+    # Baseline from sky windows when present.
+    baseline = float(np.nanmedian(p))
+    sky_sigma = float("nan")
+    used_sky = False
+    if sky_windows:
+        vals = []
+        for (a, b) in sky_windows:
+            a = int(np.clip(a, 0, ny - 1))
+            b = int(np.clip(b, a, ny - 1))
+            vv = p[a : b + 1]
+            vv = vv[np.isfinite(vv)]
+            if vv.size:
+                vals.append(float(np.median(vv)))
+        if vals:
+            baseline = float(np.median(vals))
+            used_sky = True
+            # estimate noise from sky zones as robust scatter of those medians
+            sky_sigma = _mad_sigma(np.asarray(vals, dtype=float))
+
+    s = p - baseline
+    if y_mask is not None and y_mask.size == ny:
+        s = np.where(y_mask, s, np.nan)
+
+    if not np.isfinite(s).any():
+        return float("nan"), {
+            "used_sky": used_sky,
+            "baseline": baseline,
+            "snr": float("nan"),
+        }
+
+    # Focus around the peak; use only positive weights.
+    ypk = int(np.nanargmax(s))
+    win = int(min(20, ny // 3))
+    y0 = max(0, ypk - win)
+    y1 = min(ny, ypk + win + 1)
+    ss = s[y0:y1]
+    ss = np.clip(np.nan_to_num(ss, nan=0.0), 0.0, np.inf)
+    if float(np.sum(ss)) <= 0:
+        return float("nan"), {
+            "used_sky": used_sky,
+            "baseline": baseline,
+            "snr": float("nan"),
+        }
+    ywin = yy[y0:y1]
+    yc = float(np.sum(ywin * ss) / np.sum(ss))
+
+    # SNR estimate
+    peak = float(np.nanmax(ss))
+    if not np.isfinite(sky_sigma) or sky_sigma <= 0:
+        # fallback: robust scatter of full profile residuals
+        sky_sigma = _mad_sigma(s)
+    snr = float(peak / sky_sigma) if np.isfinite(sky_sigma) and sky_sigma > 0 else float("nan")
+
+    if np.isfinite(snr) and snr < float(min_snr):
+        return float("nan"), {
+            "used_sky": used_sky,
+            "baseline": baseline,
+            "snr": snr,
+        }
+
+    return yc, {
+        "used_sky": used_sky,
+        "baseline": baseline,
+        "snr": snr,
+    }
+
+
+def _estimate_trace_blocks(
+    sci: np.ndarray,
+    mask: Optional[np.ndarray],
+    wave: np.ndarray,
+    *,
+    roi: dict[str, Any],
+    sky_windows: Optional[list[tuple[int, int]]],
+    trace_bin_A: float,
+    trace_min_snr: float,
+    fatal_bits: int,
+) -> tuple[np.ndarray, np.ndarray, list[dict[str, Any]]]:
+    """Estimate y(λ) from centroids in wavelength blocks."""
+    ny, nlam = sci.shape
+    dl = float(np.nanmedian(np.abs(np.diff(wave)))) if wave.size > 1 else 1.0
+    bin_pix = max(1, int(round(float(trace_bin_A) / max(dl, 1e-6))))
+
+    # Object corridor mask (fallback if ROI missing)
+    y0 = roi.get("obj_y0")
+    y1 = roi.get("obj_y1")
+    if isinstance(y0, (int, float)) and isinstance(y1, (int, float)):
+        y0i = int(np.clip(int(round(y0)), 0, ny - 1))
+        y1i = int(np.clip(int(round(y1)), y0i + 1, ny))
+        y_mask = np.zeros(ny, dtype=bool)
+        y_mask[y0i:y1i] = True
+    else:
+        y_mask = np.zeros(ny, dtype=bool)
+        y_mask[int(0.35 * ny) : int(0.65 * ny)] = True
+
+    have_mask = mask is not None and mask.shape == sci.shape
+
+    w_c = []
+    y_c = []
+    blocks_meta: list[dict[str, Any]] = []
+
+    for x0 in range(0, nlam, bin_pix):
+        x1 = min(nlam, x0 + bin_pix)
+        block = sci[:, x0:x1]
+        if have_mask:
+            mb = mask[:, x0:x1]
+            block = block.copy()
+            block[(mb & fatal_bits) != 0] = np.nan
+        prof = np.nanmedian(block, axis=1)
+        yc, m = _centroid_from_profile(
+            prof, y_mask=y_mask, sky_windows=sky_windows, min_snr=float(trace_min_snr)
         )
-        return np.full_like(w_full, y0, dtype=float)
-    w = wbin[good]
-    y = ycen[good]
-    # normalize λ for numerical stability
-    w0 = float(np.nanmin(w))
-    w1 = float(np.nanmax(w))
-    x = (w - w0) / max(w1 - w0, 1e-6)
-    p = np.polyfit(x, y, deg=deg)
-    xfull = (w_full - w0) / max(w1 - w0, 1e-6)
-    return np.polyval(p, xfull)
+        wc = float(np.nanmean(wave[x0:x1]))
+        w_c.append(wc)
+        y_c.append(yc)
+        blocks_meta.append(
+            {
+                "x0": int(x0),
+                "x1": int(x1),
+                "wave_c": wc,
+                "y": yc,
+                **m,
+            }
+        )
+
+    return np.asarray(w_c, dtype=float), np.asarray(y_c, dtype=float), blocks_meta
 
 
-def _estimate_trace(
+def _smooth_trace_spline(
+    wave_c: np.ndarray,
+    y_c: np.ndarray,
+    wave_full: np.ndarray,
+    *,
+    sigma_clip: float,
+    spline_k: int,
+    spline_sigma_pix: float,
+    min_points: int,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Spline smoothing with robust outlier rejection."""
+    good = np.isfinite(wave_c) & np.isfinite(y_c)
+    w = wave_c[good]
+    y = y_c[good]
+    meta: dict[str, Any] = {"initial_points": int(w.size)}
+    if w.size < int(min_points):
+        return np.full_like(wave_full, float(np.nanmedian(y_c))), {
+            **meta,
+            "fallback": True,
+            "reason": "too_few_points",
+        }
+
+    # sort by wavelength
+    srt = np.argsort(w)
+    w = w[srt]
+    y = y[srt]
+
+    # smoothing factor in spline units
+    s = float(w.size) * float(spline_sigma_pix) ** 2
+    s = max(0.0, s)
+
+    clip = float(max(2.5, sigma_clip))
+    kept = np.ones_like(y, dtype=bool)
+    for _ in range(2):
+        try:
+            spl = UnivariateSpline(w[kept], y[kept], k=int(spline_k), s=s)
+        except Exception:
+            break
+        resid = y - spl(w)
+        sig = _mad_sigma(resid)
+        if not np.isfinite(sig) or sig <= 0:
+            break
+        kept = np.abs(resid) <= (clip * sig)
+        if kept.sum() < int(min_points):
+            kept[:] = True
+            break
+
+    try:
+        spl = UnivariateSpline(w[kept], y[kept], k=int(spline_k), s=s)
+        y_full = spl(wave_full)
+        resid = y[kept] - spl(w[kept])
+        meta.update(
+            {
+                "fallback": False,
+                "kept_points": int(kept.sum()),
+                "rms_pix": float(np.sqrt(np.nanmean(resid**2))) if resid.size else float("nan"),
+                "mad_pix": float(_mad_sigma(resid)),
+                "k": int(spline_k),
+                "s": float(s),
+                "sigma_clip": float(clip),
+            }
+        )
+        return np.asarray(y_full, dtype=float), meta
+    except Exception as e:
+        return np.full_like(wave_full, float(np.nanmedian(y_c))), {
+            **meta,
+            "fallback": True,
+            "reason": f"spline_failed: {e}",
+        }
+
+
+def _build_trace_model(
     sci: np.ndarray,
     var: Optional[np.ndarray],
     mask: Optional[np.ndarray],
     wave: np.ndarray,
-    roi: dict[str, Any],
     *,
-    trace_bin_A: float,
-    trace_smooth_deg: int,
-) -> Tuple[np.ndarray, dict[str, Any]]:
+    roi: dict[str, Any],
+    sky_windows: list[tuple[int, int]] | None,
+    cfg: dict[str, Any],
+    fatal_bits: int,
+) -> TraceModel:
     ny, nlam = sci.shape
-    # object window
-    yobj0 = roi.get("obj_y0")
-    yobj1 = roi.get("obj_y1")
-    if yobj0 is None or yobj1 is None:
-        yobj0, yobj1 = int(0.35 * ny), int(0.65 * ny)
-    yobj0 = int(np.clip(yobj0, 0, ny - 1))
-    yobj1 = int(np.clip(yobj1, yobj0 + 1, ny))
 
-    # Bin width in pixels
-    dl = float(np.nanmedian(np.abs(np.diff(wave)))) if len(wave) > 1 else 1.0
-    bin_pix = max(1, int(round(trace_bin_A / max(dl, 1e-6))))
+    # Defaults / knobs
+    trace_bin_A = float(cfg.get("trace_bin_A", 60.0))
+    trace_min_snr = float(cfg.get("trace_min_snr", 3.0))
+    trace_sigma_clip = float(cfg.get("trace_sigma_clip", cfg.get("trace_outlier_sigma", 4.0)))
+    spline_k = int(np.clip(int(cfg.get("trace_spline_k", 3)), 1, 5))
+    spline_sigma_pix = float(cfg.get("trace_spline_sigma_pix", 0.7))
+    min_blocks = int(max(5, int(cfg.get("trace_min_blocks", 6))))
+    min_frac = float(cfg.get("trace_min_valid_frac", 0.25))
 
-    wbin = []
-    ycen = []
-    for x0 in range(0, nlam, bin_pix):
-        x1 = min(nlam, x0 + bin_pix)
-        block = sci[:, x0:x1]
-        if mask is not None:
-            m = mask[:, x0:x1] > 0
-            block = block.copy()
-            block[m] = np.nan
-        # collapse in λ
-        prof = np.nanmean(block, axis=1)
-        # focus on object window
-        sl = prof[yobj0:yobj1]
-        if not np.isfinite(sl).any():
-            wbin.append(float(np.nanmean(wave[x0:x1])))
-            ycen.append(np.nan)
-            continue
-        # use positive weights to avoid centroid flips in noisy sky-sub data
-        w = np.nan_to_num(sl, nan=0.0)
-        w = np.clip(
-            w,
-            0.0,
-            np.nanpercentile(w, 95) if np.isfinite(np.nanpercentile(w, 95)) else np.inf,
-        )
-        if np.sum(w) <= 0:
-            # fallback: argmax
-            yc = float(np.nanargmax(sl) + yobj0)
-        else:
-            yy = np.arange(yobj0, yobj1, dtype=float)
-            yc = float(np.sum(yy * w) / np.sum(w))
-        wbin.append(float(np.nanmean(wave[x0:x1])))
-        ycen.append(yc)
+    wave_c, y_c, blocks_meta = _estimate_trace_blocks(
+        sci,
+        mask,
+        wave,
+        roi=roi,
+        sky_windows=sky_windows,
+        trace_bin_A=trace_bin_A,
+        trace_min_snr=trace_min_snr,
+        fatal_bits=int(fatal_bits),
+    )
 
-    wbin = np.asarray(wbin, dtype=float)
-    ycen = np.asarray(ycen, dtype=float)
-    trace = _polyfit_trace(wbin, ycen, wave, deg=int(np.clip(trace_smooth_deg, 0, 8)))
+    good = np.isfinite(y_c)
+    n_good = int(np.sum(good))
+    n_all = int(y_c.size)
 
-    meta = {
-        "ny": int(ny),
-        "nlam": int(nlam),
-        "yobj0": int(yobj0),
-        "yobj1": int(yobj1),
-        "bin_pix": int(bin_pix),
-        "trace_smooth_deg": int(trace_smooth_deg),
-        "centroids": {
-            "wave": wbin.tolist(),
-            "y": ycen.tolist(),
-        },
+    meta: dict[str, Any] = {
+        "trace_bin_A": trace_bin_A,
+        "trace_min_snr": trace_min_snr,
+        "blocks": blocks_meta,
+        "blocks_total": n_all,
+        "blocks_valid": n_good,
     }
-    return trace.astype(float), meta
+
+    # Choose fixed center from ROI if available; else from the block median.
+    y_fixed_center = None
+    if isinstance(cfg.get("fixed_center_y"), (int, float)):
+        y_fixed_center = float(cfg["fixed_center_y"])
+    else:
+        y0 = roi.get("obj_y0")
+        y1 = roi.get("obj_y1")
+        if isinstance(y0, (int, float)) and isinstance(y1, (int, float)):
+            y_fixed_center = 0.5 * (float(y0) + float(y1))
+        else:
+            y_fixed_center = float(np.nanmedian(y_c))
+    y_fixed_center = float(np.clip(y_fixed_center, 0.0, float(ny - 1)))
+
+    # Decide trace: fallback if too few valid blocks
+    fallback = (n_good < min_blocks) or (n_all > 0 and (n_good / max(n_all, 1)) < min_frac)
+    if fallback:
+        y_trace = np.full(nlam, y_fixed_center, dtype=float)
+        meta["trace_model"] = {
+            "type": "fallback_constant",
+            "y0": y_fixed_center,
+            "reason": "insufficient_valid_blocks",
+        }
+    else:
+        y_trace, sm = _smooth_trace_spline(
+            wave_c,
+            y_c,
+            wave,
+            sigma_clip=trace_sigma_clip,
+            spline_k=spline_k,
+            spline_sigma_pix=spline_sigma_pix,
+            min_points=min_blocks,
+        )
+        y_trace = np.asarray(y_trace, dtype=float)
+        y_trace = np.clip(y_trace, 0.0, float(ny - 1))
+        meta["trace_model"] = {"type": "spline", **sm}
+
+    y_fixed = np.full(nlam, y_fixed_center, dtype=float)
+
+    # Aperture half-width
+    if isinstance(cfg.get("aperture_half_width"), (int, float)) and float(cfg.get("aperture_half_width")) > 0:
+        ap_hw = int(max(1, int(round(float(cfg["aperture_half_width"])))))
+        meta["aperture"] = {"mode": "user", "half_width_pix": ap_hw}
+    else:
+        ap_hw = _estimate_aperture_half_width(
+            sci,
+            mask,
+            roi=roi,
+            y_center=y_fixed_center,
+            min_hw=2,
+            max_hw=max(6, ny // 4),
+        )
+        meta["aperture"] = {"mode": "auto", "half_width_pix": int(ap_hw)}
+
+    return TraceModel(
+        y_trace=y_trace.astype(float),
+        y_fixed=y_fixed.astype(float),
+        aperture_half_width=int(ap_hw),
+        meta=meta,
+    )
+
+
+# ------------------------------- extraction -------------------------------
+
+
+def _estimate_sky_residual(
+    sci: np.ndarray,
+    var: Optional[np.ndarray],
+    mask: Optional[np.ndarray],
+    *,
+    sky_windows: list[tuple[int, int]] | None,
+    fatal_bits: int,
+) -> np.ndarray:
+    """Per-λ robust sky residual level from configured sky windows."""
+    ny, nlam = sci.shape
+    out = np.full(nlam, np.nan, dtype=float)
+    if not sky_windows:
+        return out
+    have_mask = mask is not None and mask.shape == sci.shape
+    have_var = var is not None and var.shape == sci.shape
+    for j in range(nlam):
+        vals = []
+        for (a, b) in sky_windows:
+            a = int(np.clip(a, 0, ny - 1))
+            b = int(np.clip(b, a, ny - 1))
+            sl = sci[a : b + 1, j].astype(float)
+            good = np.isfinite(sl)
+            if have_var:
+                vv = var[a : b + 1, j]
+                good &= np.isfinite(vv)
+            if have_mask:
+                mm = mask[a : b + 1, j]
+                good &= (mm & fatal_bits) == 0
+            if not np.any(good):
+                continue
+            vals.append(float(np.median(sl[good])))
+        if vals:
+            out[j] = float(np.median(vals))
+    return out
 
 
 def _boxcar_extract(
     sci: np.ndarray,
     var: Optional[np.ndarray],
     mask: Optional[np.ndarray],
-    trace: np.ndarray,
+    y_center: np.ndarray,
     *,
     ap_hw: int,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    fatal_bits: int,
+    min_good_frac: float,
+    sky_resid: Optional[np.ndarray],
+    apply_local_sky: bool,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Simple aperture sum (TRACE or FIXED)."""
     ny, nlam = sci.shape
     ap_hw = int(max(1, ap_hw))
-    flux = np.zeros(nlam, dtype=float)
-    out_var = np.zeros(nlam, dtype=float)
-    out_mask = np.zeros(nlam, dtype=np.uint16)
-    have_var = var is not None and var.shape == sci.shape
-    have_mask = mask is not None and mask.shape == sci.shape
-    for j in range(nlam):
-        yc = float(trace[j])
-        y0 = int(np.floor(yc)) - ap_hw
-        y1 = int(np.floor(yc)) + ap_hw + 1
-        y0 = max(0, y0)
-        y1 = min(ny, y1)
-        sl = sci[y0:y1, j]
-        if have_mask:
-            m = mask[y0:y1, j]
-            good = m == 0
-            if not np.any(good):
-                out_mask[j] = np.uint16(1)
-                flux[j] = np.nan
-                out_var[j] = np.inf
-                continue
-            sl = sl[good]
-            if have_var:
-                vv = var[y0:y1, j][good]
-            else:
-                vv = None
-        else:
-            vv = var[y0:y1, j] if have_var else None
-
-        flux[j] = float(np.nansum(sl))
-        if vv is not None:
-            out_var[j] = float(np.nansum(vv))
-        else:
-            out_var[j] = float(np.nanvar(sl)) if np.isfinite(np.nanvar(sl)) else np.inf
-    return flux, out_var, out_mask
-
-
-def _build_profile_template(
-    sci: np.ndarray,
-    mask: Optional[np.ndarray],
-    trace: np.ndarray,
-    *,
-    profile_hw: int,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Build a single spatial profile template P0(dy).
-
-    We sample data at y = trace(λ) + dy using linear interpolation and
-    average over λ. This avoids explicit resampling of the 2D frame.
-    """
-
-    ny, nlam = sci.shape
-    profile_hw = int(max(3, profile_hw))
-    dys = np.arange(-profile_hw, profile_hw + 1, dtype=float)
-    acc = np.zeros_like(dys, dtype=float)
-    cnt = np.zeros_like(dys, dtype=float)
-    have_mask = mask is not None and mask.shape == sci.shape
-    for j in range(nlam):
-        yc = float(trace[j])
-        if not np.isfinite(yc):
-            continue
-        for k, dy in enumerate(dys):
-            y = yc + float(dy)
-            if y < 0 or y > ny - 1:
-                continue
-            y0 = int(np.floor(y))
-            y1 = min(ny - 1, y0 + 1)
-            t = y - y0
-            if have_mask:
-                if mask[y0, j] != 0 or mask[y1, j] != 0:
-                    continue
-            v = (1 - t) * sci[y0, j] + t * sci[y1, j]
-            if np.isfinite(v):
-                acc[k] += float(v)
-                cnt[k] += 1.0
-    prof = np.zeros_like(acc)
-    good = cnt > 0
-    prof[good] = acc[good] / cnt[good]
-    # keep only non-negative template and normalize
-    prof = np.clip(
-        prof, 0.0, np.nanmax(prof) if np.isfinite(np.nanmax(prof)) else np.inf
-    )
-    s = float(np.nansum(prof))
-    if s <= 0 or not np.isfinite(s):
-        # fallback: Gaussian-ish profile
-        sigma = max(1.0, 0.35 * profile_hw)
-        prof = np.exp(-(dys**2) / (2 * sigma**2))
-        s = float(np.nansum(prof))
-    prof /= s
-    return dys, prof
-
-
-def _optimal_extract(
-    sci: np.ndarray,
-    var: Optional[np.ndarray],
-    mask: Optional[np.ndarray],
-    trace: np.ndarray,
-    *,
-    ap_hw: int,
-    profile_hw: int,
-    sigma_clip: float,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
-    ny, nlam = sci.shape
-    have_var = var is not None and var.shape == sci.shape
-    have_mask = mask is not None and mask.shape == sci.shape
-
-    # Template profile
-    dys, p0 = _build_profile_template(sci, mask, trace, profile_hw=profile_hw)
+    min_good_frac = float(np.clip(min_good_frac, 0.0, 1.0))
 
     flux = np.full(nlam, np.nan, dtype=float)
-    out_var = np.full(nlam, np.inf, dtype=float)
+    out_var = np.full(nlam, np.nan, dtype=float)
     out_mask = np.zeros(nlam, dtype=np.uint16)
+    out_npix = np.zeros(nlam, dtype=np.int16)
 
-    ap_hw = int(max(3, ap_hw))
-    sigma_clip = float(max(2.0, sigma_clip))
+    have_mask = mask is not None and mask.shape == sci.shape
+    have_var = var is not None and var.shape == sci.shape
 
-    # Precompute profile on integer dy grid used by aperture
-    dy_int = np.arange(-ap_hw, ap_hw + 1, dtype=float)
-    p_int = np.interp(dy_int, dys, p0, left=0.0, right=0.0)
-    # ensure normalized within aperture
-    s = float(np.sum(p_int))
-    if s > 0:
-        p_int = p_int / s
+    from scorpio_pipe.maskbits import NO_COVERAGE
 
     for j in range(nlam):
-        yc = float(trace[j])
+        yc = float(y_center[j])
         if not np.isfinite(yc):
-            out_mask[j] = np.uint16(1)
+            out_mask[j] |= np.uint16(NO_COVERAGE)
             continue
-        y0 = int(np.round(yc)) - ap_hw
-        y1 = int(np.round(yc)) + ap_hw + 1
-        if y0 < 0 or y1 > ny:
-            out_mask[j] = np.uint16(1)
+        y0 = int(math.floor(yc)) - ap_hw
+        y1 = int(math.floor(yc)) + ap_hw + 1
+        y0 = max(0, y0)
+        y1 = min(ny, y1)
+        if y1 <= y0:
+            out_mask[j] |= np.uint16(NO_COVERAGE)
             continue
-        d = sci[y0:y1, j].astype(float)
+
+        sl = sci[y0:y1, j].astype(float)
+        good = np.isfinite(sl)
+
         if have_var:
             vv = var[y0:y1, j].astype(float)
+            good &= np.isfinite(vv) & (vv > 0)
         else:
-            # approximate
-            vv = np.maximum(np.nanvar(d), 1.0) * np.ones_like(d)
-        good = np.isfinite(d) & np.isfinite(vv) & (vv > 0)
+            vv = None
+
         if have_mask:
-            good &= mask[y0:y1, j] == 0
-        if not np.any(good):
-            out_mask[j] = np.uint16(1)
+            mm = mask[y0:y1, j]
+            # OR all bits for output (keeps provenance of masked contributors)
+            try:
+                out_mask[j] |= np.uint16(np.bitwise_or.reduce(mm))
+            except Exception:
+                pass
+            good &= (mm & fatal_bits) == 0
+
+        n_tot = int(y1 - y0)
+        n_good = int(np.sum(good))
+        out_npix[j] = np.int16(n_good)
+
+        if n_tot <= 0 or n_good <= 0:
+            out_mask[j] |= np.uint16(NO_COVERAGE)
             continue
-        p = p_int.copy()
-        # Weighted least squares amplitude for model f*p
-        w = np.zeros_like(vv)
-        w[good] = 1.0 / vv[good]
-        num = float(np.sum(p[good] * d[good] * w[good]))
-        den = float(np.sum((p[good] ** 2) * w[good]))
-        if den <= 0:
-            out_mask[j] = np.uint16(1)
-            continue
-        fhat = num / den
-        # One-pass sigma clipping
-        resid = d - fhat * p
-        sig = np.sqrt(np.maximum(vv, 1e-12))
-        clip = np.abs(resid) / sig > sigma_clip
-        good2 = good & (~clip)
-        if good2.sum() >= max(3, good.sum() // 2):
-            num = float(np.sum(p[good2] * d[good2] * w[good2]))
-            den = float(np.sum((p[good2] ** 2) * w[good2]))
-            if den > 0:
-                fhat = num / den
-        flux[j] = float(fhat)
-        out_var[j] = float(1.0 / max(den, 1e-20))
+        if n_good < int(math.ceil(min_good_frac * n_tot)):
+            out_mask[j] |= np.uint16(NO_COVERAGE)
 
-    meta = {
-        "profile_hw": int(profile_hw),
-        "aperture_half_width": int(ap_hw),
-        "sigma_clip": float(sigma_clip),
-        "profile": {
-            "dy": dys.tolist(),
-            "p": p0.tolist(),
-        },
-    }
-    return flux, out_var, out_mask, meta
+        f = float(np.sum(sl[good]))
+        if apply_local_sky and sky_resid is not None and np.isfinite(sky_resid[j]):
+            f = f - float(sky_resid[j]) * float(n_good)
+        flux[j] = f
+        if vv is not None:
+            out_var[j] = float(np.sum(vv[good]))
+        else:
+            # fallback: empirical
+            out_var[j] = float(np.nanvar(sl[good])) if np.isfinite(np.nanvar(sl[good])) else float("nan")
+
+    sky_out = np.asarray(sky_resid, dtype=float) if sky_resid is not None else np.full(nlam, np.nan, dtype=float)
+    return flux, out_var, out_mask, sky_out, out_npix
 
 
-def _write_mef_1d(
-    path: Path, flux: np.ndarray, hdr0: fits.Header, var: np.ndarray, mask: np.ndarray
+# ------------------------------- IO helpers -------------------------------
+
+
+def _write_spec1d_fits(
+    out_path: Path,
+    *,
+    cfg: Dict[str, Any],
+    hdr0: fits.Header,
+    wave: np.ndarray,
+    trace: TraceModel,
+    flux_trace: np.ndarray,
+    var_trace: np.ndarray,
+    mask_trace: np.ndarray,
+    sky_trace: np.ndarray,
+    npix_trace: np.ndarray,
+    flux_fixed: np.ndarray,
+    var_fixed: np.ndarray,
+    mask_fixed: np.ndarray,
+    sky_fixed: np.ndarray,
+    npix_fixed: np.ndarray,
 ) -> None:
-    """Write 1D spectrum as MEF (Primary holds flux for legacy; SCI/VAR/MASK extensions are canonical)."""
-    grid = try_read_grid(hdr0)
-    write_sci_var_mask(
-        path, flux, var=var, mask=mask, header=hdr0, grid=grid, primary_data=flux
+    """Write spec1d.fits (tables + lightweight preview images).
+
+    Contract (P1-F)
+    --------------
+    - Primary HDU: linear WCS + provenance
+    - HDU1: SPEC_TRACE table
+    - HDU2: SPEC_FIXED table
+    - Additional 2×N preview images for quick GUI inspection
+    """
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # --------------------------- primary header ---------------------------
+    ph = fits.Header()
+
+    # Prefer existing WCS keywords if present.
+    for k in ("CRVAL1", "CDELT1", "CD1_1", "CRPIX1", "CTYPE1", "CUNIT1"):
+        if k in hdr0:
+            ph[k] = hdr0[k]
+    if "CRVAL1" not in ph and wave.size >= 2 and np.isfinite(wave[:2]).all():
+        ph["CRVAL1"] = float(wave[0])
+        ph["CDELT1"] = float(wave[1] - wave[0])
+        ph["CRPIX1"] = 1.0
+        ph["CTYPE1"] = "WAVE"
+        ph["CUNIT1"] = "Angstrom"
+
+    # Required stage-level provenance.
+    ph["PIPEVER"] = (str(PIPELINE_VERSION), "Pipeline version")
+    ph["STAGE"] = ("12_extract", "Pipeline stage (directory name)")
+
+    if "INPUT2D" in hdr0:
+        ph["INPUT2D"] = (str(hdr0["INPUT2D"]), "2D input FITS used for extraction")
+
+    # Units.
+    ph["BUNIT"] = hdr0.get("BUNIT", "ADU")
+    ph["FLUXUNIT"] = hdr0.get("BUNIT", "ADU")
+    ph["WAVEUNIT"] = hdr0.get("CUNIT1", "Angstrom")
+
+    # ETA stamp from upstream stacking (or missing/assumed).
+    if "ETAAPPL" in hdr0:
+        ph["ETAAPPL"] = hdr0["ETAAPPL"]
+    if "ETAPATH" in hdr0:
+        ph["ETAPATH"] = hdr0["ETAPATH"]
+
+    # Optional provenance links (done.json of upstream stages)
+    for k in list(hdr0.keys()):
+        if str(k).startswith("PROV"):
+            ph[k] = hdr0[k]
+
+    # Explain the 2×N preview images.
+    ph["ROW0"] = ("TRACE", "Row 0 in FLUX2/VAR2/MASK2/NPIX2/SKY2")
+    ph["ROW1"] = ("FIXED", "Row 1 in FLUX2/VAR2/MASK2/NPIX2/SKY2")
+
+    ph = add_provenance(ph, cfg, stage="12_extract")
+
+    # ---------------------------- table HDUs ----------------------------
+    cols_trace = [
+        fits.Column(name="LAMBDA", format="D", array=np.asarray(wave, dtype=np.float64)),
+        fits.Column(name="FLUX_TRACE", format="E", array=np.asarray(flux_trace, dtype=np.float32)),
+        fits.Column(name="VAR_TRACE", format="E", array=np.asarray(var_trace, dtype=np.float32)),
+        fits.Column(name="MASK_TRACE", format="J", array=np.asarray(mask_trace, dtype=np.int32)),
+        fits.Column(name="SKY_TRACE", format="E", array=np.asarray(sky_trace, dtype=np.float32)),
+        fits.Column(name="NPIX_TRACE", format="I", array=np.asarray(npix_trace, dtype=np.int16)),
+    ]
+    ht = fits.BinTableHDU.from_columns(cols_trace, name="SPEC_TRACE")
+    ht.header["WUNIT"] = (hdr0.get("CUNIT1", "Angstrom"), "Wavelength unit")
+    ht.header["FUNIT"] = (hdr0.get("BUNIT", "ADU"), "Flux unit")
+    ht.header["APHW"] = (int(trace.aperture_half_width), "Aperture half-width (pix)")
+
+    cols_fixed = [
+        fits.Column(name="LAMBDA", format="D", array=np.asarray(wave, dtype=np.float64)),
+        fits.Column(name="FLUX_FIXED", format="E", array=np.asarray(flux_fixed, dtype=np.float32)),
+        fits.Column(name="VAR_FIXED", format="E", array=np.asarray(var_fixed, dtype=np.float32)),
+        fits.Column(name="MASK_FIXED", format="J", array=np.asarray(mask_fixed, dtype=np.int32)),
+        fits.Column(name="SKY_FIXED", format="E", array=np.asarray(sky_fixed, dtype=np.float32)),
+        fits.Column(name="NPIX_FIXED", format="I", array=np.asarray(npix_fixed, dtype=np.int16)),
+    ]
+    hf = fits.BinTableHDU.from_columns(cols_fixed, name="SPEC_FIXED")
+    hf.header["WUNIT"] = (hdr0.get("CUNIT1", "Angstrom"), "Wavelength unit")
+    hf.header["FUNIT"] = (hdr0.get("BUNIT", "ADU"), "Flux unit")
+    hf.header["YFIX"] = (
+        float(trace.y_fixed[0]) if trace.y_fixed.size else float("nan"),
+        "Fixed center y (pix)",
     )
+    hf.header["APHW"] = (int(trace.aperture_half_width), "Aperture half-width (pix)")
+
+    # --------------------------- preview images --------------------------
+    def _img(name: str, arr: np.ndarray, dtype) -> fits.ImageHDU:
+        return fits.ImageHDU(data=np.asarray(arr, dtype=dtype), name=name)
+
+    flux2 = np.vstack([flux_trace, flux_fixed])
+    var2 = np.vstack([var_trace, var_fixed])
+    mask2 = np.vstack([mask_trace, mask_fixed]).astype(np.int32)
+    npix2 = np.vstack([npix_trace, npix_fixed]).astype(np.int16)
+    sky2 = np.vstack([sky_trace, sky_fixed])
+
+    hdus: list[fits.HDUBase] = [
+        fits.PrimaryHDU(header=ph),
+        ht,
+        hf,
+        _img("FLUX2", flux2, np.float32),
+        _img("VAR2", var2, np.float32),
+        _img("MASK2", mask2, np.int32),
+        _img("NPIX2", npix2, np.int16),
+        _img("SKY2", sky2, np.float32),
+    ]
+
+    fits.HDUList(hdus).writeto(out_path, overwrite=True)
+
+
+def _write_quicklook_png(
+    out_png: Path,
+    *,
+    wave: np.ndarray,
+    flux_trace: np.ndarray,
+    flux_fixed: np.ndarray,
+    y_trace: np.ndarray,
+    y_fixed: np.ndarray,
+    ap_hw: int,
+    roi: dict[str, Any],
+    sky_windows: list[tuple[int, int]] | None,
+    title: str,
+) -> None:
+    """Write a quicklook PNG with spectra + geometry/trace diagnostics."""
+
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        out_png.parent.mkdir(parents=True, exist_ok=True)
+
+        fig = plt.figure(figsize=(10, 6), dpi=150)
+        ax1 = fig.add_subplot(211)
+        ax1.plot(wave, flux_trace, label="TRACE")
+        ax1.plot(wave, flux_fixed, label="FIXED", alpha=0.85)
+        ax1.set_xlabel("Wavelength")
+        ax1.set_ylabel("Flux")
+        ax1.set_title(title)
+        ax1.grid(True, alpha=0.25)
+        ax1.legend(loc="best")
+
+        ax2 = fig.add_subplot(212)
+        ax2.plot(wave, y_trace, label="y_trace")
+        ax2.plot(wave, y_fixed, label="y_fixed", alpha=0.85)
+        if ap_hw is not None and int(ap_hw) > 0:
+            ap = float(int(ap_hw))
+            ax2.fill_between(wave, y_trace - ap, y_trace + ap, alpha=0.15, label="TRACE ± ap")
+
+        oy0, oy1 = roi.get("obj_y0"), roi.get("obj_y1")
+        if oy0 is not None and oy1 is not None:
+            ax2.axhspan(float(oy0), float(oy1), alpha=0.08, label="obj ROI")
+        if sky_windows:
+            for i, (a, b) in enumerate(sky_windows):
+                ax2.axhspan(float(a), float(b), alpha=0.05, label="sky" if i == 0 else None)
+
+        ax2.set_xlabel("Wavelength")
+        ax2.set_ylabel("Y (pix)")
+        ax2.grid(True, alpha=0.25)
+        ax2.legend(loc="best", ncol=3, fontsize=8)
+
+        fig.tight_layout()
+        fig.savefig(out_png)
+        plt.close(fig)
+    except Exception as e:
+        log.warning("Failed to write spec1d.png: %s", e)
+
+
+# ---------------------------------- API ----------------------------------
 
 
 def run_extract1d(
     cfg: Dict[str, Any],
     *,
     in_fits: Optional[Path] = None,
-    stacked_fits: Optional[Path] = None,
+    stacked_fits: Optional[Path] = None,  # legacy alias
     out_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     ecfg = cfg.get("extract1d", {}) if isinstance(cfg.get("extract1d"), dict) else {}
     if not bool(ecfg.get("enabled", True)):
         return {"skipped": True, "reason": "extract1d.enabled=false"}
+
     # Backward-compatible alias used in older code/tests.
     if in_fits is None and stacked_fits is not None:
         in_fits = stacked_fits
 
-    from scorpio_pipe.workspace_paths import resolve_input_path
     from scorpio_pipe.workspace_paths import stage_dir
 
     wd = resolve_work_dir(cfg)
     out_dir = Path(out_dir) if out_dir is not None else stage_dir(wd, "extract1d")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Determine input
+    # ----------------------- resolve input (explicit) -----------------------
+    mode = str(ecfg.get("input_mode", "stack2d")).strip().lower()
+    # Deprecated compatibility knob.
+    if bool(ecfg.get("allow_sky_fallback", False)) and mode in {"stack2d", "stack"}:
+        mode = "single_frame"
+
     if in_fits is None:
-        # Prefer Stack2D products (new→legacy resolver).
-        p = resolve_input_path(
-            "stacked2d",
-            wd,
-            "stack2d",
-            relpath="stacked2d.fits",
-        )
-        if p.exists():
-            in_fits = p
-        else:
-            # Optional manual-mode fallback: allow extraction directly from a sky-subtracted frame.
-            #
-            # Important: the GUI pipeline enforces Stack2D → Extract1D. This fallback is only
-            # intended for explicit/manual workflows (CLI, notebooks) when users understand
-            # they are extracting from a single (non-stacked) frame.
-            if not bool(ecfg.get("allow_sky_fallback", False)):
+        if mode in {"stack2d", "stack"}:
+            cand = stage_dir(wd, "stack2d") / "stack2d.fits"
+            if not cand.exists():
+                cand = stage_dir(wd, "stack2d") / "stacked2d.fits"
+            if not cand.exists():
                 raise FileNotFoundError(
-                    "Stack2D products not found. Run the Stack2D stage first (or pass in_fits=...). "
-                    "For manual extraction without Stack2D, set extract1d.allow_sky_fallback=true. Tried: "
-                    + str(p)
+                    "Stack2D products not found. Run the Stack2D stage first, or set "
+                    "extract1d.input_mode=single_frame and choose a linearized skysub frame. "
+                    f"Tried: {cand}"
                 )
-
-            from scorpio_pipe.product_naming import (
-                legacy_sky_sub_fits_names,
-                sky_sub_fits_name,
-            )
-
-            def _resolve_skysub(tag: str, *, raw_stem: str | None = None) -> Path:
-                # Canonical filename for this tag
-                canon_name = sky_sub_fits_name(tag)
-                extra: list[Path] = []
-                # Try legacy names in a few likely legacy layouts
-                for name in legacy_sky_sub_fits_names(tag):
-                    extra.extend(
-                        [
-                            # New contract (v5.39.1+): rectified skysub lives in Linearize stage root
-                            stage_dir(wd, "linearize") / name,
-                            stage_dir(wd, "linearize") / "per_exp" / name,
-                            wd / "products" / "linearize" / name,
-                            wd / "linearize" / name,
-                            # Legacy locations (pre v5.39.1)
-                            stage_dir(wd, "sky") / tag / name,
-                            stage_dir(wd, "sky") / "per_exp" / name,
-                            wd / "products" / "sky" / "per_exp" / name,
-                            wd / "sky" / "per_exp" / name,
-                            stage_dir(wd, "sky") / name,
-                            wd / "products" / "sky" / name,
-                            wd / "sky" / name,
-                        ]
-                    )
-                return resolve_input_path(
-                    "skysub",
-                    wd,
-                    "linearize",
-                    raw_stem=raw_stem,
-                    relpath=canon_name,
-                    extra_candidates=extra,
-                )
-
-            # 1) Prefer a stacked/combined sky-sub frame (sky stage in stack mode): obj_skysub.fits
-            p_obj = _resolve_skysub("obj")
-            if p_obj.exists():
-                in_fits = p_obj
+            in_fits = cand
+        elif mode in {"single_frame", "single"}:
+            stem = ecfg.get("single_frame_stem") or ecfg.get("stem")
+            if isinstance(ecfg.get("single_frame_path"), str) and ecfg.get("single_frame_path"):
+                in_fits = Path(str(ecfg["single_frame_path"]))
+            elif isinstance(stem, str) and stem.strip():
+                in_fits = stage_dir(wd, "linearize") / f"{stem.strip()}_skysub.fits"
             else:
-                # 2) If exactly one science exposure is defined, use its skysub frame.
-                frames = cfg.get("frames") if isinstance(cfg.get("frames"), dict) else {}
-                obj_list = frames.get("obj") if isinstance(frames.get("obj"), list) else []
-                stems = [Path(x).stem for x in obj_list if isinstance(x, str) and x.strip()]
-                if len(stems) == 1:
-                    stem = stems[0]
-                    p_one = _resolve_skysub(stem, raw_stem=stem)
-                    if p_one.exists():
-                        in_fits = p_one
-                    else:
-                        raise FileNotFoundError(
-                            "Manual sky fallback requested but skysub frame not found for stem: "
-                            + stem
-                            + ". Tried: "
-                            + str(p_one)
-                        )
-                else:
-                    # 3) Last-resort: scan the sky stage folder.
-                    lin_stage = stage_dir(wd, "linearize")
-                    found = sorted({p for p in lin_stage.rglob("*_skysub.fits")})
-                    if not found:
-                        # Legacy fallback
-                        sky_stage = stage_dir(wd, "sky")
-                        found = sorted({p for p in sky_stage.rglob("*_skysub.fits")})
-                    if len(found) == 1:
-                        in_fits = found[0]
-                    else:
-                        raise FileNotFoundError(
-                            "Manual sky fallback requested but could not unambiguously choose a sky-subtracted frame. "
-                            f"Found {len(found)} candidates in {lin_stage if found else sky_stage}. "
-                            "Pass in_fits=... or run Stack2D first."
-                        )
+                raise ValueError(
+                    "extract1d.input_mode=single_frame requires extract1d.single_frame_stem (or single_frame_path)."
+                )
+            if not Path(in_fits).exists():
+                raise FileNotFoundError(f"Single-frame input not found: {in_fits}")
+        else:
+            raise ValueError(f"Unknown extract1d.input_mode: {mode!r}")
+
     in_fits = Path(in_fits)
     if not in_fits.exists():
-        raise FileNotFoundError(
-            "No 2D input for extraction. Expected stacked2d.fits or obj_skysub.fits, got: "
-            + str(in_fits)
-        )
+        raise FileNotFoundError(f"No 2D input for extraction: {in_fits}")
 
-    sci, var, mask, hdr = _read_mef(in_fits)
+    sci, var, mask, hdr0 = _read_mef(in_fits)
     if sci.ndim != 2:
+        raise ValueError(f"extract1d expects a 2D (y,λ) frame; got {sci.shape} from {in_fits}")
+    ny, nlam = sci.shape
+    wave = _linear_wave_axis(hdr0, nlam)
+
+    # ------------------------------ ETA stamp ------------------------------
+    eta_appl = hdr0.get("ETAAPPL", None)
+    is_stack = _is_stack2d_input(in_fits, hdr0)
+    eta_warn = None
+    if is_stack and eta_appl is None:
+        # This is intentionally strict: stack2d must stamp ETAAPPL.
         raise ValueError(
-            f"extract1d expects a 2D (λ,y) frame; got {sci.shape} from {in_fits}"
+            "Input looks like Stack2D but header lacks ETAAPPL. "
+            "Update/regen Stack2D products so downstream stages can interpret VAR correctly."
+        )
+    if eta_appl is None:
+        eta_appl = False
+        eta_warn = "ETAAPPL missing in input header; assuming False."
+    eta_appl = bool(eta_appl)
+    # ------------------------------- geometry ------------------------------
+    roi = _roi_from_cfg(cfg)
+    # Allow optional per-stage override (advanced).
+    if isinstance(ecfg.get("roi"), dict) and ecfg.get("roi"):
+        roi.update({k: v for k, v in ecfg.get("roi", {}).items() if v is not None})
+
+    from scorpio_pipe.maskbits import BADPIX, COSMIC, NO_COVERAGE, REJECTED, SATURATED, USER
+    fatal_bits = int(NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED)
+
+    sky_windows: list[tuple[int, int]] | None = None
+    geo_meta: dict[str, Any] = {}
+    try:
+        from scorpio_pipe.sky_geometry import compute_sky_geometry, roi_from_cfg
+
+        # Build a temporary cfg view with the merged ROI so roi_from_cfg sees it.
+        cfg_tmp = dict(cfg)
+        sky_tmp = cfg.get("sky") if isinstance(cfg.get("sky"), dict) else {}
+        sky_tmp = dict(sky_tmp)
+        sky_tmp["roi"] = dict(roi)
+        cfg_tmp["sky"] = sky_tmp
+
+        roi_sel = roi_from_cfg(cfg_tmp)
+        g = compute_sky_geometry(
+            sci,
+            var,
+            mask,
+            roi=roi_sel,
+            roi_policy="prefer_user" if roi_sel is not None else "auto",
+            fatal_bits=fatal_bits,
         )
 
-    wave = _linear_wave_axis(hdr, sci.shape[1])
-    roi = _roi_from_cfg(cfg)
+        sky_windows = list(g.sky_windows) if g.sky_windows else []
+        geo_meta = {
+            "roi_used": g.roi_used,
+            "object_spans": g.object_spans,
+            "sky_windows": g.sky_windows,
+            "metrics": g.metrics,
+        }
 
-    method = str(ecfg.get("method", "boxcar")).lower().strip()
-    # legacy aliases
-    if method == "sum":
-        method = "boxcar"
-    if method not in {"boxcar", "mean", "optimal"}:
-        method = "boxcar"
+        # If ROI object band missing, adopt the auto estimate for tracing/aperture.
+        if (roi.get("obj_y0") is None or roi.get("obj_y1") is None) and g.object_spans:
+            y0, y1 = g.object_spans[0]
+            roi["obj_y0"], roi["obj_y1"] = int(y0), int(y1)
+            roi["_auto_obj_roi"] = True
 
-    ap_hw = int(ecfg.get("aperture_half_width", 6))
-    # If ROI is defined, initialize aperture from it unless user provided explicit.
-    if ("obj_y0" in roi and "obj_y1" in roi) and "aperture_half_width" not in ecfg:
-        ap_hw = max(1, int(round(0.5 * (int(roi["obj_y1"]) - int(roi["obj_y0"])))))
+    except Exception as e:
+        geo_meta = {"warning": f"sky_geometry_failed: {e}"}
+        sky_windows = []
 
-    trace_bin_A = float(ecfg.get("trace_bin_A", 60.0))
-    trace_smooth_deg = int(ecfg.get("trace_smooth_deg", 3))
-    trace, trace_meta = _estimate_trace(
+    # ------------------------------ trace model ----------------------------
+    trace = _build_trace_model(
         sci,
         var,
         mask,
         wave,
-        roi,
-        trace_bin_A=trace_bin_A,
-        trace_smooth_deg=trace_smooth_deg,
+        roi=roi,
+        sky_windows=sky_windows,
+        cfg=ecfg,
+        fatal_bits=fatal_bits,
     )
 
-    if method in {"boxcar", "mean"}:
-        flux, v1, m1 = _boxcar_extract(sci, var, mask, trace, ap_hw=ap_hw)
-        if method == "mean":
-            # convert to mean by dividing by N contributing pixels
-            n = 2 * ap_hw + 1
-            flux = flux / float(n)
-            v1 = v1 / float(n * n)
-        opt_meta: dict[str, Any] = {}
-    else:
-        prof_hw = int(ecfg.get("optimal_profile_half_width", 12))
-        sig_clip = float(ecfg.get("optimal_sigma_clip", 5.0))
-        flux, v1, m1, opt_meta = _optimal_extract(
-            sci,
-            var,
-            mask,
-            trace,
-            ap_hw=ap_hw,
-            profile_hw=prof_hw,
-            sigma_clip=sig_clip,
-        )
+    # ----------------------------- sky residual ----------------------------
+    sky_resid = _estimate_sky_residual(
+        sci, var, mask, sky_windows=sky_windows, fatal_bits=fatal_bits
+    )
+    apply_local_sky = bool(ecfg.get("local_sky_correction", False))
 
-    # Write outputs
+    # ------------------------------ extraction -----------------------------
+    method = str(ecfg.get("method", "boxcar")).strip().lower()
+    if method == "sum":
+        method = "boxcar"
+    if method not in {"boxcar", "mean"}:
+        # NOTE: we intentionally keep extraction deterministic and transparent.
+        # Optimal extraction is a separate R&D topic; for now, treat it as boxcar.
+        method = "boxcar"
+    min_good_frac = float(ecfg.get("min_good_frac", 0.6))
+
+    flux_tr, var_tr, mask_tr, sky_tr, npix_tr = _boxcar_extract(
+        sci,
+        var,
+        mask,
+        trace.y_trace,
+        ap_hw=trace.aperture_half_width,
+        fatal_bits=fatal_bits,
+        min_good_frac=min_good_frac,
+        sky_resid=sky_resid,
+        apply_local_sky=apply_local_sky,
+    )
+    flux_fx, var_fx, mask_fx, sky_fx, npix_fx = _boxcar_extract(
+        sci,
+        var,
+        mask,
+        trace.y_fixed,
+        ap_hw=trace.aperture_half_width,
+        fatal_bits=fatal_bits,
+        min_good_frac=min_good_frac,
+        sky_resid=sky_resid,
+        apply_local_sky=apply_local_sky,
+    )
+
+    if method == "mean":
+        # Convert sum → mean (and propagate VAR scaling).
+        n_eff_tr = np.maximum(np.asarray(npix_tr, dtype=float), 1.0)
+        n_eff_fx = np.maximum(np.asarray(npix_fx, dtype=float), 1.0)
+        flux_tr = flux_tr / n_eff_tr
+        flux_fx = flux_fx / n_eff_fx
+        var_tr = var_tr / (n_eff_tr**2)
+        var_fx = var_fx / (n_eff_fx**2)
+
+    # ------------------------------- outputs ------------------------------
     out_fits = out_dir / "spec1d.fits"
     out_png = out_dir / "spec1d.png"
     trace_json = out_dir / "trace.json"
+    done_json = out_dir / "extract_done.json"
+    done_legacy = out_dir / "extract1d_done.json"  # legacy alias
 
+    # Header: preserve flux units; never apply eta here.
     ohdr = fits.Header()
-    # keep simple linear WCS
-    if np.isfinite(wave).all() and len(wave) > 1:
-        ohdr["CRVAL1"] = float(wave[0])
-        ohdr["CDELT1"] = float(wave[1] - wave[0])
-        ohdr["CRPIX1"] = 1.0
-        ohdr["CTYPE1"] = "WAVE"
-        ohdr["CUNIT1"] = "Angstrom"
-    ohdr["BUNIT"] = hdr.get("BUNIT", "ADU")
-    ohdr = add_provenance(ohdr, cfg, stage="extract1d")
-    _write_mef_1d(out_fits, flux, ohdr, v1, m1)
+    for k in ("CRVAL1", "CDELT1", "CD1_1", "CRPIX1", "CTYPE1", "CUNIT1", "BUNIT"):
+        if k in hdr0:
+            ohdr[k] = hdr0[k]
+    ohdr["ETAAPPL"] = (bool(eta_appl), "eta(lambda) applied to VAR in upstream stacking")
+    if "ETAPATH" in hdr0:
+        ohdr["ETAPATH"] = hdr0["ETAPATH"]
+    ohdr = add_provenance(ohdr, cfg, stage="12_extract")
+
+    # Extra self-describing header cards for the 1D product (per P1-F contract).
+    ohdr["PIPEVER"] = (str(PIPELINE_VERSION), "Pipeline version")
+    ohdr["STAGE"] = ("12_extract", "Pipeline stage (directory name)")
+    try:
+        ohdr["INPUT2D"] = str(in_fits.relative_to(wd))
+    except Exception:
+        ohdr["INPUT2D"] = str(in_fits)
+
+    # Link upstream done.json files when available (for quick provenance browsing).
+    prov = []
+    try:
+        from scorpio_pipe.workspace_paths import stage_dir
+        for st, fn in [("stack2d", "stack2d_done.json"), ("sky", "sky_done.json"), ("linearize", "linearize_done.json")]:
+            p = stage_dir(wd, st) / fn
+            if p.exists():
+                try:
+                    prov.append(str(p.relative_to(wd)))
+                except Exception:
+                    prov.append(str(p))
+    except Exception:
+        prov = []
+    for i, pp in enumerate(prov[:9]):
+        ohdr[f"PROV{i}"] = (pp, "Upstream done.json")
+
+    _write_spec1d_fits(
+        out_fits,
+        cfg=cfg,
+        hdr0=ohdr,
+        wave=wave,
+        trace=trace,
+        flux_trace=flux_tr,
+        var_trace=var_tr,
+        mask_trace=mask_tr,
+        sky_trace=sky_tr,
+        npix_trace=npix_tr,
+        flux_fixed=flux_fx,
+        var_fixed=var_fx,
+        mask_fixed=mask_fx,
+        sky_fixed=sky_fx,
+        npix_fixed=npix_fx,
+    )
+    # trace.json
+    # Provide stable, explicit metadata for reproducibility and QC.
+    trace_model_meta = trace.meta.get("trace_model", {}) if isinstance(trace.meta, dict) else {}
+    aperture_meta = trace.meta.get("aperture", {}) if isinstance(trace.meta, dict) else {}
+
+    roi_used_meta = {}
+    if isinstance(geo_meta.get("roi_used"), dict):
+        roi_used_meta = geo_meta.get("roi_used")
+
+    trace_method = "fallback_fixed" if str(trace_model_meta.get("type")) in {"fallback_constant", "fallback"} else "centroid_spline"
 
     trace_payload = {
-        "input_fits": str(in_fits),
-        "method": method,
-        "aperture_half_width": int(ap_hw),
-        "trace": {
-            "wave": wave.tolist(),
-            "y": trace.tolist(),
+        "stage": "extract1d",
+        "pipeline_version": str(PIPELINE_VERSION),
+        "input": {
+            "fits": str(in_fits),
+            "mode": mode,
+            "shape": [int(ny), int(nlam)],
         },
-        "trace_meta": trace_meta,
-        "optimal_meta": opt_meta,
+        "roi_used": _safe_json(roi_used_meta) if roi_used_meta else _safe_json(roi),
+        "sky_windows_used": _safe_json(sky_windows),
+        "eta": {
+            "eta_applied_in_input": bool(eta_appl),
+            "warning": eta_warn,
+        },
+        "trace_model": {
+            "method": trace_method,
+            "meta": _safe_json(trace_model_meta),
+            "blocks_total": int(trace.meta.get("blocks_total", 0)),
+            "blocks_valid": int(trace.meta.get("blocks_valid", 0)),
+        },
+        "aperture": _safe_json(aperture_meta),
+        "y_trace": trace.y_trace.tolist(),
+        "y_fixed": trace.y_fixed.tolist(),
+        "geometry": _safe_json(geo_meta),
     }
-    trace_json.write_text(
-        json.dumps(trace_payload, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    trace_json.write_text(json.dumps(trace_payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    if bool(ecfg.get("save_png", True)):
-        try:
-            import matplotlib.pyplot as plt
+    # extract_done.json
+    # Minimal but informative metrics for QC and downstream automation.
+    def _frac_finite(x: np.ndarray) -> float:
+        x = np.asarray(x)
+        return float(np.isfinite(x).sum() / max(1, x.size))
 
-            from scorpio_pipe.plot_style import mpl_style
+    def _robust_sigma(x: np.ndarray) -> float | None:
+        x = np.asarray(x, dtype=float)
+        x = x[np.isfinite(x)]
+        if x.size < 8:
+            return None
+        med = float(np.median(x))
+        mad = float(np.median(np.abs(x - med)))
+        if not (mad > 0):
+            return None
+        return float(1.4826 * mad)
 
-            snr = np.zeros_like(flux)
-            good = np.isfinite(flux) & np.isfinite(v1) & (v1 > 0)
-            snr[good] = flux[good] / np.sqrt(v1[good])
-
-            with mpl_style():
-                fig = plt.figure(figsize=(8.0, 3.6))
-                ax = fig.add_subplot(111)
-                ax.plot(wave, flux, lw=1.0)
-                ax.set_xlabel("Wavelength (Å)")
-                ax.set_ylabel("Flux")
-                ax.set_title(
-                    f"1D extraction: {method} (median S/N={np.nanmedian(snr):.1f})"
-                )
-                fig.tight_layout()
-                fig.savefig(out_png)
-                plt.close(fig)
-        except Exception:
-            pass
-
-    done = out_dir / "extract1d_done.json"
-    payload = {
-        "ok": True,
-        "input_fits": str(in_fits),
-        # Backward-compatible keys used by tests/older callers.
-        "spec1d_fits": str(out_fits),
-        "spec1d_png": str(out_png) if out_png.exists() else None,
-        # Canonical keys (v5.3x+)
-        "output_fits": str(out_fits),
-        "output_png": str(out_png) if out_png.exists() else None,
-        "trace_json": str(trace_json),
-        "method": method,
-    }
-    done.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-
-    # Legacy mirror (disabled by default).
-    #
-    # v5.38+ supports legacy paths for *reading* via resolve_input_path(...), but
-    # does not write duplicated outputs unless explicitly requested.
+    flags: list[str] = []
+    # geometry flags from compute_sky_geometry (if any)
     try:
-        compat = cfg.get("compat") if isinstance(cfg.get("compat"), dict) else {}
-        if bool(compat.get("write_legacy_outputs", False)):
-            legacy = wd / "spec"
-            if legacy.is_dir() and legacy.resolve() != out_dir.resolve():
-                import shutil
-
-                shutil.copy2(out_fits, legacy / "spec1d.fits")
-                if out_png.exists():
-                    shutil.copy2(out_png, legacy / "spec1d.png")
-                shutil.copy2(trace_json, legacy / "trace.json")
-                shutil.copy2(done, legacy / "extract1d_done.json")
+        gf = geo_meta.get("metrics", {}).get("flags", []) if isinstance(geo_meta.get("metrics"), dict) else []
+        for f in gf:
+            if isinstance(f, dict) and f.get("code"):
+                flags.append(str(f.get("code")))
     except Exception:
         pass
 
-    log.info("Extract1D done: %s", out_fits)
-    return payload
+    if not sky_windows:
+        flags.append("NO_SKY_WINDOWS")
+    if trace_method == "fallback_fixed":
+        flags.append("TRACE_FALLBACK_USED")
+
+    # 1D mask coverage diagnostics
+    from scorpio_pipe.maskbits import NO_COVERAGE
+    mask_no_cov_tr = float(((np.asarray(mask_tr, dtype=int) & int(NO_COVERAGE)) != 0).mean())
+    mask_no_cov_fx = float(((np.asarray(mask_fx, dtype=int) & int(NO_COVERAGE)) != 0).mean())
+    if max(mask_no_cov_tr, mask_no_cov_fx) > 0.05:
+        flags.append("LOW_COVERAGE_1D")
+
+    done = {
+        "ok": True,
+        "stage": "extract1d",
+        "pipeline_version": str(PIPELINE_VERSION),
+        "input": {
+            "fits": str(in_fits),
+            "mode": mode,
+            "shape": [int(ny), int(nlam)],
+            "eta_applied_in_input": bool(eta_appl),
+            "eta_warning": eta_warn,
+        },
+        "outputs": {
+            "spec1d_fits": str(out_fits),
+            "trace_json": str(trace_json),
+            "spec1d_png": str(out_png) if bool(ecfg.get("save_png", True)) else None,
+        },
+        "products": {
+            "TRACE": {
+                "frac_finite": _frac_finite(flux_tr),
+                "npix_median": float(np.nanmedian(npix_tr)),
+                "no_coverage_frac": mask_no_cov_tr,
+            },
+            "FIXED": {
+                "frac_finite": _frac_finite(flux_fx),
+                "npix_median": float(np.nanmedian(npix_fx)),
+                "no_coverage_frac": mask_no_cov_fx,
+            },
+        },
+        "trace": {
+            "method": trace_method,
+            "aperture_half_width": int(trace.aperture_half_width),
+            "y_fixed": float(trace.y_fixed[0]) if trace.y_fixed.size else None,
+            "model_meta": _safe_json(trace_model_meta),
+            "blocks_total": int(trace.meta.get("blocks_total", 0)),
+            "blocks_valid": int(trace.meta.get("blocks_valid", 0)),
+            "valid_frac": float(trace.meta.get("blocks_valid", 0)) / max(1.0, float(trace.meta.get("blocks_total", 0))),
+        },
+        "sky_residual": {
+            "robust_sigma": _robust_sigma(sky_resid),
+        },
+        "flags": sorted(set(flags)),
+        "warnings": [w for w in [eta_warn, geo_meta.get("warning")] if w],
+    }
+    done_json.write_text(json.dumps(done, indent=2, ensure_ascii=False), encoding="utf-8")
+    # Legacy alias to not break old tooling.
+    try:
+        shutil.copy2(done_json, done_legacy)
+    except Exception:
+        pass
+
+    # Optional quicklook PNG
+    if bool(ecfg.get("save_png", True)):
+        _write_quicklook_png(
+            out_png,
+            wave=wave,
+            flux_trace=flux_tr,
+            flux_fixed=flux_fx,
+            y_trace=trace.y_trace,
+            y_fixed=trace.y_fixed,
+            ap_hw=int(trace.aperture_half_width),
+            roi=roi,
+            sky_windows=sky_windows,
+            title=(
+                f"Spec1D — {Path(in_fits).name} | ap=±{int(trace.aperture_half_width)}px | {trace_method}"
+            ),
+        )
+
+    # Legacy products directory copy (older UI/scripts).
+    try:
+        legacy = wd / "products" / "spec"
+        legacy.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(out_fits, legacy / "spec1d.fits")
+        if trace_json.exists():
+            shutil.copy2(trace_json, legacy / "trace.json")
+        shutil.copy2(done_json, legacy / "extract_done.json")
+        shutil.copy2(done_json, legacy / "extract1d_done.json")
+        if out_png.exists():
+            shutil.copy2(out_png, legacy / "spec1d.png")
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "input": str(in_fits),
+        "spec1d_fits": str(out_fits),
+        "trace_json": str(trace_json),
+        "extract_done": str(done_json),
+        "spec1d_png": str(out_png) if out_png.exists() else None,
+        "etaappl": bool(eta_appl),
+        "products": ["TRACE", "FIXED"],
+    }

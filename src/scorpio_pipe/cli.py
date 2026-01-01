@@ -193,7 +193,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     ]
     print(f"\n[bold]Executing tasks:[/bold] {', '.join(tasks)}")
     out = run_sequence(
-        cfg_path, tasks, resume=bool(args.resume), force=bool(args.force)
+        cfg_path,
+        tasks,
+        resume=bool(args.resume),
+        force=bool(args.force),
+        qc_override=bool(getattr(args, "override_qc_gate", False)),
     )
     print("\n[green]Done.[/green]")
     for k, v in out.items():
@@ -400,6 +404,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Never skip tasks (stronger than --no-resume)",
+    )
+    p_run.add_argument(
+        "--override-qc-gate",
+        dest="override_qc_gate",
+        action="store_true",
+        help="Bypass QC gate for upstream ERROR (FATAL always blocks)",
     )
     p_run.add_argument(
         "--tasks",

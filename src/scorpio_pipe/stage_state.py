@@ -89,6 +89,7 @@ def record_stage_result(
     stage_hash: str | None,
     message: str | None,
     trace: str | None,
+    meta: dict[str, Any] | None = None,
 ) -> Path:
     state = load_stage_state(work_dir)
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -99,6 +100,8 @@ def record_stage_result(
         "trace": trace,
         "updated_at": now,
     }
+    if meta:
+        entry["meta"] = meta
     set_stage_entry(state, stage, entry)
     return save_stage_state(work_dir, state)
 

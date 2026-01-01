@@ -1,49 +1,33 @@
+"""Backward-compatible mask bit definitions.
+
+Historically the project carried two modules:
+
+- :mod:`scorpio_pipe.maskbits` (the authoritative uint16 bitmask constants)
+- :mod:`scorpio_pipe.mask_bits` (an older experimental enum)
+
+The pipeline now standardizes on :mod:`scorpio_pipe.maskbits`. This module is
+kept as a thin shim so older code can continue importing ``MaskBits``.
+"""
+
 from __future__ import annotations
 
 from enum import IntEnum
 
+from scorpio_pipe import maskbits as _mb
+
 
 class MaskBits(IntEnum):
-    """Default uint16 bitmask schema used across the pipeline.
-
-    This schema is intentionally simple and forward-compatible.
-    Downstream stages should treat unknown bits as "bad/flagged" unless they
-    explicitly handle them.
-
-    Bits
-    ----
-    0: BADPIX         (static detector bad pixel)
-    1: COSMIC         (cosmic ray / transient outlier)
-    2: SATURATED      (saturated / non-linear)
-    3: EDGE           (edge / extrapolated / invalid resampling region)
-    4: SKY_REGION     (pixel belongs to user-defined sky ROI)
-    5: OBJ_REGION     (pixel belongs to user-defined object ROI)
-    6: CLIPPED        (rejected by sigma-clip in stacking)
-    7: RESERVED       (future)
-    """
-
-    BADPIX = 1 << 0
-    COSMIC = 1 << 1
-    SATURATED = 1 << 2
-    EDGE = 1 << 3
-    SKY_REGION = 1 << 4
-    OBJ_REGION = 1 << 5
-    CLIPPED = 1 << 6
-    RESERVED = 1 << 7
+    NO_COVERAGE = int(_mb.NO_COVERAGE)
+    BADPIX = int(_mb.BADPIX)
+    COSMIC = int(_mb.COSMIC)
+    SATURATED = int(_mb.SATURATED)
+    USER = int(_mb.USER)
+    REJECTED = int(_mb.REJECTED)
+    SKY = int(_mb.SKY)
 
 
-def is_flagged(mask: int, bit: MaskBits) -> bool:
-    return (int(mask) & int(bit)) != 0
+MASK_SCHEMA_VERSION = _mb.MASK_SCHEMA_VERSION
 
 
-def add_flag(mask: int, bit: MaskBits) -> int:
-    return int(mask) | int(bit)
-
-
-def remove_flag(mask: int, bit: MaskBits) -> int:
-    return int(mask) & (~int(bit))
-
-
-def mask_any(mask: int, bits: list[MaskBits]) -> bool:
-    v = int(mask)
-    return any((v & int(b)) != 0 for b in bits)
+def header_cards(prefix: str = "SCORP") -> dict[str, str]:
+    return _mb.header_cards(prefix=prefix)

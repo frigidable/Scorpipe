@@ -175,7 +175,10 @@ class QCAlertsWidget(QtWidgets.QWidget):
             self.lbl_counts.setText("—")
             return
 
-        qc_json = self._work_dir / "manifest" / "qc_report.json"
+        # Canonical path (P1-G UI-050): work_dir/qc/qc_report.json
+        qc_json = self._work_dir / "qc" / "qc_report.json"
+        if not qc_json.exists():
+            qc_json = self._work_dir / "manifest" / "qc_report.json"
         if not qc_json.exists():
             qc_json = self._work_dir / "report" / "qc_report.json"
         if not qc_json.exists():
@@ -191,8 +194,38 @@ class QCAlertsWidget(QtWidgets.QWidget):
             return
 
         qc = payload.get("qc", {}) if isinstance(payload, dict) else {}
-        counts = qc.get("alert_counts", {}) if isinstance(qc, dict) else {}
-        alerts = qc.get("alerts", []) if isinstance(qc, dict) else []
+        if not isinstance(qc, dict):
+            qc = {}
+
+        # New schema: qc.flags (P1-G). Backward compatible with qc.alerts.
+        items = qc.get("flags")
+        if not isinstance(items, list) or not items:
+            items = qc.get("alerts")
+        if not isinstance(items, list):
+            items = []
+
+        def _norm_sev(s: str) -> str:
+            ss = (s or "").strip().lower()
+            if ss in {"fatal", "error", "bad"}:
+                return "bad"
+            if ss in {"warn", "warning"}:
+                return "warn"
+            if ss in {"info"}:
+                return "info"
+            if ss in {"ok", "pass"}:
+                return "ok"
+            return ss or "info"
+
+        counts = qc.get("alert_counts") if isinstance(qc.get("alert_counts"), dict) else None
+        if not counts:
+            # derive counts from items
+            counts = {"bad": 0, "warn": 0, "info": 0, "total": 0}
+            for it in items:
+                if isinstance(it, dict):
+                    sev = _norm_sev(str(it.get("severity", "")))
+                    if sev in counts:
+                        counts[sev] += 1
+                    counts["total"] += 1
 
         def _i(k: str) -> int:
             try:
@@ -204,7 +237,7 @@ class QCAlertsWidget(QtWidgets.QWidget):
             f"bad: {_i('bad')}  |  warn: {_i('warn')}  |  info: {_i('info')}  |  total: {_i('total')}"
         )
 
-        if not isinstance(alerts, list) or not alerts:
+        if not items:
             self.list.addItem("(No alerts)")
             return
 
@@ -212,16 +245,20 @@ class QCAlertsWidget(QtWidgets.QWidget):
         sev_rank = {"bad": 0, "warn": 1, "info": 2, "ok": 3}
 
         def _key(a: dict) -> tuple[int, str]:
-            sev = str(a.get("severity", ""))
-            return (sev_rank.get(sev.lower(), 99), str(a.get("message", "")))
+            sev = _norm_sev(str(a.get("severity", "")))
+            return (sev_rank.get(sev, 99), str(a.get("message", "")))
 
-        for a in sorted([x for x in alerts if isinstance(x, dict)], key=_key):
-            sev = str(a.get("severity", ""))
+        for a in sorted([x for x in items if isinstance(x, dict)], key=_key):
+            sev_raw = str(a.get("severity", ""))
+            sev = _norm_sev(sev_raw)
+            code = str(a.get("code", ""))
             msg = str(a.get("message", ""))
             stage = str(a.get("stage", ""))
-            it = QtWidgets.QListWidgetItem(
-                f"[{sev}] {stage}: {msg}" if stage else f"[{sev}] {msg}"
-            )
+            head = f"[{sev_raw}]" if sev_raw else f"[{sev}]"
+            if code:
+                head += f" {code}"
+            line = f"{head} {stage}: {msg}" if stage else f"{head} {msg}"
+            it = QtWidgets.QListWidgetItem(line)
             it.setData(QtCore.Qt.ItemDataRole.UserRole, sev)
             self.list.addItem(it)
 

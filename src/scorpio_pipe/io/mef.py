@@ -2,12 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import numpy as np
 from astropy.io import fits
+from scorpio_pipe.maskbits import BADPIX, COSMIC, NO_COVERAGE, REJECTED, SATURATED, USER
+
+DEFAULT_FATAL_BITS = int(NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED)
+
 
 from scorpio_pipe.version import as_header_cards
+from scorpio_pipe import maskbits
 
 
 @dataclass(frozen=True)
@@ -58,6 +63,7 @@ def write_sci_var_mask(
     mask: np.ndarray | None = None,
     header: fits.Header | None = None,
     grid: WaveGrid | None = None,
+    cov: np.ndarray | None = None,
     overwrite: bool = True,
     extra_hdus: list[fits.ImageHDU] | None = None,
     primary_data: np.ndarray | None = None,
@@ -68,8 +74,9 @@ def write_sci_var_mask(
 
     Notes
     -----
-    - `mask` is expected to be a uint16 bitmask (but we do not enforce a schema here).
+    - `mask` is expected to be a uint16 bitmask using :mod:`scorpio_pipe.maskbits`.
     - `var` is expected to be variance in the same units as `sci` squared.
+    - If provided, `cov` is a per-pixel integer coverage map (number of contributing samples).
     """
     path = Path(path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -87,8 +94,15 @@ def write_sci_var_mask(
             # NumPy 2.0 strictness: allow a copy when needed.
             mask = np.asarray(mask, dtype=np.uint16)
 
+    if cov is not None:
+        cov = np.asarray(cov)
+        if cov.shape != sci.shape:
+            raise ValueError(f"COV shape {cov.shape} != SCI shape {sci.shape}")
+
     phdr = fits.Header() if header is None else fits.Header(header)
     _apply_cards(phdr, as_header_cards(prefix="SCORP"))
+    # Record the strict mask schema (even if MASK is absent; this makes downstream checks simpler).
+    _apply_cards(phdr, maskbits.header_cards(prefix="SCORP"))
 
     # Store grid metadata both as WCS cards and explicit SCORP_* keywords
     if grid is not None:
@@ -102,6 +116,12 @@ def write_sci_var_mask(
                 "SCORP_LU": str(grid.unit),
             },
         )
+        # Ensure explicit wavelength unit keyword exists for downstream tooling.
+        if "WAVEUNIT" not in phdr:
+            try:
+                phdr["WAVEUNIT"] = (str(grid.unit), "Wavelength unit (explicit)")
+            except Exception:
+                pass
 
     hdus: list[fits.HDUBase] = []
     if primary_data is not None:
@@ -143,9 +163,25 @@ def write_sci_var_mask(
         mhdr = fits.Header()
         if grid is not None:
             _apply_cards(mhdr, grid.to_wcs_cards())
+        _apply_cards(mhdr, maskbits.header_cards(prefix="SCORP"))
         hdus.append(
             fits.ImageHDU(
                 data=np.asarray(mask, dtype=np.uint16), header=mhdr, name="MASK"
+            )
+        )
+
+    if cov is not None:
+        chdr = fits.Header()
+        if grid is not None:
+            _apply_cards(chdr, grid.to_wcs_cards())
+        # Coverage is unitless (counts)
+        try:
+            chdr["BUNIT"] = ("count", "Coverage samples per pixel")
+        except Exception:
+            pass
+        hdus.append(
+            fits.ImageHDU(
+                data=np.asarray(cov, dtype=np.int16), header=chdr, name="COV"
             )
         )
 
@@ -158,8 +194,15 @@ def write_sci_var_mask(
 
 def read_sci_var_mask(
     path: str | Path,
+    *,
+    validate: bool = True,
+    fatal_bits: int = DEFAULT_FATAL_BITS,
 ) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None, fits.Header]:
-    """Read a MEF product with SCI/VAR/MASK extensions."""
+    """Read a MEF product with SCI/VAR/MASK extensions.
+
+    If ``validate=True`` (default), run a lightweight SCI/VAR/MASK contract check
+    and raise a :class:`ValueError` on violations.
+    """
     path = Path(path).expanduser().resolve()
     with fits.open(path) as hdul:
         hdr = fits.Header(hdul[0].header)
@@ -170,7 +213,98 @@ def read_sci_var_mask(
             var = np.asarray(hdul["VAR"].data, dtype=float)
         if "MASK" in hdul:
             mask = np.asarray(hdul["MASK"].data, dtype=np.uint16)
+
+    if validate:
+        issues = validate_sci_var_mask(sci, var, mask, fatal_bits=int(fatal_bits))
+        if issues:
+            raise ValueError(f"MEF contract violation in {path}: {issues}")
+
     return sci, var, mask, hdr
+
+
+def try_read_cov(path: str | Path) -> np.ndarray | None:
+    """Return COV extension as int16 if present, else None."""
+    path = Path(path).expanduser().resolve()
+    try:
+        with fits.open(path) as hdul:
+            if "COV" not in hdul:
+                return None
+            return np.asarray(hdul["COV"].data, dtype=np.int16)
+    except Exception:
+        return None
+
+
+def validate_sci_var_mask(
+    sci: np.ndarray,
+    var: np.ndarray | None,
+    mask: np.ndarray | None,
+    *,
+    cov: np.ndarray | None = None,
+    fatal_bits: int | None = None,
+) -> list[dict[str, Any]]:
+    """Validate core 2D product arrays.
+
+    Returns a list of issue dicts (empty means OK). This is intentionally
+    lightweight (no I/O) so stages can call it cheaply.
+
+    Rules
+    -----
+    - Shapes must match.
+    - Where pixels are *not* fatally masked, SCI must be finite and VAR must be
+      finite and >= 0.
+    - MASK must be uint16.
+    - If COV is present, it must be integer and non-negative.
+    """
+    issues: list[dict[str, Any]] = []
+
+    sci = np.asarray(sci)
+    if var is not None:
+        var = np.asarray(var)
+        if var.shape != sci.shape:
+            issues.append({"code": "SHAPE", "message": f"VAR shape {var.shape} != SCI shape {sci.shape}"})
+    if mask is not None:
+        mask = np.asarray(mask)
+        if mask.shape != sci.shape:
+            issues.append({"code": "SHAPE", "message": f"MASK shape {mask.shape} != SCI shape {sci.shape}"})
+        if mask.dtype != np.uint16:
+            issues.append({"code": "DTYPE", "message": f"MASK dtype {mask.dtype} != uint16"})
+
+    if cov is not None:
+        cov = np.asarray(cov)
+        if cov.shape != sci.shape:
+            issues.append({"code": "SHAPE", "message": f"COV shape {cov.shape} != SCI shape {sci.shape}"})
+        if not np.issubdtype(cov.dtype, np.integer):
+            issues.append({"code": "DTYPE", "message": f"COV dtype {cov.dtype} is not integer"})
+        else:
+            try:
+                if np.nanmin(cov) < 0:
+                    issues.append({"code": "RANGE", "message": "COV has negative values"})
+            except Exception:
+                pass
+
+    if var is not None:
+        good: np.ndarray
+        if mask is not None and fatal_bits is not None:
+            good = (mask & np.uint16(int(fatal_bits))) == 0
+        else:
+            good = np.ones(sci.shape, dtype=bool)
+
+        try:
+            if not np.isfinite(sci[good]).all():
+                issues.append({"code": "NAN", "message": "SCI has non-finite values in unmasked pixels"})
+        except Exception:
+            pass
+
+        try:
+            v = var[good]
+            if not np.isfinite(v).all():
+                issues.append({"code": "NAN", "message": "VAR has non-finite values in unmasked pixels"})
+            if np.nanmin(v) < 0:
+                issues.append({"code": "RANGE", "message": "VAR has negative values in unmasked pixels"})
+        except Exception:
+            pass
+
+    return issues
 
 
 def try_read_grid(hdr: fits.Header) -> WaveGrid | None:

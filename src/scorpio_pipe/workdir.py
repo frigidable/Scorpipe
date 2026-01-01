@@ -21,10 +21,17 @@ def safe_slug(s: str, *, max_len: int = 80) -> str:
     s = s.replace("/", " ").replace("\\", " ")
     s = re.sub(r"\s+", " ", s)
 
-    # Keep unicode letters and digits. Everything else -> underscore.
+    # Keep unicode letters/digits plus a small safe punctuation set.
+    #
+    # Why: SCORPIO disperser names can include "@" (e.g. VPHG1200@540).
+    # "@" is filesystem-safe on Windows/macOS/Linux, and keeping it improves
+    # readability and prevents collisions.
+    keep = {"@", "+", "-"}
+
+    # Everything else -> underscore.
     out = []
     for ch in s:
-        if ch.isalnum():
+        if ch.isalnum() or ch in keep:
             out.append(ch)
         else:
             out.append("_")

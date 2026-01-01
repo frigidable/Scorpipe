@@ -115,7 +115,7 @@ def _sanitize_key(s: str, *, fallback: str) -> str:
         return out or fallback
     except Exception:
         # Minimal fallback
-        out = re.sub(r"[^A-Za-z0-9_-]+", "_", s0).strip("_")
+        out = re.sub(r"[^A-Za-z0-9_@\-\+]+", "_", s0).strip("_")
         return out or fallback
 
 
@@ -241,6 +241,25 @@ def get_or_create_run_root(
     run_root = (base / sig.run_name(run_id)).resolve()
     if create:
         run_root.mkdir(parents=True, exist_ok=True)
+
+        # Create/refresh run passport (run.json) so the GUI can sort and display
+        # metadata even if config.yaml is not yet created.
+        try:
+            from scorpio_pipe.run_passport import ensure_run_passport
+
+            h = _as_header_mapping(headers)
+            passport_sig = {
+                "object": str(_pick(h, "OBJECT", "OBJNAME", "TARGNAME", "TARGET", default="")),
+                "object_key": sig.object_key,
+                "disperser": str(_pick(h, "GRISM", "DISPERSER", "GRATING", "GRAT", default="")),
+                "disperser_key": sig.disperser_key,
+                "slit": str(_pick(h, "SLIT", "SLITW", default="")),
+                "binning": str(_pick(h, "CCDSUM", "CCDBIN", "BINNING", "BINX", default="")),
+                "night_dir": sig.night_folder,
+            }
+            ensure_run_passport(run_root, signature=passport_sig, run_id=int(run_id))
+        except Exception:
+            pass
     return run_root
 
 
@@ -251,7 +270,8 @@ def scan_recent_runs(workspace_root: str | Path, *, limit: int = 10) -> list[Pat
       - config.yaml, or
       - manifest/ directory
 
-    Returned list is sorted by directory modification time (desc).
+    Returned list is sorted by ``run.json.created_at`` (desc) when available,
+    otherwise by directory modification time.
     """
 
     ws = Path(workspace_root).expanduser().resolve()
@@ -270,12 +290,18 @@ def scan_recent_runs(workspace_root: str | Path, *, limit: int = 10) -> list[Pat
             for run in night.iterdir():
                 if not run.is_dir():
                     continue
-                if (run / "config.yaml").is_file() or (run / "manifest").is_dir():
+                if (run / "config.yaml").is_file() or (run / "manifest").is_dir() or (run / "run.json").is_file():
                     try:
-                        mtime = run.stat().st_mtime
+                        from scorpio_pipe.run_passport import get_run_stamp
+
+                        stamp = get_run_stamp(run)
+                        runs.append((float(stamp.sort_ts), run))
                     except Exception:
-                        mtime = 0.0
-                    runs.append((mtime, run))
+                        try:
+                            mtime = run.stat().st_mtime
+                        except Exception:
+                            mtime = 0.0
+                        runs.append((mtime, run))
     except Exception:
         return []
 

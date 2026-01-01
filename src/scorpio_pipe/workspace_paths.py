@@ -45,7 +45,7 @@ _LEGACY_DIR_SLUGS: dict[str, list[str]] = {
     "flatfield": ["flat", "flatfield"],
     "cosmics": ["cosmics"],
     "superneon": ["superneon"],
-    "arclineid": ["lineid", "arclineid"],
+    "arclineid": ["arc_line_id", "lineid", "arclineid"],
     "wavesol": ["wavesol"],
     "linearize": ["linearize"],
     "sky": ["sky"],

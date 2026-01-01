@@ -19,6 +19,8 @@ dependencies = [
   "rich",
   "loguru",
   "matplotlib",
+  # Scientific stack: do not skimp on accuracy.
+  "scipy>=1.10",
 ]
 
 dynamic = ["version"]
@@ -33,6 +35,8 @@ gui = [
 
 # Recommended scientific stack (better peak finding, etc.)
 science = [
+  # SciPy is now part of the core dependencies (v5.40.2+).
+  # This extra remains for backward compatibility with older install guides.
   "scipy>=1.10"
 ]
 

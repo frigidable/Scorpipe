@@ -102,6 +102,34 @@ def build_products_manifest(cfg: dict[str, Any]) -> dict[str, Any]:
     if lin_qc.exists():
         payload["stages"]["linearize"]["qc_json"] = _rel(work_dir, lin_qc)
 
+    # Extract1D: advertise the two in-file 1D products (TRACE/FIXED) if trace.json exists.
+    ex_dir = stage_dir(work_dir, "extract1d")
+    tj = ex_dir / "trace.json"
+    if tj.exists():
+        try:
+            td = json.loads(tj.read_text(encoding="utf-8"))
+            payload["stages"]["extract1d"]["products"] = [
+                {
+                    "name": "TRACE",
+                    "type": "aperture_trace",
+                    "file": _rel(work_dir, ex_dir / "spec1d.fits"),
+                },
+                {
+                    "name": "FIXED",
+                    "type": "aperture_fixed",
+                    "file": _rel(work_dir, ex_dir / "spec1d.fits"),
+                },
+            ]
+            payload["stages"]["extract1d"]["trace_json"] = _rel(work_dir, tj)
+            # Light metadata for UI/QC
+            payload["stages"]["extract1d"]["trace_meta"] = {
+                "n_blocks": td.get("trace", {}).get("blocks", {}).get("n_total"),
+                "n_used": td.get("trace", {}).get("blocks", {}).get("n_used"),
+                "aperture_half_width": td.get("aperture", {}).get("half_width_px"),
+            }
+        except Exception:
+            pass
+
     return payload
 
 

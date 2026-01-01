@@ -62,7 +62,7 @@ def wavesol_dir(cfg: dict[str, Any]) -> Path:
     legacy_sub = legacy_base / slug
 
     # If new location has files, prefer it.
-    if sub.exists() or any((sub / n).exists() for n in ("lambda_map.fits", "superneon.fits")):
+    if sub.exists() or any((sub / n).exists() for n in ("lambda_map.fits", "rectification_model.json", "superneon.fits")):
         return sub
 
     # If old files exist directly in wavesol/, keep it usable.

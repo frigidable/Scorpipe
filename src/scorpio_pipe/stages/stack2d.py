@@ -1,15 +1,16 @@
 """Stack rectified sky-subtracted frames in (λ, y).
 
-This is the first *real* stacking stage for the v5.x long-slit branch.
+P1-E contract (v5.40.4)
+----------------------
+* Inputs: **only** ``10_linearize/<stem>_skysub.fits`` MEF products.
+* Consistency checks: shapes, wavelength grid, units.
+* Normalize to per-second units (ADU/s, e-/s, ...) if needed.
+* Robust inverse-variance combine (default: Huber downweighting).
+* Propagate masks conservatively (OR over contributing samples).
+* Write coverage map (COV) and a structured ``stack_done.json`` report.
+* Optional empirical variance scaling :math:`\eta(\lambda)` from sky rows.
 
-Algorithm (v5.12 interim):
-  - read per-exposure MEF products (SCI + optional VAR/MASK)
-  - compute weights = 1/VAR (fallback to 1)
-  - exclude masked pixels (MASK != 0)
-  - optional iterative sigma-clipping (per pixel) using VAR as noise model
-  - output stacked MEF with SCI/VAR/MASK and coverage map (COV)
-
-The implementation is chunked along y to keep memory bounded.
+Implementation is chunked along y to keep memory bounded.
 """
 
 from __future__ import annotations
@@ -18,14 +19,17 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import json
+import time
+
 import numpy as np
 from astropy.io import fits
+import astropy.units as u
 
 from scorpio_pipe.fits_utils import open_fits_smart
 
-from scorpio_pipe.io.mef import write_sci_var_mask, try_read_grid
+from scorpio_pipe.io.mef import write_sci_var_mask, try_read_grid, validate_sci_var_mask
 from scorpio_pipe.version import PIPELINE_VERSION
-from scorpio_pipe.maskbits import BADPIX, COSMIC, NO_COVERAGE, REJECTED, SATURATED, USER
+from scorpio_pipe.maskbits import BADPIX, COSMIC, NO_COVERAGE, REJECTED, SATURATED, USER, EDGE
 
 from ..plot_style import mpl_style
 from scorpio_pipe.paths import resolve_work_dir
@@ -33,10 +37,120 @@ from ..shift_utils import xcorr_shift_subpix
 
 
 MASK_NO_COVERAGE = NO_COVERAGE
-MASK_CLIPPED = REJECTED
+MASK_ROBUST_REJECTED = REJECTED
 
-# Bits that make a pixel unusable for stacking.
-FATAL_BITS = np.uint16(NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED)
+# Bits that make a pixel unusable for stacking (P1-E).
+# NOTE: REJECTED is produced by robust combine; it is not treated as fatal input.
+FATAL_BITS = np.uint16(NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER)
+
+
+def _get_primary_header(hdul: fits.HDUList) -> fits.Header:
+    try:
+        return hdul[0].header
+    except Exception:
+        return fits.Header()
+
+
+def _get_sci_data(hdul: fits.HDUList) -> np.ndarray:
+    sci = None
+    try:
+        sci = hdul[0].data
+    except Exception:
+        sci = None
+    if sci is None and "SCI" in hdul:
+        sci = hdul["SCI"].data
+    if sci is None:
+        raise ValueError("No SCI data")
+    return np.asarray(sci)
+
+
+def _get_var_data(hdul: fits.HDUList) -> np.ndarray:
+    if "VAR" not in hdul:
+        raise ValueError("VAR extension missing")
+    v = hdul["VAR"].data
+    if v is None:
+        raise ValueError("VAR extension has no data")
+    return np.asarray(v)
+
+
+def _get_mask_data(hdul: fits.HDUList) -> np.ndarray:
+    if "MASK" not in hdul:
+        raise ValueError("MASK extension missing")
+    m = hdul["MASK"].data
+    if m is None:
+        raise ValueError("MASK extension has no data")
+    return np.asarray(m, dtype=np.uint16)
+
+
+def _split_rate_unit(unit: str) -> tuple[str, bool]:
+    """Split a unit string into (base, per_second).
+
+    We intentionally keep this string-based because detector units like ADU
+    are not understood by :mod:`astropy.units`.
+    """
+
+    u0 = str(unit or "").strip()
+    if not u0:
+        return "", False
+    ul = u0.lower().replace(" ", "")
+    per_sec = False
+    if "/s" in ul or "/sec" in ul or "s^-1" in ul or "s-1" in ul:
+        per_sec = True
+        # Remove common rate suffixes.
+        for tok in ("/sec", "/s", "s^-1", "s-1"):
+            ul = ul.replace(tok, "")
+    base = ul
+    # Restore capitalization for readability (best-effort).
+    if base == "adu":
+        base = "ADU"
+    elif base in {"e-", "electron", "electrons"}:
+        base = "e-"
+    elif base:
+        base = base.upper() if base.isalpha() else base
+    return base, per_sec
+
+
+def _get_exptime_seconds(hdr: fits.Header) -> float | None:
+    for k in ("TEXPS", "EXPTIME", "EXPOSURE"):
+        v = hdr.get(k)
+        if v is None:
+            continue
+        try:
+            vv = float(v)
+        except Exception:
+            continue
+        if np.isfinite(vv) and vv > 0:
+            return vv
+    return None
+
+
+def _grid_to_unit(grid: Any, target_unit: str) -> tuple[float, float, int, str]:
+    """Return (lambda0, dlambda, nlam, unit) converted to ``target_unit``."""
+    if grid is None:
+        raise ValueError("Missing wavelength grid")
+    try:
+        u_in = u.Unit(str(getattr(grid, "unit", "Angstrom")))
+        u_out = u.Unit(str(target_unit))
+        fac = (1.0 * u_in).to(u_out).value
+    except Exception:
+        # Fall back to common names.
+        in_u = str(getattr(grid, "unit", "Angstrom")).strip().lower()
+        out_u = str(target_unit).strip().lower()
+        fac = 1.0
+        if in_u in {"angstrom", "a", "aa"} and out_u in {"angstrom", "a", "aa"}:
+            fac = 1.0
+        elif in_u in {"nm", "nanometer", "nanometre"} and out_u in {"angstrom", "a", "aa"}:
+            fac = 10.0
+        elif in_u in {"angstrom", "a", "aa"} and out_u in {"nm", "nanometer", "nanometre"}:
+            fac = 0.1
+        else:
+            raise
+    return (
+        float(getattr(grid, "lambda0")) * float(fac),
+        float(getattr(grid, "dlambda")) * float(fac),
+        int(getattr(grid, "nlam")),
+        str(target_unit),
+    )
 
 
 def _xcorr_subpix_shift_1d(
@@ -175,7 +289,9 @@ def _take_block_yshift_subpix(
     Returns (block, filled_mask).
     """
 
-    arr = np.asarray(arr, dtype=float)
+    # IMPORTANT: do not cast the full array (it can be a memmap). We only
+    # materialize the y-rows we need.
+    arr = np.asarray(arr)
     ny, nx = arr.shape
     s = float(shift)
     if not np.isfinite(s) or abs(s) < 1e-9:
@@ -210,7 +326,9 @@ def _take_block_yshift_subpix_var(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Subpixel y-shifted block for VAR with (w0^2, w1^2) propagation."""
 
-    var = np.asarray(var, dtype=float)
+    # IMPORTANT: do not cast the full array (it can be a memmap). We only
+    # materialize the y-rows we need.
+    var = np.asarray(var)
     ny, nx = var.shape
     s = float(shift)
     if not np.isfinite(s) or abs(s) < 1e-9:
@@ -352,18 +470,19 @@ def run_stack2d(
     st_cfg = (cfg.get("stack2d") or {}) if isinstance(cfg.get("stack2d"), dict) else {}
     if not bool(st_cfg.get("enabled", True)):
         # Keep a stable payload shape even when skipped.
-        # Downstream code/tests may still expect keys like "stacked2d_fits".
         return {
             "skipped": True,
             "reason": "stack2d.enabled=false",
+            "stack2d_fits": None,
             "stacked2d_fits": None,
-            "stacked2d_png": None,
+            "coverage_png": None,
             "qc_png": None,
         }
 
+    t0 = time.time()
+
     wd = resolve_work_dir(cfg)
     if out_dir is None:
-        # Canonical v5.38+: stage directory under products/NN_*.
         from scorpio_pipe.workspace_paths import stage_dir
 
         out_dir = stage_dir(wd, "stack2d")
@@ -375,12 +494,29 @@ def run_stack2d(
     if not files:
         raise FileNotFoundError("stack2d: no input FITS files")
 
-    # Read shapes from first file.
-    sci0, hdr0, var0, mask0 = _open_mef(files[0])
-    ny, nx = sci0.shape
+    # Enforce P1-E input contract: only 10_linearize/<stem>_skysub.fits.
+    from scorpio_pipe.workspace_paths import stage_dir
 
-    sigma_clip = float(st_cfg.get("sigma_clip", 4.0))
-    maxiter = int(st_cfg.get("maxiter", 3))
+    lin_dir = stage_dir(wd, "linearize").resolve()
+    for p in files:
+        pr = p.resolve()
+        try:
+            if not pr.is_relative_to(lin_dir):
+                raise ValueError(
+                    f"stack2d input must come from {lin_dir.name}: got {p}"
+                )
+        except AttributeError:
+            # Python < 3.9 fallback
+            if str(lin_dir) not in str(pr):
+                raise ValueError(
+                    f"stack2d input must come from {lin_dir.name}: got {p}"
+                )
+
+    normalize_exptime = bool(st_cfg.get("normalize_exptime", True))
+    method = str(st_cfg.get("method", "invvar_huber") or "invvar_huber").strip().lower()
+    robust_iter = int(st_cfg.get("robust_iter", st_cfg.get("maxiter", 3)) or 3)
+    huber_c = float(st_cfg.get("huber_c", 2.0) or 2.0)
+    clip_sigma = float(st_cfg.get("clip_sigma", st_cfg.get("sigma_clip", 4.0)) or 4.0)
     chunk = int(st_cfg.get("chunk_rows", 128))
 
     # Optional y-alignment (subpixel shifts) before stacking.
@@ -392,22 +528,262 @@ def run_stack2d(
         y_align_enabled = bool(st_cfg.get("y_align_enabled", False))
         y_align_max = int(st_cfg.get("y_align_max_shift_pix", 10))
 
-    out_sci = np.zeros((ny, nx), dtype=np.float32)
-    out_var = np.zeros((ny, nx), dtype=np.float32)
-    out_mask = np.zeros((ny, nx), dtype=np.uint16)
-    out_cov = np.zeros((ny, nx), dtype=np.int16)
-
-    # Keep HDUs open (memmap) for slicing.
-    # Use memmap='auto' to avoid Astropy strict_memmap failures when any HDU
-    # declares BZERO/BSCALE/BLANK (typical for unsigned MASK bitmasks).
+    # Open all MEFs (memmap) and collect per-input metadata.
     hduls = [open_fits_smart(p, memmap="auto") for p in files]
+    report: dict[str, Any] = {
+        "ok": False,
+        "status": "fail",
+        "stage": "stack2d",
+        "pipeline_version": PIPELINE_VERSION,
+        "started_at_unix": float(t0),
+        "inputs": [],
+        "config": {
+            "method": method,
+            "robust_iter": robust_iter,
+            "huber_c": huber_c,
+            "clip_sigma": clip_sigma,
+            "normalize_exptime": normalize_exptime,
+            "chunk_rows": chunk,
+            "y_align_enabled": bool(y_align_enabled),
+            "y_align_max_shift_pix": int(y_align_max),
+        },
+    }
+
+    # Products (filled later)
+    out_fits = out_dir / "stack2d.fits"
+    out_fits_legacy = out_dir / "stacked2d.fits"
+    eta_fits = out_dir / "eta_lambda.fits"
+    # Navigator-friendly quicklooks
+    out_stack_png = out_dir / "stack2d.png"
+    out_cov_png = out_dir / "coverage.png"
+    out_cov_hist_png = out_dir / "coverage_hist.png"
+    out_eta_png = out_dir / "eta_lambda.png"
+    stack_done = out_dir / "stack_done.json"
+    stack2d_done = out_dir / "stack2d_done.json"
+    done_json = out_dir / "done.json"
+
+    # We keep the geometry object (for var_floor/eta) and a JSON-friendly summary.
+    sky_geom = None
+    sky_geometry_meta: dict[str, Any] | None = None
+
     try:
+        # First exposure defines reference shape, WCS/grid, and base unit.
+        hdr0 = _get_primary_header(hduls[0]).copy()
+        sci0 = np.asarray(_get_sci_data(hduls[0]), dtype=np.float32)
+        var0 = np.asarray(_get_var_data(hduls[0]), dtype=np.float32)
+        mask0 = np.asarray(_get_mask_data(hduls[0]), dtype=np.uint16)
+
+        validate_sci_var_mask(sci0, var0, mask0, fatal_bits=int(FATAL_BITS))
+        ny, nx = sci0.shape
+
+        # Wavelength grid consistency (P1-E).
+        grid0 = try_read_grid(hdr0)
+        if grid0 is None:
+            raise ValueError(f"stack2d: missing wavelength grid in {files[0].name}")
+        lam0_aa, dlam_aa, nlam, grid_unit = _grid_to_unit(grid0, "Angstrom")
+        if int(nlam) != int(nx):
+            raise ValueError(
+                f"stack2d: wavelength grid nlam={nlam} does not match image nx={nx}"
+            )
+
+        # Optional: unified slit geometry (used for var_floor and eta(λ)).
+        try:
+            from scorpio_pipe.sky_geometry import compute_sky_geometry, roi_from_cfg
+
+            roi = roi_from_cfg(cfg)
+            sky = cfg.get("sky") if isinstance(cfg.get("sky"), dict) else {}
+            gcfg = sky.get("geometry") if isinstance(sky.get("geometry"), dict) else {}
+            sky_geom = compute_sky_geometry(
+                sci0,
+                var0,
+                mask0,
+                roi=roi,
+                roi_policy=str(gcfg.get("roi_policy", "prefer_user")),
+                fatal_bits=int(FATAL_BITS),
+                edge_margin_px=int(gcfg.get("edge_margin_px", 16) or 16),
+                profile_x_percentile=float(gcfg.get("profile_x_percentile", 50.0) or 50.0),
+                thresh_sigma=float(gcfg.get("thresh_sigma", 3.0) or 3.0),
+                dilation_px=int(gcfg.get("dilation_px", 3) or 3),
+                min_obj_width_px=int(gcfg.get("min_obj_width_px", 6) or 6),
+                min_sky_width_px=int(gcfg.get("min_sky_width_px", 12) or 12),
+            )
+            sky_geometry_meta = {
+                "roi_used": sky_geom.roi_used,
+                "metrics": sky_geom.metrics,
+                "sky_windows": [list(x) for x in sky_geom.sky_windows],
+                "object_spans": [list(x) for x in sky_geom.object_spans],
+            }
+        except Exception:
+            sky_geom = None
+            sky_geometry_meta = None
+
+        # Units & exposure-time normalization (P1-E).
+        unit0_raw = hdr0.get("BUNIT", hdr0.get("SCIUNIT", ""))
+        base0, per_sec0 = _split_rate_unit(str(unit0_raw))
+        norm0 = bool(hdr0.get("NORMEXP", False))
+        per_sec0 = bool(per_sec0 or norm0)
+        if not base0:
+            raise ValueError("stack2d: missing BUNIT/SCIUNIT in first input")
+
+        base_ref = base0
+        # Per-frame scaling factors applied to SCI and VAR.
+        sci_scales: list[float] = []
+        var_scales: list[float] = []
+        exptimes: list[float | None] = []
+
+        # Per-input metadata + strict validation.
+        for p, h in zip(files, hduls):
+            hdr = _get_primary_header(h)
+            sci = _get_sci_data(h)
+            var = _get_var_data(h)
+            mask = _get_mask_data(h)
+
+            if sci.shape != (ny, nx):
+                raise ValueError(
+                    f"stack2d: shape mismatch in {p.name}: {sci.shape} != {(ny, nx)}"
+                )
+            if var.shape != (ny, nx):
+                raise ValueError(
+                    f"stack2d: VAR shape mismatch in {p.name}: {var.shape} != {(ny, nx)}"
+                )
+            if mask.shape != (ny, nx):
+                raise ValueError(
+                    f"stack2d: MASK shape mismatch in {p.name}: {mask.shape} != {(ny, nx)}"
+                )
+
+            validate_sci_var_mask(
+                np.asarray(sci, dtype=np.float32),
+                np.asarray(var, dtype=np.float32),
+                np.asarray(mask, dtype=np.uint16),
+                fatal_bits=int(FATAL_BITS),
+            )
+
+            g = try_read_grid(hdr)
+            if g is None:
+                raise ValueError(f"stack2d: missing wavelength grid in {p.name}")
+            l0, dl, nn, _ = _grid_to_unit(g, "Angstrom")
+            if int(nn) != int(nx):
+                raise ValueError(
+                    f"stack2d: wavelength grid nlam={nn} does not match nx={nx} in {p.name}"
+                )
+            tol = float(st_cfg.get("grid_tol_angstrom", 1e-6) or 1e-6)
+            if (abs(l0 - lam0_aa) > tol) or (abs(dl - dlam_aa) > tol):
+                raise ValueError(
+                    f"stack2d: wavelength grid mismatch vs first frame (tol={tol} Å) in {p.name}"
+                )
+
+            unit_raw = hdr.get("BUNIT", hdr.get("SCIUNIT", ""))
+            base, per_sec = _split_rate_unit(str(unit_raw))
+            norm = bool(hdr.get("NORMEXP", False))
+            per_sec = bool(per_sec or norm)
+            if base != base_ref:
+                raise ValueError(
+                    f"stack2d: incompatible SCI unit base in {p.name}: {base!r} != {base_ref!r}"
+                )
+
+            exptime = _get_exptime_seconds(hdr)
+            exptimes.append(exptime)
+
+            s_scale = 1.0
+            applied_norm = False
+            if normalize_exptime and (not per_sec):
+                if exptime is None:
+                    raise ValueError(
+                        f"stack2d: need EXPTIME to normalize units for {p.name}"
+                    )
+                s_scale = 1.0 / float(exptime)
+                applied_norm = True
+                per_sec = True
+
+            sci_scales.append(float(s_scale))
+            var_scales.append(float(s_scale * s_scale))
+
+            report["inputs"].append(
+                {
+                    "file": p.name,
+                    "path": str(p),
+                    "shape": [int(ny), int(nx)],
+                    "bunit": str(unit_raw),
+                    "base_unit": base,
+                    "per_second": bool(per_sec),
+                    "exptime_s": float(exptime) if exptime is not None else None,
+                    "normalized_by_stack": bool(applied_norm),
+                    "grid": {
+                        "lambda0_A": float(l0),
+                        "dlambda_A": float(dl),
+                        "nlam": int(nn),
+                    },
+                }
+            )
+
+        # Decide output unit string.
+        out_bunit = f"{base_ref}/s" if normalize_exptime else str(unit0_raw)
+
+        # Var-floor (P1-E): percentile in sky rows (subsampled).
+        var_floor_enabled = bool(st_cfg.get("var_floor_enabled", True))
+        var_floor = None
+        var_floor_meta: dict[str, Any] = {"enabled": var_floor_enabled, "value": None}
+        if var_floor_enabled:
+            pctl = float(st_cfg.get("var_floor_percentile", 1.0) or 1.0)
+            scale = float(st_cfg.get("var_floor_scale", 1.0) or 1.0)
+            max_rows = int(st_cfg.get("var_floor_sample_rows", 96) or 96)
+            max_x = int(st_cfg.get("var_floor_sample_cols", 256) or 256)
+
+            if sky_geom is not None:
+                sky_rows = np.where(np.asarray(sky_geom.mask_sky_y, dtype=bool))[0]
+            else:
+                sky_rows = np.arange(ny)
+            if sky_rows.size > 0:
+                # Evenly spaced rows.
+                if sky_rows.size > max_rows:
+                    idx = np.linspace(0, sky_rows.size - 1, max_rows).astype(int)
+                    sky_rows = sky_rows[idx]
+
+            cols = np.arange(nx)
+            if cols.size > max_x:
+                cols = np.linspace(0, nx - 1, max_x).astype(int)
+
+            samples: list[np.ndarray] = []
+            for i, h in enumerate(hduls):
+                v = np.asarray(_get_var_data(h)[np.ix_(sky_rows, cols)], dtype=np.float32)
+                m = np.asarray(_get_mask_data(h)[np.ix_(sky_rows, cols)], dtype=np.uint16)
+                v = v * float(var_scales[i])
+                good = np.isfinite(v) & (v > 0) & ((m & FATAL_BITS) == 0)
+                if np.any(good):
+                    samples.append(v[good])
+
+            if samples:
+                vv = np.concatenate(samples, axis=0)
+                if vv.size >= 128:
+                    try:
+                        vf = float(np.percentile(vv, pctl)) * float(scale)
+                        if np.isfinite(vf) and vf > 0:
+                            var_floor = float(vf)
+                    except Exception:
+                        var_floor = None
+
+            var_floor_meta.update(
+                {
+                    "percentile": float(pctl),
+                    "scale": float(scale),
+                    "sample_rows": int(sky_rows.size),
+                    "sample_cols": int(cols.size),
+                    "value": float(var_floor) if var_floor is not None else None,
+                }
+            )
+        report["var_floor"] = var_floor_meta
+
+        # Output arrays.
+        out_sci = np.full((ny, nx), np.nan, dtype=np.float32)
+        out_var = np.full((ny, nx), np.nan, dtype=np.float32)
+        out_mask = np.zeros((ny, nx), dtype=np.uint16)
+        out_cov = np.zeros((ny, nx), dtype=np.int16)
+
         # Precompute per-exposure y offsets (subpixel) if requested.
         y_shifts = [0.0 for _ in files]
         y_scores: list[float | None] = [None for _ in files]
         y_offsets: list[dict[str, Any]] = []
         if y_align_enabled and len(files) > 1:
-            # Build a crude spatial profile for each exposure.
             y_align_mode = "full"
             y_align_windows_A = None
             y_align_windows_pix = None
@@ -430,27 +806,15 @@ def run_stack2d(
 
             profiles = []
             for h in hduls:
-                sci = h[0].data
-                if sci is None and "SCI" in h:
-                    sci = h["SCI"].data
-                s = np.asarray(sci, dtype=np.float32)
-                m = None
-                if "MASK" in h:
-                    try:
-                        m = np.asarray(h["MASK"].data, dtype=np.uint16)
-                    except Exception:
-                        m = None
-                good = np.isfinite(s)
-                if m is not None:
-                    good &= (m & FATAL_BITS) == 0
+                s = np.asarray(_get_sci_data(h), dtype=np.float32)
+                m = np.asarray(_get_mask_data(h), dtype=np.uint16)
+                good = np.isfinite(s) & ((m & FATAL_BITS) == 0)
 
                 sel = None
                 if y_align_mode == "windows":
                     try:
-                        hdr0 = h[0].header
                         has_wcs = (hdr0.get("CRVAL1") is not None) and (
-                            hdr0.get("CDELT1") is not None
-                            or hdr0.get("CD1_1") is not None
+                            hdr0.get("CDELT1") is not None or hdr0.get("CD1_1") is not None
                         )
                         unit = str(y_align_windows_unit or "auto").lower()
                         wA = y_align_windows_A
@@ -459,7 +823,7 @@ def run_stack2d(
                             wp = None
                         elif unit in ("pix", "pixel", "pixels"):
                             wA = None
-                        else:  # auto
+                        else:
                             if has_wcs and wA is not None:
                                 wp = None
                             elif (not has_wcs) and wp is not None:
@@ -484,230 +848,496 @@ def run_stack2d(
             for i in range(1, len(profiles)):
                 sh, sc = _xcorr_subpix_shift_1d(ref, profiles[i], y_align_max)
                 y_shifts[i] = float(sh)
-                try:
-                    y_scores[i] = float(sc)
-                except Exception:
-                    y_scores[i] = None
+                y_scores[i] = float(sc)
+
             y_offsets = [
                 {"file": p.name, "y_shift_pix": float(sh), "score": y_scores[i]}
                 for i, (p, sh) in enumerate(zip(files, y_shifts))
             ]
         else:
-            y_offsets = [
-                {"file": p.name, "y_shift_pix": 0.0, "score": None} for p in files
-            ]
+            y_offsets = [{"file": p.name, "y_shift_pix": 0.0, "score": None} for p in files]
 
+        report["y_offsets"] = y_offsets
+        report["sky_geometry"] = sky_geometry_meta
+
+        # Accumulators for diagnostics.
+        suppressed_any = 0
+        suppressed_total = 0
+
+        # Main stacking loop (chunked).
         for ys in _iter_slices(ny, chunk):
-            # Build stacks for this block.
-            sci_stack = []
-            var_stack = []
-            mask_stack = []
             y0 = int(ys.start or 0)
             y1 = int(ys.stop or ny)
+
+            sci_stack: list[np.ndarray] = []
+            var_stack: list[np.ndarray] = []
+            mask_stack: list[np.ndarray] = []
+
             for i, h in enumerate(hduls):
-                sh = (
-                    float(y_shifts[i])
-                    if (y_align_enabled and i < len(y_shifts))
-                    else 0.0
-                )
+                sh = float(y_shifts[i]) if (y_align_enabled and i < len(y_shifts)) else 0.0
 
-                sci = h[0].data
-                if sci is None and "SCI" in h:
-                    sci = h["SCI"].data
+                sci_src = _get_sci_data(h)
+                var_src = _get_var_data(h)
+                mask_src = _get_mask_data(h)
+
                 if y_align_enabled and abs(sh) > 1e-6:
-                    block_s, filled_s = _take_block_yshift_subpix(
-                        np.asarray(sci), y0, y1, sh, fill=float("nan")
-                    )
+                    block_s, _ = _take_block_yshift_subpix(sci_src, y0, y1, sh, fill=float("nan"))
+                    block_v, _ = _take_block_yshift_subpix_var(var_src, y0, y1, sh, fill=float("nan"))
+                    block_m = _take_block_yshift_subpix_mask(mask_src, y0, y1, sh)
                 else:
-                    block_s, filled_s = _take_block_yshift(
-                        np.asarray(sci), y0, y1, int(round(sh)), fill=float("nan")
-                    )
-                sci_stack.append(np.asarray(block_s, dtype=np.float32))
+                    block_s, _ = _take_block_yshift(sci_src, y0, y1, int(round(sh)), fill=float("nan"))
+                    block_v, _ = _take_block_yshift(var_src, y0, y1, int(round(sh)), fill=float("nan"))
+                    block_m = _take_block_yshift_mask(mask_src, y0, y1, int(round(sh)))
 
-                v = None
-                m = None
-                if "VAR" in h:
-                    if y_align_enabled and abs(sh) > 1e-6:
-                        block_v, filled_v = _take_block_yshift_subpix_var(
-                            np.asarray(h["VAR"].data), y0, y1, sh, fill=float("inf")
-                        )
-                    else:
-                        block_v, filled_v = _take_block_yshift(
-                            np.asarray(h["VAR"].data),
-                            y0,
-                            y1,
-                            int(round(sh)),
-                            fill=float("inf"),
-                        )
-                    v = np.asarray(block_v, dtype=np.float32)
-                if "MASK" in h:
-                    if y_align_enabled and abs(sh) > 1e-6:
-                        m = _take_block_yshift_subpix_mask(
-                            np.asarray(h["MASK"].data), y0, y1, sh
-                        )
-                    else:
-                        m = _take_block_yshift_mask(
-                            np.asarray(h["MASK"].data), y0, y1, int(round(sh))
-                        )
+                # Apply exposure normalization if requested.
+                s = np.asarray(block_s, dtype=np.float32) * float(sci_scales[i])
+                v = np.asarray(block_v, dtype=np.float32) * float(var_scales[i])
+                m = np.asarray(block_m, dtype=np.uint16)
+
+                sci_stack.append(s)
                 var_stack.append(v)
                 mask_stack.append(m)
 
             S = np.stack(sci_stack, axis=0)  # (nexp, y, x)
-            if all(v is None for v in var_stack):
-                V = None
-                W = np.ones_like(S, dtype=np.float32)
+            V = np.stack(var_stack, axis=0)
+            M = np.stack(mask_stack, axis=0)
+
+            # Valid samples: finite + positive variance + no fatal mask bits.
+            valid = np.isfinite(S) & np.isfinite(V) & (V > 0) & ((M & FATAL_BITS) == 0)
+
+            # Variance floor.
+            if var_floor is not None and var_floor > 0:
+                Veff = np.maximum(V, float(var_floor)).astype(np.float32)
             else:
-                # Replace missing VAR with large values -> small weights
-                V = np.stack(
-                    [
-                        (
-                            np.asarray(v, dtype=np.float32)
-                            if v is not None
-                            else np.full_like(sci_stack[0], 1e12, dtype=np.float32)
-                        )
-                        for v in var_stack
-                    ],
-                    axis=0,
-                )
-                W = np.where(np.isfinite(V) & (V > 0), 1.0 / V, 0.0).astype(np.float32)
+                Veff = V
 
-            if any(m is not None for m in mask_stack):
-                M = np.stack(
-                    [
-                        (
-                            np.asarray(m, dtype=np.uint16)
-                            if m is not None
-                            else np.zeros_like(
-                                mask_stack[0]
-                                if mask_stack[0] is not None
-                                else sci_stack[0],
-                                dtype=np.uint16,
-                            )
-                        )
-                        for m in mask_stack
-                    ],
-                    axis=0,
-                )
-                W = np.where(M != 0, 0.0, W)
-            else:
-                M = None
+            W0 = np.where(valid, 1.0 / Veff, 0.0).astype(np.float32)
+            W = W0.copy()
 
-            # Mask NaNs
-            W = np.where(np.isfinite(S), W, 0.0)
-
-            # Iterative sigma clipping using VAR model (or robust residual if no VAR).
-            clipped = np.zeros_like(W, dtype=bool)
-            for _ in range(max(0, maxiter)):
+            # Robust iterations.
+            keep = valid.copy()
+            hub = np.ones_like(W, dtype=np.float32)
+            for _ in range(max(0, robust_iter)):
                 wsum = np.sum(W, axis=0)
                 mu = np.where(wsum > 0, np.sum(W * S, axis=0) / wsum, np.nan)
-                if V is not None:
-                    sigma = np.sqrt(
-                        np.maximum(
-                            np.sum((W**2) * V, axis=0) / np.maximum(wsum**2, 1e-20), 0.0
-                        )
+
+                # Normalized residuals.
+                r = (S - mu[None, :, :]) / np.sqrt(np.maximum(Veff, 1e-20))
+                if method in {"invvar_huber", "huber", "huber_invvar"}:
+                    ar = np.abs(r)
+                    hub = np.where(ar <= huber_c, 1.0, huber_c / np.maximum(ar, 1e-20)).astype(
+                        np.float32
                     )
+                    W = W0 * hub
+                elif method in {"invvar_clip", "sigma_clip", "clip"}:
+                    keep &= (np.abs(r) <= clip_sigma)
+                    W = np.where(keep, W0, 0.0)
                 else:
-                    # robust estimate
-                    med = np.nanmedian(S, axis=0)
-                    mad = np.nanmedian(np.abs(S - med), axis=0)
-                    sigma = 1.4826 * mad
-                bad = np.abs(S - mu) > (sigma_clip * np.maximum(sigma, 1e-6))
-                bad = bad & (W > 0)
-                if not np.any(bad):
-                    break
-                clipped |= bad
-                W = np.where(bad, 0.0, W)
+                    # Fallback: plain inverse-variance mean.
+                    W = W0
 
             wsum = np.sum(W, axis=0)
             cov = np.sum(W > 0, axis=0).astype(np.int16)
-            mu = np.where(wsum > 0, np.sum(W * S, axis=0) / wsum, 0.0)
-            var_out = np.where(wsum > 0, 1.0 / wsum, np.nan)
+            mu = np.where(wsum > 0, np.sum(W * S, axis=0) / wsum, np.nan)
+            var_out = np.where(wsum > 0, 1.0 / wsum, np.nan).astype(np.float32)
 
+            # Mask propagation: OR over contributing samples.
             m_out = np.zeros(mu.shape, dtype=np.uint16)
             m_out = np.where(wsum <= 0, m_out | MASK_NO_COVERAGE, m_out)
-            m_out = np.where(np.any(clipped, axis=0), m_out | MASK_CLIPPED, m_out)
-            if M is not None:
-                # preserve any remaining flags (OR across exposures that contributed)
-                contrib = W > 0
-                m_or = np.bitwise_or.reduce(np.where(contrib, M, 0), axis=0).astype(
-                    np.uint16
-                )
-                m_out |= m_or
+            m_or = np.bitwise_or.reduce(np.where(W > 0, M, 0), axis=0).astype(np.uint16)
+            m_out |= m_or
+
+            # Mark robustly suppressed/rejected pixels.
+            if method in {"invvar_clip", "sigma_clip", "clip"}:
+                suppressed = np.any(valid & (W == 0) & (W0 > 0), axis=0)
+            elif method in {"invvar_huber", "huber", "huber_invvar"}:
+                suppressed = np.any(valid & (hub < 1.0), axis=0)
+            else:
+                suppressed = np.zeros(mu.shape, dtype=bool)
+            m_out = np.where(suppressed, m_out | MASK_ROBUST_REJECTED, m_out)
+
+            suppressed_any += int(np.count_nonzero(suppressed))
+            suppressed_total += int(suppressed.size)
 
             out_sci[ys, :] = mu.astype(np.float32)
-            out_var[ys, :] = var_out.astype(np.float32)
+            out_var[ys, :] = var_out
             out_mask[ys, :] = m_out
             out_cov[ys, :] = cov
 
+        # Empirical variance scaling eta(lambda) (optional).
+        eta_cfg = st_cfg.get("eta") if isinstance(st_cfg.get("eta"), dict) else {}
+        eta_enabled = bool(eta_cfg.get("enabled", True))
+        eta_meta: dict[str, Any] = {"enabled": eta_enabled, "applied": False}
+        if eta_enabled and sky_geom is not None:
+            try:
+                from scipy.ndimage import median_filter
+
+                sky_rows_mask = np.asarray(sky_geom.mask_sky_y, dtype=bool)
+                good = (
+                    sky_rows_mask[:, None]
+                    & np.isfinite(out_sci)
+                    & np.isfinite(out_var)
+                    & (out_cov > 0)
+                    & ((out_mask & FATAL_BITS) == 0)
+                )
+                if np.count_nonzero(sky_rows_mask) >= 8 and np.count_nonzero(good) >= 256:
+                    Z = np.where(good, out_sci, np.nan)
+                    med = np.nanmedian(Z, axis=0)
+                    mad = np.nanmedian(np.abs(Z - med[None, :]), axis=0)
+                    sigma = 1.4826 * mad
+                    var_emp = sigma * sigma
+                    var_pred = np.nanmedian(np.where(good, out_var, np.nan), axis=0)
+                    eta_raw = np.where(
+                        np.isfinite(var_emp) & np.isfinite(var_pred) & (var_pred > 0),
+                        var_emp / var_pred,
+                        np.nan,
+                    )
+
+                    eta_min = float(eta_cfg.get("eta_min", 1.0) or 1.0)
+                    eta_max = float(eta_cfg.get("eta_max", 5.0) or 5.0)
+                    win = int(eta_cfg.get("smooth_window", 31) or 31)
+                    win = int(max(3, win // 2 * 2 + 1))  # odd >=3
+
+                    eta0 = np.where(np.isfinite(eta_raw), eta_raw, 1.0).astype(np.float32)
+                    eta_s = median_filter(eta0, size=win, mode="nearest").astype(np.float32)
+                    eta_s = np.clip(eta_s, eta_min, eta_max)
+
+                    # Apply in-place.
+                    out_var *= eta_s[None, :]
+
+                    # Write eta(lambda) to a sidecar FITS.
+                    eh = fits.Header()
+                    eh["BUNIT"] = "dimensionless"
+                    eh["ETAMETH"] = ("sky_MAD/var_pred", "eta(lambda) definition")
+                    eh["ETASMO"] = (win, "median filter window")
+                    eh["ETAMIN"] = (eta_min, "eta lower bound")
+                    eh["ETAMAX"] = (eta_max, "eta upper bound")
+                    eh["HISTORY"] = f"Scorpio Pipe {PIPELINE_VERSION}: eta(lambda)"
+                    fits.PrimaryHDU(data=eta_s.astype(np.float32), header=eh).writeto(
+                        eta_fits, overwrite=True
+                    )
+
+                    eta_meta.update(
+                        {
+                            "applied": True,
+                            "eta_min": float(eta_min),
+                            "eta_max": float(eta_max),
+                            "smooth_window": int(win),
+                            "eta_median": float(np.nanmedian(eta_raw))
+                            if np.any(np.isfinite(eta_raw))
+                            else None,
+                            "frac_eta_lt_1": (
+                                float(np.mean(eta_raw[np.isfinite(eta_raw)] < 1.0))
+                                if np.any(np.isfinite(eta_raw))
+                                else None
+                            ),
+                            "eta_fits": str(eta_fits),
+                        }
+                    )
+            except Exception as e:
+                eta_meta.update({"applied": False, "error": str(e)})
+
+        report["eta"] = eta_meta
+
+        # Write outputs.
+        hdr = hdr0.copy()
+        hdr["HISTORY"] = f"Scorpio Pipe {PIPELINE_VERSION}: stack2d"
+        hdr["BUNIT"] = out_bunit
+        _out_per_sec = "/s" in str(out_bunit).replace(" ", "").lower() or "s-1" in str(
+            out_bunit
+        ).lower()
+        hdr["NORMEXP"] = (
+            bool(_out_per_sec),
+            "SCI/VAR in per-second units" if _out_per_sec else "SCI/VAR not normalized per second",
+        )
+        hdr["STKMETH"] = (method, "stack2d combine method")
+        if method in {"invvar_huber", "huber", "huber_invvar"}:
+            hdr["STKHC"] = (float(huber_c), "Huber c")
+        if method in {"invvar_clip", "sigma_clip", "clip"}:
+            hdr["STKCLIP"] = (float(clip_sigma), "clip sigma")
+        if var_floor is not None:
+            hdr["STKVFLO"] = (float(var_floor), "variance floor")
+        # Always stamp ETAAPPL so downstream stages can interpret VAR correctly.
+        # If eta is not applied, ETAAPPL=False is still an important piece of provenance.
+        if report.get("eta", {}).get("applied"):
+            hdr["ETAAPPL"] = (True, "eta(lambda) applied to VAR")
+            hdr["ETAPATH"] = (eta_fits.name, "eta(lambda) sidecar FITS")
+        else:
+            hdr["ETAAPPL"] = (False, "eta(lambda) applied to VAR")
+
+        _write_mef(out_fits, out_sci, hdr, var=out_var, mask=out_mask, cov=out_cov)
+        # Legacy output for older runs/UI.
+        try:
+            _write_mef(out_fits_legacy, out_sci, hdr, var=out_var, mask=out_mask, cov=out_cov)
+        except Exception:
+            pass
+
+        # Navigator-friendly quicklooks.
+        if bool(st_cfg.get("save_png", True)):
+            # Stacked SCI image
+            try:
+                from scorpio_pipe.io.quicklook import quicklook_from_mef
+
+                quicklook_from_mef(out_fits, out_stack_png, method="linear", k=4.0)
+            except Exception:
+                pass
+
+            # Coverage map (COV extension, scaled 0..max)
+            try:
+                import numpy as _np
+                from PIL import Image
+
+                mx = int(_np.nanmax(out_cov)) if out_cov.size else 0
+                mx = mx if mx > 0 else 1
+                img = (_np.clip(out_cov, 0, mx) / float(mx) * 255.0).astype("uint8")
+                Image.fromarray(img).save(out_cov_png)
+            except Exception:
+                pass
+
+            # Coverage histogram (useful for diagnosing drizzle gaps)
+            try:
+                import matplotlib.pyplot as plt
+
+                with mpl_style():
+                    fig = plt.figure(figsize=(6.0, 3.6))
+                    ax = fig.add_subplot(111)
+                    ax.hist(out_cov.ravel(), bins=range(int(out_cov.max()) + 2))
+                    ax.set_xlabel("Coverage (N exposures)")
+                    ax.set_ylabel("Pixels")
+                    fig.tight_layout()
+                    fig.savefig(out_cov_hist_png)
+                    plt.close(fig)
+            except Exception:
+                pass
+
+            # eta(lambda) plot
+            if eta_fits.exists():
+                try:
+                    from astropy.io import fits
+                    import matplotlib.pyplot as plt
+                    import numpy as _np
+
+                    with fits.open(eta_fits, memmap=False) as _hdul:
+                        _eta = _np.asarray(_hdul[0].data, dtype=float)
+                    with mpl_style():
+                        fig = plt.figure(figsize=(6.0, 3.6))
+                        ax = fig.add_subplot(111)
+                        ax.plot(_eta)
+                        ax.set_xlabel("Lambda index")
+                        ax.set_ylabel("eta")
+                        fig.tight_layout()
+                        fig.savefig(out_eta_png)
+                        plt.close(fig)
+                except Exception:
+                    pass
+
+        report.update(
+            {
+                "ok": True,
+                "status": "ok",
+                "shape": [int(ny), int(nx)],
+                "n_inputs": len(files),
+                "outputs": {
+                    "stack2d_fits": str(out_fits),
+                    "stacked2d_fits": str(out_fits_legacy) if out_fits_legacy.exists() else None,
+                    "stack2d_png": str(out_stack_png) if out_stack_png.exists() else None,
+                    "coverage_png": str(out_cov_png) if out_cov_png.exists() else None,
+                    "coverage_hist_png": str(out_cov_hist_png) if out_cov_hist_png.exists() else None,
+                    "eta_lambda_fits": str(eta_fits) if eta_fits.exists() else None,
+                    "eta_lambda_png": str(out_eta_png) if out_eta_png.exists() else None,
+                },
+                "metrics": {
+                    "cov_nonzero": float(np.count_nonzero(out_cov > 0) / float(out_cov.size))
+                    if out_cov.size
+                    else 0.0,
+                    "suppressed_pixels_fraction": float(suppressed_any / suppressed_total)
+                    if suppressed_total
+                    else 0.0,
+                },
+            }
+        )
+
+        # Backward-friendly top-level shortcuts (used by pipeline_runner / UI).
+        report["stack2d"] = str(out_fits)
+        report["stacked2d"] = (
+            str(out_fits_legacy) if out_fits_legacy.exists() else str(out_fits)
+        )
+        if out_cov_png.exists():
+            report["coverage_png"] = str(out_cov_png)
+        if out_cov_hist_png.exists():
+            report["coverage_hist_png"] = str(out_cov_hist_png)
+        if out_stack_png.exists():
+            report["stack2d_png"] = str(out_stack_png)
+        if eta_fits.exists():
+            report["eta_lambda_fits"] = str(eta_fits)
+        if out_eta_png.exists():
+            report["eta_lambda_png"] = str(out_eta_png)
+
+        # Stage-level QC flags (used by the QC gate)
+        try:
+            from scorpio_pipe.qc.flags import make_flag, max_severity
+            from scorpio_pipe.qc_thresholds import compute_thresholds
+
+            thr, thr_meta = compute_thresholds(cfg)
+            stage_flags: list[dict[str, Any]] = []
+
+            cov_nonzero = float(report.get("metrics", {}).get("cov_nonzero", 0.0) or 0.0)
+            rejected_pix_frac = float(np.mean((out_mask & MASK_ROBUST_REJECTED) != 0)) if out_mask.size else 0.0
+
+            if cov_nonzero <= float(thr.linearize_cov_nonzero_bad):
+                stage_flags.append(
+                    make_flag(
+                        "COVERAGE_LOW",
+                        "ERROR",
+                        "Stack2D coverage nonzero fraction is critically low",
+                        value=cov_nonzero,
+                        warn_le=float(thr.linearize_cov_nonzero_warn),
+                        bad_le=float(thr.linearize_cov_nonzero_bad),
+                    )
+                )
+            elif cov_nonzero <= float(thr.linearize_cov_nonzero_warn):
+                stage_flags.append(
+                    make_flag(
+                        "COVERAGE_LOW",
+                        "WARN",
+                        "Stack2D coverage nonzero fraction is low",
+                        value=cov_nonzero,
+                        warn_le=float(thr.linearize_cov_nonzero_warn),
+                        bad_le=float(thr.linearize_cov_nonzero_bad),
+                    )
+                )
+
+            if rejected_pix_frac >= float(thr.linearize_rejected_frac_bad):
+                stage_flags.append(
+                    make_flag(
+                        "REJECTED_FRAC_HIGH",
+                        "ERROR",
+                        "Stack2D rejected/suppressed pixel fraction is too high",
+                        value=rejected_pix_frac,
+                        warn_ge=float(thr.linearize_rejected_frac_warn),
+                        bad_ge=float(thr.linearize_rejected_frac_bad),
+                    )
+                )
+            elif rejected_pix_frac >= float(thr.linearize_rejected_frac_warn):
+                stage_flags.append(
+                    make_flag(
+                        "REJECTED_FRAC_HIGH",
+                        "WARN",
+                        "Stack2D rejected/suppressed pixel fraction is high",
+                        value=rejected_pix_frac,
+                        warn_ge=float(thr.linearize_rejected_frac_warn),
+                        bad_ge=float(thr.linearize_rejected_frac_bad),
+                    )
+                )
+
+            # Coverage gaps: columns with zero coverage (useful to diagnose poor dither/alignment)
+            try:
+                if out_cov.size:
+                    col_max = np.max(out_cov, axis=0)
+                    gap_frac = float(np.mean(col_max <= 0))
+                else:
+                    gap_frac = 0.0
+                if gap_frac >= 0.05:
+                    stage_flags.append(
+                        make_flag(
+                            "COVERAGE_GAPS",
+                            "ERROR",
+                            "Stack2D has substantial zero-coverage wavelength gaps",
+                            value=gap_frac,
+                            warn_ge=0.01,
+                            bad_ge=0.05,
+                        )
+                    )
+                elif gap_frac >= 0.01:
+                    stage_flags.append(
+                        make_flag(
+                            "COVERAGE_GAPS",
+                            "WARN",
+                            "Stack2D has wavelength gaps with zero coverage",
+                            value=gap_frac,
+                            warn_ge=0.01,
+                            bad_ge=0.05,
+                        )
+                    )
+            except Exception:
+                gap_frac = None
+
+            # ETA sanity check
+            try:
+                eta = report.get("eta") if isinstance(report.get("eta"), dict) else {}
+                if eta.get("applied"):
+                    mn = eta.get("eta_min")
+                    mx = eta.get("eta_max")
+                    med = eta.get("eta_median")
+                    if mn is not None and mx is not None:
+                        mnf = float(mn)
+                        mxf = float(mx)
+                        medf = float(med) if med is not None else None
+                        if mnf < 0.2 or mxf > 5.0 or (medf is not None and (medf < 0.3 or medf > 3.0)):
+                            stage_flags.append(
+                                make_flag(
+                                    "ETA_ANOMALY",
+                                    "WARN",
+                                    "eta(lambda) looks suspicious; check VAR model or sky noise estimates",
+                                    value=float(medf) if medf is not None else None,
+                                )
+                            )
+            except Exception:
+                pass
+
+            report["qc"] = {
+                "flags": stage_flags,
+                "max_severity": max_severity(stage_flags),
+                "thresholds": thr.to_dict(),
+                "thresholds_meta": thr_meta,
+                "metrics": {
+                    "cov_nonzero": cov_nonzero,
+                    "rejected_pixels_fraction": rejected_pix_frac,
+                    "gap_fraction": gap_frac,
+                    "eta_median": (eta.get("eta_median") if isinstance(eta, dict) else None),
+                },
+            }
+
+            _sev = str(report.get("qc", {}).get("max_severity", "OK") or "OK").upper()
+            report["status"] = (
+                "ok" if _sev in {"OK", "INFO"} else ("warn" if _sev == "WARN" else "fail")
+            )
+            report["ok"] = bool(report["status"] != "fail")
+        except Exception:
+            pass
+
+    except Exception as e:
+        report["ok"] = False
+        report["status"] = "fail"
+        report["error"] = str(e)
+        raise
+
     finally:
+        # Always write a done report (even on failure), then close HDUs.
+        report["finished_at_unix"] = float(time.time())
+        report["runtime_s"] = float(report["finished_at_unix"] - t0)
+        try:
+            stack_done.write_text(
+                json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception:
+            pass
+        try:
+            stack2d_done.write_text(
+                json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception:
+            pass
+        try:
+            done_json.write_text(
+                json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception:
+            pass
         for h in hduls:
             try:
                 h.close()
             except Exception:
                 pass
 
-    out_fits = out_dir / "stacked2d.fits"
-    hdr = hdr0.copy()
-    hdr["HISTORY"] = f"Scorpio Pipe {PIPELINE_VERSION}: stack2d"
-    _write_mef(out_fits, out_sci, hdr, var=out_var, mask=out_mask, cov=out_cov)
-
-    # quick QC plot: coverage histogram
-    out_png = out_dir / "coverage.png"
-    if bool(st_cfg.get("save_png", True)):
-        try:
-            import matplotlib.pyplot as plt
-
-            with mpl_style():
-                fig = plt.figure(figsize=(6.0, 3.6))
-                ax = fig.add_subplot(111)
-                ax.hist(out_cov.ravel(), bins=range(int(out_cov.max()) + 2))
-                ax.set_xlabel("Coverage (N exposures)")
-                ax.set_ylabel("Pixels")
-                fig.tight_layout()
-                fig.savefig(out_png)
-                plt.close(fig)
-        except Exception:
-            pass
-
-    done = out_dir / "stack2d_done.json"
-    payload = {
-        "ok": True,
-        "shape": [int(ny), int(nx)],
-        "method": "variance-weighted mean + sigma-clip",
-        "n_inputs": len(files),
-        # Contract keys used by tests/UI.
-        "stacked2d_fits": str(out_fits),
-        "coverage_png": str(out_png) if out_png.exists() else None,
-        "stack2d_done_json": str(done),
-        # Backwards-compat aliases (older UI/tests):
-        "output_fits": str(out_fits),
-        "output_png": str(out_png) if out_png.exists() else None,
-        "sigma_clip": sigma_clip,
-        "maxiter": maxiter,
-        "chunk_rows": chunk,
-        "y_align_enabled": bool(y_align_enabled),
-        "y_align_mode": str(ya_cfg.get("mode", "full")).lower()
-        if isinstance(ya_cfg, dict)
-        else "full",
-        "y_align_windows_A": (
-            ya_cfg.get("windows_A")
-            or ya_cfg.get("windows")
-            or ya_cfg.get("windows_angstrom")
-        )
-        if isinstance(ya_cfg, dict)
-        else None,
-        "y_align_windows_pix": (
-            ya_cfg.get("windows_pix") or ya_cfg.get("windows_pixels")
-        )
-        if isinstance(ya_cfg, dict)
-        else None,
-        "y_align_windows_unit": (ya_cfg.get("windows_unit") or "auto")
-        if isinstance(ya_cfg, dict)
-        else "auto",
-        "y_align_use_positive_flux": bool(ya_cfg.get("use_positive_flux", True))
-        if isinstance(ya_cfg, dict)
-        else True,
-        "y_offsets": y_offsets,
-    }
-    done.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    return payload
+    return report

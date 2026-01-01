@@ -257,6 +257,24 @@ Product(
         Product(
             "lambda_map", "wavesol", wsol / "lambda_map.fits", "fits", optional=True
         ),
+
+        Product(
+            "rectification_model_json",
+            "wavesol",
+            wsol / "rectification_model.json",
+            "json",
+            optional=True,
+            description="Rectification model (lambda-map signature + VAR/MASK policies)",
+        ),
+        Product(
+            "wave_done_json",
+            "wavesol",
+            wsol / "wave_done.json",
+            "json",
+            optional=True,
+            description="Wavesolution done marker (P1-B contract)",
+        ),
+
         Product(
             "wavelength_matrix_png",
             "wavesol",
@@ -389,10 +407,33 @@ Product(
             optional=True,
             description="Stacking summary",
         ),
+        # Canonical v5.40.4+ names (keep legacy products for backward compatibility)
+        Product(
+            "stack_done",
+            "stack2d",
+            stack_stage / "stack_done.json",
+            "json",
+            optional=True,
+            description="Stacking summary (canonical)",
+        ),
         Product(
             "stacked2d_fits",
             "stack2d",
             stack_stage / "stacked2d.fits",
+            "fits",
+            optional=True,
+        ),
+        Product(
+            "stack2d_fits",
+            "stack2d",
+            stack_stage / "stack2d.fits",
+            "fits",
+            optional=True,
+        ),
+        Product(
+            "eta_lambda_fits",
+            "stack2d",
+            stack_stage / "eta_lambda.fits",
             "fits",
             optional=True,
         ),
@@ -404,12 +445,28 @@ Product(
             optional=True,
         ),
         Product(
+            "extract_done",
+            "extract1d",
+            spec_stage / "extract_done.json",
+            "json",
+            optional=True,
+            description="Extraction summary (canonical)",
+        ),
+        Product(
+            "trace_json",
+            "extract1d",
+            spec_stage / "trace.json",
+            "json",
+            optional=True,
+            description="Trace model and aperture definition",
+        ),
+        Product(
             "extract1d_done",
             "extract1d",
             spec_stage / "extract1d_done.json",
             "json",
             optional=True,
-            description="Extraction summary",
+            description="Extraction summary (legacy alias)",
         ),
         Product(
             "spec1d_fits", "extract1d", spec_stage / "spec1d.fits", "fits", optional=True

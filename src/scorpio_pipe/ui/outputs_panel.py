@@ -111,6 +111,56 @@ class OutputsPanel(QtWidgets.QWidget):
         except Exception:
             pass
 
+
+class OutputsToolDialog(QtWidgets.QDialog):
+    """Non-modal Outputs viewer that does not affect the main window layout."""
+
+    visibilityChanged = QtCore.Signal(bool)  # type: ignore[attr-defined]
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Outputs")
+        # Tool-like window: stays on top of the main window, but does not steal focus.
+        self.setWindowFlags(
+            self.windowFlags()
+            | QtCore.Qt.Tool
+            | QtCore.Qt.WindowCloseButtonHint
+            | QtCore.Qt.WindowMinimizeButtonHint
+        )
+        self.setModal(False)
+        self.setMinimumSize(420, 520)
+
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setSpacing(8)
+
+        self.panel = OutputsPanel()
+        lay.addWidget(self.panel, 1)
+
+    def set_context(self, cfg: dict, stage: str | None) -> None:
+        self.panel.set_context(cfg, stage=stage)
+
+    def showEvent(self, e: QtGui.QShowEvent) -> None:  # noqa: N802
+        super().showEvent(e)
+        try:
+            self.visibilityChanged.emit(True)
+        except Exception:
+            pass
+
+    def hideEvent(self, e: QtGui.QHideEvent) -> None:  # noqa: N802
+        super().hideEvent(e)
+        try:
+            self.visibilityChanged.emit(False)
+        except Exception:
+            pass
+
+    def closeEvent(self, e: QtGui.QCloseEvent) -> None:  # noqa: N802
+        super().closeEvent(e)
+        try:
+            self.visibilityChanged.emit(False)
+        except Exception:
+            pass
+
     def _open_selected(self, item: QtWidgets.QTreeWidgetItem) -> None:
         try:
             p = Path(str(item.data(0, QtCore.Qt.ItemDataRole.UserRole) or ""))
@@ -124,3 +174,63 @@ class OutputsPanel(QtWidgets.QWidget):
                     )
         except Exception:
             pass
+
+
+class OutputsDrawer(QtWidgets.QWidget):
+    """A compact, collapsible wrapper around :class:`OutputsPanel`.
+
+    The drawer keeps its width stable to avoid "jumping" layouts when the user
+    shows/hides outputs. Outputs are secondary, so the default state is folded.
+    """
+
+    def __init__(
+        self,
+        inner: OutputsPanel | None = None,
+        *,
+        title: str = "Outputs",
+        folded: bool = True,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._folded = bool(folded)
+
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+
+        header = QtWidgets.QHBoxLayout()
+        lay.addLayout(header)
+        self.btn_toggle = QtWidgets.QToolButton()
+        self.btn_toggle.setCheckable(True)
+        self.btn_toggle.setChecked(not self._folded)
+        self.btn_toggle.setArrowType(
+            QtCore.Qt.ArrowType.DownArrow
+            if not self._folded
+            else QtCore.Qt.ArrowType.RightArrow
+        )
+        self.btn_toggle.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.lbl_title = QtWidgets.QLabel(title)
+        self.lbl_title.setStyleSheet("font-weight: 600;")
+        header.addWidget(self.btn_toggle)
+        header.addWidget(self.lbl_title)
+        header.addStretch(1)
+
+        self.inner = inner or OutputsPanel()
+        lay.addWidget(self.inner, 1)
+        self.inner.setVisible(not self._folded)
+
+        # Keep the panel width stable: fold only the content.
+        self.setMinimumWidth(420)
+        self.setMaximumWidth(520)
+
+        self.btn_toggle.toggled.connect(self.setFolded)
+
+    def setFolded(self, folded: bool) -> None:  # noqa: N802
+        # The toggle is "expanded" when checked.
+        _ = folded  # compatibility with Qt slot signature
+        self._folded = not self.btn_toggle.isChecked()
+        self.inner.setVisible(not self._folded)
+        self.btn_toggle.setArrowType(
+            QtCore.Qt.ArrowType.RightArrow if self._folded else QtCore.Qt.ArrowType.DownArrow
+        )
+

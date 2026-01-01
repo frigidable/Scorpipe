@@ -95,6 +95,8 @@ CONTRACTS: dict[str, StageContract] = {
             "wavesolution_1d_json",
             "wavesolution_2d_json",
             "lambda_map",
+            "rectification_model_json",
+            "wave_done_json",
             "residuals_1d_csv",
             "residuals_2d_csv",
             "control_points_2d_csv",
@@ -139,8 +141,10 @@ CONTRACTS: dict[str, StageContract] = {
     "extract1d": StageContract(
         stage="extract1d",
         title="1D extraction",
-        inputs=("stacked2d.fits (from Stack2D)",),
-        outputs=("extract1d_done", "spec1d_fits", "spec1d_png"),
+        inputs=(
+            "11_stack/stack2d.fits (default) or 10_linearize/<stem>_skysub.fits (extract1d.input_mode=single_frame)",
+        ),
+        outputs=("extract_done", "trace_json", "spec1d_fits", "spec1d_png", "extract1d_done"),
     ),
     "qc_report": StageContract(
         stage="qc_report",

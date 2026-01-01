@@ -1,3 +1,73 @@
+## v5.40.7
+
+### P2 — Workspace validator + StageRegistry regressions
+- Added `scorpio_pipe.run_validate.validate_run_dir()` to validate `workspace/<night>/<obj>_<disperser>_<run_id>` layout and `run.json` passport schema/consistency.
+- GUI: opening a run now validates the workspace; if folder name and `run.json` diverge, a "Fix run.json" button is shown (no silent guessing).
+- Runner: `run_sequence()` ensures minimal layout and validates the run passport before executing stages.
+- StageRegistry: canonical stage dir for Arc Line ID is now `07_arc_line_id` (legacy `07_arclineid`/`07_lineid` are still recognized).
+- Tests: added P2 regression tests for StageRegistry order and workspace validation.
+
+## v5.40.4
+
+### P1-E — Frame Stacking: strict contract + robust combine + η(λ) variance calibration
+- Stack2D input contract hardened: consumes **only** `10_linearize/*_skysub.fits` (no legacy fallbacks in runner/GUI).
+- Compatibility checks: validates **shape**, **wavelength grid**, and **SCI unit** (with consistent per-second normalization via EXPTIME / TEXPS).
+- Robust stacking: adds **invvar_huber** (default) and **invvar_clip** methods, with masked/fatal-bit aware coverage and REJECTED bookkeeping.
+- Variance stability: optional **VAR floor** from a low percentile of sky VAR (sub-sampled, ROI-aware when available).
+- η(λ) calibration: estimates column-wise variance mismatch in sky windows (MAD-based), smooths, clamps, writes `eta_lambda.fits`, and stamps headers (`ETAAPPL`, etc.).
+- Reporting: writes canonical `stack_done.json` (and keeps `stack2d_done.json` + `done.json`), including inputs, checks, runtime, metrics, and QC flags.
+- Outputs: writes canonical `11_stack/stack2d.fits` (and keeps `stacked2d.fits`).
+
+## v5.40.3
+
+### P1-D — Linearization: full Sky→Linearize transfer + reporting contract
+- Linearize: fixed per-run reporting to include a full P1-D schema (`inputs/grid/resampling/delta_lambda/roi/cleanup/metrics/outputs/flags`) and a detailed `per_exposure` array.
+- Linearize: fixed a runtime bug in coverage bookkeeping (`no_coverage_fracs` append typo).
+- Residual cleanup diagnostics: AUTO reports both output metrics and (when rejected) candidate-after metrics, without mislabeling whether cleanup was applied.
+
+## v5.40.2
+
+### P1-C — Sky Subtraction (RAW) ROI-aware + SciPy spline core
+- Dependencies: promoted **SciPy** to a core dependency (no more "optional science" install needed for key spectral steps).
+- Sky Subtraction (Kelson RAW): model fit now uses SciPy's cubic B-spline design matrix + sparse weighted least-squares (robust sigma-clipping), improving numerical stability and accuracy.
+- Reports: `sky_done.json` is now aligned with the standard `done.json` QC contract (`qc.flags`, `qc.max_severity`, `status=ok|warn|fail`) and includes P1-C fields (ROI provenance, flexure summary, metrics, outputs).
+
+## v5.40.1
+
+### P1-B — Wavelength Solution artifacts for Kelson + Linearization
+- Wavesolution: writes `rectification_model.json` next to `lambda_map.fits` (unit/reference, sha256 signature, and VAR/MASK policies).
+- Linearize: prefers `rectification_model.json` to locate/validate the lambda-map and records hashes + policies in `done.json`.
+- QC/UI: product registry + stage contract now include the rectification model as a first-class artifact.
+
+## v5.40.0
+
+### P0 — QC gate + done.json contract + MEF I/O
+- Runner: added a **QC gate** that stops downstream stages when any upstream stage emitted QC flags with severity **ERROR/FATAL** in its `done.json`. The GUI shows a blocking dialog with details and an explicit **override** button; CLI adds `--override-qc-gate`. Any override is recorded in `manifest/stage_state.json`.
+- Linearize / Sky Subtraction / Stack2D: now write canonical `done.json` (and keep legacy `*_done.json`) and embed `qc.flags` + `qc.max_severity` for reproducible gating.
+- MEF contract: `write_sci_var_mask(...)` now supports an optional `COV` extension (exposure coverage); `validate_sci_var_mask()` understands it. Mask bits remain consistent across stages.
+- Sky Subtraction: fixed a crash in output bookkeeping (missing `done.json` path).
+
+## v5.39.4
+
+### GUI — finish Wavesol + Linearize refactor (DoD)
+- Wavesol: parameter pane is now sectioned (Core / Edge crop / Power model / Chebyshev model / Trace / Power fit / Chebyshev fit).
+- Wavesol: model2d gating is done via enable/disable (no hiding) → stable layout; also fixed "dirty on open" by removing init pending.
+- Linearize: parameter pane is now sectioned (Core / Geometry / Diagnostics, plus Advanced Outputs) with checkbox text removed.
+- Params: default-icon hover now shows Default + (when available) Usually from centralized metadata.
+- Metadata: expanded `param_metadata.py` (Wavesol + SuperNeon-related Wavesol keys), used as UI source of truth.
+
+## v5.39.3
+
+### GUI — Linearize: units + defaults + tooltip polish
+- Linearize: parameter rows now use schema-backed cfg_path, so the default-icon reset works reliably and tooltips show the default value.
+- Units are rendered consistently as `Name [unit]` (e.g. Δλ [Å], λ min/max [Å], crop [px]).
+- Default-icon hover text is now human-friendly for schema defaults like `None`/empty/bool (shows `auto`, `empty`, `on/off` instead of `None/True/False`).
+
+## v5.39.2
+
+### GUI — layout stability, less visual noise
+- Stage pages: Outputs are shown in a detached tool window (toolbar action) — no in-page Outputs panes/drawers, so the main layout does not shift.
+- Setup page: removed inline help/"?" buttons; help is now via tooltip on parameter labels.
 
 ## v5.38.2
 
@@ -186,6 +256,16 @@
 - Products manifest now groups **per-exposure** artifacts by tag and includes FITS/PNG/JSON files.
 
 # Changelog
+
+## v5.40.7
+
+P2 (HARDENING / QA / REGRESSIONS): "ремень безопасности".
+
+- Workspace/run validator: `validate_run_dir()` — проверка layout `workspace/<night>/<obj>_<disperser>_<run_id>` и `run.json` (schema=1), с понятными сообщениями об ошибках.
+- GUI: при открытии run выполняется валидация; при несогласованности `run.json` ↔ имя папки доступна кнопка "Fix run.json".
+- Runner: `run_sequence()` гарантирует базовый layout (`ensure_work_layout`) и валидирует run перед запуском.
+- StageRegistry: каноническое имя стадии `07_arc_line_id`.
+- Тесты P2: фиксация 12 стадий и порядка, + регрессионные проверки `validate_run_dir()`.
 
 ## v5.16.0
 

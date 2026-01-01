@@ -43,6 +43,17 @@ class Thresholds:
     linearize_rejected_frac_warn: float = 0.10
     linearize_rejected_frac_bad: float = 0.25
 
+    # Sky-subtraction (detector-space) sanity checks
+    # P1-C guardrails (sky subtraction): be stricter by default.
+    sky_good_frac_warn: float = 0.80
+    sky_good_frac_bad: float = 0.60
+
+    sky_rows_frac_warn: float = 0.20
+    sky_rows_frac_bad: float = 0.10
+
+    sky_resid_mad_snr_warn: float = 3.0
+    sky_resid_mad_snr_bad: float = 6.0
+
     def to_dict(self) -> Dict[str, float]:
         return {
             "wavesol_1d_rms_warn": float(self.wavesol_1d_rms_warn),
@@ -57,6 +68,12 @@ class Thresholds:
             "linearize_cov_nonzero_bad": float(self.linearize_cov_nonzero_bad),
             "linearize_rejected_frac_warn": float(self.linearize_rejected_frac_warn),
             "linearize_rejected_frac_bad": float(self.linearize_rejected_frac_bad),
+            "sky_good_frac_warn": float(self.sky_good_frac_warn),
+            "sky_good_frac_bad": float(self.sky_good_frac_bad),
+            "sky_rows_frac_warn": float(self.sky_rows_frac_warn),
+            "sky_rows_frac_bad": float(self.sky_rows_frac_bad),
+            "sky_resid_mad_snr_warn": float(self.sky_resid_mad_snr_warn),
+            "sky_resid_mad_snr_bad": float(self.sky_resid_mad_snr_bad),
         }
 
 
@@ -138,9 +155,15 @@ def compute_thresholds(cfg: Dict[str, Any]) -> Tuple[Thresholds, Dict[str, Any]]
                 linearize_cov_nonzero_bad=thr.linearize_cov_nonzero_bad,
                 linearize_rejected_frac_warn=thr.linearize_rejected_frac_warn,
                 linearize_rejected_frac_bad=thr.linearize_rejected_frac_bad,
+                sky_good_frac_warn=thr.sky_good_frac_warn,
+                sky_good_frac_bad=thr.sky_good_frac_bad,
+                sky_rows_frac_warn=thr.sky_rows_frac_warn,
+                sky_rows_frac_bad=thr.sky_rows_frac_bad,
+                sky_resid_mad_snr_warn=thr.sky_resid_mad_snr_warn,
+                sky_resid_mad_snr_bad=thr.sky_resid_mad_snr_bad,
             )
 
-    # --- user overrides (wavesol.qc.thresholds + linearize.qc.thresholds) ---
+    # --- user overrides (qc.thresholds + per-stage thresholds) ---
     w_overrides = (
         (qc or {}).get("thresholds") if isinstance((qc or {}).get("thresholds"), dict) else {}
     )
@@ -151,9 +174,26 @@ def compute_thresholds(cfg: Dict[str, Any]) -> Tuple[Thresholds, Dict[str, Any]]
         (lqc or {}).get("thresholds") if isinstance((lqc or {}).get("thresholds"), dict) else {}
     )
 
+    q = cfg.get("qc") if isinstance(cfg.get("qc"), dict) else {}
+    q_overrides = (
+        (q or {}).get("thresholds") if isinstance((q or {}).get("thresholds"), dict) else {}
+    )
+
+    s = cfg.get("sky") if isinstance(cfg.get("sky"), dict) else {}
+    sqc = (s or {}).get("qc") if isinstance((s or {}).get("qc"), dict) else {}
+    s_overrides = (
+        (sqc or {}).get("thresholds") if isinstance((sqc or {}).get("thresholds"), dict) else {}
+    )
+
+    st2 = cfg.get("stack2d") if isinstance(cfg.get("stack2d"), dict) else {}
+    st2qc = (st2 or {}).get("qc") if isinstance((st2 or {}).get("qc"), dict) else {}
+    st2_overrides = (
+        (st2qc or {}).get("thresholds") if isinstance((st2qc or {}).get("thresholds"), dict) else {}
+    )
+
     d = thr.to_dict()
     applied: Dict[str, float] = {}
-    for overrides in (w_overrides, l_overrides):
+    for overrides in (q_overrides, w_overrides, l_overrides, s_overrides, st2_overrides):
         if not overrides:
             continue
         for k, v in overrides.items():

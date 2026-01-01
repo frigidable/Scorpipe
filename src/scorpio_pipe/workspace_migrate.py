@@ -150,7 +150,7 @@ def migrate_run_to_v5391(src_run_root: str | Path, dst_run_root: str | Path | No
         "flatfield": ["flat", "flatfield"],
         "cosmics": ["cosmics"],
         "superneon": ["superneon"],
-        "arclineid": ["lineid", "arclineid"],
+        "arclineid": ["arc_line_id", "lineid", "arclineid"],
         "wavesol": ["wavesol"],
         "linearize": ["linearize"],
         # unified sky: prefer rectified, then raw, then any sky dir

@@ -17,24 +17,22 @@ class QCItem:
 
 
 DEFAULT_QC_ITEMS: list[QCItem] = [
-    # Canonical (v5.38.6): everything is local to run_root.
+    # Canonical (v5.40.6): QC lives in run_root/qc, HTML entrypoint at run_root/index.html.
     QCItem("Manifest (JSON)", "manifest/manifest.json", "text"),
     QCItem("Products manifest (JSON)", "manifest/products_manifest.json", "text"),
     QCItem("QC report (HTML)", "index.html", "text"),
-    QCItem("QC summary (JSON)", "manifest/qc_report.json", "text"),
+    QCItem("QC report (HTML, qc/)", "qc/qc_report.html", "text"),
+    QCItem("QC summary (JSON)", "qc/qc_report.json", "text"),
     QCItem("Timings (JSON)", "manifest/timings.json", "text"),
-    QCItem("Linearize QC (JSON)", "manifest/linearize_qc.json", "text"),
+    QCItem("Linearize QC (JSON)", "qc/linearize_qc.json", "text"),
     QCItem("Superbias (FITS)", "03_bias/superbias.fits", "fits"),
     QCItem("Superflat (FITS)", "04_flat/superflat.fits", "fits"),
     QCItem("Cosmics summary (JSON)", "05_cosmics/summary.json", "text"),
 
-    # Legacy locations (kept read-only; no auto-migration).
-    QCItem("Manifest (legacy)", "qc/manifest.json", "text"),
-    QCItem("Products manifest (legacy)", "qc/products_manifest.json", "text"),
-    QCItem("QC report (legacy)", "qc/index.html", "text"),
-    QCItem("QC summary (legacy)", "qc/qc_report.json", "text"),
-    QCItem("Timings (legacy)", "qc/timings.json", "text"),
-    QCItem("Linearize QC (legacy)", "qc/linearize_qc.json", "text"),
+    # Legacy copies (kept for back-compat consumers).
+    QCItem("QC summary (legacy)", "manifest/qc_report.json", "text"),
+    QCItem("QC report (legacy)", "manifest/qc_report.html", "text"),
+    QCItem("Linearize QC (legacy)", "manifest/linearize_qc.json", "text"),
     QCItem("Superbias (legacy)", "calibs/superbias.fits", "fits"),
     QCItem("Superbias (legacy)", "calib/superbias.fits", "fits"),
     QCItem("Superflat (legacy)", "calibs/superflat.fits", "fits"),

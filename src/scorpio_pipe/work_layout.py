@@ -38,7 +38,7 @@ def ensure_work_layout(work_dir: str | Path) -> WorkLayout:
 
     New layout (v5.38.4)
     --------------------
-    - Always create: ``manifest/`` and ``config.yaml``.
+    - Always create: ``manifest/``, ``qc/``, ``ui/navigator/``, ``ui/history/`` and ``config.yaml``.
     - Do NOT create: ``raw/`` and ``products/``.
     - Stage output directories live directly under the workspace root as
       ``NN_slug/`` and are created **lazily** by each stage when it runs.
@@ -62,7 +62,20 @@ def ensure_work_layout(work_dir: str | Path) -> WorkLayout:
     report_legacy = wd / "report"
 
     manifest.mkdir(parents=True, exist_ok=True)
+    # Lightweight UI/QC roots are part of the run layout contract.
+    qc.mkdir(parents=True, exist_ok=True)
+    (wd / "ui" / "navigator").mkdir(parents=True, exist_ok=True)
+    (wd / "ui" / "history").mkdir(parents=True, exist_ok=True)
     _write_default_config(wd / "config.yaml")
+
+    # Ensure the run passport exists (best-effort; it may be created later
+    # when a representative header is available).
+    try:
+        from scorpio_pipe.run_passport import ensure_run_passport
+
+        ensure_run_passport(wd)
+    except Exception:
+        pass
 
     return WorkLayout(
         work_dir=wd,
