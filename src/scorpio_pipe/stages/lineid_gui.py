@@ -103,6 +103,46 @@ def _read_peaks_candidates(path: Path) -> tuple[np.ndarray, np.ndarray]:
     return x[idx], amp[idx]
 
 
+def _read_linelist_meta(path: Path) -> dict[str, str]:
+    """Parse metadata comment lines from a linelist CSV.
+
+    We accept simple comment headers like:
+      # waveref: air
+      # unit: angstrom
+
+    Returns a dict with lower-case keys/values.
+    """
+
+    meta: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception:
+        return meta
+
+    for line in lines[:80]:
+        s = line.strip()
+        if not s.startswith("#"):
+            continue
+        s = s[1:].strip()
+        if not s:
+            continue
+        if ":" in s:
+            k, v = s.split(":", 1)
+        elif "=" in s:
+            k, v = s.split("=", 1)
+        else:
+            continue
+        k = k.strip().lower()
+        v = v.strip().lower()
+        if k in {"waveref", "wave_ref", "ref"}:
+            if v in {"air", "vacuum"}:
+                meta["waveref"] = v
+        elif k in {"unit", "units"}:
+            meta["unit"] = v
+
+    return meta
+
+
 def _read_neon_lines_csv(path: Path) -> list[float]:
     # максимально терпимо к формату
     # берём все числа в разумном диапазоне
@@ -843,6 +883,18 @@ def prepare_lineid(
     x = np.arange(prof.size, dtype=float)
 
     pk_x, pk_amp = _read_peaks_candidates(peaks_candidates_csv)
+
+    # Hard guard: line list waveref must match wavesol.waveref to avoid systematic shifts.
+    ll_meta = _read_linelist_meta(neon_lines_csv)
+    cfg_ref = str(wcfg.get("wave_ref", wcfg.get("waveref", "air")) or "air").strip().lower()
+    if cfg_ref not in {"air", "vacuum"}:
+        cfg_ref = "air"
+    if ll_meta.get("waveref") and ll_meta["waveref"] != cfg_ref:
+        raise RuntimeError(
+            f"neon_lines.csv WAVEREF mismatch: linelist={ll_meta['waveref']!r}, config={cfg_ref!r}. "
+            "Fix one of them (wavesol.waveref or the linelist header) before calibrating."
+        )
+
     ref_lams = _read_neon_lines_csv(neon_lines_csv)
 
     # --- Atlas (HeNeAr) ---

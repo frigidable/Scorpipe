@@ -7,10 +7,13 @@ import numpy as np
 from astropy.io import fits
 
 from scorpio_pipe.app_paths import ensure_dir
+from scorpio_pipe.calib_compat import ensure_compatible_calib
 from scorpio_pipe.fits_utils import open_fits_smart
 from scorpio_pipe.io.mef import write_sci_var_mask
 from scorpio_pipe.noise_model import estimate_variance_adu2, resolve_noise_params
 from scorpio_pipe.paths import resolve_work_dir
+from scorpio_pipe.units_model import ensure_electron_units
+from scorpio_pipe.workspace_paths import stage_dir
 
 
 def _read_sci_var_mask(path: Path) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None, fits.Header]:
@@ -83,8 +86,20 @@ def apply_flat(
     data, var, mask, hdr = _read_sci_var_mask(data_path)
     superflat = fits.getdata(superflat_path).astype(np.float32)
 
+    # Calibration compatibility check (strict key; readout differences allowed).
+    try:
+        ensure_compatible_calib(hdr, superflat_path, kind="superflat", strict=True, allow_readout_diff=True)
+    except Exception as e:
+        # hard stop: applying mismatched flat corrupts science.
+        raise
+
     if do_bias_subtract and not bool(hdr.get("BIASSUB", False)):
         superbias = fits.getdata(superbias_path).astype(np.float32)
+
+        try:
+            ensure_compatible_calib(hdr, superbias_path, kind="superbias", strict=True, allow_readout_diff=True)
+        except Exception:
+            raise
         if superbias.shape == data.shape:
             data = data - superbias.astype(np.float32)
             hdr["BIASSUB"] = (True, "Superbias subtracted")
@@ -103,6 +118,7 @@ def apply_flat(
             hdr,
             gain_override=gain_override,
             rdnoise_override=rdnoise_override,
+            require_gain=True,
         )
         hdr.setdefault("HISTORY", "scorpio_pipe flatfield: VAR estimated")
         # Keep resolved params in the header for downstream stages.
@@ -125,8 +141,18 @@ def apply_flat(
     hdr["FLATCOR"] = (True, "Flat-fielding applied")
     hdr["HISTORY"] = "scorpio_pipe flatfield: divided by superflat"
 
-    # Keep science units explicit.
-    hdr.setdefault("BUNIT", "ADU")
+    # Convert to internal unit standard: electrons.
+    corr_e, var_corr_e, hdr_e, prov, _ = ensure_electron_units(
+        corr,
+        var_corr,
+        hdr,
+        gain_override=gain_override,
+        rdnoise_override=rdnoise_override,
+        require_gain=True,
+    )
+    corr = corr_e
+    var_corr = var_corr_e
+    hdr = hdr_e
 
     ensure_dir(out_path.parent)
     write_sci_var_mask(
@@ -154,8 +180,8 @@ def run_flatfield(cfg: dict, *, out_dir: Path | None = None) -> Path:
     Layout
     ------
     - calib/superflat.fits  (created if absent)
-    - flatfield/<kind>/*_flat.fits
-    - flatfield/flatfield_done.json
+    - 04_flat/<kind>/*_flat.fits
+    - 04_flat/flatfield_done.json
 
     Notes
     -----
@@ -165,7 +191,10 @@ def run_flatfield(cfg: dict, *, out_dir: Path | None = None) -> Path:
     """
 
     work_dir = resolve_work_dir(cfg)
-    out_dir = out_dir or (work_dir / "flatfield")
+    # Canonical v5.40+ layout uses numbered stage directories.
+    # Legacy fallback `work_dir/flatfield` is still *read* by some tools,
+    # but the stage must write to the canonical location by default.
+    out_dir = out_dir or stage_dir(work_dir, "flatfield")
     ensure_dir(out_dir)
 
     block = cfg.get("flatfield", {}) or {}
@@ -182,35 +211,56 @@ def run_flatfield(cfg: dict, *, out_dir: Path | None = None) -> Path:
 
     frames = cfg.get("frames", {}) or {}
 
-    superbias_path = _resolve_path(
-        (cfg.get("calib", {}) or {}).get(
-            "superbias_path", work_dir / "calib" / "superbias.fits"
-        ),
-        work_dir,
+    # Resolve calibration masters robustly (canonical stage dirs + legacy fallbacks).
+    # NOTE: do *not* hard-code work_dir/calibs or work_dir/calib here — GUI/CLI may
+    # use the canonical NN_* stage layout.
+    from scorpio_pipe.stages.calib import (
+        build_superbias as _build_superbias,
+        build_superflat as _build_superflat,
+        _resolve_superbias_path as _resolve_superbias_path,
+        _resolve_superflat_path as _resolve_superflat_path,
     )
-    superflat_path = _resolve_path(
-        (cfg.get("calib", {}) or {}).get(
-            "superflat_path", work_dir / "calib" / "superflat.fits"
-        ),
-        work_dir,
-    )
+
+    superbias_path = _resolve_superbias_path(cfg, work_dir)
+    superflat_path = _resolve_superflat_path(cfg, work_dir)
 
     flat_paths = [_resolve_path(p, work_dir) for p in (frames.get("flat") or [])]
     if not flat_paths:
         raise ValueError("No flat frames selected (frames.flat is empty)")
 
-    # Always build / refresh superflat for the current object.
-    # Canonical builder lives in stages.calib (single source of truth).
-    from scorpio_pipe.stages.calib import (
-        build_superflat as _build_superflat,
-        _resolve_superbias_path as _resolve_superbias_path,
-    )
+    # Ensure superbias exists (flatfield may be executed standalone).
+    if not superbias_path.exists():
+        bias_paths = frames.get("bias") or []
+        if bias_paths:
+            try:
+                _build_superbias(cfg, out_path=superbias_path)
+            except Exception as e:
+                raise RuntimeError(
+                    f"FlatFielding requires superbias, and auto-build failed. "
+                    f"Tried to build at: {superbias_path}"
+                ) from e
+        else:
+            raise RuntimeError(
+                f"FlatFielding requires superbias, but it was not found at: {superbias_path}. "
+                "Run the 'superbias' stage first or set calib.superbias_path in config."
+            )
 
-    ensure_dir(superflat_path.parent)
-    # Use config-driven builder to avoid diverging behavior between different call paths.
-    superflat_path = _build_superflat(cfg, out_path=superflat_path)
-    # Make sure we use the same superbias file as the superflat builder.
+    # Build/refresh superflat only if missing or explicitly requested.
+    rebuild_superflat = bool(block.get("rebuild_superflat", False))
+    if rebuild_superflat or (not superflat_path.exists()):
+        ensure_dir(superflat_path.parent)
+        # Use config-driven builder to avoid diverging behavior between different call paths.
+        superflat_path = _build_superflat(cfg, out_path=superflat_path)
+
+    # After builds, resolve again (builders may mirror into canonical locations).
     superbias_path = _resolve_superbias_path(cfg, work_dir)
+    superflat_path = _resolve_superflat_path(cfg, work_dir)
+
+    if not superflat_path.exists():
+        raise RuntimeError(
+            f"FlatFielding requires superflat, but it was not found at: {superflat_path}. "
+            "Run the 'superflat' stage first (or enable flatfield.rebuild_superflat) or set calib.superflat_path in config."
+        )
 
     apply_to = list(
         block.get("apply_to") or ["obj", "sky", "sunsky"]
@@ -232,7 +282,15 @@ def run_flatfield(cfg: dict, *, out_dir: Path | None = None) -> Path:
         kind_out = out_dir / kind
         ensure_dir(kind_out)
 
-        kind_clean_dir = work_dir / "cosmics" / kind / "clean"
+        # Prefer canonical 05_cosmics layout, with legacy fallback.
+        kind_clean_dir: Path | None = None
+        for root in (stage_dir(work_dir, "cosmics"), work_dir / "cosmics"):
+            cand = root / kind / "clean"
+            if cand.exists():
+                kind_clean_dir = cand
+                break
+        if kind_clean_dir is None:
+            kind_clean_dir = stage_dir(work_dir, "cosmics") / kind / "clean"
 
         for fp in kind_frames:
             src0 = _resolve_path(fp, work_dir)

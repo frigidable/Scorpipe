@@ -24,6 +24,7 @@ from scorpio_pipe.ui.qc_viewer import QCViewer
 from scorpio_pipe.ui.pair_rejector import clean_pairs_interactively
 from scorpio_pipe.ui.cosmics_manual import CosmicsManualDialog
 from scorpio_pipe.ui.frame_browser import SelectedFrame
+from scorpio_pipe.ui.project_manifest_dialog import ProjectManifestDialog
 from scorpio_pipe.ui.outputs_panel import OutputsToolDialog
 from scorpio_pipe.ui.config_defaults import schema_default
 from scorpio_pipe.ui.param_metadata import get_param_meta
@@ -1159,12 +1160,17 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_inspect.setProperty("primary", True)
         self.btn_frames_project = QtWidgets.QPushButton("Frames…")
         self.btn_frames_project.setToolTip("Open Frames Browser for the Project stage")
+        self.btn_manifest_project = QtWidgets.QPushButton("Manifest…")
+        self.btn_manifest_project.setToolTip(
+            "Edit project_manifest.yaml (explicit frame roles: OBJECT/SKY/ARCS/FLATS/BIAS)"
+        )
         self.lbl_inspect = QtWidgets.QLabel("—")
         self.lbl_inspect.setWordWrap(True)
 
         row_ins = QtWidgets.QHBoxLayout()
         row_ins.addWidget(self.btn_inspect)
         row_ins.addWidget(self.btn_frames_project)
+        row_ins.addWidget(self.btn_manifest_project)
         row_ins.addStretch(1)
         # QFormLayout.addRow() does not accept (QLayout, QWidget).
         # Put the action buttons on their own full-width row, then the status line below.
@@ -1217,6 +1223,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_frames_project.clicked.connect(
             lambda: self._open_frames_window("project")
         )
+        self.btn_manifest_project.clicked.connect(self._open_project_manifest)
         self.edit_data_dir.textChanged.connect(lambda *_: self._update_enables())
         self.edit_data_dir.textChanged.connect(lambda *_: self._refresh_statusbar())
 
@@ -1559,6 +1566,122 @@ class LauncherWindow(QtWidgets.QMainWindow):
             win.activateWindow()
         except Exception as e:
             self._log_exception(e)
+
+    def _open_project_manifest(self) -> None:
+        """Open the project manifest editor.
+
+        The manifest defines explicit frame roles (OBJECT/SKY/ARCS/FLATS/BIAS).
+        It lives in the current *run folder* (work dir).
+        """
+        try:
+            # Need inspection table as a convenient picker.
+            if getattr(self, "_inspect", None) is None or getattr(self._inspect, "table", None) is None:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "No inspection yet",
+                    "Run 'Inspect dataset' first to populate the frame list.",
+                )
+                return
+
+            wd_txt = str(getattr(self, "edit_work_dir", None).text() if hasattr(self, "edit_work_dir") else "")
+            if not wd_txt.strip():
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Work folder is empty",
+                    "Initialize run (Setup page) or set the Run folder, then open the manifest editor.",
+                )
+                return
+            work_dir = Path(wd_txt).expanduser()
+            work_dir.mkdir(parents=True, exist_ok=True)
+
+            # Provide a minimal cfg stub for path resolution.
+            cfg_stub: dict[str, Any] = {}
+            try:
+                cfg_stub.update(getattr(self, "_cfg", {}) or {})
+            except Exception:
+                pass
+            cfg_stub.setdefault("work_dir", str(work_dir))
+            try:
+                cfg_stub.setdefault("config_dir", str(Path(self.edit_cfg_path.text()).expanduser().resolve().parent))
+            except Exception:
+                cfg_stub.setdefault("config_dir", str(work_dir))
+
+            dlg = ProjectManifestDialog(cfg=cfg_stub, inspect_df=self._inspect.table, parent=self)
+            dlg.manifestSaved.connect(lambda *_: self._on_project_manifest_saved())
+            dlg.show()
+        except Exception as e:
+            self._log_exception(e)
+
+    def _on_project_manifest_saved(self) -> None:
+        """Reload config (if present) and refresh UI gating."""
+        try:
+            # Reload config from disk if possible (apply_project_manifest_to_cfg happens inside).
+            cfg_path = Path(self.edit_cfg_path.text()).expanduser()
+            if cfg_path.exists():
+                self._load_config(cfg_path)
+            else:
+                # Still refresh gating based on current cfg/manifest.
+                self._apply_manifest_gating()
+        except Exception:
+            self._apply_manifest_gating()
+
+    def _apply_manifest_gating(self) -> None:
+        """Enable/disable UI options that require explicit roles in the manifest."""
+        try:
+            pm = (getattr(self, "_cfg", None) or {}).get("_project_manifest", {})
+            has_sky = bool(pm.get("has_sky_frames", False))
+        except Exception:
+            has_sky = False
+
+        # Sky scaling requires explicit SKY_FRAMES in the project manifest.
+        try:
+            combo = getattr(self, "combo_sky_primary", None)
+            if combo is not None:
+                self._set_combo_item_enabled(
+                    combo,
+                    "sky_scale_raw",
+                    enabled=has_sky,
+                    disabled_tooltip="Disabled: SKY_FRAMES are not defined in project_manifest.yaml",
+                )
+                # If the user previously selected sky_scale_raw and it became disabled, fall back.
+                if (not has_sky) and combo.currentData() == "sky_scale_raw":
+                    idx = combo.findData("kelson_raw")
+                    if idx >= 0:
+                        combo.setCurrentIndex(idx)
+        except Exception:
+            pass
+
+    def _set_combo_item_enabled(
+        self,
+        combo: QtWidgets.QComboBox,
+        data_value: str,
+        *,
+        enabled: bool,
+        disabled_tooltip: str = "",
+    ) -> None:
+        """Enable/disable a specific combo item identified by ``itemData``."""
+        try:
+            model = combo.model()
+            for i in range(combo.count()):
+                if combo.itemData(i) != data_value:
+                    continue
+                item = None
+                try:
+                    # QStandardItemModel path (default for QComboBox)
+                    item = model.item(i)  # type: ignore[attr-defined]
+                except Exception:
+                    item = None
+                if item is not None:
+                    item.setEnabled(bool(enabled))
+                    if disabled_tooltip:
+                        item.setToolTip("" if enabled else disabled_tooltip)
+                else:
+                    # Fallback: disable the whole combo if we cannot target the item.
+                    if not enabled:
+                        combo.setToolTip(disabled_tooltip)
+                break
+        except Exception:
+            pass
 
     def _open_existing_cfg(self) -> None:
         fn, _ = QtWidgets.QFileDialog.getOpenFileName(

@@ -10,8 +10,61 @@ import numpy as np
 from astropy.io import fits
 
 from scorpio_pipe.fits_utils import read_image_smart
+from scorpio_pipe.workspace_paths import stage_dir
+from scorpio_pipe import maskbits
 
 log = logging.getLogger(__name__)
+
+
+def _default_out_root(work_dir: Path) -> Path:
+    """Choose the default Cosmics output root.
+
+    Canonical layout is the stage directory (``run_root/05_cosmics``). For
+    backward compatibility, if an existing legacy directory ``run_root/cosmics``
+    already contains products for this run and the canonical dir does not exist
+    yet, we keep writing into the legacy dir to avoid splitting outputs.
+    """
+
+    canonical = stage_dir(work_dir, "cosmics")
+    legacy = work_dir / "cosmics"
+
+    # If a run was already started with legacy layout, keep it consistent.
+    try:
+        legacy_has_products = legacy.exists() and any(
+            (legacy / k / "clean").exists() for k in ("obj", "sky")
+        )
+    except Exception:
+        legacy_has_products = False
+
+    if canonical.exists():
+        return canonical
+    if legacy_has_products and not canonical.exists():
+        return legacy
+    return canonical
+
+
+def _write_clean_mask_bitmask(clean_dir: Path, base: str, mask_bool: np.ndarray) -> Path:
+    """Write a pipeline-compatible uint16 COSMIC bitmask next to a clean frame.
+
+    Downstream stages expect ``<base>_clean_mask.fits`` next to
+    ``<base>_clean.fits``.
+    """
+
+    clean_dir.mkdir(parents=True, exist_ok=True)
+    m = (np.asarray(mask_bool, dtype=bool).astype(np.uint16) * maskbits.COSMIC).astype(
+        np.uint16
+    )
+    h = fits.Header()
+    # Stamp schema cards so external tools can interpret the mask.
+    for k, v in maskbits.header_cards(prefix="SCORP").items():
+        try:
+            h[k] = (str(v), "Mask schema")
+        except Exception:
+            pass
+    h["BUNIT"] = ("bitmask", "MASK unit (uint16 bitfield)")
+    out = clean_dir / f"{base}_clean_mask.fits"
+    fits.writeto(out, m, header=h, overwrite=True)
+    return out
 
 
 @dataclass(frozen=True)
@@ -358,6 +411,12 @@ def _two_frame_diff_clean(
             # that may break strict memmap readers.
             fits.writeto(mf, m.astype(np.uint8), overwrite=True)
 
+        # Pipeline-compatible mask next to the cleaned frame.
+        try:
+            _write_clean_mask_bitmask(out_dir / "clean", name, m)
+        except Exception as e:
+            log.debug("Failed to write clean mask for %s: %s", name, e)
+
     sum_excl = (a * (~m0) + b * (~m1)).astype(np.float32)
     cov = ((~m0).astype(np.int16) + (~m1).astype(np.int16)).astype(np.int16)
     sum_f = out_dir / "sum_excl_cosmics.fits"
@@ -546,6 +605,12 @@ def _single_frame_laplacian_clean(
             overwrite=True,
         )
 
+    # Pipeline-compatible mask next to the cleaned frame.
+    try:
+        _write_clean_mask_bitmask(out_dir / "clean", name, m)
+    except Exception as e:
+        log.debug("Failed to write clean mask for %s: %s", name, e)
+
     replaced_pixels = int(m.sum())
     replaced_fraction = float(replaced_pixels / float(m.size)) if m.size else 0.0
 
@@ -638,78 +703,29 @@ def _single_frame_lacosmic_clean(
                 np.abs(ry) < 0.8 * float(protect_k) * sy
             )
 
-    # Try astroscrappy first (closest to van Dokkum L.A.Cosmic).
+    # Mandatory astroscrappy engine (P1 requirement): closest to van Dokkum L.A.Cosmic.
     try:
         import astroscrappy  # type: ignore
+    except Exception as e:
+        raise RuntimeError(
+            "astroscrappy is required for cosmics method 'la_cosmic' (LACOSMIC). "
+            "Install scorpio-pipe with the required dependencies (astroscrappy) or choose another cosmics method."
+        ) from e
 
-        crmask, cleaned = astroscrappy.detect_cosmics(
-            img,
-            sigclip=float(sigclip),
-            sigfrac=float(sigfrac),
-            objlim=float(objlim),
-            niter=int(max(1, niter)),
-            verbose=False,
-        )
-        m = np.asarray(crmask, dtype=bool)
-        if line_protect is not None:
-            m = m & (~line_protect)
-        cleaned = np.asarray(cleaned, dtype=np.float32)
-        engine = "astroscrappy"
-        sigma_lap = float("nan")
-    except Exception:
-        # Fallback: iterative Laplacian threshold + object-likeness discriminator.
-        a = img.astype(np.float32)
-        m = np.zeros_like(a, dtype=bool)
-        sigma_lap = float("nan")
-
-        # Use two-scale "fine structure" proxy to reject object/line-like features.
-        # (In original L.A.Cosmic this is based on median filters.)
-        def _fine_structure(x: np.ndarray) -> np.ndarray:
-            x1 = _boxcar_mean2d(x, r=1)
-            x3 = _boxcar_mean2d(x, r=3)
-            return (x1 - x3).astype(np.float32)
-
-        thr_seed = float(sigclip)
-        thr_grow = float(sigclip) * float(sigfrac)
-        for _ in range(int(max(1, niter))):
-            # High-frequency component
-            smooth = _boxcar_mean2d(a, r=2)
-            resid = (a - smooth).astype(np.float32)
-            lap = _laplacian4(resid)
-
-            sigma = _robust_sigma_mad_1d(lap)
-            if not np.isfinite(sigma) or sigma <= 0:
-                sigma = float(np.std(lap)) if lap.size else 0.0
-            sigma_lap = float(sigma)
-            if sigma <= 0:
-                break
-
-            fine = _fine_structure(a)
-            # Object-likeness: cosmics are sharp in Laplacian but not supported
-            # by broader fine-structure.
-            denom = np.maximum(np.abs(fine), 1e-3 * sigma).astype(np.float32)
-            ratio = np.abs(lap) / denom
-
-            seed = (np.abs(lap) > (thr_seed * sigma)) & (ratio > float(objlim))
-            if line_protect is not None:
-                seed = seed & (~line_protect)
-            grow = (np.abs(lap) > (thr_grow * sigma)) & (ratio > float(objlim))
-            if line_protect is not None:
-                grow = grow & (~line_protect)
-
-            # Grow around existing mask and new seed.
-            m_new = m | seed
-            if np.any(m_new):
-                m_new = m_new | (grow & _dilate_mask(m_new, r=1))
-            m = m_new
-
-            # Replace masked pixels conservatively using local mean on unmasked.
-            repl = _boxcar_mean2d_masked(a, m, r=int(replace_r))
-            a = a.copy()
-            a[m] = repl[m]
-
-        cleaned = a
-        engine = "fallback"
+    crmask, cleaned = astroscrappy.detect_cosmics(
+        img,
+        sigclip=float(sigclip),
+        sigfrac=float(sigfrac),
+        objlim=float(objlim),
+        niter=int(max(1, niter)),
+        verbose=False,
+    )
+    m = np.asarray(crmask, dtype=bool)
+    if line_protect is not None:
+        m = m & (~line_protect)
+    cleaned = np.asarray(cleaned, dtype=np.float32)
+    engine = "astroscrappy"
+    sigma_lap = float("nan")
 
     # Final small dilation to cover halos.
     m = _dilate_mask(m, r=int(max(0, dilate)))
@@ -743,6 +759,12 @@ def _single_frame_lacosmic_clean(
             m.astype(np.uint8),
             overwrite=True,
         )
+
+    # Pipeline-compatible mask next to the cleaned frame.
+    try:
+        _write_clean_mask_bitmask(out_dir / "clean", name, m)
+    except Exception as e:
+        log.debug("Failed to write clean mask for %s: %s", name, e)
 
     sum_f = out_dir / "sum_excl_cosmics.fits"
     cov_f = out_dir / "coverage.fits"
@@ -895,6 +917,11 @@ def _apply_manual_masks(
         fits.writeto(
             masks_fits / f"{base}_mask.fits", final_m.astype(np.uint8), overwrite=True
         )
+        # Keep pipeline mask next to the clean frame (uint16 COSMIC bit).
+        try:
+            _write_clean_mask_bitmask(clean_dir, base, final_m)
+        except Exception as e:
+            log.debug("Failed to write clean mask for %s: %s", base, e)
         if save_png:
             _save_png(
                 masks_png / f"{base}_mask.png",
@@ -1062,6 +1089,13 @@ def _stack_mad_clean(
             # that may break strict memmap readers.
             fits.writeto(mf, mask[i].astype(np.uint8), overwrite=True)
 
+        # Pipeline-compatible mask next to the cleaned frame.
+        # (Downstream stages expect <base>_clean_mask.fits.)
+        try:
+            _write_clean_mask_bitmask(out_dir / "clean", name, mask[i])
+        except Exception as e:
+            log.debug("Failed to write clean mask for %s: %s", name, e)
+
     # Reference products: sum excluding masked pixels + coverage map
     sum_excl = np.sum(stack * (~mask), axis=0)
     cov = np.sum(~mask, axis=0).astype(np.int16)
@@ -1121,8 +1155,11 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
       - ≥3       -> `stack_mad`
 
     Outputs:
-      work_dir/cosmics/<kind>/clean/*.fits
-      work_dir/cosmics/<kind>/summary.json
+      run_root/05_cosmics/<kind>/clean/*.fits
+      run_root/05_cosmics/<kind>/summary.json
+
+    Legacy runs may still write into ``run_root/cosmics`` if such a directory
+    already exists for the current workspace.
     """
     cfg = _load_cfg_any(cfg)
     base_dir = Path(str(cfg.get("config_dir", "."))).resolve()
@@ -1134,7 +1171,7 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
 
     ccfg = cfg.get("cosmics", {}) or {}
     if not bool(ccfg.get("enabled", True)):
-        out_root = Path(out_dir) if out_dir is not None else (work_dir / "cosmics")
+        out_root = Path(out_dir) if out_dir is not None else _default_out_root(work_dir)
         if not out_root.is_absolute():
             out_root = (work_dir / out_root).resolve()
         out_root.mkdir(parents=True, exist_ok=True)
@@ -1233,7 +1270,7 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
 
     superbias = _load_superbias(work_dir) if bias_subtract else None
 
-    out_root = Path(out_dir) if out_dir is not None else (work_dir / "cosmics")
+    out_root = Path(out_dir) if out_dir is not None else _default_out_root(work_dir)
     if not out_root.is_absolute():
         out_root = (work_dir / out_root).resolve()
     out_root.mkdir(parents=True, exist_ok=True)

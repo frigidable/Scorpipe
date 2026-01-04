@@ -191,10 +191,13 @@ def task_superflat():
 
         _timed("superflat", work_dir, _run)
 
+    superbias = work_dir / "calibs" / "superbias.fits"
+
     return {
         "actions": [_action],
-        "file_dep": [_cfg_path()] + [Path(p) for p in flat_list],
+        "file_dep": [_cfg_path(), superbias] + [Path(p) for p in flat_list],
         "targets": [out],
+        "task_dep": ["superbias"],
         "clean": True,
     }
 
@@ -208,6 +211,14 @@ def task_cosmics():
     sky_list = cfg["frames"].get("sky", [])
     file_dep = [_cfg_path()] + [Path(p) for p in obj_list + sky_list]
 
+    cosmics_cfg = (cfg.get("cosmics") or {}) if isinstance(cfg.get("cosmics"), dict) else {}
+    bias_sub = bool(cosmics_cfg.get("bias_subtract", True))
+    task_dep = []
+    if bias_sub:
+        superbias = work_dir / "calibs" / "superbias.fits"
+        file_dep.append(superbias)
+        task_dep.append("superbias")
+
     def _action():
         def _run():
             from scorpio_pipe.stages.cosmics import clean_cosmics
@@ -219,6 +230,59 @@ def task_cosmics():
         "actions": [_action],
         "file_dep": file_dep,
         "targets": [out],
+        "task_dep": task_dep,
+        "clean": True,
+    }
+
+
+def task_flatfield():
+    """Apply superflat to selected frame kinds.
+
+    Important ordering for science-quality runs:
+    cosmics -> flatfield -> sky_sub
+
+    Sky subtraction prefers flat-fielded products if they exist.
+    """
+
+    cfg = _load_cfg()
+    work_dir = resolve_work_dir(cfg)
+    from scorpio_pipe.workspace_paths import stage_dir
+
+    out_dir = stage_dir(work_dir, "flatfield")
+    done_json = out_dir / "done.json"
+    done_marker = out_dir / "flatfield_done.json"
+
+    ff_cfg = (cfg.get("flatfield") or {}) if isinstance(cfg.get("flatfield"), dict) else {}
+    enabled = bool(ff_cfg.get("enabled", False))
+
+    frames = cfg.get("frames", {}) or {}
+    flat_list = frames.get("flat", []) or []
+
+    # Inputs: flats + any kinds we are asked to correct (best-effort).
+    apply_to = list(ff_cfg.get("apply_to") or ["obj", "sky", "sunsky"])
+    inp = list(flat_list)
+    for k in apply_to:
+        inp.extend(frames.get(k, []) or [])
+
+    file_dep = [_cfg_path()] + [Path(p) for p in inp]
+
+    task_dep = []
+    if enabled:
+        # We want cosmics-cleaned inputs when available.
+        task_dep.append("cosmics")
+        # Ensure masters exist; flatfield stage can still auto-build but we keep the DAG explicit.
+        task_dep.append("superflat")
+
+    def _action():
+        from scorpio_pipe.stages.flatfield import run_flatfield
+
+        _timed("flatfield", work_dir, lambda: run_flatfield(cfg, out_dir=out_dir))
+
+    return {
+        "actions": [_action],
+        "file_dep": file_dep,
+        "targets": [done_json, done_marker],
+        "task_dep": task_dep,
         "clean": True,
     }
 
@@ -243,7 +307,8 @@ def task_superneon():
     superneon_cfg = (cfg.get("superneon") or {}) if isinstance(cfg.get("superneon"), dict) else {}
     bias_sub = bool(superneon_cfg.get("bias_sub", True))
 
-    superbias = Path(cfg.get("calib", {}).get("superbias_path") or (work_dir / "calibs" / "superbias.fits"))
+    from scorpio_pipe.stages.calib import _resolve_superbias_path as _resolve_sb
+    superbias = _resolve_sb(cfg, work_dir)
     targets = [
         outdir / "superneon.fits",
         outdir / "superneon.png",
@@ -336,8 +401,12 @@ def task_sky_sub():
     """Kelson-style sky subtraction (per exposure by default)."""
     cfg = _load_cfg()
     work_dir = resolve_work_dir(cfg)
-    out_dir = work_dir / "products" / "sky"
-    done = out_dir / "sky_sub_done.json"
+    from scorpio_pipe.workspace_paths import stage_dir
+    from scorpio_pipe.wavesol_paths import wavesol_dir
+
+    out_dir = stage_dir(work_dir, "sky")
+    done_json = out_dir / "done.json"
+    done_marker = out_dir / "sky_done.json"
 
     def _action():
         from scorpio_pipe.stages.sky_sub import run_sky_sub
@@ -346,10 +415,13 @@ def task_sky_sub():
 
     return {
         "actions": [_action],
-        # Depends on linearize preview and/or per-exposure products
-        "file_dep": [_cfg_path(), work_dir / "products" / "lin" / "linearize_done.json"],
-        "targets": [done, out_dir / "qc_sky.json", out_dir / "roi.json"],
-        "task_dep": ["linearize"],
+        "file_dep": [
+            _cfg_path(),
+            wavesol_dir(cfg) / "lambda_map.fits",
+            stage_dir(work_dir, "flatfield") / "flatfield_done.json",
+        ],
+        "targets": [done_json, done_marker, out_dir / "qc_sky.json", out_dir / "roi.json"],
+        "task_dep": ["wavesol", "cosmics", "flatfield"],
         "clean": True,
     }
 
@@ -363,7 +435,10 @@ def task_linearize():
     """Rectify per-pixel spectra to a common linear wavelength grid (per exposure)."""
     cfg = _load_cfg()
     work_dir = resolve_work_dir(cfg)
-    out_dir = work_dir / "products" / "lin"
+    from scorpio_pipe.workspace_paths import stage_dir
+    from scorpio_pipe.wavesol_paths import wavesol_dir
+
+    out_dir = stage_dir(work_dir, "linearize")
     done = out_dir / "linearize_done.json"
 
     def _action():
@@ -371,12 +446,11 @@ def task_linearize():
 
         _timed("linearize", work_dir, lambda: run_linearize(cfg, out_dir=out_dir))
 
-    # wavesol provides the lambda_map; cosmics provides cleaned frames (optional)
-    from scorpio_pipe.wavesol_paths import wavesol_dir
+    # wavesol provides the lambda_map; sky_sub provides 09_sky/*_skysub_raw.fits
 
     return {
         "actions": [_action],
-        "file_dep": [_cfg_path(), wavesol_dir(cfg) / "lambda_map.fits"],
+        "file_dep": [_cfg_path(), wavesol_dir(cfg) / "lambda_map.fits", stage_dir(work_dir, "sky") / "sky_done.json"],
         "targets": [
             done,
             out_dir / "wave_grid.json",
@@ -384,30 +458,27 @@ def task_linearize():
             out_dir / "lin_preview.fits",
             out_dir / "lin_preview.png",
         ],
-        "task_dep": ["wavesol", "cosmics"],
+        "task_dep": ["wavesol", "sky_sub"],
         "clean": True,
     }
 
 
 def _collect_sky_sub_frames(cfg: dict[str, Any]) -> list[Path]:
     wd = resolve_work_dir(cfg)
-    cand_dirs = [
-        wd / "products" / "sky" / "per_exp",
-        wd / "sky" / "per_exp",
-    ]
-    for d in cand_dirs:
-        if d.exists():
-            frames = sorted(d.glob("*_sky_sub.fits"))
-            if frames:
-                return frames
-    return []
+    from scorpio_pipe.workspace_paths import stage_dir
+
+    lin_dir = stage_dir(wd, "linearize")
+    frames = sorted(lin_dir.glob("*_skysub.fits"))
+    return [p for p in frames if p.is_file()]
 
 
 def task_stack2d():
     """Stack per-exposure sky-subtracted rectified frames into a single 2D product."""
     cfg = _load_cfg()
     work_dir = resolve_work_dir(cfg)
-    out_dir = work_dir / "products" / "stack"
+    from scorpio_pipe.workspace_paths import stage_dir
+
+    out_dir = stage_dir(work_dir, "stack2d")
     done = out_dir / "stack2d_done.json"
 
     def _action():
@@ -421,9 +492,9 @@ def task_stack2d():
 
     return {
         "actions": [_action],
-        "file_dep": [_cfg_path(), work_dir / "products" / "sky" / "sky_sub_done.json"],
+        "file_dep": [_cfg_path(), stage_dir(work_dir, "linearize") / "linearize_done.json"],
         "targets": [done, out_dir / "stacked2d.fits", out_dir / "coverage.png"],
-        "task_dep": ["sky_sub"],
+        "task_dep": ["linearize"],
         "clean": True,
     }
 
@@ -437,7 +508,9 @@ def task_extract1d():
     """1D extraction (boxcar/optimal) from the stacked 2D product."""
     cfg = _load_cfg()
     work_dir = resolve_work_dir(cfg)
-    out_dir = work_dir / "products" / "spec"
+    from scorpio_pipe.workspace_paths import stage_dir
+
+    out_dir = stage_dir(work_dir, "extract1d")
     done = out_dir / "extract1d_done.json"
 
     def _action():
@@ -447,7 +520,7 @@ def task_extract1d():
 
     return {
         "actions": [_action],
-        "file_dep": [_cfg_path(), work_dir / "products" / "stack" / "stacked2d.fits"],
+        "file_dep": [_cfg_path(), stage_dir(work_dir, "stack2d") / "stacked2d.fits"],
         "targets": [done, out_dir / "spec1d.fits", out_dir / "spec1d.png"],
         "task_dep": ["stack2d"],
         "clean": True,

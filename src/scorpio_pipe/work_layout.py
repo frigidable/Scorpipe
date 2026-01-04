@@ -68,6 +68,15 @@ def ensure_work_layout(work_dir: str | Path) -> WorkLayout:
     (wd / "ui" / "history").mkdir(parents=True, exist_ok=True)
     _write_default_config(wd / "config.yaml")
 
+    # Project-level role manifest (P1): explicit source of truth for frame roles.
+    # We only create a minimal template if the file does not exist.
+    try:
+        from scorpio_pipe.project_manifest import write_default_project_manifest
+
+        write_default_project_manifest(wd / "project_manifest.yaml")
+    except Exception:
+        pass
+
     # Ensure the run passport exists (best-effort; it may be created later
     # when a representative header is available).
     try:

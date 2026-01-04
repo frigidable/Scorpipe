@@ -50,6 +50,10 @@ class AutoConfig:
             # Config is written into work_dir. Using "." keeps it self-contained and avoids
             # duplicated "work/.../work/..." when resolving relative paths.
             work_dir=self.work_dir,
+            project={
+                "wave_reference": "UNKNOWN",
+                "barycentric_correction": "OFF",
+            },
             instrument=instrument_section,
             calib={
                 **(self.calib or {}),

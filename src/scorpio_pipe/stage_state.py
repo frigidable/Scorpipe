@@ -10,35 +10,55 @@ from typing import Iterable
 from .version import get_provenance
 
 
-def _is_numeric_scalar(v: Any) -> bool:
+def _is_hashable_scalar(v: Any) -> bool:
     # bool is intentionally included: toggles are meaningful for reruns.
-    return isinstance(v, (int, float, bool))
+    return isinstance(v, (int, float, bool, str))
 
 
-def _numeric_only(obj: Any) -> Any:
-    """Keep only numeric-ish values (int/float/bool) from nested configs.
+def _stable_cfg(obj: Any) -> Any:
+    """Keep only stable, behavior-affecting config values.
 
-    Variant A: stage is "dirty" only when numeric parameters change.
-    We also keep bools (practically 0/1) because they affect behavior.
+    Prior versions kept *only* numeric-ish values from configs. That proved
+    unsafe for scientific work because non-numeric parameters (e.g. method
+    names, policy strings, file identifiers) can materially change results.
+
+    We therefore keep scalar primitives (int/float/bool/str), plus lists/dicts
+    recursively. Unknown objects are dropped (best-effort), so the hash stays
+    deterministic and compact.
     """
+
     if obj is None:
         return None
-    if _is_numeric_scalar(obj):
-        # Normalize floats to a stable representation
+
+    # Common scalar primitives
+    if _is_hashable_scalar(obj):
         if isinstance(obj, float):
             return float(f"{obj:.12g}")
+        if isinstance(obj, str):
+            return str(obj)
         return obj
+
+    # Path-like objects occasionally sneak in (e.g. from JSON/YAML tooling).
+    try:
+        from pathlib import Path
+
+        if isinstance(obj, Path):
+            return str(obj)
+    except Exception:
+        pass
+
     if isinstance(obj, (list, tuple)):
-        out = [_numeric_only(v) for v in obj]
-        out = [v for v in out if v is not None]
-        return out
+        out = [_stable_cfg(v) for v in obj]
+        return [v for v in out if v is not None]
+
     if isinstance(obj, dict):
         out: dict[str, Any] = {}
         for k in sorted(obj.keys()):
-            v = _numeric_only(obj[k])
+            v = _stable_cfg(obj[k])
             if v is not None:
                 out[str(k)] = v
         return out
+
     return None
 
 
@@ -58,11 +78,11 @@ def compute_stage_hash(
 ) -> str:
     """Compute a stable hash for stage "up-to-date" checks.
 
-    Variant A: stage becomes "dirty" only when numeric parameters and/or inputs change.
-    We therefore keep only numeric-ish values from the stage config.
+    Stage becomes "dirty" when stage config and/or inputs change.
+    We keep stable primitives (ints/floats/bools/strings) from the config.
     """
     prov = get_provenance().__dict__
-    stage_cfg_num = _numeric_only(stage_cfg or {})
+    stage_cfg_num = _stable_cfg(stage_cfg or {})
     payload = {
         "pipeline": prov,
         "stage": stage,

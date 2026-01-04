@@ -36,13 +36,18 @@ class WaveGrid:
     nlam: int
     unit: str = "Angstrom"
 
+    wave_ref: str = "UNKNOWN"
     def to_wcs_cards(self) -> dict[str, Any]:
+        ref = str(self.wave_ref or "UNKNOWN").strip().upper()
+        ctype = "AWAV" if ref in ("AIR", "A", "AWAV") else "WAVE"
         return {
             "CRVAL1": float(self.lambda0),
             "CDELT1": float(self.dlambda),
             "CRPIX1": 1.0,
-            "CTYPE1": "WAVE",
+            "CTYPE1": ctype,
             "CUNIT1": str(self.unit),
+            "WAVEREF": ref.lower() if ref != "UNKNOWN" else "unknown",
+            "WAVEUNIT": str(self.unit),
         }
 
 
@@ -65,6 +70,7 @@ def write_sci_var_mask(
     grid: WaveGrid | None = None,
     cov: np.ndarray | None = None,
     overwrite: bool = True,
+    validate: bool = True,
     extra_hdus: list[fits.ImageHDU] | None = None,
     primary_data: np.ndarray | None = None,
 ) -> Path:
@@ -81,9 +87,9 @@ def write_sci_var_mask(
     path = Path(path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    sci = np.asarray(sci)
+    sci = np.asarray(sci, dtype=float)
     if var is not None:
-        var = np.asarray(var)
+        var = np.asarray(var, dtype=float)
         if var.shape != sci.shape:
             raise ValueError(f"VAR shape {var.shape} != SCI shape {sci.shape}")
     if mask is not None:
@@ -99,10 +105,40 @@ def write_sci_var_mask(
         if cov.shape != sci.shape:
             raise ValueError(f"COV shape {cov.shape} != SCI shape {sci.shape}")
 
+    # Sanitize non-finite pixels: enforce fully-finite SCI/VAR at boundaries.
+    # We mark such pixels as NO_COVERAGE and zero them.
+    scorpnan = 0
+    try:
+        bad_sci = ~np.isfinite(sci)
+        bad_var = ~np.isfinite(var) if var is not None else None
+        if bad_var is not None:
+            scorpnan = int(np.count_nonzero(bad_sci) + np.count_nonzero(bad_var))
+            bad = bad_sci | bad_var
+        else:
+            scorpnan = int(np.count_nonzero(bad_sci))
+            bad = bad_sci
+
+        if scorpnan > 0:
+            if mask is None:
+                mask = np.zeros(sci.shape, dtype=np.uint16)
+            mask = np.asarray(mask, dtype=np.uint16)
+            mask[bad] = np.bitwise_or(mask[bad], np.uint16(NO_COVERAGE))
+            sci[bad] = 0.0
+            if var is not None:
+                var[bad] = 0.0
+    except Exception:
+        scorpnan = 0
+
     phdr = fits.Header() if header is None else fits.Header(header)
     _apply_cards(phdr, as_header_cards(prefix="SCORP"))
     # Record the strict mask schema (even if MASK is absent; this makes downstream checks simpler).
     _apply_cards(phdr, maskbits.header_cards(prefix="SCORP"))
+
+    if scorpnan > 0:
+        try:
+            phdr["SCORPNAN"] = (int(scorpnan), "Non-finite SCI/VAR sanitized to 0 (NO_COVERAGE)")
+        except Exception:
+            pass
 
     # Store grid metadata both as WCS cards and explicit SCORP_* keywords
     if grid is not None:
@@ -314,10 +350,11 @@ def try_read_grid(hdr: fits.Header) -> WaveGrid | None:
         dl = hdr.get("SCORP_DL", hdr.get("CDELT1", None))
         nl = hdr.get("SCORP_NL", hdr.get("NAXIS1", None))
         lu = hdr.get("SCORP_LU", hdr.get("CUNIT1", "Angstrom"))
+        wr = hdr.get("SCORP_WR", hdr.get("WAVEREF", "UNKNOWN"))
         if l0 is None or dl is None or nl is None:
             return None
         return WaveGrid(
-            lambda0=float(l0), dlambda=float(dl), nlam=int(nl), unit=str(lu)
+            lambda0=float(l0), dlambda=float(dl), nlam=int(nl), unit=str(lu), wave_ref=str(wr)
         )
     except Exception:
         return None

@@ -30,6 +30,7 @@ from astropy.io import fits
 
 from scorpio_pipe.io.mef import WaveGrid, read_sci_var_mask, write_sci_var_mask
 from scorpio_pipe.noise_model import estimate_variance_adu2, resolve_noise_params
+from scorpio_pipe.units_model import ensure_electron_units
 from scorpio_pipe.maskbits import (
     BADPIX,
     COSMIC,
@@ -178,7 +179,9 @@ def _write_mef(
     wave0: float | None = None,
     dw: float | None = None,
     unit: str = "Angstrom",
+    wave_ref: str = "UNKNOWN",
 ) -> None:
+
     """Write a MEF product with SCI/VAR/MASK and optional COV.
 
     Uses the common writer from :mod:`scorpio_pipe.io.mef` and adds a COV
@@ -193,6 +196,9 @@ def _write_mef(
         except Exception:
             pass
 
+    # Spectral frame bookkeeping (external-friendly defaults).
+    hdr.setdefault("SPECSYS", str(hdr.get("SPECSYS", "TOPOCENT") or "TOPOCENT"))
+    hdr.setdefault("SSYSOBS", str(hdr.get("SPECSYS", "TOPOCENT") or "TOPOCENT"))
     grid = None
     if wave0 is not None and dw is not None:
         try:
@@ -201,6 +207,7 @@ def _write_mef(
                 dlambda=float(dw),
                 nlam=int(np.asarray(sci).shape[1]),
                 unit=str(unit),
+                wave_ref=str(wave_ref),
             )
         except Exception:
             grid = None
@@ -1423,6 +1430,7 @@ def run_linearize(
                 compare_a = None
 
         lcfg = cfg.get("linearize", {}) if isinstance(cfg.get("linearize"), dict) else {}
+        wave_ref = str((cfg.get("project", {}) or {}).get("wave_reference", "UNKNOWN") or "UNKNOWN")
         # Canonical keys in v5.x schema:
         #   dlambda_A, lambda_min_A, lambda_max_A, per_exposure
         # Backward-compatible aliases:
@@ -1867,6 +1875,15 @@ def run_linearize(
                 if delta_policy == "always" or flexure_flag == "OK":
                     wave0 = float(wave0) + float(delta_u)
                     wmax = float(wmax) + float(delta_u)
+                    # IMPORTANT: the lambda-map is the mapping pixel->wavelength.
+                    # If we adjust the output grid due to flexure, we must shift
+                    # the lambda-map as well; otherwise binning is inconsistent and
+                    # features can move in the *wrong* direction.
+                    try:
+                        lam_map = (np.asarray(lam_map, dtype=np.float64) + float(delta_u)).astype(np.float32)
+                    except Exception:
+                        # If this fails, we still keep the shift for provenance.
+                        pass
                     delta_lambda_applied = True
             except Exception:
                 delta_lambda_applied = False
@@ -1986,9 +2003,23 @@ def run_linearize(
                     hdr,
                     gain_override=gain_override_f,
                     rdnoise_override=rdnoise_override_f,
+                    require_gain=True,
                 )
                 var = np.asarray(var_est, dtype=np.float64)
                 var_source = "estimated"
+
+            # Enforce internal unit standard: electrons (SCI) and electrons^2 (VAR).
+            data_e, var_e, hdr_e, prov, npar_e = ensure_electron_units(
+                data,
+                var,
+                hdr,
+                gain_override=gain_override_f,
+                rdnoise_override=rdnoise_override_f,
+                require_gain=True,
+            )
+            data = np.asarray(data_e, dtype=np.float64)
+            var = np.asarray(var_e, dtype=np.float64)
+            hdr = hdr_e
 
             # Sanity: variance must be finite and >= 0. Flag bad pixels via mask.
             bad_var = ~np.isfinite(var) | (var < 0)
@@ -2042,9 +2073,19 @@ def run_linearize(
             if mp.exists():
                 try:
                     m, _ = _open_fits_resilient(mp)
-                    cm = ((m.astype(np.uint16) > 0).astype(np.uint16) * COSMIC).astype(
-                        np.uint16
-                    )
+                    mm = np.asarray(m)
+                    # Most legacy masks are stored as 0/1. If the file already
+                    # looks like a bitmask (>1), preserve it.
+                    try:
+                        mx = int(np.nanmax(mm)) if np.isfinite(mm).any() else 0
+                    except Exception:
+                        mx = 0
+                    if mx <= 1:
+                        cm = ((mm.astype(np.uint16) > 0).astype(np.uint16) * COSMIC).astype(
+                            np.uint16
+                        )
+                    else:
+                        cm = mm.astype(np.uint16)
                     cm = cm[y0:y1, :]
                     if mask is None:
                         mask = cm
@@ -2311,6 +2352,7 @@ def run_linearize(
                 wave0=wave0,
                 dw=dw,
                 unit=unit,
+        wave_ref=wave_ref,
             )
             rect_paths.append(out_skysub)
 

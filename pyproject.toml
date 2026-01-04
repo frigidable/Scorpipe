@@ -22,6 +22,8 @@ dependencies = [
   "matplotlib",
   # Scientific stack: do not skimp on accuracy.
   "scipy>=1.10",
+  # Mandatory cosmic-ray cleaner engine (P1): L.A.Cosmic family.
+  "astroscrappy>=1.2",
 ]
 
 dynamic = ["version"]

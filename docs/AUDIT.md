@@ -11,14 +11,14 @@
 - **clean_cosmics** → очищенные кадры (SCI/VAR/MASK) в `work/cosmics/` *(реальная стадия)*
 
 ### Wavesolution (каркас + базовые продукты)
-- **lineid_prepare / lineid_solve / wavesolution** → `work/wavesol/` и продукты RMS/линии/λ‑карты
+- **lineid_prepare / lineid_solve / wavesolution** → `work/08_wavesol/` и продукты RMS/линии/λ‑карты
   - **Комментарий:** точность и интерактивность — зона активной разработки; структура данных стабилизирована.
 
 ### Science core (v5.17+ минимально рабочий скелет)
-- **linearize** → `work/products/lin/lin_preview.fits` (+ PNG), `per_exp/*.fits`
-- **sky_sub** → `work/products/sky/preview.fits` (+ PNG), `per_exp/*.fits`, `sky_model/*.fits`
-- **stack2d** → `work/products/stack/stacked2d.fits` (+ `coverage.png`)
-- **extract1d** → `work/products/extract/spec1d.fits` (+ PNG)
+- **sky_sub** → `work/09_sky/preview.fits` (+ PNG), `obj/*_skysub_raw.fits`, `sky_model/*.fits`
+- **linearize** → `work/10_linearize/lin_preview.fits` (+ PNG), `*_skysub.fits` (per-exposure rectified)
+- **stack2d** → `work/11_stack/stacked2d.fits` (+ `coverage.png`)
+- **extract1d** → `work/12_extract/spec1d.fits` (+ PNG)
 
 ### QC / Reproducibility
 - **manifest** → `work/qc/manifest.json` (+ legacy `work/report/manifest.json`)

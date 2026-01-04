@@ -69,6 +69,7 @@ def resolve_noise_params(
     gain_override: float | None = None,
     rdnoise_override: float | None = None,
     instrument_hint: str | None = None,
+    require_gain: bool = False,
 ) -> NoiseParams:
     """Resolve gain/read-noise (in electrons) from header + optional overrides."""
 
@@ -79,7 +80,11 @@ def resolve_noise_params(
     else:
         gain = _parse_float(hdr, ("GAIN", "EGAIN", "GAIN_E", "GAINE"))
         if gain is None or gain <= 0:
-            # Conservative fallback.
+            if require_gain:
+                raise ValueError(
+                    "Missing CCD gain (e-/ADU). Provide a valid GAIN/EGAIN header card or set gain_override/gain_e_per_adu in the stage config."
+                )
+            # Conservative fallback for quicklook/legacy data.
             gain = 1.0
             gain_src = "default(1.0)"
         else:
@@ -105,6 +110,10 @@ def resolve_noise_params(
 
     # 3) Basic sanity
     if not np.isfinite(gain) or gain <= 0:
+        if require_gain:
+            raise ValueError(
+                "Invalid CCD gain (e-/ADU). Provide a valid GAIN/EGAIN header card or set gain_override/gain_e_per_adu in the stage config."
+            )
         gain = 1.0
         gain_src = "default(1.0)"
     if not np.isfinite(rn) or rn < 0:
@@ -122,6 +131,7 @@ def estimate_variance_adu2(
     gain_override: float | None = None,
     rdnoise_override: float | None = None,
     instrument_hint: str | None = None,
+    require_gain: bool = False,
 ) -> tuple[np.ndarray, NoiseParams]:
     """Estimate per-pixel variance in ADU^2 from a simple CCD model."""
 
@@ -130,6 +140,7 @@ def estimate_variance_adu2(
         gain_override=gain_override,
         rdnoise_override=rdnoise_override,
         instrument_hint=instrument_hint,
+        require_gain=require_gain,
     )
     gain = params.gain_e_per_adu
     rn = params.rdnoise_e
@@ -139,3 +150,59 @@ def estimate_variance_adu2(
     var_e = e + float(rn) ** 2
     var_adu2 = var_e / (float(gain) ** 2)
     return np.asarray(var_adu2, dtype=np.float32), params
+
+
+def estimate_variance_e2(
+    sci_e: np.ndarray,
+    *,
+    rdnoise_e: float,
+) -> np.ndarray:
+    """Estimate per-pixel variance in electrons^2 from SCI in electrons.
+
+    Model: Var[e-^2] = max(SCI_e, 0) + RN_e^2
+    """
+    sci = np.asarray(sci_e, dtype=np.float64)
+    rn2 = float(rdnoise_e) ** 2
+    return (np.maximum(sci, 0.0) + rn2).astype(np.float32)
+
+
+def estimate_variance_auto(
+    sci: np.ndarray,
+    hdr: fits.Header,
+    *,
+    gain_override: float | None = None,
+    rdnoise_override: float | None = None,
+    unit_model: str | None = None,
+    instrument_hint: str | None = None,
+    require_gain: bool = False,
+) -> tuple[np.ndarray, NoiseParams, str]:
+    """Estimate variance for SCI, automatically handling ADU vs electrons.
+
+    Returns (var, params, model) where model is "ADU" or "ELECTRON".
+    """
+    from scorpio_pipe.units_model import infer_unit_model, UnitModel
+
+    h = fits.Header(hdr)
+    model = infer_unit_model(h, default=UnitModel.ADU) if unit_model is None else UnitModel(str(unit_model).upper())
+    params = resolve_noise_params(
+        h,
+        gain_override=gain_override,
+        rdnoise_override=rdnoise_override,
+        instrument_hint=instrument_hint,
+        require_gain=require_gain if str(model.value).upper() == "ADU" else False,
+    )
+    if model == UnitModel.ELECTRON:
+        var_e2 = estimate_variance_e2(sci, rdnoise_e=params.rdnoise_e)
+        return var_e2, params, model.value
+
+    # ADU model
+    var_adu2, _params = estimate_variance_adu2(
+        sci,
+        h,
+        gain_override=gain_override,
+        rdnoise_override=rdnoise_override,
+        instrument_hint=instrument_hint,
+        require_gain=require_gain,
+    )
+    # `params` and `_params` are identical by construction; keep `params`.
+    return var_adu2, params, model.value

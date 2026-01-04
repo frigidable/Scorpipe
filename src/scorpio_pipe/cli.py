@@ -428,13 +428,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_prod.add_argument("--config", required=True)
     p_prod.set_defaults(func=cmd_products)
 
-p_exp = sub.add_parser(
+
+    p_exp = sub.add_parser(
         "export-package", help="Export a compact result ZIP: spec1d + qc + navigator"
     )
     g = p_exp.add_mutually_exclusive_group(required=True)
-    g.add_argument("--work-dir", default=None, help="Run work_dir (workplace/<date>/<obj>_...>)")
+    g.add_argument(
+        "--work-dir",
+        default=None,
+        help="Run work_dir (workplace/<date>/<obj>_...>)",
+    )
     g.add_argument("--config", default=None, help="Config path (work_dir resolved from config)")
-    p_exp.add_argument("--out", default=None, help="Output zip path (default: <work_dir>/science_package.zip)")
+    p_exp.add_argument(
+        "--out",
+        default=None,
+        help="Output zip path (default: <work_dir>/science_package.zip)",
+    )
     p_exp.add_argument("--overwrite", action="store_true", help="Overwrite existing zip")
     p_exp.add_argument("--no-html", action="store_true", help="Do not include navigator HTML")
     p_exp.add_argument("--no-png", action="store_true", help="Do not include PNG quicklooks")

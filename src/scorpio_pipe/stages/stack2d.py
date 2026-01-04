@@ -44,6 +44,32 @@ MASK_ROBUST_REJECTED = REJECTED
 FATAL_BITS = np.uint16(NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER)
 
 
+def _validate_or_raise(
+    *,
+    what: str,
+    name: str,
+    sci: np.ndarray,
+    var: np.ndarray | None,
+    mask: np.ndarray | None,
+    fatal_bits: int,
+) -> None:
+    """Hard-fail on invalid SCI/VAR/MASK contracts.
+
+    ``validate_sci_var_mask`` is intentionally non-throwing; stacking must not
+    silently proceed with NaNs/negative VAR in unmasked pixels.
+    """
+    issues = validate_sci_var_mask(sci, var, mask, fatal_bits=int(fatal_bits))
+    if not issues:
+        return
+    parts: list[str] = []
+    for it in issues[:12]:
+        code = str(it.get("code") or "?")
+        msg = str(it.get("message") or "")
+        parts.append(f"{code}: {msg}")
+    more = "" if len(issues) <= 12 else f"; ... (+{len(issues) - 12} more)"
+    raise ValueError(f"{what}: invalid SCI/VAR/MASK for {name}: " + "; ".join(parts) + more)
+
+
 def _robust_sigma_r(x: np.ndarray) -> float | None:
     """Robust sigma estimate via MAD (Gaussian equivalent)."""
     x = np.asarray(x, dtype=float)
@@ -609,7 +635,14 @@ def run_stack2d(
         var0 = np.asarray(_get_var_data(hduls[0]), dtype=np.float32)
         mask0 = np.asarray(_get_mask_data(hduls[0]), dtype=np.uint16)
 
-        validate_sci_var_mask(sci0, var0, mask0, fatal_bits=int(FATAL_BITS))
+        _validate_or_raise(
+            what="stack2d",
+            name=files[0].name,
+            sci=sci0,
+            var=var0,
+            mask=mask0,
+            fatal_bits=int(FATAL_BITS),
+        )
         ny, nx = sci0.shape
 
         # Wavelength grid consistency (P1-E).
@@ -687,10 +720,12 @@ def run_stack2d(
                     f"stack2d: MASK shape mismatch in {p.name}: {mask.shape} != {(ny, nx)}"
                 )
 
-            validate_sci_var_mask(
-                np.asarray(sci, dtype=np.float32),
-                np.asarray(var, dtype=np.float32),
-                np.asarray(mask, dtype=np.uint16),
+            _validate_or_raise(
+                what="stack2d",
+                name=p.name,
+                sci=np.asarray(sci, dtype=np.float32),
+                var=np.asarray(var, dtype=np.float32),
+                mask=np.asarray(mask, dtype=np.uint16),
                 fatal_bits=int(FATAL_BITS),
             )
 
@@ -1328,7 +1363,11 @@ def run_stack2d(
                         mnf = float(mn)
                         mxf = float(mx)
                         medf = float(med) if med is not None else None
-                        if mnf < 0.2 or mxf > 5.0 or (medf is not None and (medf < 0.3 or medf > 3.0)):
+                        if (
+                            mnf < 0.2
+                            or mxf > 5.0
+                            or (medf is not None and (medf < 0.3 or medf > 3.0))
+                        ):
                             stage_flags.append(
                                 make_flag(
                                     "ETA_ANOMALY",
@@ -1337,33 +1376,35 @@ def run_stack2d(
                                     value=float(medf) if medf is not None else None,
                                 )
                             )
+            except Exception:
+                pass
 
-
-# P3-LIN-010 QC: if after-eta normalized sky scatter is far from 1,
-# treat η as badly calibrated (correlated noise not captured).
-sig_after = eta_meta.get("sigma_after_eta")
-if sig_after is not None and np.isfinite(sig_after):
-    dev = abs(float(sig_after) - 1.0)
-    dev_warn = float(getattr(thr, "eta_sigma_dev_warn", 0.25))
-    dev_bad = float(getattr(thr, "eta_sigma_dev_bad", 0.50))
-    if dev > dev_bad:
-        stage_flags.append(
-            make_flag(
-                "ETA_BAD_CALIBRATION",
-                "ERROR",
-                "after-eta robust_sigma(SCI/sqrt(VAR)) on sky is far from 1; η may be miscalibrated",
-                value=float(sig_after),
-            )
-        )
-    elif dev > dev_warn:
-        stage_flags.append(
-            make_flag(
-                "ETA_BAD_CALIBRATION",
-                "WARN",
-                "after-eta robust_sigma(SCI/sqrt(VAR)) on sky deviates from 1; verify η and sky windows",
-                value=float(sig_after),
-            )
-        )
+            # P3-LIN-010 QC: if after-eta normalized sky scatter is far from 1,
+            # treat η as badly calibrated (correlated noise not captured).
+            try:
+                sig_after = eta_meta.get("sigma_after_eta")
+                if sig_after is not None and np.isfinite(sig_after):
+                    dev = abs(float(sig_after) - 1.0)
+                    dev_warn = float(getattr(thr, "eta_sigma_dev_warn", 0.25))
+                    dev_bad = float(getattr(thr, "eta_sigma_dev_bad", 0.50))
+                    if dev > dev_bad:
+                        stage_flags.append(
+                            make_flag(
+                                "ETA_BAD_CALIBRATION",
+                                "ERROR",
+                                "after-eta robust_sigma(SCI/sqrt(VAR)) on sky is far from 1; η may be miscalibrated",
+                                value=float(sig_after),
+                            )
+                        )
+                    elif dev > dev_warn:
+                        stage_flags.append(
+                            make_flag(
+                                "ETA_BAD_CALIBRATION",
+                                "WARN",
+                                "after-eta robust_sigma(SCI/sqrt(VAR)) on sky deviates from 1; verify η and sky windows",
+                                value=float(sig_after),
+                            )
+                        )
             except Exception:
                 pass
 

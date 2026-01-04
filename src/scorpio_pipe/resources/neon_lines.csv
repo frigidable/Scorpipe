@@ -1,3 +1,6 @@
+# waveref: air
+# unit: angstrom
+# note: keep this consistent with wavesol.waveref in config.yaml
 lambda
 3888.65
 3948.98

@@ -10,9 +10,12 @@ Goals:
 from __future__ import annotations
 
 import inspect
+import json
 import logging
+import time
 import traceback
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event
 from typing import Any, Callable, Iterable
@@ -29,6 +32,20 @@ from scorpio_pipe.wavesol_paths import wavesol_dir
 from scorpio_pipe.work_layout import ensure_work_layout
 from scorpio_pipe.workspace_paths import stage_dir, per_exp_dir, resolve_input_path
 from scorpio_pipe.stage_registry import REGISTRY
+
+# P0 provenance + boundary contract enforcement
+from scorpio_pipe.boundary_contract import (
+    ProductContractError,
+    validate_mef_product,
+    validate_spec1d_product,
+)
+from scorpio_pipe.io.done_json import write_done_json
+from scorpio_pipe.prov_capture import (
+    compute_input_hashes,
+    ensure_run_provenance,
+    load_hash_cache,
+)
+from scorpio_pipe.run_passport import ensure_run_passport
 
 log = logging.getLogger(__name__)
 
@@ -412,6 +429,111 @@ TASKS: dict[str, TaskFn] = {
 }
 
 
+def _done_dir_for_task(run_root: Path, task: str) -> Path:
+    """Return directory where task-scoped done.json should live.
+
+    We keep done.json in a task-specific folder to avoid collisions.
+    For tasks that conceptually belong to a stage folder (e.g. superbias -> biascorr),
+    we reuse the stage directory.
+    """
+
+    if task == "manifest":
+        return Path(run_root) / "manifest"
+    if task == "navigator":
+        return Path(run_root) / "ui" / "navigator"
+    if task == "qc_report":
+        return Path(run_root) / "qc"
+    if task == "superbias":
+        return stage_dir(run_root, "biascorr")
+    if task == "superflat":
+        return stage_dir(run_root, "flatfield")
+
+    # Most tasks map 1:1 to a stage key (stage registry).
+    try:
+        REGISTRY.get(task)
+        return stage_dir(run_root, task)
+    except Exception:
+        pass
+
+    # Fallback: a folder named after the task.
+    return Path(run_root) / task
+
+
+def _collect_output_paths(res: Any) -> list[Path]:
+    """Best-effort flatten of stage return value into a list of file paths."""
+
+    out: list[Path] = []
+
+    def _add(v: Any) -> None:
+        if v is None:
+            return
+        if isinstance(v, (str, Path)):
+            p = Path(str(v))
+            out.append(p)
+            return
+        if isinstance(v, dict):
+            for vv in v.values():
+                _add(vv)
+            return
+        if isinstance(v, (list, tuple, set)):
+            for vv in v:
+                _add(vv)
+
+    _add(res)
+    # De-duplicate while preserving order.
+    seen: set[str] = set()
+    uniq: list[Path] = []
+    for p in out:
+        s = str(p)
+        if s in seen:
+            continue
+        seen.add(s)
+        uniq.append(p)
+    return uniq
+
+
+def _validate_task_products(task: str, run_root: Path) -> None:
+    """Validate boundary contract for task outputs (hard-fail).
+
+    We validate only canonical *product* tasks that output a standard 2D MEF
+    or 1D spectrum product.
+    """
+
+    if task == "sky":
+        st = stage_dir(run_root, "sky")
+        for p in sorted(st.glob("*_skysub_raw.fits")):
+            validate_mef_product(p, stage=task)
+        for p in sorted(st.glob("*_skymodel_raw.fits")):
+            validate_mef_product(p, stage=task)
+        return
+
+    if task == "linearize":
+        st = stage_dir(run_root, "linearize")
+        for pat in ("*_rectified.fits", "*_skysub.fits", "*_skymodel.fits"):
+            for p in sorted(st.glob(pat)):
+                validate_mef_product(p, stage=task)
+        # Optional preview
+        prev = st / "lin_preview.fits"
+        if prev.is_file():
+            validate_mef_product(prev, stage=task)
+        return
+
+    if task == "stack2d":
+        st = stage_dir(run_root, "stack2d")
+        p = st / "stack2d.fits"
+        if p.is_file():
+            validate_mef_product(p, stage=task)
+        return
+
+    if task == "extract1d":
+        st = stage_dir(run_root, "extract1d")
+        # Most common output
+        for p in sorted(st.glob("spec1d*.fits")):
+            validate_spec1d_product(p, stage=task)
+        return
+
+
+
 def canonical_task_name(name: str) -> str:
     n = (name or "").strip().lower()
     # tolerate old naming
@@ -476,9 +598,33 @@ def _stage_cfg_for_hash(cfg: dict[str, Any], task: str) -> dict[str, Any]:
 def _input_paths_for_hash(cfg: dict[str, Any], task: str, out_dir: Path) -> list[Path]:
     frames = cfg.get("frames") if isinstance(cfg.get("frames"), dict) else {}
 
+    # Resolve frame paths the same way the stages do (config_dir first, then data_dir).
+    cfg_dir = Path(str(cfg.get("config_dir", "."))).expanduser().resolve()
+    data_dir_raw = str(cfg.get("data_dir", "") or "").strip()
+    data_dir = Path(data_dir_raw).expanduser() if data_dir_raw else None
+    if data_dir is not None:
+        try:
+            data_dir = data_dir.resolve()
+        except Exception:
+            pass
+
+    def _resolve_frame_path(x: Any) -> Path:
+        p = Path(str(x)).expanduser()
+        if p.is_absolute():
+            return p
+        cand = (cfg_dir / p)
+        if cand.exists():
+            return cand.resolve()
+        if data_dir is not None:
+            cand2 = (data_dir / p)
+            if cand2.exists():
+                return cand2.resolve()
+        # Keep deterministic even if missing.
+        return cand.resolve()
+
     def _frame_list(key: str) -> list[Path]:
         v = frames.get(key, []) if isinstance(frames, dict) else []
-        return [Path(str(x)) for x in v] if isinstance(v, list) else []
+        return [_resolve_frame_path(x) for x in v] if isinstance(v, list) else []
 
     wd = Path(out_dir)
     layout = ensure_work_layout(wd)
@@ -518,7 +664,7 @@ def _input_paths_for_hash(cfg: dict[str, Any], task: str, out_dir: Path) -> list
         paths: list[Path] = []
         for _k, v in frames.items() if isinstance(frames, dict) else []:
             if isinstance(v, list):
-                paths.extend(Path(str(x)) for x in v)
+                paths.extend(_resolve_frame_path(x) for x in v)
         return paths
 
     if task == "superbias":
@@ -526,7 +672,17 @@ def _input_paths_for_hash(cfg: dict[str, Any], task: str, out_dir: Path) -> list
     if task == "superflat":
         return _frame_list("flat")
     if task == "flatfield":
-        return _frame_list("obj") + [sf, sb]
+        # Flat-fielding prefers cosmics-cleaned frames (if present) to avoid
+        # having the flat correction interpolate across cosmic hits.
+        paths: list[Path] = []
+        obj = _frame_list("obj")
+        cos_clean_dir = stage_dir(wd, "cosmics") / "obj" / "clean"
+        for p in obj:
+            stem = p.stem
+            cand = cos_clean_dir / f"{stem}_clean.fits"
+            paths.append(cand if cand.exists() else p)
+        paths.extend([sf, sb])
+        return paths
     if task == "cosmics":
         return _frame_list("obj") + [sb]
     if task == "superneon":
@@ -550,16 +706,36 @@ def _input_paths_for_hash(cfg: dict[str, Any], task: str, out_dir: Path) -> list
             lin_inputs.append(sky_stage)
         return lin_inputs
     if task in ("sky", "sky_sub"):
-        # Sky runs in RAW geometry; it depends on wavesol lambda_map and pre-cleaned frames.
+        # Sky runs in RAW geometry; it depends on the wavelength solution and
+        # the *actual* per-exposure inputs it will consume.
         sky_inputs: list[Path] = []
-        cos_clean = stage_dir(wd, "cosmics") / "clean"
-        if cos_clean.exists():
-            sky_inputs.extend(sorted(p for p in cos_clean.glob("*_clean.fits") if p.is_file()))
+        obj = _frame_list("obj")
+        cos_clean_dir = stage_dir(wd, "cosmics") / "obj" / "clean"
+        flat_dir = stage_dir(wd, "flatfield") / "obj"
+
+        def _best_obj_input(raw_p: Path) -> Path:
+            stem = raw_p.stem
+            # Prefer flat-fielded frame if present
+            cand_flat = flat_dir / f"{stem}_flat.fits"
+            if cand_flat.exists():
+                return cand_flat
+            # Else cosmics-cleaned
+            cand_clean = cos_clean_dir / f"{stem}_clean.fits"
+            if cand_clean.exists():
+                return cand_clean
+            return raw_p
+
+        if obj:
+            sky_inputs.extend(_best_obj_input(p) for p in obj)
         else:
-            sky_inputs.extend(_frame_list("obj"))
+            # If frames.obj is not configured, mimic stage behavior: consume all
+            # available pre-products.
+            if flat_dir.exists():
+                sky_inputs.extend(sorted(p for p in flat_dir.glob("*_flat.fits") if p.is_file()))
+            elif cos_clean_dir.exists():
+                sky_inputs.extend(sorted(p for p in cos_clean_dir.glob("*_clean.fits") if p.is_file()))
+
         sky_inputs.append(wsol / "lambda_map.fits")
-        if sb:
-            sky_inputs.append(sb)
         return sky_inputs
     if task in ("stack2d", "stack"):
         # Stack2D depends on rectified sky-subtracted frames produced by Linearization.
@@ -674,12 +850,249 @@ def run_sequence(
         from scorpio_pipe.run_validate import validate_run_dir
 
         ensure_work_layout(out_dir)
+        # P0-PROV-002: run passport (run.json) must exist even if we crash later.
+        try:
+            ensure_run_passport(out_dir)
+        except Exception:
+            # Never block a run on passport capture.
+            log.debug("Failed to ensure run passport", exc_info=True)
         validate_run_dir(out_dir, strict=True)
     except Exception as e:
         raise RuntimeError(
             f"Invalid run folder layout: {out_dir}\n{e}"
         ) from e
 
+    # P0-PROV-003: capture a publication-grade provenance bundle.
+    prov_paths: dict[str, str] = {}
+    hash_cache = {}
+    try:
+        prov_paths = ensure_run_provenance(out_dir, cfg, config_path=config_path)
+        raw_hashes_path = Path(prov_paths.get("raw_hashes_json", out_dir / "manifest" / "raw_hashes.json"))
+        hash_cache = load_hash_cache(raw_hashes_path)
+    except Exception:
+        # Must never crash the pipeline.
+        log.debug("Failed to capture run provenance", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # P0-PROV-002: done.json must exist for every stage (ok/skip/fail).
+    # We also enrich any stage-written done.json with runner-level metadata.
+    # ------------------------------------------------------------------
+
+    def _deep_merge(a: dict, b: dict) -> dict:
+        out = dict(a)
+        for k, v in b.items():
+            if k in out and isinstance(out[k], dict) and isinstance(v, dict):
+                out[k] = _deep_merge(out[k], v)
+            else:
+                out[k] = v
+        return out
+
+    def _atomic_write_json(path: Path, payload: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + '.tmp')
+        tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding='utf-8')
+        tmp.replace(path)
+
+
+
+    def _upsert_stage_done_json(
+        task: str,
+        *,
+        status: str,
+        stage_hash: str | None,
+        started_utc: str | None = None,
+        finished_utc: str | None = None,
+        duration_s: float | None = None,
+        reason: str | None = None,
+        res_obj: Any | None = None,
+        err_code: str | None = None,
+        err_msg: str | None = None,
+        trace: str | None = None,
+    ) -> None:
+        """Ensure a task-scoped done.json exists and enrich it with runner provenance.
+
+        Must never raise (best-effort); failure to write done.json must not break the run.
+        """
+
+        def _worst_status(a: str | None, b: str | None) -> str:
+            order = {
+                "ok": 0,
+                "warn": 1,
+                "skipped": 2,
+                "cancelled": 3,
+                "blocked": 4,
+                "fail": 5,
+            }
+            aa = str(a or "ok").strip().lower()
+            bb = str(b or "ok").strip().lower()
+            aa = {"failed": "fail", "skip": "skipped", "canceled": "cancelled"}.get(aa, aa)
+            bb = {"failed": "fail", "skip": "skipped", "canceled": "cancelled"}.get(bb, bb)
+            return aa if order.get(aa, 0) >= order.get(bb, 0) else bb
+
+        try:
+            ddir = _done_dir_for_task(out_dir, task)
+            ddir.mkdir(parents=True, exist_ok=True)
+            done_p = ddir / "done.json"
+
+            # Base structure if the task did not create its own done.json.
+            if not done_p.exists():
+                try:
+                    write_done_json(
+                        stage=task,
+                        stage_dir=ddir,
+                        status=status,
+                        error_code=err_code,
+                        error_message=err_msg,
+                    )
+                except Exception:
+                    _atomic_write_json(
+                        done_p,
+                        {
+                            "stage": task,
+                            "status": status,
+                            "error_code": err_code,
+                            "error_message": err_msg,
+                        },
+                    )
+
+            # Read existing payload.
+            existing: dict = {}
+            try:
+                existing = json.loads(done_p.read_text(encoding="utf-8"))
+                if not isinstance(existing, dict):
+                    existing = {}
+            except Exception:
+                existing = {}
+
+            merged_status = _worst_status(existing.get("status"), status)
+
+            # Provenance: input hashes.
+            input_paths = _input_paths_for_hash(cfg, task, out_dir)
+            try:
+                input_hashes = compute_input_hashes(input_paths, raw_cache=hash_cache)
+            except Exception:
+                input_hashes = []
+
+            # Outputs: best-effort list.
+            try:
+                out_paths = _collect_output_paths(res_obj) if res_obj is not None else []
+            except Exception:
+                out_paths = []
+
+            outputs_list = [str(p) for p in out_paths]
+
+            # Bonus: product sanity metrics (SCORPNAN counter + NO_COVERAGE fraction).
+            products_sanity: dict[str, Any] = {}
+            try:
+                from astropy.io import fits  # type: ignore
+                import numpy as np  # type: ignore
+                from scorpio_pipe.maskbits import NO_COVERAGE
+
+                per: list[dict[str, Any]] = []
+                scorpnan_total = 0
+                cov_fracs: list[float] = []
+
+                for p in out_paths:
+                    try:
+                        p = Path(str(p))
+                        if not p.exists() or p.suffix.lower() != ".fits":
+                            continue
+                        with fits.open(p, memmap=False) as hdul:
+                            hdr0 = hdul[0].header
+                            scorpnan = int(hdr0.get("SCORPNAN", 0) or 0)
+                            scorpnan_total += scorpnan
+
+                            no_cov: float | None = None
+
+                            # 2D MEF product
+                            if "MASK" in hdul:
+                                m = hdul["MASK"].data
+                                if m is not None:
+                                    mm = m.astype(np.uint16, copy=False)
+                                    no_cov = float(np.mean((mm & np.uint16(NO_COVERAGE)) != 0))
+
+                            # 1D product tables
+                            elif "SPEC_TRACE" in hdul:
+                                fracs: list[float] = []
+                                try:
+                                    mt = hdul["SPEC_TRACE"].data["MASK_TRACE"]
+                                    if mt is not None:
+                                        fracs.append(
+                                            float(
+                                                np.mean(
+                                                    (mt.astype(np.uint16) & np.uint16(NO_COVERAGE)) != 0
+                                                )
+                                            )
+                                        )
+                                except Exception:
+                                    pass
+                                try:
+                                    mf = hdul["SPEC_FIXED"].data["MASK_FIXED"]
+                                    if mf is not None:
+                                        fracs.append(
+                                            float(
+                                                np.mean(
+                                                    (mf.astype(np.uint16) & np.uint16(NO_COVERAGE)) != 0
+                                                )
+                                            )
+                                        )
+                                except Exception:
+                                    pass
+                                if fracs:
+                                    no_cov = float(max(fracs))
+
+                            if no_cov is not None:
+                                cov_fracs.append(float(no_cov))
+
+                            per.append(
+                                {
+                                    "path": str(p),
+                                    "scorpnan": scorpnan,
+                                    "no_coverage_frac": no_cov,
+                                }
+                            )
+                    except Exception:
+                        continue
+
+                if per:
+                    products_sanity = {
+                        "scorpnan_total": int(scorpnan_total),
+                        "no_coverage_frac_max": float(max(cov_fracs)) if cov_fracs else None,
+                        "no_coverage_frac_mean": float(sum(cov_fracs) / len(cov_fracs)) if cov_fracs else None,
+                        "products": per,
+                    }
+            except Exception:
+                products_sanity = {}
+
+            additions: dict[str, Any] = {
+                "stage": task,
+                "status": merged_status,
+                "stage_hash": stage_hash,
+                "runner": {
+                    "started_utc": started_utc,
+                    "finished_utc": finished_utc,
+                    "duration_s": duration_s,
+                    "reason": reason,
+                    "traceback": trace,
+                },
+                "error_code": err_code,
+                "error_message": err_msg,
+                "input_hashes": input_hashes,
+                "effective_config": effective_config if isinstance(effective_config, dict) else {},
+                "outputs_list": outputs_list,
+                "provenance_bundle": prov_paths if isinstance(prov_paths, dict) else {},
+            }
+            if products_sanity:
+                additions.setdefault("metrics", {})
+                if isinstance(additions["metrics"], dict):
+                    additions["metrics"].setdefault("products_sanity", products_sanity)
+
+            merged = _deep_merge(existing, additions)
+            merged["status"] = merged_status
+            _atomic_write_json(done_p, merged)
+        except Exception:
+            # Must never fail the run
+            log.debug("Failed to upsert done.json for %s", task, exc_info=True)
     results: dict[str, Any] = {}
 
     plan = plan_sequence(
@@ -688,6 +1101,7 @@ def run_sequence(
     for it in plan:
         if cancel_token is not None and cancel_token.cancelled:
             log.warning("Cancelled before %s", _task_label(it.task))
+            _upsert_stage_done_json(it.task, status="cancelled", stage_hash=None, reason="Cancelled", started_utc=datetime.now(timezone.utc).isoformat(), finished_utc=datetime.now(timezone.utc).isoformat(), duration_s=0.0)
             record_stage_result(
                 out_dir,
                 it.task,
@@ -708,6 +1122,7 @@ def run_sequence(
                 update_after_stage(cfg, stage=t, status="skipped", stage_hash=None)
             except Exception:
                 pass
+            _upsert_stage_done_json(t, status="skipped", stage_hash=None, reason=str(it.reason or "skipped"), started_utc=datetime.now(timezone.utc).isoformat(), finished_utc=datetime.now(timezone.utc).isoformat(), duration_s=0.0)
             continue
 
         fn = TASKS.get(t)
@@ -720,6 +1135,7 @@ def run_sequence(
 
             check_qc_gate(cfg, task=t, allow_override=bool(qc_override))
         except QCGateError as ge:
+            _upsert_stage_done_json(t, status="blocked", stage_hash=None, reason=ge.summary(), started_utc=datetime.now(timezone.utc).isoformat(), finished_utc=datetime.now(timezone.utc).isoformat(), duration_s=0.0, err_code="QC_GATE", err_msg=ge.summary())
             record_stage_result(
                 out_dir,
                 t,
@@ -741,6 +1157,8 @@ def run_sequence(
         )
 
         log.info("Run %s...", _task_label(t))
+        t_start = time.time()
+        started_utc = datetime.now(timezone.utc).isoformat()
         try:
             res = _call_maybe_with_cancel(
                 fn,
@@ -750,6 +1168,26 @@ def run_sequence(
                 cancel_token=cancel_token,
             )
             results[t] = res
+            # Hard-fail boundary contract enforcement for produced products
+            try:
+                _validate_task_products(t, out_dir)
+            except ProductContractError as ce:
+                raise
+            except Exception as ce:
+                raise ProductContractError(stage=t, path="", code="CONTRACT", message=str(ce)) from ce
+
+            finished_utc = datetime.now(timezone.utc).isoformat()
+            duration_s = float(max(0.0, time.time() - t_start))
+            _upsert_stage_done_json(
+                t,
+                status="ok",
+                stage_hash=stage_hash,
+                started_utc=started_utc,
+                finished_utc=finished_utc,
+                duration_s=duration_s,
+                res_obj=res,
+            )
+
             record_stage_result(
                 out_dir,
                 t,
@@ -832,6 +1270,21 @@ def run_sequence(
         except Exception as e:
             tb = traceback.format_exc()
             log.error("Task %s failed: %s", t, e, exc_info=True)
+            finished_utc = datetime.now(timezone.utc).isoformat()
+            duration_s = float(max(0.0, time.time() - t_start)) if "t_start" in locals() else None
+            _upsert_stage_done_json(
+                t,
+                status="fail",
+                stage_hash=stage_hash if "stage_hash" in locals() else None,
+                started_utc=started_utc if "started_utc" in locals() else None,
+                finished_utc=finished_utc,
+                duration_s=duration_s,
+                reason=str(e),
+                res_obj=results.get(t),
+                err_code=type(e).__name__,
+                err_msg=str(e),
+                trace=tb,
+            )
             record_stage_result(
                 out_dir,
                 t,

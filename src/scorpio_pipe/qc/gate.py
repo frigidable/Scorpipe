@@ -14,6 +14,7 @@ The goal is not to be perfect; it is to be *fail-fast* and reproducible.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import json
 from pathlib import Path
 from typing import Any, Iterable
@@ -22,6 +23,9 @@ from scorpio_pipe.paths import resolve_work_dir
 from scorpio_pipe.stage_registry import STAGES
 from scorpio_pipe.workspace_paths import stage_dir
 from scorpio_pipe.wavesol_paths import wavesol_dir
+
+
+log = logging.getLogger(__name__)
 
 
 _SEV_ORDER = {
@@ -160,13 +164,23 @@ def check_qc_gate(
     task:
         Runner task name.
     allow_override:
-        If True, the gate is bypassed for ERROR blockers (FATAL still blocks).
+        If True, the runner *requests* bypassing ERROR blockers.
+        For safety, bypassing errors is only enabled when the config contains
+        ``qc.allow_override_errors: true``.
     """
     # Override policy: allow bypassing blockers entirely.
     # (Older versions distinguished FATAL; P2 standardizes to INFO/WARN/ERROR.)
     cur_stage = _task_to_stage_key(task)
     if not cur_stage:
         return
+
+    qc_cfg = cfg.get("qc") if isinstance(cfg.get("qc"), dict) else {}
+    allow_override_errors = bool(qc_cfg.get("allow_override_errors", False))
+    if allow_override and not allow_override_errors:
+        log.warning(
+            "QC gate override requested for task '%s' but qc.allow_override_errors is false; keeping strict gate.",
+            task,
+        )
 
     ordered = _stage_key_order()
     if cur_stage not in ordered:
@@ -183,7 +197,7 @@ def check_qc_gate(
         flags, _ = _read_done_flags(done)
         for f in flags:
             sev = normalize_severity(str(f.get("severity") or ""))
-            if allow_override:
+            if allow_override and allow_override_errors:
                 continue
             if _SEV_ORDER.get(sev, 0) >= _SEV_ORDER["ERROR"]:
                 x = dict(f)

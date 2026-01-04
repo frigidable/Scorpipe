@@ -7,6 +7,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from scorpio_pipe.inspect import KIND_ORDER
 from scorpio_pipe.paths import resolve_work_dir
+from scorpio_pipe.workspace_paths import stage_dir
 from scorpio_pipe.wavesol_paths import wavesol_dir
 from scorpio_pipe.ui.fits_preview import FitsPreviewWidget
 from scorpio_pipe.ui.frame_browser import FrameBrowser
@@ -203,7 +204,14 @@ class StageFramesWindow(QtWidgets.QMainWindow):
             kinds = ["obj", "sky", "sunsky", "neon"]
 
         for k in kinds:
-            base = work_dir / "cosmics" / k
+            canonical = stage_dir(work_dir, "cosmics") / k
+            legacy = work_dir / "cosmics" / k
+            base = canonical if canonical.exists() else legacy
+
             self._add_scan_tab(f"{k.upper()} clean", base / "clean")
-            self._add_scan_tab(f"{k.upper()} masks", base / "masks")
+            # Historical name was "masks"; current is "masks_fits".
+            masks_dir = base / "masks_fits"
+            if not masks_dir.exists():
+                masks_dir = base / "masks"
+            self._add_scan_tab(f"{k.upper()} masks", masks_dir)
             self._add_scan_tab(f"{k.upper()} outputs", base)

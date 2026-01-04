@@ -152,6 +152,40 @@ class FrameBrowser(QtWidgets.QWidget):
         """
         self.set_frames_df(df)
 
+    def selected_frames(self) -> list[SelectedFrame]:
+        """Return all currently selected frames.
+
+        The widget is usually used in single-selection mode, but dialogs may switch
+        the table selection mode to ExtendedSelection. This helper keeps the logic
+        in one place.
+        """
+        out: list[SelectedFrame] = []
+        try:
+            idxs = self.table.selectionModel().selectedRows()
+            if not idxs:
+                return out
+            for idx in idxs:
+                r = int(idx.row())
+                row = self._df.iloc[r]
+                p = Path(str(row.get("path", "") or "")).expanduser()
+                if not p:
+                    continue
+                out.append(
+                    SelectedFrame(
+                        path=p,
+                        kind=str(row.get("kind", "") or ""),
+                        object=str(row.get("object", "") or ""),
+                        disperser=str(row.get("disperser", "") or ""),
+                        slit=str(row.get("slit", "") or ""),
+                        binning=str(row.get("binning", "") or ""),
+                    )
+                )
+        except Exception:
+            return []
+        # stable ordering
+        out = sorted(out, key=lambda s: str(s.path))
+        return out
+
     # ---------------------------- internals ----------------------------
 
     def _populate_filter_values(self) -> None:

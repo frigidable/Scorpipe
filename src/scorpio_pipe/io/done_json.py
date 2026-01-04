@@ -1,135 +1,216 @@
-"""Stage done.json helper.
-
-P2 contract
------------
-- Every stage must write ``done.json`` even if it fails.
-- The payload must contain a minimal, stable skeleton for reproducibility.
-- QC flags must use the canonical schema from :mod:`scorpio_pipe.qc.flags`.
-
-This helper is intentionally generic so stages with richer reports can
-still embed extra fields.
-"""
-
 from __future__ import annotations
 
-from datetime import datetime, timezone
+"""Unified stage/task completion marker (done.json).
+
+This module enforces a small, stable schema used across *all* stages and
+UI/pipeline tasks.
+
+Contract (P0-PROV-002)
+----------------------
+- done.json is written on both success and failure.
+- must contain: status, error_code, error_message, input_hashes,
+  effective_config, outputs_list.
+
+Notes
+-----
+Stages typically know only inputs/params/outputs and QC flags.
+The GUI runner may later *upsert* additional provenance fields
+(input hashes, expanded config, timing, hashes).
+"""
+
+import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from scorpio_pipe.io.atomic import atomic_write_json
-from scorpio_pipe.qc.flags import coerce_flags, max_severity
-from scorpio_pipe.version import PIPELINE_VERSION
 
 
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+_STATUS_ALIASES = {
+    "ok": "ok",
+    "success": "ok",
+    "pass": "ok",
+    "warn": "warn",
+    "warning": "warn",
+    "failed": "fail",
+    "fail": "fail",
+    "error": "fail",
+    "skipped": "skipped",
+    "skip": "skipped",
+    "blocked": "blocked",
+    "cancelled": "cancelled",
+    "canceled": "cancelled",
+    "cancel": "cancelled",
+}
+
+_ALLOWED_STATUSES = {"ok", "warn", "fail", "skipped", "blocked", "cancelled"}
+
+
+def _utc_now() -> str:
+    # RFC3339-ish UTC string.
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _norm_status(status: str | None) -> str:
+    s = str(status or "ok").strip().lower()
+    s = _STATUS_ALIASES.get(s, s)
+    if s not in _ALLOWED_STATUSES:
+        raise ValueError(f"Invalid status {status!r}. Allowed: {sorted(_ALLOWED_STATUSES)}")
+    return s
+
+
+def _norm_scalar(v: Any) -> Any:
+    # Keep JSON small and robust.
+    if v is None:
+        return None
+    if isinstance(v, (str, int, float, bool)):
+        return v
+    try:
+        # pathlib.Path
+        return str(v)
+    except Exception:
+        return repr(v)
+
+
+def _norm_mapping(obj: Any) -> Any:
+    if obj is None:
+        return None
+    if isinstance(obj, Mapping):
+        out: dict[str, Any] = {}
+        for k, v in obj.items():
+            out[str(k)] = _norm_mapping(v)
+        return out
+    if isinstance(obj, (list, tuple, set)):
+        return [_norm_mapping(x) for x in obj]
+    return _norm_scalar(obj)
+
+
+def _outputs_list_from_outputs(outputs: Any) -> list[str]:
+    out: list[str] = []
+
+    def _add(v: Any) -> None:
+        if v is None:
+            return
+        if isinstance(v, (str, Path)):
+            out.append(str(v))
+            return
+        if isinstance(v, Mapping):
+            for vv in v.values():
+                _add(vv)
+            return
+        if isinstance(v, (list, tuple, set)):
+            for vv in v:
+                _add(vv)
+
+    _add(outputs)
+
+    # de-dup while preserving order
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for s in out:
+        if s in seen:
+            continue
+        seen.add(s)
+        uniq.append(s)
+    return uniq
+
+
+def _norm_flags(flags: Sequence[Any] | None) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for f in flags or []:
+        if isinstance(f, dict):
+            out.append(dict(f))
+        else:
+            # tolerate Flag dataclass or any object with attributes
+            d: dict[str, Any] = {}
+            for k in ("code", "severity", "message", "hint"):
+                if hasattr(f, k):
+                    d[k] = getattr(f, k)
+            if not d:
+                d = {"message": str(f)}
+            out.append(d)
+    return out
 
 
 def write_done_json(
-    stage: str,
     *,
+    stage: str,
     stage_dir: str | Path,
-    status: str,
+    status: str = "ok",
+    error_code: str | None = None,
+    error_message: str | None = None,
     inputs: Mapping[str, Any] | None = None,
     params: Mapping[str, Any] | None = None,
     outputs: Mapping[str, Any] | None = None,
+    input_hashes: list[dict[str, Any]] | None = None,
+    effective_config: Mapping[str, Any] | None = None,
+    outputs_list: list[str] | None = None,
     metrics: Mapping[str, Any] | None = None,
     flags: Sequence[Any] | None = None,
     qc: Mapping[str, Any] | None = None,
-    error: Mapping[str, Any] | None = None,
-    created_utc: str | None = None,
-    version: str | None = None,
     extra: Mapping[str, Any] | None = None,
+    error: Mapping[str, Any] | None = None,
     legacy_paths: Sequence[str | Path] | None = None,
-    indent: int = 2,
-    ensure_ascii: bool = False,
 ) -> dict[str, Any]:
-    """Write a stage ``done.json`` in a consistent format.
+    """Write ``done.json`` into ``stage_dir`` and return the payload."""
 
-    Parameters
-    ----------
-    stage
-        Canonical stage key (e.g. "linearize").
-    stage_dir
-        Directory where outputs are written.
-    status
-        One of: "ok", "warn", "fail".
-    legacy_paths
-        Optional additional JSON paths to mirror the same payload for backward
-        compatibility.
-    """
+    st = _norm_status(status)
+    stage_dir = Path(stage_dir)
+    stage_dir.mkdir(parents=True, exist_ok=True)
 
-    out_dir = Path(stage_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    fl = _norm_flags(flags)
+
+    # Decide error code/message.
+    ecode = error_code
+    emsg = error_message
+    if st == "fail":
+        if not ecode:
+            ecode = "STAGE_FAILED"
+        if not emsg:
+            if error and isinstance(error, Mapping) and error.get("message"):
+                emsg = str(error.get("message"))
+            elif fl:
+                emsg = str(fl[0].get("message") or fl[0].get("code") or "stage failed")
+            else:
+                emsg = "stage failed"
+    else:
+        # For non-failure statuses, keep codes/messages optional.
+        ecode = ecode if ecode else None
+        emsg = emsg if emsg else None
 
     payload: dict[str, Any] = {
+        "schema": "scorpio_pipe.done_json",
+        "schema_version": 1,
         "stage": str(stage),
-        "status": str(status),
-        "version": str(version or PIPELINE_VERSION),
-        "created_utc": str(created_utc or utc_now_iso()),
-        "inputs": dict(inputs or {}),
-        "params": dict(params or {}),
-        "outputs": dict(outputs or {}),
-        "metrics": dict(metrics or {}),
+        "status": st,
+        "error_code": ecode,
+        "error_message": emsg,
+        "created_utc": _utc_now(),
+        "inputs": _norm_mapping(inputs or {}),
+        "params": _norm_mapping(params or {}),
+        "outputs": _norm_mapping(outputs or {}),
+        # Filled by runner when available; keep keys always present.
+        "input_hashes": list(input_hashes or []),
+        "effective_config": _norm_mapping(effective_config or {}),
+        "outputs_list": list(outputs_list or _outputs_list_from_outputs(outputs or {})),
+        "flags": fl,
     }
 
+    if metrics is not None:
+        payload["metrics"] = _norm_mapping(metrics)
+    if qc is not None:
+        payload["qc"] = _norm_mapping(qc)
+    if extra is not None:
+        payload["extra"] = _norm_mapping(extra)
     if error is not None:
-        payload["error"] = dict(error)
+        payload["error"] = _norm_mapping(error)
 
-    # Merge QC info.
-    qc_payload: dict[str, Any] = {}
-    if isinstance(qc, Mapping):
-        qc_payload.update(dict(qc))
+    # Write canonical marker.
+    atomic_write_json(stage_dir / "done.json", payload, indent=2, ensure_ascii=False)
 
-    # Flags may be provided either in the top-level ``flags`` parameter or
-    # inside qc['flags']; we merge them and publish in two places:
-    #   - payload['flags'] (stable, easy to grep)
-    #   - payload['qc']['flags'] (rich QC section)
-    # This is deliberately redundant to keep legacy callers and P2 tests
-    # happy.
-    fl_top = coerce_flags(flags)
-    fl_qc = coerce_flags(qc_payload.get("flags"))
-    merged: list[dict[str, Any]] = []
-    if fl_top or fl_qc:
-        seen: set[tuple[str, str]] = set()
-
-        def _add_all(items: list[dict[str, Any]]) -> None:
-            for it in items:
-                code = str(it.get("code", ""))
-                sev = str(it.get("severity", ""))
-                key = (code, sev)
-                if key in seen:
-                    continue
-                seen.add(key)
-                merged.append(it)
-
-        _add_all(fl_top)
-        _add_all(fl_qc)
-
-    # Always publish a top-level flags list for a stable contract.
-    payload["flags"] = merged
-
-    if merged:
-        qc_payload["flags"] = merged
-        qc_payload["max_severity"] = max_severity(merged)
-
-    if qc_payload:
-        payload["qc"] = qc_payload
-
-    if extra:
-        # Do not overwrite the stable keys above.
-        for k, v in extra.items():
-            if k in payload:
-                continue
-            payload[k] = v
-
-    # Canonical path
-    atomic_write_json(out_dir / "done.json", payload, indent=int(indent), ensure_ascii=bool(ensure_ascii))
-
-    # Optional mirrors
-    for p in legacy_paths or []:
+    # Optional legacy mirrors (best-effort).
+    for lp in legacy_paths or []:
         try:
-            atomic_write_json(Path(p), payload, indent=int(indent), ensure_ascii=bool(ensure_ascii))
+            atomic_write_json(Path(lp), payload, indent=2, ensure_ascii=False)
         except Exception:
             pass
 

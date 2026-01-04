@@ -18,6 +18,7 @@ from scorpio_pipe.config import load_config_any
 from scorpio_pipe.fits_utils import read_image_smart
 from scorpio_pipe.plot_style import mpl_style
 from scorpio_pipe.stages.cosmics import _boxcar_mean2d_masked
+from scorpio_pipe.workspace_paths import stage_dir
 
 log = logging.getLogger(__name__)
 
@@ -38,8 +39,21 @@ def _work_dir_from_cfg(cfg: dict[str, Any]) -> Path:
     return wd if wd.is_absolute() else (base_dir / wd).resolve()
 
 
+def _cosmics_root(work_dir: Path) -> Path:
+    """Locate the cosmics stage root (canonical + legacy fallback)."""
+
+    canonical = stage_dir(work_dir, "cosmics")
+    legacy = work_dir / "cosmics"
+    if canonical.exists():
+        return canonical
+    if legacy.exists():
+        return legacy
+    # Prefer canonical for new workspaces.
+    return canonical
+
+
 def _cosmics_kind_dirs(work_dir: Path, kind: str) -> dict[str, Path]:
-    root = work_dir / "cosmics" / kind
+    root = _cosmics_root(work_dir) / kind
     return {
         "root": root,
         "clean": root / "clean",

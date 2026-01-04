@@ -117,16 +117,18 @@ def main() -> int:
             },
         }
 
-        # Run pipeline stages
-        lin_info = run_linearize(cfg)
+        # Run pipeline stages (canonical order v5.40+):
+        #   wavesol -> sky_sub (raw) -> linearize -> stack2d -> extract1d
         _ = run_sky_sub(cfg)
-        # gather per-exp sky-subtracted
-        per_exp_dir = work_dir / "products" / "sky" / "per_exp"
-        sky_fits = sorted(per_exp_dir.glob("*_skysub.fits"))
+        lin_info = run_linearize(cfg)
+
+        from scorpio_pipe.workspace_paths import stage_dir
+
+        # gather per-exp rectified sky-subtracted frames
+        lin_dir = stage_dir(work_dir, "linearize")
+        sky_fits = sorted(lin_dir.glob("*_skysub.fits"))
         if not sky_fits:
-            sky_fits = sorted(per_exp_dir.glob("*_sky_sub.fits"))
-        if not sky_fits:
-            raise RuntimeError(f"No sky-subtracted per-exp FITS in {per_exp_dir}")
+            raise RuntimeError(f"No rectified sky-subtracted FITS in {lin_dir}")
         st_info = run_stack2d(cfg, inputs=sky_fits)
         ex_info = run_extract1d(cfg, stacked_fits=st_info["stacked2d_fits"])
 

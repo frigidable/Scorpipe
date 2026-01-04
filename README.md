@@ -10,7 +10,7 @@
 - построение **superneon** + детекцию линий,
 - интерактивную **LineID GUI** (ручные пары x↔λ + библиотека пар),
 - **wavesolution** (1D/2D продукты: RMS, λ‑карта),
-- научное ядро v5.x: **linearize → sky_sub → stack2d → extract1d**,
+- научное ядро v5.x: **sky_sub → linearize → stack2d → extract1d**,
 - **QC и воспроизводимость** (manifest, отчёт, timings).
 
 > В терминах “дойти до научного результата”: пайплайн в активной разработке, но уже даёт воспроизводимый, управляемый и расширяемый workflow.  
@@ -71,16 +71,17 @@
 ### 4) Запустить стадии
 Обычно порядок такой:
 1. `manifest`
-2. `superbias` (+ при необходимости `superflat` / `flatfield`)
+2. `superbias`
 3. `cosmics`
-4. `superneon`
-5. `lineid_prepare` → **LineID GUI** (привязка) → сохранить пары
-6. `wavesolution`
-7. `linearize`
+4. `superflat` → `flatfield` (опционально, но рекомендуется перед sky)
+5. `superneon`
+6. `lineid_prepare` → **LineID GUI** (привязка) → сохранить пары
+7. `wavesolution`
 8. `sky`
-9. `stack2d`
-10. `extract1d`
-11. `qc_report`
+9. `linearize`
+10. `stack2d`
+11. `extract1d`
+12. `qc_report`
 
 GUI использует режим **resume**: если продукт уже существует и хэш стадии совпадает, стадия будет пропущена.
 
@@ -229,13 +230,13 @@ work/
 ### Wavesolution
 - `work/superneon/superneon.fits` (+ PNG preview)
 - `work/lineid/hand_pairs.txt` — сохранённые ручные пары
-- `work/wavesol/*/` — продукты решения (JSON/PNG/λ‑карта)
+- `work/08_wavesol/` (или `work/08_wavesol/<disperser>/`) — продукты решения (JSON/PNG/λ‑карта)
 
 ### Science
-- `work/products/lin/lin_preview.fits` (+ PNG)
-- `work/products/sky/preview.fits` (+ PNG)
-- `work/products/stack/stacked2d.fits` (+ coverage.png)
-- `work/products/spec/spec1d.fits` (+ PNG)
+- `work/10_linearize/lin_preview.fits` (+ PNG)
+- `work/09_sky/preview.fits` (+ PNG)
+- `work/11_stack/stacked2d.fits` (+ coverage.png)
+- `work/12_extract/spec1d.fits` (+ PNG)
 
 > Точный список под ваш конфиг: `scorpio-pipe products --config <...>`.
 

@@ -121,7 +121,19 @@ def _read_fits_data(path: Path) -> Tuple[np.ndarray, fits.Header]:
 
 
 def _resolve_superbias_path(c: Dict, work_dir: Path) -> Path:
-    """Resolve superbias path with backward-compatible fallbacks."""
+    """Resolve superbias path with backward-compatible fallbacks.
+
+    Priority
+    --------
+    1) Explicit config: calib.superbias_path
+    2) Canonical stage output: <work_dir>/NN_superbias/superbias.fits
+    3) Legacy/compat roots: <work_dir>/calibs/superbias.fits, <work_dir>/calib/superbias.fits
+
+    Notes
+    -----
+    ``workspace_paths.resolve_input_path`` intentionally does *not* know about
+    legacy ``calibs/`` and ``calib/`` roots, so we add them here.
+    """
 
     calib_cfg = c.get("calib", {}) or {}
     p = calib_cfg.get("superbias_path")
@@ -134,7 +146,46 @@ def _resolve_superbias_path(c: Dict, work_dir: Path) -> Path:
     from scorpio_pipe.workspace_paths import resolve_input_path
 
     return resolve_input_path(
-        "superbias_fits", work_dir, "superbias", relpath="superbias.fits"
+        "superbias_fits",
+        work_dir,
+        "superbias",
+        relpath="superbias.fits",
+        extra_candidates=[
+            Path(work_dir) / "calibs" / "superbias.fits",
+            Path(work_dir) / "calib" / "superbias.fits",
+        ],
+    )
+
+
+def _resolve_superflat_path(c: Dict, work_dir: Path) -> Path:
+    """Resolve superflat path with backward-compatible fallbacks.
+
+    Priority
+    --------
+    1) Explicit config: calib.superflat_path
+    2) Canonical stage output: <work_dir>/NN_superflat/superflat.fits
+    3) Legacy/compat roots: <work_dir>/calibs/superflat.fits, <work_dir>/calib/superflat.fits
+    """
+
+    calib_cfg = c.get("calib", {}) or {}
+    p = calib_cfg.get("superflat_path")
+    if p:
+        pp = Path(str(p)).expanduser()
+        if not pp.is_absolute():
+            pp = (work_dir / pp).resolve()
+        return pp
+
+    from scorpio_pipe.workspace_paths import resolve_input_path
+
+    return resolve_input_path(
+        "superflat_fits",
+        work_dir,
+        "superflat",
+        relpath="superflat.fits",
+        extra_candidates=[
+            Path(work_dir) / "calibs" / "superflat.fits",
+            Path(work_dir) / "calib" / "superflat.fits",
+        ],
     )
 
 
@@ -286,8 +337,9 @@ def _build_superflat_core(
 def build_superbias(cfg: Any, out_path: str | Path | None = None) -> Path:
     """
     Строит superbias (по умолчанию — медианой) по bias-кадрам.
-    По умолчанию пишет FITS в work_dir/calibs/superbias.fits и зеркалит в legacy
-    work_dir/calib/superbias.fits для обратной совместимости.
+    По умолчанию пишет FITS в каноническую stage‑директорию
+    work_dir/NN_superbias/superbias.fits и (best‑effort) зеркалит в legacy
+    work_dir/calibs/superbias.fits и work_dir/calib/superbias.fits для обратной совместимости.
     """
     c = _load_cfg_any(cfg)
 
@@ -298,6 +350,12 @@ def build_superbias(cfg: Any, out_path: str | Path | None = None) -> Path:
         raise ValueError("No bias frames in config.frames.bias")
 
     log.info("Superbias: %d input bias frames", len(bias_paths))
+
+    # Combine settings must be resolved *before* any logging/header stamping.
+    # (A NameError here would block calibration for the whole pipeline.)
+    calib_cfg = c.get("calib", {}) or {}
+    combine = str(calib_cfg.get("bias_combine", "median")).strip().lower() or "median"
+    sigma_clip = float(calib_cfg.get("bias_sigma_clip", 0.0) or 0.0)
 
     # Strict calibration compatibility: all bias frames must share the same
     # FrameSignature and match the science setup (if known). No implicit pad/crop.
@@ -473,8 +531,9 @@ def build_superflat(cfg: Any, out_path: str | Path | None = None) -> Path:
       3) объединить кадры (median/mean, опционально sigma-clipped mean)
       4) нормировать итоговый superflat к медиане=1
 
-    По умолчанию пишет FITS в work_dir/calibs/superflat.fits и зеркалит в legacy
-    work_dir/calib/superflat.fits для обратной совместимости.
+    По умолчанию пишет FITS в каноническую stage‑директорию
+    work_dir/NN_superflat/superflat.fits и (best‑effort) зеркалит в legacy
+    work_dir/calibs/superflat.fits и work_dir/calib/superflat.fits для обратной совместимости.
     """
     c = _load_cfg_any(cfg)
 

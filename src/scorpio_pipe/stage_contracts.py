@@ -128,7 +128,12 @@ CONTRACTS: dict[str, StageContract] = {
     "sky": StageContract(
         stage="sky",
         title="Sky subtraction (per exposure)",
-        inputs=("linearized frames", "sky/object ROI definitions"),
+        inputs=(
+            "05_cosmics/*_clean.fits (preferred) OR raw/obj/*.fits (RAW detector geometry)",
+            "05_cosmics/*_mask.fits (optional)",
+            "08_wavesol/lambda_map.fits (\u03bb(x,y) in RAW geometry)",
+            "ROI/geometry settings (cfg.sky.geometry.*)",
+        ),
         outputs=("sky_done", "qc_sky_json", "sky_preview_fits", "sky_preview_png"),
         metrics=("sky.rms_sky", "sky.flexure_shift_A"),
     ),

@@ -11,6 +11,7 @@ from scorpio_pipe.config import load_config
 from scorpio_pipe.resource_utils import resolve_resource, resolve_resource_maybe
 from scorpio_pipe.schema import find_unknown_keys, schema_validate
 from scorpio_pipe.validation import validate_config
+from scorpio_pipe.workspace_paths import stage_dir
 
 
 def _check_optional_imports(modules: List[str]) -> Tuple[bool, List[str]]:
@@ -27,7 +28,13 @@ def _ensure_dirs(cfg: Dict[str, Any]) -> List[str]:
     """Create key directories (safe). Returns list of created dirs."""
     created: List[str] = []
     work_dir = Path(str(cfg.get("work_dir", "work"))).expanduser().resolve()
-    for d in [work_dir, work_dir / "report", work_dir / "calib", work_dir / "cosmics"]:
+    for d in [
+        work_dir,
+        work_dir / "report",
+        work_dir / "calib",
+        stage_dir(work_dir, "cosmics"),
+        work_dir / "cosmics",  # legacy
+    ]:
         if not d.exists():
             d.mkdir(parents=True, exist_ok=True)
             created.append(str(d))

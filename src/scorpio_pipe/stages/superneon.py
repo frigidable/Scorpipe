@@ -427,21 +427,19 @@ def build_superneon(cfg: dict[str, Any]) -> SuperNeonResult:
         superneon_cfg = {}
     bias_sub = bool(superneon_cfg.get("bias_sub", True))
 
-    # Resolve superbias: prefer explicit calib.superbias_path, otherwise use canonical work_dir/calibs.
-    superbias_path_cfg = (cfg.get("calib", {}) or {}).get("superbias_path")
-    superbias_path: Path | None = None
-    if superbias_path_cfg:
-        superbias_path = Path(str(superbias_path_cfg)).expanduser()
-        if not superbias_path.is_absolute():
-            superbias_path = (work_dir / superbias_path).resolve()
-    else:
-        from scorpio_pipe.work_layout import ensure_work_layout
+    # Resolve superbias path robustly (canonical stage dirs + legacy fallbacks).
+    # Do not assume work_dir/calibs exists: GUI/CLI often use NN_* stage layout.
+    from scorpio_pipe.stages.calib import _resolve_superbias_path as _resolve_sb
 
-        layout = ensure_work_layout(work_dir)
-        for cand in (layout.calibs / "superbias.fits", layout.calib_legacy / "superbias.fits"):
+    superbias_path: Path | None = None
+    if bias_sub:
+        cand = _resolve_sb(cfg, work_dir)
+        if cand is not None:
+            cand = Path(str(cand)).expanduser()
+            if not cand.is_absolute():
+                cand = (work_dir / cand).resolve()
             if cand.is_file():
                 superbias_path = cand
-                break
 
     superbias: np.ndarray | None = None
     superbias_hdr: fits.Header | None = None

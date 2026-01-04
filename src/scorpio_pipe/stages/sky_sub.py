@@ -57,10 +57,12 @@ from scorpio_pipe.qc_thresholds import compute_thresholds
 from scorpio_pipe.sky_geometry import compute_sky_geometry, roi_from_cfg
 from scorpio_pipe.version import PIPELINE_VERSION
 from scorpio_pipe.workspace_paths import stage_dir
+from scorpio_pipe.units_model import UnitModel, ensure_electron_units, infer_unit_model
 
 from scorpio_pipe.compare_cache import build_stage_diff, snapshot_stage
 from scorpio_pipe.io.quicklook import quicklook_from_mef
 from scorpio_pipe.io.atomic import atomic_write_json
+from scorpio_pipe.fits_utils import open_fits_smart
 
 log = logging.getLogger(__name__)
 
@@ -68,14 +70,18 @@ log = logging.getLogger(__name__)
 FATAL_BITS = int(NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED)
 
 
-def _read_lambda_map(path: Path) -> Tuple[np.ndarray, fits.Header, dict[str, Any]]:
+def _read_lambda_map(
+    path: Path,
+    *,
+    allow_fallback_pix: bool = False,
+) -> Tuple[np.ndarray, fits.Header, dict[str, Any]]:
     """Load and validate ``lambda_map.fits``.
 
-    In strict mode we expect a physically meaningful, monotonic lambda map with
-    explicit metadata. For legacy/synthetic test data, the file may be present
-    but lack metadata or contain placeholders (e.g. all zeros). In that case we
-    fall back to a pixel-coordinate map (x index) so that the raw-branch sky
-    subtraction can still run and the stage can emit a clear QC flag.
+    By default we require a physically meaningful, monotonic lambda map with
+    explicit metadata. For synthetic/legacy quicklooks you may enable
+    ``allow_fallback_pix`` to replace an invalid file with a pixel-coordinate
+    map (x index) and continue the raw-branch sky subtraction while emitting a
+    clear QC flag.
     """
 
     diag: dict[str, Any] = {}
@@ -87,6 +93,8 @@ def _read_lambda_map(path: Path) -> Tuple[np.ndarray, fits.Header, dict[str, Any
             hdr = hdul[0].header.copy()
         return lam, hdr, diag
     except Exception as e:
+        if not allow_fallback_pix:
+            raise
         # Best-effort fallback: read the file for shape and build a pixel map.
         with fits.open(path, memmap=False) as hdul:
             lam_raw = np.asarray(hdul[0].data, dtype=float)
@@ -114,29 +122,136 @@ def _raw_stem_from_path(p: Path) -> str:
     return s
 
 
-def _try_load_mask_for_clean(path: Path) -> Optional[np.ndarray]:
+def _locate_cosmics_dirs(work_dir: Path, *, kind: str) -> tuple[Path | None, Path | None]:
+    """Locate cosmics clean and mask directories (canonical + legacy fallbacks)."""
+
+    roots = [stage_dir(work_dir, "cosmics"), work_dir / "cosmics"]
+
+    # Preferred layout: <root>/<kind>/clean and .../masks_fits
+    for r in roots:
+        c = r / kind / "clean"
+        m = r / kind / "masks_fits"
+        if c.exists():
+            return c, (m if m.exists() else None)
+
+    # Legacy (very old): <root>/clean
+    for r in roots:
+        c = r / "clean"
+        m = r / "masks_fits"
+        if c.exists():
+            return c, (m if m.exists() else None)
+
+    return None, None
+
+
+def _resolve_clean_or_raw(raw_path: Path, *, clean_dir: Path | None) -> Path:
+    """Return a matching cosmics-cleaned frame if present; else the raw path."""
+
+    if clean_dir is None:
+        return raw_path
+    stem = _raw_stem_from_path(raw_path)
+    cand = clean_dir / f"{stem}_clean.fits"
+    return cand if cand.is_file() else raw_path
+
+
+def _try_load_mask_for_clean(
+    path: Path, *, masks_fits_dir: Path | None = None
+) -> Optional[np.ndarray]:
     """Try to load per-frame mask written by Cosmics stage.
 
     Cosmics stage stores masks alongside cleaned frames as ``*_mask.fits``.
     """
+    # 1) Preferred: next to the clean frame: <base>_clean_mask.fits
     cand = path.with_name(path.stem + "_mask.fits")
+    # 2) Legacy: masks_fits/<base>_mask.fits
+    if not cand.exists() and masks_fits_dir is not None:
+        base = _raw_stem_from_path(path)
+        cand2 = masks_fits_dir / f"{base}_mask.fits"
+        if cand2.exists():
+            cand = cand2
+
     if not cand.exists():
         return None
+
     try:
-        with fits.open(cand, memmap=False) as hdul:
-            m = np.asarray(hdul[0].data, dtype=np.uint16)
+        with open_fits_smart(
+            cand,
+            memmap="auto",
+            ignore_missing_end=True,
+            ignore_missing_simple=True,
+            do_not_scale_image_data=False,
+        ) as hdul:
+            h_sel = None
+            for h in hdul:
+                try:
+                    if str(h.header.get("EXTNAME", "")).strip().upper() == "MASK" and getattr(h, "data", None) is not None:
+                        h_sel = h
+                        break
+                except Exception:
+                    continue
+            if h_sel is None:
+                # Fallback: first image-like HDU.
+                for h in hdul:
+                    d = getattr(h, "data", None)
+                    if d is None:
+                        continue
+                    a = np.asarray(d)
+                    if a.ndim >= 2:
+                        h_sel = h
+                        break
+            if h_sel is None or getattr(h_sel, "data", None) is None:
+                return None
+            m0 = np.asarray(h_sel.data)
+    except Exception:
+        return None
+
+    # Normalize to pipeline bitmask (uint16). Older products may store 0/1.
+    try:
+        m = np.asarray(m0)
+        if m.size == 0:
+            return None
+        mx = int(np.nanmax(m)) if np.isfinite(m).any() else 0
+        if mx <= 1:
+            m = (m.astype(np.uint16) > 0).astype(np.uint16) * np.uint16(COSMIC)
+        else:
+            m = m.astype(np.uint16)
         return m
     except Exception:
         return None
 
 
 def _read_image(path: Path) -> Tuple[np.ndarray, fits.Header]:
-    with fits.open(path, memmap=False) as hdul:
-        data = hdul[0].data
-        hdr = hdul[0].header.copy()
-    if data is None:
-        raise ValueError(f"Empty image: {path}")
-    return np.asarray(data, dtype=float), hdr
+    with open_fits_smart(
+        path,
+        memmap="auto",
+        ignore_missing_end=True,
+        ignore_missing_simple=True,
+        do_not_scale_image_data=False,
+    ) as hdul:
+        h_sel = None
+        # Prefer MEF products with SCI extension.
+        for h in hdul:
+            try:
+                if str(h.header.get("EXTNAME", "")).strip().upper() == "SCI" and getattr(h, "data", None) is not None:
+                    h_sel = h
+                    break
+            except Exception:
+                continue
+        if h_sel is None:
+            # Fallback: first image-like HDU.
+            for h in hdul:
+                d = getattr(h, "data", None)
+                if d is None:
+                    continue
+                a = np.asarray(d)
+                if a.ndim >= 2:
+                    h_sel = h
+                    break
+        if h_sel is None or getattr(h_sel, "data", None) is None:
+            raise ValueError(f"Empty image: {path}")
+        data = np.asarray(h_sel.data, dtype=float)
+        hdr = h_sel.header.copy()
+    return data, hdr
 
 
 def _estimate_var_adu2(sci: np.ndarray, *, read_noise_e: float, gain_e_per_adu: float) -> np.ndarray:
@@ -147,6 +262,26 @@ def _estimate_var_adu2(sci: np.ndarray, *, read_noise_e: float, gain_e_per_adu: 
     var_e = np.maximum(sci * g, 0.0) + rn * rn
     # var_adu = var_e / g^2
     return (var_e / (g * g)).astype(np.float32)
+
+
+def _fail_if_rectified(hdr: fits.Header, *, path: Path) -> None:
+    """Fail fast if input looks rectified/linearized.
+
+    Sky modelling (Kelson 2003 principle) must occur before rebinning. We detect
+    common wavelength-WCS markers and refuse to run on such inputs.
+    """
+
+    ctype1 = str(hdr.get("CTYPE1", "") or "").upper()
+    if ctype1.startswith("WAVE") or ctype1.startswith("AWAV"):
+        raise RuntimeError(
+            f"Sky modelling must run on raw (unrectified) detector geometry. "
+            f"Input appears rectified (CTYPE1={ctype1!r}): {path}"
+        )
+    if hdr.get("SCORP_L0") is not None or hdr.get("SCORP_DL") is not None:
+        raise RuntimeError(
+            f"Sky modelling must run on raw (unrectified) detector geometry. "
+            f"Input appears rectified (SCORP_L0/SCORP_DL present): {path}"
+        )
 
 
 def _robust_sigma(x: np.ndarray) -> float:
@@ -952,11 +1087,11 @@ def _median_template(frames: Iterable[Path]) -> Tuple[np.ndarray, fits.Header]:
     return np.nanmedian(stack, axis=0).astype(np.float32), (hdr0 or fits.Header())
 
 
-def _run_sky_sub_impl(cfg: dict[str, Any]) -> dict[str, Path]:
+def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[str, Path]:
     """Entry point used by the pipeline runner."""
 
     work_dir = resolve_work_dir(cfg)
-    out_dir = stage_dir(work_dir, "sky")
+    out_dir = out_dir or stage_dir(work_dir, "sky")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     done_path = out_dir / "done.json"
@@ -1020,26 +1155,93 @@ def _run_sky_sub_impl(cfg: dict[str, Any]) -> dict[str, Path]:
     obj_frames = frames.get("obj") if isinstance(frames.get("obj"), list) else []
     sky_frames = frames.get("sky") if isinstance(frames.get("sky"), list) else []
 
-    # Prefer cosmics-cleaned frames if present
-    cos_clean_dir = stage_dir(work_dir, "cosmics") / "clean"
-    clean_inputs = sorted(p for p in cos_clean_dir.glob("*_clean.fits") if p.is_file()) if cos_clean_dir.exists() else []
-    raw_inputs = [Path(str(p)) for p in clean_inputs] if clean_inputs else [Path(str(p)) for p in obj_frames]
+    # Resolve relative frame paths consistently with other stages.
+    config_dir = Path(str(cfg.get("config_dir", "."))).expanduser().resolve()
+    data_dir_raw = str(cfg.get("data_dir", "") or "").strip()
+    data_dir = Path(data_dir_raw).expanduser() if data_dir_raw else None
+    if data_dir is not None:
+        try:
+            data_dir = data_dir.resolve()
+        except Exception:
+            pass
+
+    def _resolve_input(fp: Any) -> Path:
+        p = Path(str(fp)).expanduser()
+        if p.is_absolute():
+            return p
+        cand = (config_dir / p)
+        if cand.exists():
+            return cand.resolve()
+        if data_dir is not None:
+            cand2 = (data_dir / p)
+            if cand2.exists():
+                return cand2.resolve()
+        return cand.resolve()
+
+    # Prefer flat-fielded frames (if present), then cosmics-cleaned frames.
+    obj_clean_dir, obj_mask_dir = _locate_cosmics_dirs(work_dir, kind="obj")
+    sky_clean_dir, sky_mask_dir = _locate_cosmics_dirs(work_dir, kind="sky")
+
+    flat_obj_dir = stage_dir(work_dir, "flatfield") / "obj"
+    flat_sky_dir = stage_dir(work_dir, "flatfield") / "sky"
+
+    def _resolve_best(raw_p: Path, *, kind: str) -> Path:
+        stem = raw_p.stem
+        flat_dir = flat_obj_dir if kind == "obj" else flat_sky_dir
+        cand_flat = flat_dir / f"{stem}_flat.fits"
+        if cand_flat.exists():
+            return cand_flat
+        clean_dir = obj_clean_dir if kind == "obj" else sky_clean_dir
+        return _resolve_clean_or_raw(raw_p, clean_dir=clean_dir)
+
+    if obj_frames:
+        raw_inputs = [_resolve_best(_resolve_input(p), kind="obj") for p in obj_frames]
+    else:
+        # Backward compatibility: if frames are not specified, process all
+        # cosmics-cleaned object frames if available.
+        raw_inputs: list[Path] = []
+        clean_inputs: list[Path] = []
+        if obj_clean_dir is not None and obj_clean_dir.exists():
+            clean_inputs = sorted(p for p in obj_clean_dir.glob("*_clean.fits") if p.is_file())
+        # If we also have flat-fielded products, prefer them.
+        if flat_obj_dir.exists():
+            for p in clean_inputs:
+                stem = _raw_stem_from_path(p)
+                cand = flat_obj_dir / f"{stem}_flat.fits"
+                raw_inputs.append(cand if cand.exists() else Path(str(p)))
+        else:
+            raw_inputs = [Path(str(p)) for p in clean_inputs]
 
     lam_map_path = stage_dir(work_dir, "wavesol") / "lambda_map.fits"
     if not lam_map_path.exists():
         # Older layout: wavesol_dir may be elsewhere
         lam_map_path = (work_dir / "wavesol" / "lambda_map.fits")
 
+    lam_cfg = sky_cfg.get("lambda_map") if isinstance(sky_cfg.get("lambda_map"), dict) else {}
+    allow_fallback_pix = bool(lam_cfg.get("allow_fallback_pix", False))
+
     lam_map = None
     lam_hdr = None
     lam_diag: dict[str, Any] = {}
     try:
-        lam_map, lam_hdr, lam_diag = _read_lambda_map(lam_map_path)
+        lam_map, lam_hdr, lam_diag = _read_lambda_map(
+            lam_map_path,
+            allow_fallback_pix=allow_fallback_pix,
+        )
     except Exception as e:
         stage_flags.append(make_flag("LAMBDA_MAP_INVALID", "FATAL", str(e), path=str(lam_map_path)))
 
     # thresholds
     thr, thr_meta = compute_thresholds(cfg)
+
+    # Lambda-map shape policy: by default we are strict. Any implicit
+    # repetition/cropping can silently corrupt sky modelling.
+    sky_cfg = cfg.get("sky") if isinstance(cfg.get("sky"), dict) else {}
+    # `lam_cfg` was already resolved above.
+    allow_lam_shape_adjust = bool(lam_cfg.get("allow_shape_adjust", False))
+    lam_shape_policy = str(lam_cfg.get("shape_policy") or ("legacy" if allow_lam_shape_adjust else "strict")).strip().lower()
+    if lam_shape_policy in {"legacy", "adjust", "lenient"}:
+        allow_lam_shape_adjust = True
 
     preview_stack = []
 
@@ -1050,11 +1252,24 @@ def _run_sky_sub_impl(cfg: dict[str, Any]) -> dict[str, Path]:
         # optional sky template
         sky_template = None
         if primary == "sky_scale_raw":
+            pm = cfg.get("_project_manifest") if isinstance(cfg, dict) else {}
+            pm_ok = (
+                isinstance(pm, dict)
+                and bool(pm.get("has_manifest"))
+                and str(pm.get("frames_source", "")).lower() == "manifest"
+                and bool(pm.get("has_sky_frames"))
+            )
+            if not pm_ok:
+                raise RuntimeError(
+                    "primary_method=sky_scale_raw is an explicit mode and requires SKY_FRAMES to be declared in project_manifest.yaml. "
+                    "Open Project → Manifest… and assign dedicated sky frames (or switch to kelson_raw)."
+                )
             if sky_frames:
-                sky_template, _hdr_t = _median_template([Path(str(p)) for p in sky_frames])
+                sky_inputs = [_resolve_best(_resolve_input(p), kind="sky") for p in sky_frames]
+                sky_template, _hdr_t = _median_template(sky_inputs)
             else:
                 raise RuntimeError(
-                    "primary_method=sky_scale_raw is an explicit mode and requires cfg.frames.sky (a non-empty list of sky frames). "
+                    "primary_method=sky_scale_raw requires SKY_FRAMES in project_manifest.yaml (cfg.frames.sky is empty). "
                     "Provide dedicated sky frames or switch to kelson_raw."
                 )
 
@@ -1063,14 +1278,50 @@ def _run_sky_sub_impl(cfg: dict[str, Any]) -> dict[str, Path]:
             stem = _raw_stem_from_path(p)
             try:
                 sci, hdr = _read_image(p)
-                mask = _try_load_mask_for_clean(p)
+                _fail_if_rectified(hdr, path=p)
+                mask = _try_load_mask_for_clean(p, masks_fits_dir=obj_mask_dir)
                 if mask is None:
                     mask = np.zeros_like(sci, dtype=np.uint16)
 
-                # basic variance estimate (can be replaced later by a more faithful model)
-                read_noise_e = float(sky_cfg.get("read_noise_e", 5.0) or 5.0)
-                gain = float(sky_cfg.get("gain_e_per_adu", 1.0) or 1.0)
-                var = _estimate_var_adu2(sci, read_noise_e=read_noise_e, gain_e_per_adu=gain)
+                # Variance estimate: resolve gain/RN from overrides/header/instrument
+                # and standardize to electrons. (Do NOT silently default to gain=1, RN=5.)
+                from scorpio_pipe.noise_model import estimate_variance_auto
+
+                def _opt_float(v: Any, *, allow_zero: bool = False) -> float | None:
+                    if v is None:
+                        return None
+                    try:
+                        if isinstance(v, str) and not v.strip():
+                            return None
+                        f = float(v)
+                        if not np.isfinite(f):
+                            return None
+                        if allow_zero:
+                            return f if f >= 0.0 else None
+                        return f if f > 0.0 else None
+                    except Exception:
+                        return None
+
+                gain_override = _opt_float(sky_cfg.get("gain_e_per_adu"), allow_zero=False)
+                rn_override = _opt_float(sky_cfg.get("read_noise_e"), allow_zero=True)
+
+                var_in, _noise_params0, _model_name = estimate_variance_auto(
+                    sci,
+                    hdr,
+                    gain_override=gain_override,
+                    rdnoise_override=rn_override,
+                    instrument_hint=str(cfg.get("instrument_hint") or ""),
+                    require_gain=True,
+                )
+                sci, var, hdr, _unit_prov, _noise_params = ensure_electron_units(
+                    sci,
+                    var_in,
+                    hdr,
+                    gain_override=gain_override,
+                    rdnoise_override=rn_override,
+                    instrument_hint=str(cfg.get("instrument_hint") or ""),
+                    require_gain=True,
+                )
 
                 # geometry
                 roi = roi_from_cfg(cfg)
@@ -1098,13 +1349,32 @@ def _run_sky_sub_impl(cfg: dict[str, Any]) -> dict[str, Path]:
                 # build sky pixel list
                 ny, nx = sci.shape
 
-                # Lambda-map should match the detector frame shape. For robustness (and for
-                # tiny synthetic smoke tests), allow simple y-repetition when the X dimension
-                # matches and the Y dimension differs by an integer factor.
+                # Lambda-map should match the detector frame shape.
+                #
+                # IMPORTANT: implicit repetition/cropping can silently corrupt sky modelling.
+                # Therefore the default policy is strict. A legacy/lenient mode exists only
+                # for synthetic tests and backwards compatibility.
                 lam_eff = lam_map
                 if tuple(getattr(lam_eff, "shape", ())) != tuple(sci.shape):
                     src_shape = tuple(int(v) for v in getattr(lam_eff, "shape", ()))
                     tgt_shape = tuple(int(v) for v in sci.shape)
+                    if not allow_lam_shape_adjust:
+                        stage_flags.append(
+                            make_flag(
+                                "LAMBDA_MAP_SHAPE_MISMATCH",
+                                "ERROR",
+                                f"lambda_map shape {src_shape} does not match SCI {tgt_shape}",
+                                hint=(
+                                    "Fix wavesolution/ROI/binning so lambda_map matches raw frame shape. "
+                                    "If this is a synthetic/smoke test and you really need implicit adjustment, "
+                                    "set sky.lambda_map.allow_shape_adjust: true (or shape_policy: legacy)."
+                                ),
+                                stem=stem,
+                            )
+                        )
+                        raise RuntimeError(
+                            f"lambda_map shape {src_shape} does not match SCI {tgt_shape} (strict policy)"
+                        )
                     if (
                         isinstance(lam_eff, np.ndarray)
                         and lam_eff.ndim == 2
@@ -1745,7 +2015,7 @@ def _run_sky_sub_impl(cfg: dict[str, Any]) -> dict[str, Path]:
     return outs
 
 
-def run_sky_sub(cfg: dict[str, Any]) -> dict[str, Path]:
+def run_sky_sub(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[str, Path]:
     """Sky subtraction stage with P2 reliability guard.
 
     Guarantees that ``done.json`` is written even if the stage fails.
@@ -1753,7 +2023,7 @@ def run_sky_sub(cfg: dict[str, Any]) -> dict[str, Path]:
 
     # Run the main implementation first; it already writes rich done.json on success.
     try:
-        return _run_sky_sub_impl(cfg)
+        return _run_sky_sub_impl(cfg, out_dir=out_dir)
     except Exception as e:
         # Best-effort failure marker (must not swallow the exception).
         from scorpio_pipe.io.done_json import write_done_json

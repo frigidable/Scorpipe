@@ -8,6 +8,7 @@ import yaml
 import logging
 
 from scorpio_pipe.work_layout import ensure_work_layout
+from scorpio_pipe.project_manifest import apply_project_manifest_to_cfg
 
 
 def _norm_path_str(p: str) -> str:
@@ -163,6 +164,14 @@ def load_config(cfg_path: str | Path) -> dict[str, Any]:
             if applied:
                 cfg["_profiles_applied"] = applied
 
+    # Finally, allow an explicit project manifest (if present) to override
+    # frame role selection. This is the "source of truth" for roles like SKY_FRAMES.
+    # Stages can gate features based on cfg['_project_manifest'].
+    try:
+        apply_project_manifest_to_cfg(cfg)
+    except Exception as e:
+        logging.getLogger(__name__).warning("Failed to apply project_manifest.yaml: %s", e)
+
     return cfg
 
 
@@ -175,6 +184,13 @@ def load_config_any(cfg: Any) -> dict[str, Any]:
     if isinstance(cfg, (str, Path)):
         return load_config(cfg)
     if isinstance(cfg, dict):
+        # Best-effort: if this dict looks like a full config (has work_dir/config_dir),
+        # apply the project manifest so stage gating remains consistent.
+        if "_project_manifest" not in cfg:
+            try:
+                apply_project_manifest_to_cfg(cfg)
+            except Exception:
+                pass
         return cfg
 
     # Common wrappers: RunContext (ui.pipeline_runner) or similar

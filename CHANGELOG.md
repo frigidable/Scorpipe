@@ -1,3 +1,34 @@
+## [5.40.34] - 2026-01-03
+
+### Fixed
+- Workflow (doit): added `flatfield` task and wired dependencies (`sky_sub` depends on `flatfield`; `cosmics` depends on `superbias` when bias subtraction is enabled; `superflat` depends on `superbias`).
+- Calibration master resolution: `_resolve_superbias_path` / `_resolve_superflat_path` now check canonical stage dirs and legacy `calibs/` + `calib/` fallbacks.
+- SuperNeon: robust superbias resolution for GUI/CLI runs (no assumption about `work_dir/calibs`).
+- LineID: added `waveref` metadata header to the default neon line list and enforced consistency with `wavesol.waveref` to prevent silent systematic wavelength shifts.
+- Docs: corrected stage order (sky subtraction happens before linearization) and updated quick-start steps.
+
+## [5.40.32] - 2026-01-03
+
+### Fixed
+- Stage hashing: stage state hash now includes **string and boolean** config values (not only numerics), preventing silent cache hits when users change non-numeric settings (e.g. method names/policies).
+- Stage hashing: input frame paths are now resolved via `config_dir`/`data_dir` before hashing, so cache correctness no longer depends on current working directory.
+- Flat → Sky wiring: Sky Subtraction now prefers flat-fielded per-exposure frames (`04_flat/obj/*_flat.fits`) when available, otherwise falls back to cosmics-cleaned or raw frames.
+- Sky variance model: removed dangerous hidden defaults (`gain=1`, `RN=5e-`) and now resolves gain/read-noise from overrides/header/instrument defaults consistently.
+- Noise model: fixed `estimate_variance_auto()` returning an incorrect tuple for ADU inputs.
+- Linearize flexure correction: when applying Sky-derived `delta_lambda`, the lambda-map is now shifted consistently along with the output grid (prevents sign errors and wrong binning).
+- Pipeline hash deps: Sky-stage hash now tracks the actual inputs (`05_cosmics/obj/clean` and/or flat-fielded frames), not a non-existent `05_cosmics/clean` directory.
+
+## [5.40.31] - 2026-01-03
+
+### Fixed
+- Calib: fixed `superbias` stage crash caused by logging/header stamping using undefined `combine`/`sigma_clip` (now resolved from `calib.bias_*` settings deterministically).
+- Flat-fielding: restored missing imports (`ensure_compatible_calib`, `ensure_electron_units`) so the stage runs and enforces strict calibration/unit contracts.
+- Stack2D: made SCI/VAR/MASK validation a hard gate; stacking now fails fast if NaNs or negative variance appear in unmasked pixels.
+- Sky subtraction: default is now **strict** about `lambda_map` shape; mismatch becomes an ERROR and stops the stage (legacy implicit Y-repeat/crop is available only via `sky.lambda_map.allow_shape_adjust: true`).
+
+### Changed
+- QC gate: bypassing ERROR blockers now requires explicit opt-in `qc.allow_override_errors: true` to prevent accidental propagation of bad products.
+
 ## [5.40.25] - 2026-01-01
 
 ### Added

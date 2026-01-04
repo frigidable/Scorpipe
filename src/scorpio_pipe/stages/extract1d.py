@@ -41,6 +41,7 @@ from astropy.io import fits
 from scipy.interpolate import UnivariateSpline
 from scipy.ndimage import gaussian_filter1d
 
+from scorpio_pipe import maskbits
 from scorpio_pipe.paths import resolve_work_dir
 from scorpio_pipe.provenance import add_provenance
 from scorpio_pipe.version import PIPELINE_VERSION
@@ -887,6 +888,13 @@ def _write_spec1d_fits(
     ph["BUNIT"] = hdr0.get("BUNIT", "ADU")
     ph["FLUXUNIT"] = hdr0.get("BUNIT", "ADU")
     ph["WAVEUNIT"] = hdr0.get("CUNIT1", "Angstrom")
+    # Wavelength medium must be declared once wavelength exists.
+    _wr = str(hdr0.get("WAVEREF") or (cfg.get("project", {}) or {}).get("wave_reference") or "air").strip().lower()
+    if _wr in {"vac", "vacuo"}:
+        _wr = "vacuum"
+    if _wr not in {"air", "vacuum"}:
+        _wr = "air"
+    ph["WAVEREF"] = (_wr, "Wavelength medium (air/vacuum)")
 
     # ETA stamp from upstream stacking (or missing/assumed).
     if "ETAAPPL" in hdr0:
@@ -906,6 +914,24 @@ def _write_spec1d_fits(
     ph = add_provenance(ph, cfg, stage="12_extract")
 
     # ---------------------------- table HDUs ----------------------------
+    # Sanitize non-finite values: spec1d contract requires finite FLUX/VAR.
+    # We map NaN/Inf to 0 and mark NO_COVERAGE in the corresponding MASK.
+    def _sanitize_1d(flux, var, mask):
+        flux = np.asarray(flux)
+        var = np.asarray(var)
+        mask = np.asarray(mask)
+        bad = (~np.isfinite(flux)) | (~np.isfinite(var))
+        if np.any(bad):
+            flux = flux.copy(); var = var.copy(); mask = mask.copy()
+            flux[bad] = 0.0
+            var[bad] = 0.0
+            mask[bad] = mask[bad] | int(maskbits.NO_COVERAGE)
+        return flux, var, mask, int(np.count_nonzero(bad))
+
+    flux_trace, var_trace, mask_trace, _nb1 = _sanitize_1d(flux_trace, var_trace, mask_trace)
+    flux_fixed, var_fixed, mask_fixed, _nb2 = _sanitize_1d(flux_fixed, var_fixed, mask_fixed)
+    if (_nb1 + _nb2) > 0:
+        ph["SCORPNAN"] = (_nb1 + _nb2, "Non-finite FLUX/VAR sanitized to 0 (NO_COVERAGE)")
     cols_trace = [
         fits.Column(name="LAMBDA", format="D", array=np.asarray(wave, dtype=np.float64)),
         fits.Column(name="FLUX_TRACE", format="E", array=np.asarray(flux_trace, dtype=np.float32)),
@@ -1246,29 +1272,6 @@ def _run_extract1d_impl(
             sky_resid=sky_resid,
             apply_local_sky=apply_local_sky,
         )
-(
-        sci,
-        var,
-        mask,
-        trace.y_trace,
-        ap_hw=trace.aperture_half_width,
-        fatal_bits=fatal_bits,
-        min_good_frac=min_good_frac,
-        sky_resid=sky_resid,
-        apply_local_sky=apply_local_sky,
-    )
-    flux_fx, var_fx, mask_fx, sky_fx, npix_fx = _boxcar_extract(
-        sci,
-        var,
-        mask,
-        trace.y_fixed,
-        ap_hw=trace.aperture_half_width,
-        fatal_bits=fatal_bits,
-        min_good_frac=min_good_frac,
-        sky_resid=sky_resid,
-        apply_local_sky=apply_local_sky,
-    )
-
     if method == "mean":
         # Convert sum → mean (and propagate VAR scaling).
         n_eff_tr = np.maximum(np.asarray(npix_tr, dtype=float), 1.0)
