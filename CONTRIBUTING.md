@@ -24,7 +24,18 @@ ruff check .
 
 2) Тесты
 ```bash
+# Полный прогон (unit + smoke)
 pytest -q
+
+# Быстрый прогон (как CI job `tests_fast`): без end-to-end smoke
+pytest -q -m "not smoke"
+
+# Только end-to-end smoke (1 тест):
+# `-m smoke` *выбирает* тесты по маркеру, поэтому остальные покажутся как "deselected" — это нормально.
+pytest -q -m smoke
+
+# Удобная обертка (локально воспроизводит CI):
+python scripts/run_tests.py ci --quiet
 ```
 
 3) Сборка и установка из wheel (важно для релизов)
