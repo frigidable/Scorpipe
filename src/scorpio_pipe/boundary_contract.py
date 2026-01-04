@@ -20,20 +20,25 @@ actionable message.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
 
-@dataclass(frozen=True)
 class ProductContractError(RuntimeError):
-    stage: str
-    path: str
-    code: str
-    message: str
+    """Stage-scoped contract violation.
 
-    def __str__(self) -> str:  # pragma: no cover
-        return f"[{self.stage}] {self.code}: {self.message} ({self.path})"
+    Note
+    ----
+    We intentionally keep this exception *mutable* (not a frozen dataclass).
+    Python/pytest may attach traceback/context attributes at runtime.
+    """
+
+    def __init__(self, *, stage: str, path: str, code: str, message: str) -> None:
+        self.stage = str(stage)
+        self.path = str(path)
+        self.code = str(code)
+        self.message = str(message)
+        super().__init__(f"[{self.stage}] {self.code}: {self.message} ({self.path})")
 
 
 def _has_wavelength_wcs(hdr: Any) -> bool:
@@ -50,7 +55,17 @@ def _has_wavelength_wcs(hdr: Any) -> bool:
 
 
 def _require_units_and_noise(stage: str, path: Path, hdr: Any) -> None:
-    unit = str(hdr.get("SCORPUM", "") or "").strip().upper()
+    raw = str(hdr.get("SCORPUM", "") or "").strip().upper()
+
+    # Normalize common historical values.
+    # - MEF writer may store "e-" (human readable) for electrons.
+    # - We accept both singular/plural spellings.
+    unit = raw
+    if raw in {"E-", "E", "ELECTRONS", "ELECTRON", "ELECTRON(S)"}:
+        unit = "ELECTRON"
+    if raw in {"ADUS", "ADU"}:
+        unit = "ADU"
+
     if unit not in {"ADU", "ELECTRON"}:
         raise ProductContractError(
             stage=stage,

@@ -1427,7 +1427,7 @@ def _run_extract1d_impl(
             "Define sky bands (ROI) away from the object, or widen them.",
         ),
         "TRACE_FALLBACK_USED": (
-            "WARN",
+            "INFO",
             "Trace model fell back to a fixed aperture center.",
             "Check object visibility and the trace window; consider a wider ROI.",
         ),
@@ -1508,8 +1508,6 @@ def _run_extract1d_impl(
             "flag_codes": sorted(set(flag_codes)),
         },
         legacy_paths=[done_json, done_legacy],
-        indent=2,
-        ensure_ascii=False,
     )
 
     # Optional quicklook PNG
@@ -1616,8 +1614,6 @@ def run_extract1d(
                 "ok": False,
             },
             legacy_paths=[od / "extract_done.json", od / "extract1d_done.json"],
-            indent=2,
-            ensure_ascii=False,
         )
 
         raise

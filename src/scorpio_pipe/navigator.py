@@ -193,8 +193,8 @@ _STAGES: list[_StageSpec] = [
     _StageSpec("wavesol", "Wavelength Solution", ("wavesol_done.json", "wavesolution_done.json", "done.json")),
     _StageSpec("sky", "Sky Subtraction", ("sky_done.json", "done.json")),
     _StageSpec("linearize", "Linearization", ("linearize_done.json", "done.json")),
-    _StageSpec("stack", "Frame Stacking", ("stack_done.json", "stack2d_done.json", "done.json")),
-    _StageSpec("extract", "Object Extraction", ("extract_done.json", "extract1d_done.json", "done.json")),
+    _StageSpec("stack2d", "Frame Stacking", ("stack_done.json", "stack2d_done.json", "done.json")),
+    _StageSpec("extract1d", "Object Extraction", ("extract_done.json", "extract1d_done.json", "done.json")),
 ]
 
 

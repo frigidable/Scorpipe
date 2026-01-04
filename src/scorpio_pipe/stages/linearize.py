@@ -1691,7 +1691,9 @@ def run_linearize(
         unit, waveref, unit_src = _read_lambda_map_meta(lam_hdr, lam_map)
         # For strict science runs we *prefer* explicit metadata, but for
         # synthetic tests and legacy products we allow heuristics.
-        unit_meta_inferred = unit_src != "explicit"
+        # _read_lambda_map_meta returns the *key* used for explicit metadata
+        # (e.g. "WAVEUNIT") and "heuristic" when it had to infer.
+        unit_meta_inferred = (str(unit_src).strip().lower() == "heuristic")
 
         wmin_cfg = lcfg.get("lambda_min_A", lcfg.get("wmin"))
         wmax_cfg = lcfg.get("lambda_max_A", lcfg.get("wmax"))

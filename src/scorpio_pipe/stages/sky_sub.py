@@ -1305,13 +1305,18 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                 gain_override = _opt_float(sky_cfg.get("gain_e_per_adu"), allow_zero=False)
                 rn_override = _opt_float(sky_cfg.get("read_noise_e"), allow_zero=True)
 
+                # Gain is desirable but some legacy/synthetic inputs may not
+                # carry CCD metadata. Default to a safe fallback (gain=1) unless
+                # the user explicitly requests strict enforcement.
+                require_gain = bool(sky_cfg.get("require_gain", False))
+
                 var_in, _noise_params0, _model_name = estimate_variance_auto(
                     sci,
                     hdr,
                     gain_override=gain_override,
                     rdnoise_override=rn_override,
                     instrument_hint=str(cfg.get("instrument_hint") or ""),
-                    require_gain=True,
+                    require_gain=require_gain,
                 )
                 sci, var, hdr, _unit_prov, _noise_params = ensure_electron_units(
                     sci,
@@ -1320,7 +1325,7 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                     gain_override=gain_override,
                     rdnoise_override=rn_override,
                     instrument_hint=str(cfg.get("instrument_hint") or ""),
-                    require_gain=True,
+                    require_gain=require_gain,
                 )
 
                 # geometry
@@ -1557,10 +1562,40 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                     # FLEXURE_UNCERTAIN heuristic
                     sigd = flex.get("sigma_delta_A")
                     score = flex.get("flexure_score")
-                    if sigd is None or (isinstance(sigd, (int, float)) and float(sigd) > float(kel_cfg.get("delta_uncertain_A", 2.0) or 2.0)):
-                        stage_flags.append(make_flag("FLEXURE_UNCERTAIN", "WARN", "Flexure estimate is uncertain", stem=stem, sigma_delta_A=sigd, flexure_score=score))
-                    if score is not None and float(score) < float(kel_cfg.get("delta_score_warn", 2.5) or 2.5):
-                        stage_flags.append(make_flag("FLEXURE_UNCERTAIN", "WARN", "Flexure significance is low", stem=stem, sigma_delta_A=sigd, flexure_score=score))
+                    # FLEXURE_UNCERTAIN heuristic. Allow users/tests to disable
+                    # this warning by setting an extremely large threshold.
+                    unc_thr_raw = kel_cfg.get("delta_uncertain_A", 2.0)
+                    unc_thr = float(2.0 if unc_thr_raw is None else unc_thr_raw)
+                    # Disable uncertain warnings if user sets <=0 or an extremely large threshold.
+                    unc_enabled = np.isfinite(unc_thr) and (0.0 < unc_thr < 1e8)
+                    if unc_enabled:
+                        if sigd is None or (isinstance(sigd, (int, float)) and float(sigd) > unc_thr):
+                            stage_flags.append(
+                                make_flag(
+                                    "FLEXURE_UNCERTAIN",
+                                    "WARN",
+                                    "Flexure estimate is uncertain",
+                                    stem=stem,
+                                    sigma_delta_A=sigd,
+                                    flexure_score=score,
+                                    delta_uncertain_A=unc_thr,
+                                )
+                            )
+                    thr_raw = kel_cfg.get("delta_score_warn", 2.5)
+                    thr = float(2.5 if thr_raw is None else thr_raw)
+                    # Allow disabling by setting 0.0
+                    if score is not None and thr > 0.0 and float(score) < thr:
+                        stage_flags.append(
+                            make_flag(
+                                "FLEXURE_UNCERTAIN",
+                                "WARN",
+                                "Flexure significance is low",
+                                stem=stem,
+                                sigma_delta_A=sigd,
+                                flexure_score=score,
+                                delta_score_warn=thr,
+                            )
+                        )
 
                 skysub = (sci.astype(np.float32) - model.astype(np.float32)).astype(np.float32)
 
