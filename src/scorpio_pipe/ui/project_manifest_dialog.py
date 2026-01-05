@@ -17,12 +17,21 @@ import yaml
 import pandas as pd
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from scorpio_pipe.project_manifest import (
-    ProjectManifestModel,
-    read_project_manifest,
-    resolve_project_manifest_path,
-    write_project_manifest,
-)
+try:
+    from scorpio_pipe.project_manifest import (
+        ProjectManifestModel,
+        read_project_manifest,
+        resolve_project_manifest_path,
+        write_project_manifest,
+    )
+except ImportError:  # pragma: no cover
+    # Backward-compat / frozen builds may expose ProjectManifest alias
+    from scorpio_pipe.project_manifest import (
+        ProjectManifest as ProjectManifestModel,
+        read_project_manifest,
+        resolve_project_manifest_path,
+        write_project_manifest,
+    )
 from scorpio_pipe.ui.frame_browser import FrameBrowser
 
 
@@ -56,9 +65,7 @@ class ProjectManifestDialog(QtWidgets.QDialog):
         self._pm = read_project_manifest(self._manifest_path)
         self._yaml_dirty = False
 
-        root = QtWidgets.QVBoxLayout()
-        self.setLayout(root)
-
+        root = QtWidgets.QVBoxLayout(self)
         # --- top info bar ---
         info = QtWidgets.QHBoxLayout()
         root.addLayout(info)
@@ -84,8 +91,7 @@ class ProjectManifestDialog(QtWidgets.QDialog):
         # Right: roles + YAML
         right = QtWidgets.QWidget()
         splitter.addWidget(right)
-        rlay = QtWidgets.QVBoxLayout()
-        right.setLayout(rlay)
+        rlay = QtWidgets.QVBoxLayout(right)
         rlay.setContentsMargins(0, 0, 0, 0)
         rlay.setSpacing(8)
 
@@ -103,7 +109,7 @@ class ProjectManifestDialog(QtWidgets.QDialog):
 
         # YAML tab (advanced)
         tab_yaml = QtWidgets.QWidget()
-        v = QtWidgets.QVBoxLayout(); tab_yaml.setLayout(v)
+        v = QtWidgets.QVBoxLayout(tab_yaml)
         v.setContentsMargins(10, 10, 10, 10)
         v.setSpacing(8)
         self.edit_yaml = QtWidgets.QPlainTextEdit()
@@ -143,7 +149,7 @@ class ProjectManifestDialog(QtWidgets.QDialog):
 
     def _add_role_tab(self, role_key: str, title: str) -> None:
         tab = QtWidgets.QWidget()
-        lay = QtWidgets.QVBoxLayout(); tab.setLayout(lay)
+        lay = QtWidgets.QVBoxLayout(tab)
         lay.setContentsMargins(10, 10, 10, 10)
         lay.setSpacing(8)
 

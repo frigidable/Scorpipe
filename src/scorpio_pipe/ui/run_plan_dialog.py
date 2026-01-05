@@ -37,8 +37,7 @@ class RunPlanDialog(QtWidgets.QDialog):
             pass
         self._cfg = cfg
 
-        lay = QtWidgets.QVBoxLayout()
-        self.setLayout(lay)
+        lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(10, 10, 10, 10)
         lay.setSpacing(8)
 

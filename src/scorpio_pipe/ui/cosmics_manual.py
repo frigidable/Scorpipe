@@ -161,8 +161,7 @@ class CosmicsManualDialog(QtWidgets.QDialog):
         self._undo: list[_UndoItem] = []
 
         # --- Layout
-        root = QtWidgets.QVBoxLayout()
-        self.setLayout(root)
+        root = QtWidgets.QVBoxLayout(self)
         root.setSpacing(10)
 
         top = QtWidgets.QHBoxLayout()

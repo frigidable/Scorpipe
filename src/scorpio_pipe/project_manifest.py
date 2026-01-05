@@ -49,11 +49,198 @@ Notes
 - The manifest only overwrites roles that are explicitly present.
 """
 
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict
 
 import yaml
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+CANONICAL_ROLES: tuple[str, ...] = (
+    "OBJECT_FRAMES",
+    "SKY_FRAMES",
+    "ARCS",
+    "FLATS",
+    "BIAS",
+    "SUNSKY_FRAMES",
+)
+
+
+DEFAULT_MANIFEST_NAME = "project_manifest.yaml"
+
+
+class ProjectManifestModel(BaseModel):
+    """Pydantic model for ``project_manifest.yaml``.
+
+    The on-disk YAML is intentionally flexible:
+      - "roles" may contain either a list[str] (treated as files),
+        or a mapping {files: [...], globs: [...]}.
+      - For backward compatibility with early GUI drafts, we also accept
+        top-level keys like "object_frames"/"sky_frames"/etc.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    schema_id: str = Field(default="scorpio-pipe.project-manifest.v1", alias="schema")
+    roles: Dict[str, Any] = Field(default_factory=dict)
+    groups: Dict[str, Any] = Field(default_factory=dict)
+    active_group: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_legacy_shape(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        # Legacy GUI (early drafts) stored role lists at the top level.
+        legacy_map = {
+            "object_frames": "OBJECT_FRAMES",
+            "sky_frames": "SKY_FRAMES",
+            "sunsky_frames": "SUNSKY_FRAMES",
+            "arcs": "ARCS",
+            "flats": "FLATS",
+            "bias": "BIAS",
+        }
+
+        if not any(k in data for k in legacy_map):
+            return data
+
+        out = dict(data)
+        roles = out.get("roles")
+        if not isinstance(roles, dict):
+            roles = {}
+
+        for k, role in legacy_map.items():
+            if k not in out:
+                continue
+            v = out.pop(k)
+            if v is None:
+                continue
+            if isinstance(v, str):
+                files = [v]
+            elif isinstance(v, list):
+                files = [str(x) for x in v]
+            else:
+                files = [str(v)]
+            roles[role] = {"files": files, "globs": []}
+
+        out["roles"] = roles
+        return out
+
+    def _files_for_role(self, role: str) -> list[str]:
+        entry = self.roles.get(role)
+        if entry is None:
+            return []
+        if isinstance(entry, list):
+            return [str(x).strip() for x in entry if str(x).strip()]
+        if isinstance(entry, dict):
+            files = entry.get("files", [])
+            if isinstance(files, str):
+                files = [files]
+            if not isinstance(files, list):
+                return []
+            return [str(x).strip() for x in files if str(x).strip()]
+        return []
+
+    @property
+    def object_frames(self) -> list[str]:
+        return self._files_for_role("OBJECT_FRAMES")
+
+    @property
+    def sky_frames(self) -> list[str]:
+        return self._files_for_role("SKY_FRAMES")
+
+    @property
+    def sunsky_frames(self) -> list[str]:
+        return self._files_for_role("SUNSKY_FRAMES")
+
+    @property
+    def arcs(self) -> list[str]:
+        return self._files_for_role("ARCS")
+
+    @property
+    def flats(self) -> list[str]:
+        return self._files_for_role("FLATS")
+
+    @property
+    def bias(self) -> list[str]:
+        return self._files_for_role("BIAS")
+
+    def to_manifest_dict(self) -> dict[str, Any]:
+        """Return a stable YAML-ready dict in the canonical on-disk shape."""
+
+        roles_out: dict[str, Any] = {}
+        for role in CANONICAL_ROLES:
+            v = self.roles.get(role)
+            if v is None:
+                roles_out[role] = {"files": [], "globs": []}
+                continue
+            if isinstance(v, list):
+                roles_out[role] = {"files": [str(x) for x in v], "globs": []}
+            elif isinstance(v, dict):
+                files = v.get("files", [])
+                globs = v.get("globs", [])
+                if isinstance(files, str):
+                    files = [files]
+                if isinstance(globs, str):
+                    globs = [globs]
+                roles_out[role] = {
+                    "files": [str(x) for x in (files or [])],
+                    "globs": [str(x) for x in (globs or [])],
+                }
+            else:
+                roles_out[role] = {"files": [str(v)], "globs": []}
+
+        return {
+            "schema": self.schema_id,
+            "roles": roles_out,
+            "groups": self.groups or {},
+            "active_group": self.active_group,
+        }
+
+    # The GUI code (and a few helper scripts) historically used `.dict()`.
+    # In pydantic v2 it still exists, but returns the *model fields*.
+    # We override it to return the canonical manifest mapping instead.
+    def dict(self, *args: Any, **kwargs: Any) -> dict[str, Any]:  # type: ignore[override]
+        return self.to_manifest_dict()
+
+
+def resolve_project_manifest_path(work_dir: str | Path) -> Path:
+    """Return canonical ``project_manifest.yaml`` path and ensure its folder exists."""
+
+    wd = Path(work_dir).expanduser().resolve()
+    wd.mkdir(parents=True, exist_ok=True)
+    return wd / DEFAULT_MANIFEST_NAME
+
+
+def read_project_manifest(path: str | Path) -> ProjectManifestModel:
+    """Read and validate project manifest.
+
+    If the file doesn't exist, a default one is created.
+    """
+
+    p = Path(path).expanduser()
+    if not p.is_absolute():
+        p = p.resolve()
+    if not p.exists():
+        write_default_project_manifest(p)
+    obj = load_project_manifest(p)
+    return ProjectManifestModel.model_validate(obj)
+
+
+def write_project_manifest(pm: ProjectManifestModel, path: str | Path) -> Path:
+    """Write manifest to disk in canonical shape."""
+
+    p = Path(path).expanduser()
+    if not p.is_absolute():
+        p = p.resolve()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(
+        yaml.safe_dump(pm.to_manifest_dict(), sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    return p
 
 
 ROLE_TO_FRAMES_KEY: dict[str, str] = {
@@ -68,9 +255,6 @@ ROLE_TO_FRAMES_KEY: dict[str, str] = {
 }
 
 FRAMES_KEY_TO_ROLE: dict[str, str] = {v: k for k, v in ROLE_TO_FRAMES_KEY.items() if k in {"OBJECT_FRAMES","SKY_FRAMES","ARCS","FLATS","BIAS","SUNSKY_FRAMES","SUNSKY"}}
-
-DEFAULT_MANIFEST_NAME = "project_manifest.yaml"
-
 
 def default_project_manifest_dict() -> dict[str, Any]:
     roles: dict[str, Any] = {}
@@ -283,3 +467,14 @@ def apply_project_manifest_to_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
 
     cfg["_project_manifest"] = meta
     return cfg
+
+# Backward-compat: older UI code may import ProjectManifest instead of ProjectManifestModel.
+ProjectManifest = ProjectManifestModel
+
+__all__ = [
+    "Role",
+    "ProjectManifestModel",
+    "ProjectManifest",
+    "load_or_create_manifest",
+    "save_manifest",
+]

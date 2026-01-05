@@ -17,8 +17,7 @@ class OutputsPanel(QtWidgets.QWidget):
         self._cfg: dict[str, Any] | None = None
         self._stage: str | None = None
 
-        lay = QtWidgets.QVBoxLayout()
-        self.setLayout(lay)
+        lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(6)
 
@@ -131,8 +130,7 @@ class OutputsToolDialog(QtWidgets.QDialog):
         self.setModal(False)
         self.setMinimumSize(420, 520)
 
-        lay = QtWidgets.QVBoxLayout()
-        self.setLayout(lay)
+        lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(10, 10, 10, 10)
         lay.setSpacing(8)
 
@@ -196,8 +194,7 @@ class OutputsDrawer(QtWidgets.QWidget):
         super().__init__(parent)
         self._folded = bool(folded)
 
-        lay = QtWidgets.QVBoxLayout()
-        self.setLayout(lay)
+        lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(6)
 

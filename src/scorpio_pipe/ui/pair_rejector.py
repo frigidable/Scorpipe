@@ -104,8 +104,7 @@ class PairRejectorDialog(QtWidgets.QDialog):
         ]
 
         # --- layout ---
-        lay = QtWidgets.QVBoxLayout()
-        self.setLayout(lay)
+        lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(10, 10, 10, 10)
 
         head = QtWidgets.QHBoxLayout()
@@ -136,8 +135,7 @@ class PairRejectorDialog(QtWidgets.QDialog):
 
         # left: table
         left = QtWidgets.QWidget()
-        llay = QtWidgets.QVBoxLayout()
-        left.setLayout(llay)
+        llay = QtWidgets.QVBoxLayout(left)
         llay.setContentsMargins(0, 0, 0, 0)
         self.table = QtWidgets.QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(["Use", "x", "λ", "Δλ", "blend", "note"])
@@ -150,8 +148,7 @@ class PairRejectorDialog(QtWidgets.QDialog):
 
         # right: plot (matplotlib)
         right = QtWidgets.QWidget()
-        rlay = QtWidgets.QVBoxLayout()
-        right.setLayout(rlay)
+        rlay = QtWidgets.QVBoxLayout(right)
         rlay.setContentsMargins(0, 0, 0, 0)
         self.lbl_stats = QtWidgets.QLabel("—")
         self.lbl_stats.setStyleSheet("font-weight:600;")

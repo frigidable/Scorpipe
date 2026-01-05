@@ -79,9 +79,7 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
         }
 
         # UI
-        root = QtWidgets.QHBoxLayout()
-        self.setLayout(root)
-
+        root = QtWidgets.QHBoxLayout(self)
         left = QtWidgets.QVBoxLayout()
         right = QtWidgets.QVBoxLayout()
         root.addLayout(left, 0)

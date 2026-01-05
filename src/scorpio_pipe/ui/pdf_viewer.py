@@ -54,11 +54,11 @@ class PdfViewer(QtWidgets.QWidget):
     # -------------------------- UI --------------------------
 
     def _build(self) -> None:
-        lay = QtWidgets.QVBoxLayout()
-        self.setLayout(lay)
+        lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
 
-        tb = QtWidgets.QHBoxLayout()
+        tbw = QtWidgets.QWidget()
+        tb = QtWidgets.QHBoxLayout(tbw)
         tb.setContentsMargins(6, 6, 6, 6)
 
         self.btn_prev = QtWidgets.QToolButton(text="◀")
@@ -90,8 +90,6 @@ class PdfViewer(QtWidgets.QWidget):
         tb.addWidget(self.slider_zoom, 1)
         tb.addWidget(self.lbl_zoom)
 
-        tbw = QtWidgets.QWidget()
-        tbw.setLayout(tb)
         lay.addWidget(tbw)
 
         self.container = QtWidgets.QStackedWidget()
@@ -129,8 +127,7 @@ class PdfViewer(QtWidgets.QWidget):
 
         # ultimate fallback: show a helpful message + external open button
         msg = QtWidgets.QWidget()
-        v = QtWidgets.QVBoxLayout()
-        msg.setLayout(v)
+        v = QtWidgets.QVBoxLayout(msg)
         v.setContentsMargins(12, 12, 12, 12)
         lbl = QtWidgets.QLabel(
             "Не удалось встроить PDF в окно.\n\n"
@@ -301,8 +298,7 @@ class _PdfView(QtWidgets.QWidget):
     def __init__(self, view: QtWidgets.QWidget, parent=None):
         super().__init__(parent)
         self._view = view
-        lay = QtWidgets.QVBoxLayout()
-        self.setLayout(lay)
+        lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(view, 1)
 

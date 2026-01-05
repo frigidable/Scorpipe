@@ -36,8 +36,7 @@ class FrameBrowser(QtWidgets.QWidget):
         self._df_all = pd.DataFrame()
         self._df = pd.DataFrame()
 
-        lay = QtWidgets.QVBoxLayout()
-        self.setLayout(lay)
+        lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(8)
 
@@ -76,8 +75,7 @@ class FrameBrowser(QtWidgets.QWidget):
         lay.addWidget(splitter, 1)
 
         left = QtWidgets.QWidget()
-        vbox_left = QtWidgets.QVBoxLayout()
-        left.setLayout(vbox_left)
+        vbox_left = QtWidgets.QVBoxLayout(left)
         vbox_left.setContentsMargins(0, 0, 0, 0)
         vbox_left.setSpacing(6)
 
@@ -100,8 +98,7 @@ class FrameBrowser(QtWidgets.QWidget):
         splitter.addWidget(left)
 
         right = QtWidgets.QWidget()
-        r = QtWidgets.QVBoxLayout()
-        right.setLayout(r)
+        r = QtWidgets.QVBoxLayout(right)
         r.setContentsMargins(0, 0, 0, 0)
         r.setSpacing(6)
 

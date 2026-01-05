@@ -152,8 +152,7 @@ def _collapsible(
 ) -> tuple[QtWidgets.QWidget, QtWidgets.QVBoxLayout, QtWidgets.QToolButton]:
     """Return (widget, content_layout, header_button) for a simple collapsible section."""
     root = QtWidgets.QWidget()
-    v = QtWidgets.QVBoxLayout()
-    root.setLayout(v)
+    v = QtWidgets.QVBoxLayout(root)
     v.setContentsMargins(0, 0, 0, 0)
     v.setSpacing(6)
 
@@ -168,8 +167,7 @@ def _collapsible(
 
     content = QtWidgets.QWidget()
     content.setVisible(bool(expanded))
-    content_lay = QtWidgets.QVBoxLayout()
-    content.setLayout(content_lay)
+    content_lay = QtWidgets.QVBoxLayout(content)
     content_lay.setContentsMargins(10, 6, 0, 0)
     content_lay.setSpacing(8)
 
@@ -310,8 +308,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         # -------------- central layout --------------
         root = QtWidgets.QWidget()
         self.setCentralWidget(root)
-        outer = QtWidgets.QVBoxLayout()
-        root.setLayout(outer)
+        outer = QtWidgets.QVBoxLayout(root)
         outer.setContentsMargins(10, 10, 10, 10)
         outer.setSpacing(10)
 
@@ -607,8 +604,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             field = w
 
         root = QtWidgets.QWidget()
-        h = QtWidgets.QHBoxLayout()
-        root.setLayout(h)
+        h = QtWidgets.QHBoxLayout(root)
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(6)
         h.addWidget(field, 1)
@@ -1104,8 +1100,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
     def _mk_stage_apply_row(self, stage: str) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
-        h = QtWidgets.QHBoxLayout()
-        w.setLayout(h)
+        h = QtWidgets.QHBoxLayout(w)
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(10)
         state_lbl = QtWidgets.QLabel("Применено")
@@ -1123,14 +1118,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
     def _build_page_project(self) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
-        lay = QtWidgets.QVBoxLayout()
-        w.setLayout(lay)
+        lay = QtWidgets.QVBoxLayout(w)
         lay.setSpacing(12)
 
         g = _box("Project")
         lay.addWidget(g)
-        gl = QtWidgets.QFormLayout()
-        g.setLayout(gl)
+        gl = QtWidgets.QFormLayout(g)
         gl.setLabelAlignment(QtCore.Qt.AlignLeft)
 
         # Data dir
@@ -1180,8 +1173,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         # Overview (filled after Inspect)
         self.g_overview = _box("Dataset overview")
         lay.addWidget(self.g_overview)
-        ovl = QtWidgets.QHBoxLayout()
-        self.g_overview.setLayout(ovl)
+        ovl = QtWidgets.QHBoxLayout(self.g_overview)
         self.lbl_overview_counts = QtWidgets.QLabel("Run Inspect to see summary…")
         self.lbl_overview_counts.setWordWrap(True)
         ovl.addWidget(self.lbl_overview_counts, 2)
@@ -1697,8 +1689,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
     def _build_page_config(self) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
-        lay = QtWidgets.QVBoxLayout()
-        w.setLayout(lay)
+        lay = QtWidgets.QVBoxLayout(w)
         lay.setSpacing(12)
 
         # Two-column layout: left = target setup, right = config editor
@@ -1710,9 +1701,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         g_setup = _box("Target & setup")
         g_setup.setMinimumWidth(430)
         splitter.addWidget(g_setup)
-        fl = QtWidgets.QFormLayout()
-        g_setup.setLayout(fl)
-
+        fl = QtWidgets.QFormLayout(g_setup)
         # Object
         row_obj = QtWidgets.QHBoxLayout()
         self.combo_object = QtWidgets.QComboBox()
@@ -1822,9 +1811,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([430, 900])
 
-        yl = QtWidgets.QVBoxLayout()
-        g_yaml.setLayout(yl)
-
+        yl = QtWidgets.QVBoxLayout(g_yaml)
         self.editor_yaml = QtWidgets.QPlainTextEdit()
         self.editor_yaml.setPlaceholderText("Create or open a config to edit it here…")
         yl.addWidget(self.editor_yaml, 1)
@@ -3751,20 +3738,17 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
     def _build_page_calib(self) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
-        lay = QtWidgets.QVBoxLayout()
-        w.setLayout(lay)
+        lay = QtWidgets.QVBoxLayout(w)
         lay.setSpacing(12)
 
         # left: controls
         left = QtWidgets.QWidget()
-        left_layout = QtWidgets.QVBoxLayout()
-        left.setLayout(left_layout)
+        left_layout = QtWidgets.QVBoxLayout(left)
         left_layout.setSpacing(12)
 
         g = _box("Calibrations")
         left_layout.addWidget(g)
-        gl = QtWidgets.QVBoxLayout()
-        g.setLayout(gl)
+        gl = QtWidgets.QVBoxLayout(g)
         self.lbl_calib = QtWidgets.QLabel(
             "Build report/manifest.json and calib/superbias.fits.\n"
             "Tune parameters below and press Apply before running the stage."
@@ -3774,13 +3758,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         # --- parameters ---
         pbox = _box("Parameters")
-        pl = QtWidgets.QVBoxLayout()
-        pbox.setLayout(pl)
+        pl = QtWidgets.QVBoxLayout(pbox)
         pl.setSpacing(10)
 
         basic = QtWidgets.QWidget()
-        bf = QtWidgets.QFormLayout()
-        basic.setLayout(bf)
+        bf = QtWidgets.QFormLayout(basic)
         bf.setLabelAlignment(QtCore.Qt.AlignLeft)
         bf.setHorizontalSpacing(12)
 
@@ -3815,8 +3797,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         )
 
         adv = QtWidgets.QWidget()
-        adv_lay = QtWidgets.QVBoxLayout()
-        adv.setLayout(adv_lay)
+        adv_lay = QtWidgets.QVBoxLayout(adv)
         adv_lay.setContentsMargins(0, 0, 0, 0)
         adv_lay.setSpacing(8)
         note = QtWidgets.QLabel("(Пока без дополнительных параметров для этого этапа.)")
@@ -3861,8 +3842,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             lay.addWidget(left, 1)
         except RuntimeError:
             # Defensive: if Qt ownership got confused and the layout was deleted, rebuild it.
-            lay = QtWidgets.QVBoxLayout()
-            w.setLayout(lay)
+            lay = QtWidgets.QVBoxLayout(w)
             lay.setSpacing(12)
             lay.addWidget(left, 1)
 
@@ -3899,19 +3879,16 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
     def _build_page_cosmics(self) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
-        lay = QtWidgets.QVBoxLayout()
-        w.setLayout(lay)
+        lay = QtWidgets.QVBoxLayout(w)
         lay.setSpacing(12)
 
         left = QtWidgets.QWidget()
-        left_layout = QtWidgets.QVBoxLayout()
-        left.setLayout(left_layout)
+        left_layout = QtWidgets.QVBoxLayout(left)
         left_layout.setSpacing(12)
 
         g = _box("Clean Cosmics")
         left_layout.addWidget(g)
-        gl = QtWidgets.QVBoxLayout()
-        g.setLayout(gl)
+        gl = QtWidgets.QVBoxLayout(g)
         lbl = QtWidgets.QLabel(
             "Clean cosmic rays in object/sky frames.\n"
             "Methods:\n"
@@ -3926,13 +3903,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         # --- per-stage params ---
         pbox = _box("Parameters")
-        pl = QtWidgets.QVBoxLayout()
-        pbox.setLayout(pl)
+        pl = QtWidgets.QVBoxLayout(pbox)
         pl.setSpacing(10)
 
         basic = QtWidgets.QWidget()
-        bf = QtWidgets.QFormLayout()
-        basic.setLayout(bf)
+        bf = QtWidgets.QFormLayout(basic)
         bf.setLabelAlignment(QtCore.Qt.AlignLeft)
         bf.setHorizontalSpacing(12)
 
@@ -3967,8 +3942,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         )
 
         apply_row_w = QtWidgets.QWidget()
-        apply_row = QtWidgets.QHBoxLayout()
-        apply_row_w.setLayout(apply_row)
+        apply_row = QtWidgets.QHBoxLayout(apply_row_w)
         apply_row.setContentsMargins(0, 0, 0, 0)
         self.chk_cosmics_obj = QtWidgets.QCheckBox("obj")
         self.chk_cosmics_sky = QtWidgets.QCheckBox("sky")
@@ -4023,8 +3997,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._param_field(self.spin_cosmics_dilate, cfg_path="cosmics.dilate"),
         )
         adv = QtWidgets.QWidget()
-        af = QtWidgets.QFormLayout()
-        adv.setLayout(af)
+        af = QtWidgets.QFormLayout(adv)
         af.setLabelAlignment(QtCore.Qt.AlignLeft)
         af.setHorizontalSpacing(12)
 
@@ -4260,8 +4233,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             lay.addWidget(left, 1)
         except RuntimeError:
             # Defensive: if Qt ownership got confused and the layout was deleted, rebuild it.
-            lay = QtWidgets.QVBoxLayout()
-            w.setLayout(lay)
+            lay = QtWidgets.QVBoxLayout(w)
             lay.setSpacing(12)
             lay.addWidget(left, 1)
 
@@ -4392,20 +4364,16 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
     def _build_page_flatfield(self) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
-        lay = QtWidgets.QVBoxLayout()
-        w.setLayout(lay)
+        lay = QtWidgets.QVBoxLayout(w)
         lay.setSpacing(12)
 
         left = QtWidgets.QWidget()
-        left_layout = QtWidgets.QVBoxLayout()
-        left.setLayout(left_layout)
+        left_layout = QtWidgets.QVBoxLayout(left)
         left_layout.setSpacing(12)
 
         g = _box("Flat-fielding (optional)")
         left_layout.addWidget(g)
-        gl = QtWidgets.QVBoxLayout()
-        g.setLayout(gl)
-
+        gl = QtWidgets.QVBoxLayout(g)
         lbl = QtWidgets.QLabel(
             "Divide frames by a superflat built from selected FLAT frames.\n"
             "Superbias can be subtracted (recommended).\n"
@@ -4416,14 +4384,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         gpar = _box("Parameters")
         left_layout.addWidget(gpar)
-        pl = QtWidgets.QVBoxLayout()
-        gpar.setLayout(pl)
+        pl = QtWidgets.QVBoxLayout(gpar)
         pl.setSpacing(8)
 
         # ---------------- BASIC ----------------
         basic = QtWidgets.QWidget()
-        form = QtWidgets.QFormLayout()
-        basic.setLayout(form)
+        form = QtWidgets.QFormLayout(basic)
         form.setLabelAlignment(QtCore.Qt.AlignLeft)
         form.setFormAlignment(QtCore.Qt.AlignTop)
 
@@ -4440,7 +4406,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._param_field(self.chk_flat_enabled, cfg_path="flatfield.enabled"),
         )
 
-        apply_row = QtWidgets.QHBoxLayout()
+        apply_w = QtWidgets.QWidget()
+        apply_row = QtWidgets.QHBoxLayout(apply_w)
         self.chk_flat_obj = QtWidgets.QCheckBox("obj")
         self.chk_flat_sky = QtWidgets.QCheckBox("sky")
         self.chk_flat_sunsky = QtWidgets.QCheckBox("sunsky")
@@ -4453,8 +4420,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
         ):
             apply_row.addWidget(cb)
         apply_row.addStretch(1)
-        apply_w = QtWidgets.QWidget()
-        apply_w.setLayout(apply_row)
         form.addRow(
             self._param_label(
                 "Apply to",
@@ -4493,8 +4458,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         )
 
         adv = QtWidgets.QWidget()
-        adv_form = QtWidgets.QFormLayout()
-        adv.setLayout(adv_form)
+        adv_form = QtWidgets.QFormLayout(adv)
         adv_form.setLabelAlignment(QtCore.Qt.AlignLeft)
         adv_lbl = QtWidgets.QLabel(
             "(Advanced reserved for future: per-kind flats, normalization, etc.)"
@@ -4526,8 +4490,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             lay.addWidget(left, 1)
         except RuntimeError:
             # Defensive: if Qt ownership got confused and the layout was deleted, rebuild it.
-            lay = QtWidgets.QVBoxLayout()
-            w.setLayout(lay)
+            lay = QtWidgets.QVBoxLayout(w)
             lay.setSpacing(12)
             lay.addWidget(left, 1)
 
@@ -4600,19 +4563,16 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
     def _build_page_superneon(self) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
-        lay = QtWidgets.QVBoxLayout()
-        w.setLayout(lay)
+        lay = QtWidgets.QVBoxLayout(w)
         lay.setSpacing(12)
 
         left = QtWidgets.QWidget()
-        left_layout = QtWidgets.QVBoxLayout()
-        left.setLayout(left_layout)
+        left_layout = QtWidgets.QVBoxLayout(left)
         left_layout.setSpacing(12)
 
         g = _box("SuperNeon")
         left_layout.addWidget(g)
-        gl = QtWidgets.QVBoxLayout()
-        g.setLayout(gl)
+        gl = QtWidgets.QVBoxLayout(g)
         lbl = QtWidgets.QLabel(
             "Stack all NEON frames into a single superneon image,\n"
             "build a robust 1D profile and auto-detect peaks for LineID."
@@ -4622,14 +4582,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         gpar = _box("Parameters")
         left_layout.addWidget(gpar)
-        pl = QtWidgets.QVBoxLayout()
-        gpar.setLayout(pl)
+        pl = QtWidgets.QVBoxLayout(gpar)
         pl.setSpacing(8)
 
         # ---------------- BASIC ----------------
         basic = QtWidgets.QWidget()
-        bform = QtWidgets.QFormLayout()
-        basic.setLayout(bform)
+        bform = QtWidgets.QFormLayout(basic)
         bform.setLabelAlignment(QtCore.Qt.AlignLeft)
         bform.setFormAlignment(QtCore.Qt.AlignTop)
 
@@ -4753,7 +4711,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.spin_sn_target_max = QtWidgets.QSpinBox()
         self.spin_sn_target_max.setRange(0, 5000)
         self.spin_sn_target_max.setSingleStep(10)
-        tgt_row = QtWidgets.QHBoxLayout()
+        tgt_w = QtWidgets.QWidget()
+        tgt_row = QtWidgets.QHBoxLayout(tgt_w)
         tgt_row.addWidget(QtWidgets.QLabel("min"))
         tgt_row.addWidget(
             self._param_field(self.spin_sn_target_min, cfg_path="wavesol.peak_target_min")
@@ -4764,8 +4723,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._param_field(self.spin_sn_target_max, cfg_path="wavesol.peak_target_max")
         )
         tgt_row.addStretch(1)
-        tgt_w = QtWidgets.QWidget()
-        tgt_w.setLayout(tgt_row)
         bform.addRow(
             self._param_label(
                 "Target peaks",
@@ -4777,8 +4734,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         # ---------------- ADVANCED ----------------
         adv = QtWidgets.QWidget()
-        aform = QtWidgets.QFormLayout()
-        adv.setLayout(aform)
+        aform = QtWidgets.QFormLayout(adv)
         aform.setLabelAlignment(QtCore.Qt.AlignLeft)
 
         # noise model
@@ -4884,7 +4840,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.dspin_sn_snr_max.setRange(0.1, 100.0)
         self.dspin_sn_snr_max.setDecimals(2)
         self.dspin_sn_snr_max.setSingleStep(0.1)
-        snr_row = QtWidgets.QHBoxLayout()
+        snr_w = QtWidgets.QWidget()
+        snr_row = QtWidgets.QHBoxLayout(snr_w)
         snr_row.addWidget(QtWidgets.QLabel("min"))
         snr_row.addWidget(
             self._param_field(self.dspin_sn_snr_min, cfg_path="wavesol.peak_snr_min")
@@ -4895,8 +4852,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._param_field(self.dspin_sn_snr_max, cfg_path="wavesol.peak_snr_max")
         )
         snr_row.addStretch(1)
-        snr_w = QtWidgets.QWidget()
-        snr_w.setLayout(snr_row)
         aform.addRow(
             self._param_label(
                 "Auto-tune SNR bounds",
@@ -4914,7 +4869,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.dspin_sn_boost.setRange(1.01, 2.0)
         self.dspin_sn_boost.setDecimals(2)
         self.dspin_sn_boost.setSingleStep(0.01)
-        rb_row = QtWidgets.QHBoxLayout()
+        rb_w = QtWidgets.QWidget()
+        rb_row = QtWidgets.QHBoxLayout(rb_w)
         rb_row.addWidget(QtWidgets.QLabel("relax"))
         rb_row.addWidget(
             self._param_field(self.dspin_sn_relax, cfg_path="wavesol.peak_snr_relax")
@@ -4925,8 +4881,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._param_field(self.dspin_sn_boost, cfg_path="wavesol.peak_snr_boost")
         )
         rb_row.addStretch(1)
-        rb_w = QtWidgets.QWidget()
-        rb_w.setLayout(rb_row)
         aform.addRow(
             self._param_label(
                 "Relax/Boost",
@@ -4988,8 +4942,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             lay.addWidget(left, 1)
         except RuntimeError:
             # Defensive: if Qt ownership got confused and the layout was deleted, rebuild it.
-            lay = QtWidgets.QVBoxLayout()
-            w.setLayout(lay)
+            lay = QtWidgets.QVBoxLayout(w)
             lay.setSpacing(12)
             lay.addWidget(left, 1)
 
@@ -5133,20 +5086,16 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
     def _build_page_lineid(self) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
-        lay = QtWidgets.QVBoxLayout()
-        w.setLayout(lay)
+        lay = QtWidgets.QVBoxLayout(w)
         lay.setSpacing(12)
 
         left = QtWidgets.QWidget()
-        left_layout = QtWidgets.QVBoxLayout()
-        left.setLayout(left_layout)
+        left_layout = QtWidgets.QVBoxLayout(left)
         left_layout.setSpacing(12)
 
         g = _box("LineID (manual pairs)")
         left_layout.addWidget(g)
-        gl = QtWidgets.QVBoxLayout()
-        g.setLayout(gl)
-
+        gl = QtWidgets.QVBoxLayout(g)
         self.lbl_lineid = QtWidgets.QLabel(
             "Interactive identification: match peaks to reference lines and write hand_pairs.txt.\n"
             "Tip: if you have multiple gratings, each one gets its own wavesol/<grating>/ folder."
@@ -5161,13 +5110,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
         # --- Parameters (Basic/Advanced) + Apply ---
         gpar = _box("Parameters")
         left_layout.addWidget(gpar)
-        pl = QtWidgets.QVBoxLayout()
-        gpar.setLayout(pl)
+        pl = QtWidgets.QVBoxLayout(gpar)
         pl.setContentsMargins(10, 10, 10, 10)
 
         basic = QtWidgets.QWidget()
-        form = QtWidgets.QFormLayout()
-        basic.setLayout(form)
+        form = QtWidgets.QFormLayout(basic)
         form.setLabelAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
 
         self.dspin_lineid_sigma_k = QtWidgets.QDoubleSpinBox()
@@ -5239,8 +5186,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         # Advanced (reserved)
         adv = QtWidgets.QWidget()
-        adv_l = QtWidgets.QVBoxLayout()
-        adv.setLayout(adv_l)
+        adv_l = QtWidgets.QVBoxLayout(adv)
         adv_l.setContentsMargins(0, 0, 0, 0)
         adv_l.addWidget(
             QtWidgets.QLabel(
@@ -5307,8 +5253,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             lay.addWidget(left, 1)
         except RuntimeError:
             # Defensive: if Qt ownership got confused and the layout was deleted, rebuild it.
-            lay = QtWidgets.QVBoxLayout()
-            w.setLayout(lay)
+            lay = QtWidgets.QVBoxLayout(w)
             lay.setSpacing(12)
             lay.addWidget(left, 1)
 
@@ -5916,20 +5861,16 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
     def _build_page_wavesol(self) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
-        lay = QtWidgets.QVBoxLayout()
-        w.setLayout(lay)
+        lay = QtWidgets.QVBoxLayout(w)
         lay.setSpacing(12)
 
         left = QtWidgets.QWidget()
-        left_layout = QtWidgets.QVBoxLayout()
-        left.setLayout(left_layout)
+        left_layout = QtWidgets.QVBoxLayout(left)
         left_layout.setSpacing(12)
 
         g = _box("Wavelength solution (1D + 2D)")
         left_layout.addWidget(g)
-        gl = QtWidgets.QVBoxLayout()
-        g.setLayout(gl)
-
+        gl = QtWidgets.QVBoxLayout(g)
         lbl = QtWidgets.QLabel(
             "Build 1D λ(x) from hand pairs and a 2D λ(x,y) map from traced lines."
             "Настройки ниже влияют на точность (RMS) и устойчивость решения."
@@ -5945,8 +5886,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         # ---------------- director workflow (director's cut) ----------------
         gflow = _box("Workflow 3.1–3.6 (director's cut)")
         left_layout.addWidget(gflow)
-        fl = QtWidgets.QGridLayout()
-        gflow.setLayout(fl)
+        fl = QtWidgets.QGridLayout(gflow)
         fl.setHorizontalSpacing(10)
         fl.setVerticalSpacing(8)
 
@@ -5965,8 +5905,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             fr.setFrameShape(QtWidgets.QFrame.StyledPanel)
             fr.setFrameShadow(QtWidgets.QFrame.Raised)
             fr.setMinimumWidth(240)
-            v = QtWidgets.QVBoxLayout()
-            fr.setLayout(v)
+            v = QtWidgets.QVBoxLayout(fr)
             v.setContentsMargins(8, 8, 8, 8)
             v.setSpacing(6)
             t = QtWidgets.QLabel(f"<b>{title}</b>")
@@ -6094,14 +6033,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
         # ---------------- parameters ----------------
         gpar = _box("Parameters")
         left_layout.addWidget(gpar)
-        pl = QtWidgets.QVBoxLayout()
-        gpar.setLayout(pl)
+        pl = QtWidgets.QVBoxLayout(gpar)
         pl.setSpacing(8)
 
         # -------- BASIC: Core / 2D model / Edge crop --------
         basic = QtWidgets.QWidget()
-        bvl = QtWidgets.QVBoxLayout()
-        basic.setLayout(bvl)
+        bvl = QtWidgets.QVBoxLayout(basic)
         bvl.setContentsMargins(0, 0, 0, 0)
         bvl.setSpacing(10)
 
@@ -6110,8 +6047,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             grp_core,
             "High-level solution controls.\nMost users only adjust these.",
         )
-        core = QtWidgets.QFormLayout()
-        grp_core.setLayout(core)
+        core = QtWidgets.QFormLayout(grp_core)
         core.setLabelAlignment(QtCore.Qt.AlignLeft)
         core.setHorizontalSpacing(12)
 
@@ -6163,8 +6099,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             grp_edge,
             "Exclude slit edges from the 2D fit.\nHelps when edges are noisy/vignetted.",
         )
-        edge = QtWidgets.QFormLayout()
-        grp_edge.setLayout(edge)
+        edge = QtWidgets.QFormLayout(grp_edge)
         edge.setLabelAlignment(QtCore.Qt.AlignLeft)
         edge.setHorizontalSpacing(12)
 
@@ -6189,8 +6124,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.grp_ws_power_model,
             "Parameters for the Power 2D model.\nEnabled when 2D model = power/auto.",
         )
-        pmod = QtWidgets.QFormLayout()
-        self.grp_ws_power_model.setLayout(pmod)
+        pmod = QtWidgets.QFormLayout(self.grp_ws_power_model)
         pmod.setLabelAlignment(QtCore.Qt.AlignLeft)
         pmod.setHorizontalSpacing(12)
 
@@ -6208,8 +6142,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.grp_ws_cheb_model,
             "Parameters for the Chebyshev 2D model.\nEnabled when 2D model = cheb/auto.",
         )
-        cmod = QtWidgets.QFormLayout()
-        self.grp_ws_cheb_model.setLayout(cmod)
+        cmod = QtWidgets.QFormLayout(self.grp_ws_cheb_model)
         cmod.setLabelAlignment(QtCore.Qt.AlignLeft)
         cmod.setHorizontalSpacing(12)
 
@@ -6231,8 +6164,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         # -------- ADVANCED: Trace / Robust fit --------
         adv = QtWidgets.QWidget()
-        avl = QtWidgets.QVBoxLayout()
-        adv.setLayout(avl)
+        avl = QtWidgets.QVBoxLayout(adv)
         avl.setContentsMargins(0, 0, 0, 0)
         avl.setSpacing(10)
 
@@ -6241,8 +6173,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             grp_trace,
             "How 2D lines are traced across Y before fitting λ(x,y).\nUsually safe to keep defaults.",
         )
-        af = QtWidgets.QFormLayout()
-        grp_trace.setLayout(af)
+        af = QtWidgets.QFormLayout(grp_trace)
         af.setLabelAlignment(QtCore.Qt.AlignLeft)
         af.setHorizontalSpacing(12)
 
@@ -6335,8 +6266,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.grp_ws_power_fit,
             "Robust fitting controls for the Power 2D model.\nEnabled when 2D model = power/auto.",
         )
-        pf = QtWidgets.QFormLayout()
-        self.grp_ws_power_fit.setLayout(pf)
+        pf = QtWidgets.QFormLayout(self.grp_ws_power_fit)
         pf.setLabelAlignment(QtCore.Qt.AlignLeft)
         pf.setHorizontalSpacing(12)
 
@@ -6363,8 +6293,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.grp_ws_cheb_fit,
             "Robust fitting controls for the Chebyshev 2D model.\nEnabled when 2D model = cheb/auto.",
         )
-        cf = QtWidgets.QFormLayout()
-        self.grp_ws_cheb_fit.setLayout(cf)
+        cf = QtWidgets.QFormLayout(self.grp_ws_cheb_fit)
         cf.setLabelAlignment(QtCore.Qt.AlignLeft)
         cf.setHorizontalSpacing(12)
 
@@ -6523,8 +6452,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             lay.addWidget(left, 1)
         except RuntimeError:
             # Defensive: if Qt ownership got confused and the layout was deleted, rebuild it.
-            lay = QtWidgets.QVBoxLayout()
-            w.setLayout(lay)
+            lay = QtWidgets.QVBoxLayout(w)
             lay.setSpacing(12)
             lay.addWidget(left, 1)
 
@@ -6939,21 +6867,17 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
     def _build_page_linearize(self) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
-        lay = QtWidgets.QVBoxLayout()
-        w.setLayout(lay)
+        lay = QtWidgets.QVBoxLayout(w)
         lay.setSpacing(12)
 
         # left: controls
         left = QtWidgets.QWidget()
-        left_layout = QtWidgets.QVBoxLayout()
-        left.setLayout(left_layout)
+        left_layout = QtWidgets.QVBoxLayout(left)
         left_layout.setSpacing(12)
 
         g = _box("Linearize (2D dispersion solution)")
         left_layout.addWidget(g)
-        gl = QtWidgets.QVBoxLayout()
-        g.setLayout(gl)
-
+        gl = QtWidgets.QVBoxLayout(g)
         lbl = QtWidgets.QLabel(
             "Resample SKY-subtracted RAW frames (09_sky/*_skysub_raw.fits) onto a linear wavelength grid using lambda_map(y,x).\n"
             "Output: 10_linearize/lin_preview.fits (+ per_exp/ for individual frames).\n"
@@ -6964,14 +6888,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
         gl.addWidget(lbl)
 
         gpar = _box("Parameters")
-        pl = QtWidgets.QVBoxLayout()
-        gpar.setLayout(pl)
+        pl = QtWidgets.QVBoxLayout(gpar)
         pl.setSpacing(10)
 
         # -------- BASIC: Core / Geometry / Diagnostics --------
         basic = QtWidgets.QWidget()
-        bvl = QtWidgets.QVBoxLayout()
-        basic.setLayout(bvl)
+        bvl = QtWidgets.QVBoxLayout(basic)
         bvl.setContentsMargins(0, 0, 0, 0)
         bvl.setSpacing(10)
 
@@ -6980,8 +6902,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             g_core,
             "Resampling grid and stage enable/disable.\nTune only if you need a fixed wavelength grid.",
         )
-        core = QtWidgets.QFormLayout()
-        g_core.setLayout(core)
+        core = QtWidgets.QFormLayout(g_core)
         core.setLabelAlignment(QtCore.Qt.AlignLeft)
         core.setHorizontalSpacing(12)
 
@@ -7028,8 +6949,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             g_geom,
             "Spatial (Y) cropping of the rectified frame.\nUse to exclude vignetted/noisy slit edges.",
         )
-        geom = QtWidgets.QFormLayout()
-        g_geom.setLayout(geom)
+        geom = QtWidgets.QFormLayout(g_geom)
         geom.setLabelAlignment(QtCore.Qt.AlignLeft)
         geom.setHorizontalSpacing(12)
 
@@ -7056,8 +6976,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             g_diag,
             "Quicklook/QA outputs.\nThese do not affect the science result.",
         )
-        diag = QtWidgets.QFormLayout()
-        g_diag.setLayout(diag)
+        diag = QtWidgets.QFormLayout(g_diag)
         diag.setLabelAlignment(QtCore.Qt.AlignLeft)
         diag.setHorizontalSpacing(12)
 
@@ -7072,8 +6991,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         # -------- ADVANCED: Outputs --------
         adv = QtWidgets.QWidget()
-        avl = QtWidgets.QVBoxLayout()
-        adv.setLayout(avl)
+        avl = QtWidgets.QVBoxLayout(adv)
         avl.setContentsMargins(0, 0, 0, 0)
         avl.setSpacing(10)
 
@@ -7082,8 +7000,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             g_out,
             "Debug outputs for each input exposure.\nUseful for debugging, but increases disk and time.",
         )
-        out = QtWidgets.QFormLayout()
-        g_out.setLayout(out)
+        out = QtWidgets.QFormLayout(g_out)
         out.setLabelAlignment(QtCore.Qt.AlignLeft)
         out.setHorizontalSpacing(12)
 
@@ -7122,8 +7039,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             lay.addWidget(left, 1)
         except RuntimeError:
             # Defensive: if Qt ownership got confused and the layout was deleted, rebuild it.
-            lay = QtWidgets.QVBoxLayout()
-            w.setLayout(lay)
+            lay = QtWidgets.QVBoxLayout(w)
             lay.setSpacing(12)
             lay.addWidget(left, 1)
 
@@ -7220,20 +7136,16 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
     def _build_page_sky(self) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
-        lay = QtWidgets.QVBoxLayout()
-        w.setLayout(lay)
+        lay = QtWidgets.QVBoxLayout(w)
         lay.setSpacing(12)
 
         left = QtWidgets.QWidget()
-        left_layout = QtWidgets.QVBoxLayout()
-        left.setLayout(left_layout)
+        left_layout = QtWidgets.QVBoxLayout(left)
         left_layout.setSpacing(12)
 
         g = _box("Sky Subtraction")
         left_layout.addWidget(g)
-        gl = QtWidgets.QVBoxLayout()
-        g.setLayout(gl)
-
+        gl = QtWidgets.QVBoxLayout(g)
         lbl = QtWidgets.QLabel(
             "Primary sky subtraction in detector geometry (RAW), guided by λ(x,y) from Wavelength solution.\n"
             "Workflow: select OBJ/SKY regions on a cosmics-clean preview → run Step 09 Sky.\n"
@@ -7244,8 +7156,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         # ROI
         groi = _box("Regions (OBJ / SKY)")
-        rlay = QtWidgets.QVBoxLayout()
-        groi.setLayout(rlay)
+        rlay = QtWidgets.QVBoxLayout(groi)
         self.lbl_sky_roi = QtWidgets.QLabel("ROI: <not set>")
         self.lbl_sky_roi.setWordWrap(True)
         rlay.addWidget(self.lbl_sky_roi)
@@ -7258,13 +7169,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
         gl.addWidget(groi)
 
         gpar = _box("Parameters")
-        pl = QtWidgets.QVBoxLayout()
-        gpar.setLayout(pl)
+        pl = QtWidgets.QVBoxLayout(gpar)
         pl.setSpacing(10)
 
         basic = QtWidgets.QWidget()
-        bf = QtWidgets.QFormLayout()
-        basic.setLayout(bf)
+        bf = QtWidgets.QFormLayout(basic)
         bf.setLabelAlignment(QtCore.Qt.AlignLeft)
         bf.setHorizontalSpacing(12)
 
@@ -7411,15 +7320,13 @@ class LauncherWindow(QtWidgets.QMainWindow):
         )
 
         adv = QtWidgets.QWidget()
-        adv_l = QtWidgets.QVBoxLayout()
-        adv.setLayout(adv_l)
+        adv_l = QtWidgets.QVBoxLayout(adv)
         adv_l.setContentsMargins(0, 0, 0, 0)
         adv_l.setSpacing(10)
 
         # Flexure correction (Δλ)
         gflex = _box("Flexure correction (Δλ)")
-        fl = QtWidgets.QFormLayout()
-        gflex.setLayout(fl)
+        fl = QtWidgets.QFormLayout(gflex)
         fl.setLabelAlignment(QtCore.Qt.AlignLeft)
         fl.setHorizontalSpacing(12)
 
@@ -7471,8 +7378,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         )
 
         row_w = QtWidgets.QWidget()
-        row_w_l = QtWidgets.QHBoxLayout()
-        row_w.setLayout(row_w_l)
+        row_w_l = QtWidgets.QHBoxLayout(row_w)
         row_w_l.setContentsMargins(0, 0, 0, 0)
         self.lbl_sky_flex_windows = QtWidgets.QLabel("<no windows>")
         self.lbl_sky_flex_windows.setWordWrap(True)
@@ -7543,8 +7449,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         # Stack2D tuning (runs after sky if enabled)
         gstack = _box("Stack2D (after sky)")
-        sl = QtWidgets.QFormLayout()
-        gstack.setLayout(sl)
+        sl = QtWidgets.QFormLayout(gstack)
         sl.setLabelAlignment(QtCore.Qt.AlignLeft)
         sl.setHorizontalSpacing(12)
 
@@ -7618,8 +7523,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         )
 
         row_sw = QtWidgets.QWidget()
-        row_sw_l = QtWidgets.QHBoxLayout()
-        row_sw.setLayout(row_sw_l)
+        row_sw_l = QtWidgets.QHBoxLayout(row_sw)
         row_sw_l.setContentsMargins(0, 0, 0, 0)
         self.lbl_stack_y_align_windows = QtWidgets.QLabel("<no windows>")
         self.lbl_stack_y_align_windows.setWordWrap(True)
@@ -7675,8 +7579,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             lay.addWidget(left, 1)
         except RuntimeError:
             # Defensive: if Qt ownership got confused and the layout was deleted, rebuild it.
-            lay = QtWidgets.QVBoxLayout()
-            w.setLayout(lay)
+            lay = QtWidgets.QVBoxLayout(w)
             lay.setSpacing(12)
             lay.addWidget(left, 1)
 
@@ -7995,20 +7898,16 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
     def _build_page_stack2d(self) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
-        lay = QtWidgets.QVBoxLayout()
-        w.setLayout(lay)
+        lay = QtWidgets.QVBoxLayout(w)
         lay.setSpacing(12)
 
         left = QtWidgets.QWidget()
-        left_layout = QtWidgets.QVBoxLayout()
-        left.setLayout(left_layout)
+        left_layout = QtWidgets.QVBoxLayout(left)
         left_layout.setSpacing(12)
 
         g = _box("Stack2D (combine)")
         left_layout.addWidget(g)
-        gl = QtWidgets.QVBoxLayout()
-        g.setLayout(gl)
-
+        gl = QtWidgets.QVBoxLayout(g)
         lbl = QtWidgets.QLabel(
             "Robust 2D stacking of rectified sky-subtracted frames in (λ, y).\n"
             "Input: 10_linearize/<stem>_skysub.fits\n"
@@ -8018,8 +7917,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         gl.addWidget(lbl)
 
         gpar = _box("Parameters")
-        pl = QtWidgets.QVBoxLayout()
-        gpar.setLayout(pl)
+        pl = QtWidgets.QVBoxLayout(gpar)
         pl.setSpacing(10)
 
         form = QtWidgets.QFormLayout()
@@ -8074,8 +7972,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             lay.addWidget(left, 1)
         except RuntimeError:
             # Defensive: if Qt ownership got confused and the layout was deleted, rebuild it.
-            lay = QtWidgets.QVBoxLayout()
-            w.setLayout(lay)
+            lay = QtWidgets.QVBoxLayout(w)
             lay.setSpacing(12)
             lay.addWidget(left, 1)
 
@@ -8098,20 +7995,16 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
     def _build_page_extract1d(self) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
-        lay = QtWidgets.QVBoxLayout()
-        w.setLayout(lay)
+        lay = QtWidgets.QVBoxLayout(w)
         lay.setSpacing(12)
 
         left = QtWidgets.QWidget()
-        left_layout = QtWidgets.QVBoxLayout()
-        left.setLayout(left_layout)
+        left_layout = QtWidgets.QVBoxLayout(left)
         left_layout.setSpacing(12)
 
         g = _box("Extract 1D spectrum")
         left_layout.addWidget(g)
-        gl = QtWidgets.QVBoxLayout()
-        g.setLayout(gl)
-
+        gl = QtWidgets.QVBoxLayout(g)
         lbl = QtWidgets.QLabel(
             "Extract 1D spectra F(λ) from a rectified 2D product (y, λ).\n"
             "Default input: 11_stack/stack2d.fits.\n"
@@ -8122,13 +8015,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
         gl.addWidget(lbl)
 
         gpar = _box("Parameters")
-        pl = QtWidgets.QVBoxLayout()
-        gpar.setLayout(pl)
+        pl = QtWidgets.QVBoxLayout(gpar)
         pl.setSpacing(10)
 
         basic = QtWidgets.QWidget()
-        bf = QtWidgets.QFormLayout()
-        basic.setLayout(bf)
+        bf = QtWidgets.QFormLayout(basic)
         bf.setLabelAlignment(QtCore.Qt.AlignLeft)
         bf.setHorizontalSpacing(12)
 
@@ -8217,8 +8108,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         )
 
         adv = QtWidgets.QWidget()
-        af = QtWidgets.QFormLayout()
-        adv.setLayout(af)
+        af = QtWidgets.QFormLayout(adv)
         af.setLabelAlignment(QtCore.Qt.AlignLeft)
         af.setHorizontalSpacing(12)
 
@@ -8282,8 +8172,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             lay.addWidget(left, 1)
         except RuntimeError:
             # Defensive: if Qt ownership got confused and the layout was deleted, rebuild it.
-            lay = QtWidgets.QVBoxLayout()
-            w.setLayout(lay)
+            lay = QtWidgets.QVBoxLayout(w)
             lay.setSpacing(12)
             lay.addWidget(left, 1)
 

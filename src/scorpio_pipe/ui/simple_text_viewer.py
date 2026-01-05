@@ -16,8 +16,7 @@ class TextViewerDialog(QtWidgets.QDialog):
         except Exception:
             pass
 
-        lay = QtWidgets.QVBoxLayout()
-        self.setLayout(lay)
+        lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(12, 12, 12, 12)
 
         self.editor = QtWidgets.QPlainTextEdit()

@@ -428,8 +428,7 @@ class FitsPreviewWidget(QtWidgets.QWidget):
         top.addWidget(self.btn_1to1)
         top.addStretch(1)
 
-        lay = QtWidgets.QVBoxLayout()
-        self.setLayout(lay)
+        lay = QtWidgets.QVBoxLayout(self)
         lay.addLayout(top)
         lay.addWidget(self.lbl_path)
         lay.addWidget(self.lbl_stats)

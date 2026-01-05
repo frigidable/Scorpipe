@@ -40,8 +40,7 @@ class RunPlanWidget(QtWidgets.QWidget):
         super().__init__(parent)
         self._cfg: dict[str, Any] | None = None
 
-        lay = QtWidgets.QVBoxLayout()
-        self.setLayout(lay)
+        lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(6)
 
@@ -139,8 +138,7 @@ class QCAlertsWidget(QtWidgets.QWidget):
         super().__init__(parent)
         self._work_dir: Path | None = None
 
-        lay = QtWidgets.QVBoxLayout()
-        self.setLayout(lay)
+        lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(6)
 
@@ -161,10 +159,9 @@ class QCAlertsWidget(QtWidgets.QWidget):
 
         # QC-guided suggestions (P3): show safe recommended actions based on QC flags.
         self.grp_actions = QtWidgets.QGroupBox("Recommended actions")
-        ga = QtWidgets.QVBoxLayout()
+        ga = QtWidgets.QVBoxLayout(self.grp_actions)
         ga.setContentsMargins(8, 6, 8, 8)
         ga.setSpacing(4)
-        self.grp_actions.setLayout(ga)
         self.lbl_actions = QtWidgets.QLabel("—")
         self.lbl_actions.setWordWrap(True)
         ga.addWidget(self.lbl_actions)
@@ -313,8 +310,7 @@ class InspectorPanel(QtWidgets.QWidget):
         self._cfg: dict[str, Any] | None = None
         self._stage: str | None = None
 
-        lay = QtWidgets.QVBoxLayout()
-        self.setLayout(lay)
+        lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(6, 6, 6, 6)
         lay.setSpacing(8)
 
