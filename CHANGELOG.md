@@ -7,6 +7,13 @@
 - LineID: added `waveref` metadata header to the default neon line list and enforced consistency with `wavesol.waveref` to prevent silent systematic wavelength shifts.
 - Docs: corrected stage order (sky subtraction happens before linearization) and updated quick-start steps.
 
+## [5.41.0](https://github.com/frigidable/Scorpipe/compare/scorpipe-v5.40.25...scorpipe-v5.41.0) (2026-01-06)
+
+
+### Features
+
+* **sky/linearize:** move sky before linearize; split raw vs rectified skysub contract ([b7ec59e](https://github.com/frigidable/Scorpipe/commit/b7ec59ed77ed4d1c35807bd5b76e2b563aaf8140))
+
 ## [5.40.32] - 2026-01-03
 
 ### Fixed
