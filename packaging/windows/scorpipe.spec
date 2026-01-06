@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-"""PyInstaller spec for building scorpipe.exe (Windows).
+"""PyInstaller spec for building scorpipe. exe (Windows).
 
 Build (PowerShell):
   pip install -U pyinstaller
@@ -11,15 +11,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.utils. hooks import collect_data_files, collect_submodules
 
 import os
 
 ROOT = Path(os.environ.get("SCORPIPE_REPO_ROOT", Path.cwd())).resolve()
-# sanity: if run from packaging/windows, climb to repo root
-if not (ROOT / "pyproject.toml").exists() and (ROOT / ".." / "pyproject.toml").exists():
+# sanity:  if run from packaging/windows, climb to repo root
+if not (ROOT / "pyproject.toml").exists() and (ROOT / ". ." / "pyproject.toml").exists():
     ROOT = (ROOT / "..").resolve()
-if not (ROOT / "pyproject.toml").exists() and (ROOT / ".." / ".." / "pyproject.toml").exists():
+if not (ROOT / "pyproject.toml").exists() and (ROOT / ".." / ". ." / "pyproject.toml").exists():
     ROOT = (ROOT / ".." / "..").resolve()
 
 block_cipher = None
@@ -61,7 +61,9 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
-    disable_windowed_traceback=False,
+    # ВАЖНО:  Если есть необработанное исключение, PyInstaller покажет окно с ошибкой
+    # Это позволит пользователю увидеть, в чём проблема
+    disable_windowed_traceback=False,  # ← Окно трассировки ВКЛЮЧЕНО! 
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
@@ -71,8 +73,8 @@ exe = EXE(
 coll = COLLECT(
     exe,
     a.binaries,
-    a.zipfiles,
-    a.datas,
+    a. zipfiles,
+    a. datas,
     strip=False,
     upx=True,
     upx_exclude=[],
