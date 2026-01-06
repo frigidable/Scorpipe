@@ -61,9 +61,10 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
-    # ВАЖНО:  Если есть необработанное исключение, PyInstaller покажет окно с ошибкой
-    # Это позволит пользователю увидеть, в чём проблема
-    disable_windowed_traceback=False,  # ← Окно трассировки ВКЛЮЧЕНО! 
+    # КРИТИЧНО: Разрешить PyInstaller показывать traceback при необработанных исключениях. 
+    # Если это False, пользователь увидит окно с ошибкой (good).
+    # Если True, окно будет подавлено (bad — пользователь не поймёт, почему приложение закрылось).
+    disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,

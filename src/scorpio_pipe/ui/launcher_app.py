@@ -10,32 +10,31 @@ from scorpio_pipe.ui.launcher_window import LauncherWindow
 from scorpio_pipe.ui.theme import apply_theme, load_ui_settings
 
 
-def _write_crash_log(exc_info: str) -> Path:
-    """Запишем ошибку в лог-файл для отладки."""
+def _get_log_file() -> Path:
+    """Получить путь к лог-файлу ошибок."""
     log_dir = Path.home() / ".scorpipe_logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-
-    log_file = log_dir / "gui_crash.log"
     try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return log_dir / "gui_crash.log"
+
+
+def _write_crash_log(message: str) -> None:
+    """Записать сообщение об ошибке в лог."""
+    try:
+        log_file = _get_log_file()
         with open(log_file, "a", encoding="utf-8") as f:
             f.write("\n" + "=" * 80 + "\n")
-            f.write(f"CRASH at {Path.cwd()}\n")
-            f.write(exc_info)
+            f.write(message)
             f.write("\n" + "=" * 80 + "\n")
     except Exception:
         pass
-    return log_file
 
 
 def _show_error_dialog(title: str, message: str, details: str = "") -> None:
     """Показать диалог ошибки пользователю."""
     try:
-        # Убедимся, что QApplication существует
-        app = QtWidgets.QApplication.instance()
-        if app is None:
-            app = QtWidgets.QApplication(sys.argv)
-
-        # Создаём диалог ошибки
         msg_box = QtWidgets.QMessageBox()
         msg_box.setIcon(QtWidgets.QMessageBox.Critical)
         msg_box.setWindowTitle(title)
@@ -43,90 +42,102 @@ def _show_error_dialog(title: str, message: str, details: str = "") -> None:
         if details:
             msg_box.setDetailedText(details)
         msg_box.setStandardButtons(QtWidgets.QMessageBox.Ok)
+        msg_box.setMinimumWidth(500)
         msg_box.exec()
     except Exception:
-        # Если даже этот дополнительный диалог не работает — выводим в stderr
-        print(f"ERROR: {title}", file=sys.stderr)
-        print(f"{message}", file=sys.stderr)
-        if details:
-            print(f"Details:\n{details}", file=sys.stderr)
+        # Если даже диалог не работает — просто логируем
+        pass
 
 
 def main() -> None:
-    """Главная точка входа GUI приложения с обработкой ошибок."""
+    """Главная точка входа GUI с полной обработкой ошибок."""
 
     try:
-        # 1. Создать QApplication (если ещё не создан)
+        # 1. Создать QApplication
         app = QtWidgets.QApplication.instance()
         if app is None:
             app = QtWidgets.QApplication(sys.argv)
 
-        # 2. Установить локаль
+        # 2. Попытка установить локаль (некритично)
         try:
             QtCore.QLocale.setDefault(QtCore.QLocale.c())
             app.setLocale(QtCore.QLocale.c())
         except Exception as e:
-            print(f"[Warning] Failed to set locale: {e}", file=sys.stderr)
-            # Продолжаем несмотря на ошибку локали
+            # Логируем, но не прерываем
+            pass
 
-        # 3. Загрузить параметры темы
+        # 3. Загрузить параметры UI (некритично)
         try:
             st = load_ui_settings()
             theme_mode = st.value("ui/theme", "dark")
         except Exception as e:
-            print(f"[Warning] Failed to load settings: {e}", file=sys.stderr)
             theme_mode = "dark"
 
-        # 4. Применить тему
+        # 4. Применить тему (некритично)
         try:
             apply_theme(app, mode=str(theme_mode))
         except Exception as e:
-            print(f"[Warning] Failed to apply theme: {e}", file=sys.stderr)
-            # Тема не критична, продолжаем
+            # Тема не критична
+            pass
 
-        # 5. Создать главное окно
+        # 5. Создать главное окно (КРИТИЧНО!)
         try:
             w = LauncherWindow()
         except Exception as e:
-            error_details = traceback.format_exc()
-            log_file = _write_crash_log(error_details)
+            error_msg = traceback.format_exc()
+            _write_crash_log(f"FAILED TO CREATE LAUNCHERWINDOW:\n{error_msg}")
+
+            # Показать диалог ошибки
+            log_file = _get_log_file()
+            user_message = (
+                "Scorpio Pipe GUI failed to initialize.\n\n"
+                f"Error log saved to:\n{log_file}\n\n"
+                "Please check the log file for details."
+            )
             _show_error_dialog(
                 "Scorpio Pipe — Initialization Error",
-                f"Failed to initialize the GUI.\n\nLog saved to:\n{log_file}",
-                error_details
+                user_message,
+                error_msg
             )
             raise SystemExit(1)
 
         # 6. Показать окно
         try:
             w.showMaximized()
-        except Exception:
+        except Exception as e:
             try:
                 w.show()
-            except Exception as e:
-                print(f"[Error] Failed to show window: {e}", file=sys.stderr)
-                raise SystemExit(1)
+            except Exception:
+                pass
 
         # 7. Запустить event loop
         exit_code = app.exec()
         raise SystemExit(exit_code)
 
-    except SystemExit:
-        raise  # Re-raise SystemExit
+    except SystemExit as e:
+        # Re-raise SystemExit (не логируем как ошибку)
+        raise
     except Exception as e:
         # Ловим ВСЕ необработанные исключения
-        error_details = traceback.format_exc()
-        log_file = _write_crash_log(error_details)
+        error_msg = traceback.format_exc()
+        _write_crash_log(f"UNCAUGHT EXCEPTION:\n{error_msg}")
+
+        log_file = _get_log_file()
+        user_message = (
+            "Scorpio Pipe encountered an unexpected error.\n\n"
+            f"Error log saved to:\n{log_file}\n\n"
+            "Please check the log file and restart the application."
+        )
 
         try:
             _show_error_dialog(
                 "Scorpio Pipe — Critical Error",
-                f"An unexpected error occurred.\n\nLog saved to:\n{log_file}",
-                error_details
+                user_message,
+                error_msg
             )
         except Exception:
-            print(f"CRITICAL ERROR:\n{error_details}", file=sys.stderr)
-            print(f"Log file: {log_file}", file=sys.stderr)
+            # Даже если диалог не сработал, выходим gracefully
+            pass
 
         raise SystemExit(1)
 
