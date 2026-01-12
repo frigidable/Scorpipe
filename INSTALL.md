@@ -25,3 +25,13 @@
 - `packaging/windows/scorpipe.spec` — PyInstaller spec для `scorpipe.exe`
 - `packaging/windows/scorpipe.iss` — Inno Setup script для установщика `ScorpioPipe-Setup-x64-<версия>.exe`
 - `.github/workflows/windows_release.yml` — GitHub Actions, который собирает артефакты на Windows
+
+
+## Если EXE запускается, но окна нет
+
+В версии 5.40.40 добавлен диагностический лог запуска GUI.
+
+- Лог: `%LOCALAPPDATA%\Scorpipe\logs\scorpipe_gui.log`
+- Если папка недоступна, используется `%TEMP%\Scorpipe\logs`
+
+Если окно не открылось, откройте лог и посмотрите traceback — это обычно указывает на отсутствующий DLL/Qt-плагин или ошибку импорта.

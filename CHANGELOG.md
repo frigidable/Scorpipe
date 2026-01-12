@@ -1,4 +1,28 @@
+## [6.0.1] - 2026-01-12
+
+### Added
+- P0-A2 deterministic frame classifier (`scorpio_pipe.dataset.classify`): `FrameClass`, `classify_frame()`, and long-slit mode guardrail `is_longslit_mode()`.
+- Tests for frame classification using the real SCORPIO-1/2 header samples.
+
+## [6.0.0] - 2026-01-12
+
+### Added
+- P0-A1 Header Contract: unified metadata structure `FrameMeta` and strict header parsers for **SCORPIO-1** and **SCORPIO-2** (`scorpio_pipe/instruments/*`).
+- Header normalization utilities (string cleanup, non-standard date parsing, stable slit/binning keys).
+- Tests for SCORPIO headers: `tests/test_headers_sc1.py`, `tests/test_headers_sc2.py`.
+
+### Changed
+- `inspect` now prefers contract-normalized meta for stable grouping (slit width, binning, disperser, instrument id), while keeping best-effort behavior for dataset browsing.
+- `calib_compat` now derives matching keys via the Header Contract first (fails loudly on contract violations), with a legacy fallback for non-SCORPIO headers.
+
 ## [5.40.34] - 2026-01-03
+
+## 5.40.40
+
+- Исправлен запуск GUI в windowed/.exe сборках: добавлен bootstrap с логом и показом ошибок.
+- Для Windows сборок отключён UPX (меньше ложных срабатываний антивируса).
+- Окно лаунчера принудительно активируется при старте.
+
 
 ### Fixed
 - Workflow (doit): added `flatfield` task and wired dependencies (`sky_sub` depends on `flatfield`; `cosmics` depends on `superbias` when bias subtraction is enabled; `superflat` depends on `superbias`).

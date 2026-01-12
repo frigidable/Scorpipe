@@ -17,6 +17,8 @@ from typing import Any
 
 from astropy.io import fits
 
+from scorpio_pipe.instruments import HeaderContractError, parse_frame_meta
+
 
 def _s(v: Any) -> str:
     return str(v).strip()
@@ -52,15 +54,34 @@ class CalibKey:
 
     @classmethod
     def from_header(cls, h: fits.Header) -> "CalibKey":
+        # Prefer strict, instrument-aware parsing. If the header violates the
+        # contract, we want an explicit failure rather than silent guessing.
+        try:
+            m = parse_frame_meta(h, strict=True)
+            instrume = _norm(m.instrument_db_key)
+            mode = _norm(m.mode)
+            disperse = _norm(m.disperser)
+            binning = _norm(m.binning_key)
+            slitwid = _norm(m.slit_width_key)
+            node = _norm(m.readout_key.node)
+        except HeaderContractError:
+            # Fallback for non-SCORPIO headers or legacy datasets.
+            instrume = _norm(h.get("INSTRUME", h.get("TELESCOP", "")))
+            mode = _norm(h.get("MODE", h.get("OBS_MODE", "")))
+            disperse = _norm(h.get("DISPERSE", h.get("GRISM", h.get("GRATING", ""))))
+            binning = _get_binning(h)
+            slitwid = _norm(h.get("SLITWID", h.get("SLIT", "")))
+            node = _norm(h.get("NODE", h.get("READMODE", "")))
+
         return cls(
-            instrume=_norm(h.get("INSTRUME", h.get("TELESCOP", ""))),
+            instrume=instrume,
             detector=_norm(h.get("DETECTOR", h.get("CCDNAME", h.get("CCD", "")))),
-            mode=_norm(h.get("MODE", h.get("OBS_MODE", ""))),
-            disperse=_norm(h.get("DISPERSE", h.get("GRISM", h.get("GRATING", "")))),
-            binning=_get_binning(h),
-            slitwid=_norm(h.get("SLITWID", h.get("SLIT", ""))),
+            mode=mode,
+            disperse=disperse,
+            binning=binning,
+            slitwid=slitwid,
             slitmask=_norm(h.get("SLITMASK", "")),
-            node=_norm(h.get("NODE", h.get("READMODE", ""))),
+            node=node,
             rot=_norm(h.get("ROTANGLE", h.get("PA", ""))),
         )
 

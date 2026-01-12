@@ -1,7 +1,7 @@
 """PyInstaller entry-point for the Scorpipe GUI."""
 
-from scorpio_pipe.ui.launcher_app import main
+from scorpio_pipe.ui.bootstrap import run_gui
 
 
 if __name__ == "__main__":
-    main()
+    run_gui()

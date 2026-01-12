@@ -3,8 +3,8 @@
 PyInstaller works best when you point it to a .py file.
 """
 
-from scorpio_pipe.ui.launcher_app import main
+from scorpio_pipe.ui.bootstrap import run_gui
 
 
 if __name__ == "__main__":
-    main()
+    run_gui()

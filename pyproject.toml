@@ -54,8 +54,8 @@ scorpio-pipe = "scorpio_pipe.cli:main"
 
 [project.gui-scripts]
 # Windows: creates a no-console launcher (pythonw) so the UI can be started by double click.
-scorpio-ui = "scorpio_pipe.ui.launcher_app:main"
-scorpipe = "scorpio_pipe.ui.launcher_app:main"
+scorpio-ui = "scorpio_pipe.ui.bootstrap:run_gui"
+scorpipe = "scorpio_pipe.ui.bootstrap:run_gui"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

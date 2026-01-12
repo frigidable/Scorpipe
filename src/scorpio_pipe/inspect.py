@@ -12,6 +12,7 @@ from scorpio_pipe.fits_utils import open_fits_smart
 
 from scorpio_pipe.nightlog import find_nightlog, parse_nightlog
 from scorpio_pipe.instrument_db import guess_instrument_from_header
+from scorpio_pipe.instruments import HeaderContractError, parse_frame_meta
 
 EXPECTED_COLUMNS = [
     "path",
@@ -235,16 +236,34 @@ def inspect_dataset(data_dir: Path, max_files: int | None = None) -> InspectResu
 
         fid = _fid_from_path(fp)
 
+        # Header Contract (best-effort for `inspect`): prefer normalized meta,
+        # but do not crash the browser when headers are incomplete.
+        meta = None
+        try:
+            meta = parse_frame_meta(hdr, strict=False)
+        except HeaderContractError as e:
+            # record first few contract violations for diagnostics
+            if len(open_errors) < 5:
+                open_errors.append(f"{fp} -> HeaderContractError: {e}")
+            meta = None
+
         obj = str(_safe_get(hdr, "OBJECT", "OBJNAME", default="") or "")
         kind = classify_frame(hdr)
 
         mode = str(_safe_get(hdr, "MODE", "OBSMODE", "OBS_MODE", default="") or "")
         disperser = str(
-            _safe_get(hdr, "GRISM", "GRATING", "DISPERSER", "ELEMENT", default="") or ""
+            _safe_get(hdr, "DISPERSE", "GRISM", "GRATING", "DISPERSER", "ELEMENT", default="")
+            or ""
         )
         slit = str(
             _safe_get(hdr, "SLIT", "SLITWID", "SLITW", "SLIT_WIDTH", default="") or ""
         )
+
+        if meta is not None:
+            obj = meta.object_name or obj
+            mode = meta.mode or mode
+            disperser = meta.disperser
+            slit = meta.slit_width_key
 
         # shape без чтения data
         shape = ""
@@ -259,6 +278,9 @@ def inspect_dataset(data_dir: Path, max_files: int | None = None) -> InspectResu
         instrument = guess_instrument_from_header(hdr) or str(
             _safe_get(hdr, "INSTRUME", "INSTRUMENT", default="") or ""
         )
+
+        if meta is not None:
+            instrument = meta.instrument_db_key
         row = dict(
             path=str(fp),
             fid=fid,
@@ -271,7 +293,7 @@ def inspect_dataset(data_dir: Path, max_files: int | None = None) -> InspectResu
             mode=mode,
             disperser=disperser,
             slit=slit,
-            binning=_binning_from_header(hdr),
+            binning=(meta.binning_key if meta is not None else _binning_from_header(hdr)),
             window=_window_from_header(hdr),
             shape=shape,
         )

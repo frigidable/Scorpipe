@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-"""PyInstaller spec for building scorpipe. exe (Windows).
+"""PyInstaller spec for building scorpipe.exe (Windows).
 
 Build (PowerShell):
   pip install -U pyinstaller
@@ -11,15 +11,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyInstaller.utils. hooks import collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 import os
 
 ROOT = Path(os.environ.get("SCORPIPE_REPO_ROOT", Path.cwd())).resolve()
-# sanity:  if run from packaging/windows, climb to repo root
-if not (ROOT / "pyproject.toml").exists() and (ROOT / ". ." / "pyproject.toml").exists():
+# sanity: if run from packaging/windows, climb to repo root
+if not (ROOT / "pyproject.toml").exists() and (ROOT / ".." / "pyproject.toml").exists():
     ROOT = (ROOT / "..").resolve()
-if not (ROOT / "pyproject.toml").exists() and (ROOT / ".." / ". ." / "pyproject.toml").exists():
+if not (ROOT / "pyproject.toml").exists() and (ROOT / ".." / ".." / "pyproject.toml").exists():
     ROOT = (ROOT / ".." / "..").resolve()
 
 block_cipher = None
@@ -59,11 +59,8 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     console=False,
-    # КРИТИЧНО: Разрешить PyInstaller показывать traceback при необработанных исключениях. 
-    # Если это False, пользователь увидит окно с ошибкой (good).
-    # Если True, окно будет подавлено (bad — пользователь не поймёт, почему приложение закрылось).
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
@@ -74,10 +71,10 @@ exe = EXE(
 coll = COLLECT(
     exe,
     a.binaries,
-    a. zipfiles,
-    a. datas,
+    a.zipfiles,
+    a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name="scorpipe",
 )

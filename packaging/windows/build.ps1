@@ -1,118 +1,119 @@
-param(
-  [string]$Name = "scorpipe",
-  [string]$PythonPath = "",
-  [string]$ProjectRoot = ""
+Param(
+  [switch]$SkipInstall,
+  [switch]$SkipInstaller
 )
 
 $ErrorActionPreference = "Stop"
 
-function Assert-LastExitOk([string]$step) {
-  if ($LASTEXITCODE -ne 0) {
-    throw "Step failed ($step), exit code: $LASTEXITCODE"
-  }
-}
+function Invoke-Logged {
+  param(
+    [string]$FilePath,
+    [string[]]$ArgumentList,
+    [string]$LogPath,
+    [string]$StepName
+  )
 
-Write-Host "Building GUI . exe:  $Name" -ForegroundColor Cyan
-
-$py = $PythonPath
-if (-not $py) { $py = "python" }
-
-# IMPORTANT: 
-# PyInstaller stores --add-data entries inside the generated . spec. 
-# When the .spec is written to a subfolder (e.g. build\pyinstaller),
-# RELATIVE paths inside datas are resolved relative to that folder.
-# Поэтому здесь используем абсолютные пути для datas. 
-
-if (-not $ProjectRoot) {
-  # tools/..  -> project root
-  $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot ".."))
-} else {
-  $ProjectRoot = (Resolve-Path $ProjectRoot)
-}
-
-$resDir = Join-Path $ProjectRoot "src\scorpio_pipe\resources"
-if (-not (Test-Path $resDir)) {
-  throw "resources folder not found: $resDir"
-}
-
-$entry = Join-Path $ProjectRoot "tools\run_ui. py"
-if (-not (Test-Path $entry)) {
-  throw "entry script not found: $entry"
-}
-
-Push-Location $ProjectRoot
-try {
-  # Ensure pyinstaller exists in the selected interpreter
-  & $py -m pip install -U pip
-  Assert-LastExitOk "pip upgrade"
-  & $py -m pip install -U pyinstaller
-  Assert-LastExitOk "pyinstaller install"
-
-  # Clean old
-  if (Test-Path "$Name.exe") { Remove-Item -Force "$Name.exe" }
-  if (Test-Path "build") { Remove-Item -Recurse -Force "build" }
-  if (Test-Path "$Name.spec") { Remove-Item -Force "$Name.spec" }
-
-  # NOTE: 
-  # - --noconsole:  no terminal window
-  # - --onefile: single exe
-  # - --paths src: so imports work in editable layout
-  # - hidden imports for QtPdf (vector) and PyMuPDF (fallback renderer)
-
-  $dataArg = "$resDir;scorpio_pipe\resources"
-
-  & $py -m PyInstaller `
-    --noconsole --onefile `
-    --name $Name `
-    --distpath "." `
-    --workpath "build\pyinstaller" `
-    --specpath "build\pyinstaller" `
-    --paths "src" `
-    --add-data $dataArg `
-    --hidden-import "PySide6.QtPdf" `
-    --hidden-import "PySide6.QtPdfWidgets" `
-    --hidden-import "pymupdf" `
-    --hidden-import "fitz" `
-    --hidden-import "pyqtgraph" `
-    $entry
-
-  Assert-LastExitOk "PyInstaller"
-
-  if (-not (Test-Path "$Name. exe")) {
-    throw "PyInstaller finished but $Name.exe not found in project root."
+  $logDir = Split-Path -Parent $LogPath
+  if ($logDir -and -not (Test-Path $logDir)) {
+    New-Item -ItemType Directory -Force -Path $logDir | Out-Null
   }
 
-  Write-Host "Done.  EXE is in .\$Name.exe" -ForegroundColor Green
-  
-  # НОВОЕ: Также собрать DEBUG версию с консолью
-  Write-Host "Building DEBUG . exe with console..." -ForegroundColor Cyan
-  
-  $debugEntry = Join-Path $ProjectRoot "packaging\windows\entry_gui_debug.py"
-  if (Test-Path $debugEntry) {
-    # Clean old debug build
-    if (Test-Path "$Name-debug.exe") { Remove-Item -Force "$Name-debug.exe" }
-    if (Test-Path "build\pyinstaller_debug") { Remove-Item -Recurse -Force "build\pyinstaller_debug" }
-    
-    & $py -m PyInstaller `
-      --console --onefile `
-      --name "$Name-debug" `
-      --distpath "." `
-      --workpath "build\pyinstaller_debug" `
-      --specpath "build\pyinstaller_debug" `
-      --paths "src" `
-      --add-data $dataArg `
-      --hidden-import "PySide6.QtPdf" `
-      --hidden-import "PySide6.QtPdfWidgets" `
-      --hidden-import "pymupdf" `
-      --hidden-import "fitz" `
-      --hidden-import "pyqtgraph" `
-      $debugEntry
-    
-    if (Test-Path "$Name-debug.exe") {
-      Write-Host "Debug EXE created: .\$Name-debug.exe (use this for troubleshooting)" -ForegroundColor Green
+  Write-Host "[$StepName] $FilePath $($ArgumentList -join ' ')" -ForegroundColor DarkCyan
+
+  # NOTE:
+  # Start-Process forbids redirecting stdout and stderr to the same file.
+  # This caused GitHub Actions to fail before even starting PyInstaller/ISCC.
+  $errLog = "$LogPath.err"
+
+  $p = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -NoNewWindow -PassThru -Wait `
+        -RedirectStandardOutput $LogPath -RedirectStandardError $errLog
+
+  if ($p.ExitCode -ne 0) {
+    Write-Host "---- $StepName stdout tail ----" -ForegroundColor Yellow
+    if (Test-Path $LogPath) {
+      Get-Content $LogPath -Tail 60
+    } else {
+      Write-Host "(no stdout log produced: $LogPath)" -ForegroundColor DarkYellow
     }
+
+    Write-Host "---- $StepName stderr tail ----" -ForegroundColor Yellow
+    if (Test-Path $errLog) {
+      Get-Content $errLog -Tail 60
+    } else {
+      Write-Host "(no stderr log produced: $errLog)" -ForegroundColor DarkYellow
+    }
+
+    throw "$StepName failed, exit code: $($p.ExitCode). See logs: $LogPath and $errLog"
   }
-  
-} finally {
-  Pop-Location
 }
+
+Write-Host "[Scorpipe] Windows build" -ForegroundColor Cyan
+
+# Repo root for PyInstaller spec (do not rely on __file__ in spec)
+$env:SCORPIPE_REPO_ROOT = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+Write-Host "[Scorpipe] Repo root: $env:SCORPIPE_REPO_ROOT" -ForegroundColor DarkCyan
+
+if (-not $SkipInstall) {
+  python -m pip install -U pip
+  pip install -e ".[gui]"
+  python -m pip install -U pyinstaller
+}
+
+New-Item -ItemType Directory -Force -Path packaging\windows\Output | Out-Null
+
+Write-Host "[Scorpipe] PyInstaller..." -ForegroundColor Cyan
+Invoke-Logged -FilePath "python" -ArgumentList @(
+  "-m", "PyInstaller", "packaging\windows\scorpipe.spec"
+) -LogPath "packaging\windows\Output\pyinstaller.log" -StepName "PyInstaller"
+
+if (-not $SkipInstaller) {
+  Write-Host "[Scorpipe] Inno Setup (installer)..." -ForegroundColor Cyan
+
+  $iscc = (Get-Command iscc.exe -ErrorAction SilentlyContinue).Source
+  if (-not $iscc) { $iscc = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source }
+
+  if (-not $iscc) {
+    $candidates = @(
+      (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'),
+      (Join-Path $env:ProgramFiles 'Inno Setup 6\ISCC.exe'),
+      'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
+      'C:\Program Files\Inno Setup 6\ISCC.exe'
+    ) | Where-Object { $_ -and (Test-Path $_) }
+
+    if ($candidates.Count -gt 0) { $iscc = $candidates[0] }
+  }
+
+  if (-not $iscc) {
+    throw "ISCC.exe not found. Install Inno Setup 6 (e.g. choco install innosetup -y) and retry."
+  }
+
+
+  $detectedVersion = (python -c "from scorpio_pipe.version import __version__; print(__version__)").Trim()
+  if (-not $detectedVersion) {
+    throw "Failed to determine AppVersion from scorpio_pipe.version.__version__. Ensure the package is installed (pip install -e .[gui]) before building the installer."
+  }
+
+  $appVersion = $env:APP_VERSION
+  if ($appVersion) {
+    if ($appVersion -ne $detectedVersion) {
+      throw "Version mismatch: tag/workflow APP_VERSION=$appVersion, but Python package reports __version__=$detectedVersion. Bump src/scorpio_pipe/version.py to match the release tag."
+    }
+  } else {
+    $appVersion = $detectedVersion
+  }
+  Write-Host "[Scorpipe] AppVersion: $appVersion" -ForegroundColor DarkCyan
+
+  Invoke-Logged -FilePath $iscc -ArgumentList @(
+    "/DAppVersion=$appVersion"
+    "packaging\windows\scorpipe.iss"
+  ) -LogPath "packaging\windows\Output\iscc.log" -StepName "ISCC"
+
+  $setupExe = "packaging\windows\Output\ScorpioPipe-Setup-x64-$appVersion.exe"
+  if (-not (Test-Path $setupExe)) {
+    throw "Installer EXE was not produced (expected: $setupExe). Check packaging\windows\Output\iscc.log"
+  }
+
+  Write-Host "Built: $setupExe" -ForegroundColor Green
+}
+
+Write-Host "Done." -ForegroundColor Green
