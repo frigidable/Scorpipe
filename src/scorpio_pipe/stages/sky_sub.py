@@ -1330,7 +1330,7 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                 # Reference science header: use the first raw object input (same config).
                 sci_ref_path = Path(str(raw_inputs[0]))
                 try:
-                    from astropy.io import fits  # type: ignore
+                    # fits is imported at module scope
                     with fits.open(sci_ref_path, memmap=False) as hdul:  # type: ignore[attr-defined]
                         sci_hdr = dict(hdul[0].header)
                         try:

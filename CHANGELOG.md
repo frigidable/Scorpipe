@@ -1,3 +1,8 @@
+## [6.0.14] - 2026-01-17
+
+### Fixed
+- `sky_sub`: removed a local `fits` import that shadowed the module-level `astropy.io.fits` and could raise `UnboundLocalError` during preview writing (smoke chain regression).
+
 ## [6.0.13] - 2026-01-16
 
 ### Added
