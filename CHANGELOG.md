@@ -1,3 +1,16 @@
+## [6.0.16] - 2026-01-17
+
+### Fixed
+- `sky_sub`: removed a local `make_flag` import that shadowed the module-level symbol and could raise `UnboundLocalError` in some failure paths.
+- `extract1d`: ensured upstream degradation markers (`QADEGRD`, `SKYOK`, `SKYMD`, `PROV*`) propagate into `spec1d.fits` primary header (regression in P0-L test).
+- `sky_sub` geometry config: treat numeric 0/0.0 as valid values (e.g. `thresh_sigma: 0.0`) instead of falling back to defaults.
+- Tests: `P0-J` pass-through assertion now compares against the float32-rounded values actually written to the input FITS.
+
+## [6.0.15] - 2026-01-17
+
+### Fixed
+- `stack2d`: fixed `NameError: _get_ext` by using the local MEF helper `_get_mask_data()` (with a safe zero-mask fallback for legacy/synthetic inputs).
+
 ## [6.0.14] - 2026-01-17
 
 ### Fixed

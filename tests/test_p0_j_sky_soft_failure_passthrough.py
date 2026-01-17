@@ -87,8 +87,11 @@ def test_p0_j_sky_soft_mode_emits_passthrough_and_does_not_fail_stage():
             var = hdul["VAR"].data.astype(float)
             mask = hdul["MASK"].data
 
-        # pass-through: SCI unchanged (within float32 write)
-        assert np.allclose(sci, raw.astype(float), rtol=0.0, atol=1e-6)
+        # pass-through: SCI unchanged.
+        # Note: the helper writes the input frame as float32, so compare against the
+        # float32-rounded values to avoid platform-specific float64 rounding noise.
+        raw_written = raw.astype(np.float32).astype(float)
+        assert np.allclose(sci, raw_written, rtol=0.0, atol=1e-6)
         assert np.all(np.isfinite(var))
 
         # Soft-degrade markers

@@ -1323,7 +1323,6 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                 # - must-match mismatch: reject this sky frame + WARN (SKY_TEMPLATE_INCOMPATIBLE)
                 # - QC-only mismatch (rot/slitpos/readout): WARN but still use
                 from scorpio_pipe.calib_compat import compare_compat_headers
-                from scorpio_pipe.qc.flags import make_flag
 
                 sky_inputs_all = [_resolve_best(_resolve_input(p), kind="sky") for p in sky_frames]
 
@@ -1417,6 +1416,9 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
             hdr = None
             mask = None
             geom = None
+            # Keep an immutable copy for P0-J pass-through products.
+            sci_passthrough = None
+            var_passthrough = None
             try:
                 sci, hdr = _read_image(p)
                 _fail_if_rectified(hdr, path=p)
@@ -1471,8 +1473,34 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                     require_gain=require_gain,
                 )
 
+                # IMPORTANT (P0-J): downstream geometry/fit helpers may modify arrays in-place.
+                # Preserve the original (unit-correct) SCI/VAR to write a true pass-through
+                # product in soft-failure mode.
+                sci_passthrough = np.asarray(sci, dtype=np.float32).copy()
+                var_passthrough = None if var is None else np.asarray(var, dtype=np.float32).copy()
+
                 # geometry
                 roi = roi_from_cfg(cfg)
+
+                # Note: 0/0.0 are meaningful for several geometry parameters
+                # (e.g. thresh_sigma=0 to force very aggressive object masking).
+                # Do NOT use the "or default" idiom here, as it treats 0 as missing.
+                def _cfg_float(d: dict, key: str, default: float) -> float:
+                    v = d.get(key, default)
+                    if v is None:
+                        return float(default)
+                    if isinstance(v, str) and not v.strip():
+                        return float(default)
+                    return float(v)
+
+                def _cfg_int(d: dict, key: str, default: int) -> int:
+                    v = d.get(key, default)
+                    if v is None:
+                        return int(default)
+                    if isinstance(v, str) and not v.strip():
+                        return int(default)
+                    return int(v)
+
                 geom = compute_sky_geometry(
                     sci,
                     var,
@@ -1480,14 +1508,14 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                     roi=roi,
                     roi_policy=str(geom_cfg.get("roi_policy") or "prefer_user"),
                     fatal_bits=FATAL_BITS,
-                    edge_margin_px=int(geom_cfg.get("edge_margin_px", 16) or 16),
-                    profile_x_percentile=float(geom_cfg.get("profile_x_percentile", 50.0) or 50.0),
-                    thresh_sigma=float(geom_cfg.get("thresh_sigma", 3.0) or 3.0),
-                    dilation_px=int(geom_cfg.get("dilation_px", 3) or 3),
-                    min_obj_width_px=int(geom_cfg.get("min_obj_width_px", 6) or 6),
-                    min_sky_width_px=int(geom_cfg.get("min_sky_width_px", 12) or 12),
-                    contamination_sigma=float(geom_cfg.get("contamination_sigma", 3.0) or 3.0),
-                    contamination_frac_warn=float(geom_cfg.get("contamination_frac_warn", 0.15) or 0.15),
+                    edge_margin_px=_cfg_int(geom_cfg, "edge_margin_px", 16),
+                    profile_x_percentile=_cfg_float(geom_cfg, "profile_x_percentile", 50.0),
+                    thresh_sigma=_cfg_float(geom_cfg, "thresh_sigma", 3.0),
+                    dilation_px=_cfg_int(geom_cfg, "dilation_px", 3),
+                    min_obj_width_px=_cfg_int(geom_cfg, "min_obj_width_px", 6),
+                    min_sky_width_px=_cfg_int(geom_cfg, "min_sky_width_px", 12),
+                    contamination_sigma=_cfg_float(geom_cfg, "contamination_sigma", 3.0),
+                    contamination_frac_warn=_cfg_float(geom_cfg, "contamination_frac_warn", 0.15),
                 )
                 # propagate geom flags
                 # P0-J: in soft mode, downgrade geometry ERRORs that indicate missing/poor sky to WARN
@@ -2022,8 +2050,14 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                     and mask is not None
                 ):
                     try:
-                        sci0 = np.asarray(sci, dtype=np.float32)
-                        var0 = np.asarray(var, dtype=np.float32)
+                        sci0 = np.asarray(
+                            sci_passthrough if sci_passthrough is not None else sci,
+                            dtype=np.float32,
+                        )
+                        var0 = np.asarray(
+                            var_passthrough if var_passthrough is not None else var,
+                            dtype=np.float32,
+                        )
                         m0 = np.asarray(mask, dtype=np.uint16)
                         m0 = np.bitwise_or(m0, np.uint16(SKYMODEL_FAIL))
 

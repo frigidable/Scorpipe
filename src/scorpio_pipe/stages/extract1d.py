@@ -1317,6 +1317,16 @@ def _run_extract1d_impl(
     for k in ("CRVAL1", "CDELT1", "CD1_1", "CRPIX1", "CTYPE1", "CUNIT1", "BUNIT"):
         if k in hdr0:
             ohdr[k] = hdr0[k]
+
+    # Upstream degradation propagation (P0-L): keep these in the 1D primary header.
+    for k in ("QADEGRD", "SKYOK", "SKYMD"):
+        if k in hdr0:
+            ohdr[k] = hdr0[k]
+
+    # Carry any upstream provenance links if present.
+    for k in list(hdr0.keys()):
+        if str(k).startswith("PROV"):
+            ohdr[k] = hdr0[k]
     ohdr["ETAAPPL"] = (bool(eta_appl), "eta(lambda) applied to VAR in upstream stacking")
     if "ETAPATH" in hdr0:
         ohdr["ETAPATH"] = hdr0["ETAPATH"]
