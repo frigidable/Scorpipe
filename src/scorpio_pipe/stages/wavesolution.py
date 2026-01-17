@@ -1032,6 +1032,202 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
 
     outdir = _ensure_dir(wavesol_dir(cfg))
 
+    # --- P0-H: ARC compatibility contract (must-match vs QC-only) ---
+    # --- P0-K: re-apply global exclude as safety net (stale dataset_manifest) ---
+    # --- P0-M: resolve lamp_type + line-list provenance ---
+    # --- P0-N: validate per setup (do not assume the "first object") ---
+
+    pre_flags: list[dict[str, Any]] = []
+    compat_flags: list[dict[str, Any]] = []
+    compat_meta: dict[str, Any] = {}
+    lamp_meta: dict[str, Any] = {}
+
+    from scorpio_pipe.calib_compat import CalibrationMismatchError
+
+    # Input lists (may be empty in special workflows)
+    obj_list = [Path(x) for x in (cfg.get("frames", {}) or {}).get("obj", [])]  # type: ignore[union-attr]
+    arc_list = [Path(x) for x in (cfg.get("frames", {}) or {}).get("neon", [])]  # type: ignore[union-attr]
+
+    # Safety-net exclude application (absolute policy).
+    try:
+        from scorpio_pipe.exclude_policy import filter_paths_by_exclude, resolve_exclude_set
+        from scorpio_pipe.qc.flags import make_flag
+
+        ex = resolve_exclude_set(cfg, data_dir=cfg.get("data_dir"))
+        if ex.excluded_abs:
+            obj_list, obj_dropped = filter_paths_by_exclude(obj_list, ex.excluded_abs)
+            arc_list, arc_dropped = filter_paths_by_exclude(arc_list, ex.excluded_abs)
+            if obj_dropped or arc_dropped:
+                pre_flags.append(
+                    make_flag(
+                        "MANIFEST_EXCLUDE_APPLIED",
+                        "WARN",
+                        "Applied global exclude while building wavelength solution inputs.",
+                        dropped_obj=[str(p) for p in obj_dropped],
+                        dropped_arc=[str(p) for p in arc_dropped],
+                    )
+                )
+    except Exception:
+        # Exclude should never break the stage.
+        pass
+
+    # Resolve lamp type + line list (always recorded).
+    try:
+        from scorpio_pipe.lamp_contract import (
+            LAMP_UNKNOWN,
+            resolve_lamp_type,
+            resolve_linelist_csv_path,
+        )
+        from scorpio_pipe.qc.flags import make_flag
+
+        arc_hint = str(arc_list[0]) if arc_list else ""
+        setup = (cfg.get("frames", {}) or {}).get("__setup__", {}) or {}
+        instr_hint = str(setup.get("instrument") or "")
+
+        lamp_res = resolve_lamp_type(cfg, arc_path=arc_hint, instrument_hint=instr_hint)
+        linelist_path = resolve_linelist_csv_path(cfg, lamp_res.lamp_type)
+
+        # Strict mode: require explicit override when lamp is unknown.
+        strict_lamp = bool((wcfg.get("strict_lamp") if isinstance(wcfg, dict) else False) or cfg.get("strict"))
+        if lamp_res.lamp_type == LAMP_UNKNOWN:
+            pre_flags.append(
+                make_flag(
+                    "LAMP_UNKNOWN",
+                    "WARN",
+                    "Could not determine arc lamp type; line list choice may be wrong.",
+                    "Set wavesol.lamp_type in config to override.",
+                )
+            )
+            if strict_lamp:
+                raise RuntimeError(
+                    "Unknown lamp type for wavelength calibration. Set wavesol.lamp_type in config.yaml "
+                    "(e.g. 'HeNeAr' or 'Ne') or disable strict_lamp."
+                )
+
+        if lamp_res.source == "default":
+            pre_flags.append(
+                make_flag(
+                    "LAMP_DEFAULT_USED",
+                    "INFO",
+                    f"Using default lamp_type={lamp_res.lamp_type} for this instrument/setup.",
+                )
+            )
+
+        lamp_meta = {
+            "lamp_type": lamp_res.lamp_type,
+            "lamp_source": lamp_res.source,
+            "lamp_raw": lamp_res.lamp_raw,
+            "linelist_csv": str(linelist_path),
+            "linelist_reason": (
+                "config" if str((wcfg or {}).get("linelist_csv") or "").strip() else "lamp_type_default"
+            ),
+        }
+    except Exception as e:
+        # Lamp metadata must never stop the fit; keep a warning.
+        try:
+            from scorpio_pipe.qc.flags import make_flag
+
+            pre_flags.append(
+                make_flag(
+                    "LAMP_CONTRACT_FAILED",
+                    "WARN",
+                    f"Lamp/linelist resolution failed: {e}",
+                )
+            )
+        except Exception:
+            pass
+
+    # Validate setup consistency across science frames (P0-N).
+    try:
+        if obj_list and arc_list:
+            from scorpio_pipe.instruments import parse_frame_meta
+
+            setup_groups: dict[tuple[Any, ...], list[str]] = {}
+            for sp in obj_list:
+                try:
+                    with fits.open(sp, memmap=False) as hdul:  # type: ignore[attr-defined]
+                        hdr = dict(hdul[0].header)
+                        try:
+                            if "SCI" in hdul:
+                                hdr = dict(hdul["SCI"].header)
+                        except Exception:
+                            pass
+                    meta = parse_frame_meta(hdr, strict=False)
+                    key = (
+                        meta.instrument,
+                        meta.mode,
+                        meta.disperser,
+                        round(float(meta.slit_width_arcsec), 3),
+                        int(meta.binning_x),
+                        int(meta.binning_y),
+                        int(meta.naxis1),
+                        int(meta.naxis2),
+                    )
+                    setup_groups.setdefault(key, []).append(str(sp))
+                except Exception:
+                    # If we cannot parse one header, do not block the stage here.
+                    continue
+
+            if len(setup_groups) > 1:
+                # Policy B: fail fast with a clear explanation.
+                parts = []
+                for k, paths in setup_groups.items():
+                    parts.append({"setup_key": list(k), "n": len(paths), "examples": paths[:3]})
+                raise RuntimeError(
+                    "Multiple distinct science setups detected in this wavesolution run. "
+                    "Build wavelength solutions per-setup (separate work dirs/configs), or run in a mode that "
+                    "produces per-setup solutions. Details: "
+                    + json.dumps(parts, ensure_ascii=False)
+                )
+
+            # ARC compatibility: check against the (single) setup representative.
+            from scorpio_pipe.calib_compat import ensure_compatible_calib
+            from scorpio_pipe.qc.flags import make_flag
+
+            sci_path = Path(next(iter(next(iter(setup_groups.values()))))) if setup_groups else obj_list[0]
+            with fits.open(sci_path, memmap=False) as hdul:  # type: ignore[attr-defined]
+                sci_hdr = dict(hdul[0].header)
+                try:
+                    if "SCI" in hdul:
+                        sci_hdr = dict(hdul["SCI"].header)
+                except Exception:
+                    pass
+
+            arc_checks = []
+            for ap in arc_list:
+                arc_checks.append(
+                    ensure_compatible_calib(
+                        sci_hdr,
+                        ap,
+                        kind="arc",
+                        strict=True,
+                        allow_readout_diff=True,
+                        stage_flags=compat_flags,
+                    )
+                )
+            compat_meta = {
+                "ref_science": str(sci_path),
+                "n_science": int(len(obj_list)),
+                "n_arcs": int(len(arc_list)),
+                "arc_checks": arc_checks,
+            }
+    except CalibrationMismatchError:
+        # must-match mismatch is a hard ERROR
+        raise
+    except Exception as e:
+        # Do not fail the whole stage just because we could not read headers.
+        try:
+            from scorpio_pipe.qc.flags import make_flag
+
+            compat_flags.append(
+                make_flag(
+                    "ARC_COMPAT_CHECK_FAILED",
+                    "WARN",
+                    f"Failed to verify ARC compatibility: {e}",
+                )
+            )
+        except Exception:
+            pass
     superneon_fits = outdir / "superneon.fits"
 
     # Allow overriding the hand pairs file (useful for alternative pair-sets,
@@ -1803,6 +1999,20 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
         thr, _thr_meta = compute_thresholds(cfg)
         flags: list[dict[str, Any]] = []
 
+        # P0-K/P0-M: carry over pre-flags (manifest exclude applied, lamp contract notes)
+        try:
+            if isinstance(pre_flags, list) and pre_flags:
+                flags.extend(pre_flags)
+        except Exception:
+            pass
+
+        # P0-H: prepend ARC compatibility warnings (CALIB_* / ARC_COMPAT_CHECK_FAILED)
+        try:
+            if isinstance(compat_flags, list) and compat_flags:
+                flags.extend(compat_flags)
+        except Exception:
+            pass
+
         # 1D fit quality
         if np.isfinite(rms1d):
             if float(rms1d) >= float(thr.wavesol_1d_rms_bad):
@@ -1904,6 +2114,8 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
             "stage": "wavesolution",
             "ok": bool(sev not in {"ERROR"}),
             "frame_signature": frame_sig.to_dict(),
+            "lamp": lamp_meta or None,
+            "compat": {"arc": compat_meta or None, "excluded_summary": excluded_summary or None},
             "lambda_map": lam_diag.as_dict(),
             "products": {
                 "lambda_map_fits": str(lambda_map_fits),

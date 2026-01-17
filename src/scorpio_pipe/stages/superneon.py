@@ -465,7 +465,8 @@ def build_superneon(cfg: dict[str, Any]) -> SuperNeonResult:
 
     def _read_one(p: Path) -> tuple[Path, np.ndarray, fits.Header, FrameSignature]:
         img, hdr = _load_fits(p)
-        sig = FrameSignature.from_header(hdr, shape=img.shape)
+        # FrameSignature.from_header() uses fallback_shape for missing NAXIS cards.
+        sig = FrameSignature.from_header(hdr, fallback_shape=img.shape)
         return p, img, hdr, sig
 
     items: list[tuple[Path, np.ndarray, fits.Header, FrameSignature]] = []

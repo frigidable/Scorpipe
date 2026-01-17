@@ -60,7 +60,17 @@ class ProjectManifestDialog(QtWidgets.QDialog):
         base_dir = Path(str(cfg.get("config_dir", "."))).expanduser().resolve()
         if not work_dir.is_absolute():
             work_dir = (base_dir / work_dir).resolve()
-        self._manifest_path = resolve_project_manifest_path(work_dir)
+        # Night-level manifest lives in data_dir by default (best for collaboration).
+        data_dir = Path(str(cfg.get("data_dir", ""))).expanduser() if cfg.get("data_dir") else None
+        if data_dir is not None:
+            try:
+                data_dir = data_dir.resolve()
+            except Exception:
+                data_dir = None
+        if data_dir is not None:
+            self._manifest_path = (data_dir / "project_manifest.yaml")
+        else:
+            self._manifest_path = resolve_project_manifest_path(work_dir)
 
         self._pm = read_project_manifest(self._manifest_path)
         self._yaml_dirty = False
@@ -81,12 +91,57 @@ class ProjectManifestDialog(QtWidgets.QDialog):
         splitter.setChildrenCollapsible(False)
         root.addWidget(splitter, 1)
 
-        # Left: inspected frames
+        # Left: inspected frames + night-level controls (exclude, suggested SKY)
+        left = QtWidgets.QWidget()
+        splitter.addWidget(left)
+        l = QtWidgets.QVBoxLayout(left)
+        l.setContentsMargins(0, 0, 0, 0)
+        l.setSpacing(8)
+
         self.browser = FrameBrowser()
         self.browser.set_frames_df(self._inspect_df)
         # Dialog expects multi-select.
         self.browser.table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-        splitter.addWidget(self.browser)
+        l.addWidget(self.browser, 1)
+
+        # Global exclude controls
+        box_ex = QtWidgets.QGroupBox("Exclude (night-level)")
+        bx = QtWidgets.QVBoxLayout(box_ex)
+        bx.setContentsMargins(10, 10, 10, 10)
+        bx.setSpacing(6)
+        bar_ex = QtWidgets.QHBoxLayout()
+        self.btn_exclude = QtWidgets.QPushButton("Exclude selected")
+        self.btn_restore = QtWidgets.QPushButton("Restore")
+        bar_ex.addWidget(self.btn_exclude)
+        bar_ex.addWidget(self.btn_restore)
+        bar_ex.addStretch(1)
+        bx.addLayout(bar_ex)
+        self.list_exclude = QtWidgets.QListWidget()
+        self.list_exclude.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.list_exclude.setAlternatingRowColors(True)
+        bx.addWidget(self.list_exclude, 1)
+        l.addWidget(box_ex, 0)
+
+        # Suggested SKY candidates (conservative; never auto-applied)
+        box_sky = QtWidgets.QGroupBox("Suggested SKY candidates (review & accept)")
+        bs = QtWidgets.QVBoxLayout(box_sky)
+        bs.setContentsMargins(10, 10, 10, 10)
+        bs.setSpacing(6)
+        self.lbl_sky_hint = QtWidgets.QLabel(
+            "These are conservative suggestions only. Nothing is applied automatically."
+        )
+        self.lbl_sky_hint.setStyleSheet("color: #A0A0A0;")
+        bs.addWidget(self.lbl_sky_hint)
+        self.list_suggest_sky = QtWidgets.QListWidget()
+        self.list_suggest_sky.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.list_suggest_sky.setAlternatingRowColors(True)
+        bs.addWidget(self.list_suggest_sky, 1)
+        bar_sky = QtWidgets.QHBoxLayout()
+        self.btn_accept_sky = QtWidgets.QPushButton("Accept → SKY_FRAMES")
+        bar_sky.addWidget(self.btn_accept_sky)
+        bar_sky.addStretch(1)
+        bs.addLayout(bar_sky)
+        l.addWidget(box_sky, 0)
 
         # Right: roles + YAML
         right = QtWidgets.QWidget()
@@ -142,6 +197,9 @@ class ProjectManifestDialog(QtWidgets.QDialog):
         self.btn_autofill.clicked.connect(self._autofill)
         self.btn_open_folder.clicked.connect(self._open_folder)
         self.btn_reload_yaml.clicked.connect(self._reload_yaml_from_disk)
+        self.btn_exclude.clicked.connect(self._exclude_selected)
+        self.btn_restore.clicked.connect(self._restore_selected)
+        self.btn_accept_sky.clicked.connect(self._accept_suggested_sky)
 
         self._load_into_widgets()
 
@@ -198,6 +256,17 @@ class ProjectManifestDialog(QtWidgets.QDialog):
             for p in items:
                 lst.addItem(str(p))
 
+        # Exclude list
+        self.list_exclude.clear()
+        for p in getattr(pm, "exclude_files", []) or []:
+            self.list_exclude.addItem(str(p))
+        for pat in getattr(pm, "exclude_globs", []) or []:
+            # Keep patterns in the list as-is for transparency.
+            self.list_exclude.addItem(str(pat))
+
+        # Suggested SKY list (computed from inspection table; never auto-applied)
+        self._refresh_suggested_sky()
+
         # YAML view
         try:
             if self._manifest_path.exists():
@@ -217,6 +286,7 @@ class ProjectManifestDialog(QtWidgets.QDialog):
             return [lst.item(i).text().strip() for i in range(lst.count()) if lst.item(i).text().strip()]
 
         pm = ProjectManifestModel(
+            exclude_frames=_list_items(self.list_exclude),
             object_frames=_list_items(self._role_lists["OBJECT_FRAMES"]),
             sky_frames=_list_items(self._role_lists["SKY_FRAMES"]),
             sunsky_frames=_list_items(self._role_lists["SUNSKY_FRAMES"]),
@@ -255,6 +325,98 @@ class ProjectManifestDialog(QtWidgets.QDialog):
         if lst is None:
             return
         lst.clear()
+
+    # ---------------------------- exclude + suggested SKY ----------------------------
+
+    def _exclude_selected(self) -> None:
+        """Add currently selected frames in the browser to the global exclude list."""
+        sel = self.browser.selected_frames()
+        if not sel:
+            return
+        existing = {self.list_exclude.item(i).text().strip() for i in range(self.list_exclude.count())}
+        for fr in sel:
+            s = str(fr.path)
+            if s not in existing:
+                self.list_exclude.addItem(s)
+                existing.add(s)
+
+        # Also remove excluded frames from all role lists for clarity.
+        for _, lst in self._role_lists.items():
+            for i in range(lst.count() - 1, -1, -1):
+                if lst.item(i).text().strip() in existing:
+                    lst.takeItem(i)
+
+        self._refresh_suggested_sky()
+        self._yaml_dirty = True
+
+    def _restore_selected(self) -> None:
+        for it in list(self.list_exclude.selectedItems()):
+            row = self.list_exclude.row(it)
+            self.list_exclude.takeItem(row)
+        self._refresh_suggested_sky()
+        self._yaml_dirty = True
+
+    def _accept_suggested_sky(self) -> None:
+        lst_sky = self._role_lists.get("SKY_FRAMES")
+        if lst_sky is None:
+            return
+        existing = {lst_sky.item(i).text().strip() for i in range(lst_sky.count())}
+        for it in list(self.list_suggest_sky.selectedItems()):
+            s = it.text().strip()
+            if s and s not in existing:
+                lst_sky.addItem(s)
+                existing.add(s)
+        self._refresh_suggested_sky()
+        self._yaml_dirty = True
+
+    def _refresh_suggested_sky(self) -> None:
+        self.list_suggest_sky.clear()
+        try:
+            sugg = self._suggest_sky_candidates()
+        except Exception:
+            sugg = []
+        for p in sugg:
+            self.list_suggest_sky.addItem(str(p))
+
+    def _suggest_sky_candidates(self) -> list[str]:
+        """Conservative SKY candidates from inspection dataframe.
+
+        Policy: suggest only when we have an explicit hint in headers/logs.
+        """
+        df = self._inspect_df
+        if df is None or df.empty:
+            return []
+        if "path" not in df.columns:
+            return []
+
+        # Already-chosen SKY and excluded frames
+        chosen = set(self._role_lists["SKY_FRAMES"].item(i).text().strip() for i in range(self._role_lists["SKY_FRAMES"].count()))
+        excluded = set(self.list_exclude.item(i).text().strip() for i in range(self.list_exclude.count()))
+
+        import re
+
+        def _is_sky_row(row: Any) -> bool:
+            kind = str(row.get("kind", "") or "").strip().lower()
+            if kind == "sky":
+                return True
+            obj = str(row.get("object", "") or "").strip().lower()
+            if not obj:
+                return False
+            return bool(re.search(r"\bsky\b", obj)) or "фон" in obj or "blank" in obj
+
+        out: list[str] = []
+        for _, row in df.iterrows():
+            if not _is_sky_row(row):
+                continue
+            p = str(row.get("path", "") or "").strip()
+            if not p:
+                continue
+            if p in chosen or p in excluded:
+                continue
+            out.append(p)
+        # stable
+        out = sorted(set(out))
+        return out
 
     # ---------------------------- actions ----------------------------
 

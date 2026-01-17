@@ -13,15 +13,21 @@ edit once and keep reproducible.
 
 File
 ----
-By default we look for ``project_manifest.yaml`` in the run/work directory.
+By default we look for ``project_manifest.yaml`` in the night folder
+(``data_dir``) first, then in the run/work directory.
 
 Minimal schema (human-friendly)
 ------------------------------
+
+exclude:
+  files: ["raw/bad1.fits"]
+  globs: ["raw/*_bad*.fits"]
 
 roles:
   OBJECT_FRAMES:
     files: ["raw/obj1.fits", ...]
     globs: ["raw/*NGC*.fits"]
+    exclude: ["raw/obj1_test.fits"]
   SKY_FRAMES:
     files: []
     globs: []
@@ -34,6 +40,7 @@ roles:
   BIAS:
     files: []
     globs: []
+    exclude: []
 
 Optional grouping placeholders are allowed but not interpreted yet:
 
@@ -46,6 +53,8 @@ Notes
 -----
 - Paths may be absolute or relative. Relative paths are resolved against
   ``data_dir`` (preferred), then the manifest directory.
+- ``exclude`` is *global* (removes frames from all roles / all products).
+- Role-level ``exclude`` subtracts from a specific role only.
 - The manifest only overwrites roles that are explicitly present.
 """
 
@@ -82,7 +91,10 @@ class ProjectManifestModel(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    schema_id: str = Field(default="scorpio-pipe.project-manifest.v1", alias="schema")
+    schema_id: str = Field(default="scorpio-pipe.project-manifest.v1.1", alias="schema")
+    # Global exclude: remove frames from *all* roles and products.
+    # On disk we accept either a list[str] or a mapping {files: [...], globs: [...]}
+    exclude: Any = Field(default_factory=lambda: {"files": [], "globs": []})
     roles: Dict[str, Any] = Field(default_factory=dict)
     groups: Dict[str, Any] = Field(default_factory=dict)
     active_group: str | None = None
@@ -102,6 +114,19 @@ class ProjectManifestModel(BaseModel):
             "flats": "FLATS",
             "bias": "BIAS",
         }
+
+        # Legacy/GUI drafts also stored a flat list of excluded frames.
+        # Accept both "exclude" and "exclude_frames".
+        if "exclude_frames" in data and "exclude" not in data:
+            out = dict(data)
+            v = out.pop("exclude_frames")
+            if isinstance(v, str):
+                out["exclude"] = {"files": [v], "globs": []}
+            elif isinstance(v, list):
+                out["exclude"] = {"files": [str(x) for x in v], "globs": []}
+            else:
+                out["exclude"] = {"files": [str(v)], "globs": []}
+            data = out
 
         if not any(k in data for k in legacy_map):
             return data
@@ -143,6 +168,49 @@ class ProjectManifestModel(BaseModel):
             return [str(x).strip() for x in files if str(x).strip()]
         return []
 
+    def _parse_exclude(self) -> tuple[list[str], list[str]]:
+        v = self.exclude
+        if v is None:
+            return [], []
+        if isinstance(v, list):
+            return [str(x).strip() for x in v if str(x).strip()], []
+        if isinstance(v, dict):
+            files = v.get("files", [])
+            globs = v.get("globs", [])
+            if isinstance(files, str):
+                files = [files]
+            if isinstance(globs, str):
+                globs = [globs]
+            if not isinstance(files, list) or not isinstance(globs, list):
+                return [], []
+            return (
+                [str(x).strip() for x in files if str(x).strip()],
+                [str(x).strip() for x in globs if str(x).strip()],
+            )
+        return [], []
+
+    @property
+    def exclude_files(self) -> list[str]:
+        return self._parse_exclude()[0]
+
+    @property
+    def exclude_globs(self) -> list[str]:
+        return self._parse_exclude()[1]
+
+    @property
+    def excluded_frames(self) -> list[str]:
+        """Best-effort flat list of globally excluded frame path strings."""
+        # Keep this a stable list of strings; path resolution happens later.
+        out = [*self.exclude_files, *self.exclude_globs]
+        # De-duplicate preserving order
+        seen: set[str] = set()
+        res: list[str] = []
+        for s in out:
+            if s not in seen:
+                seen.add(s)
+                res.append(s)
+        return res
+
     @property
     def object_frames(self) -> list[str]:
         return self._files_for_role("OBJECT_FRAMES")
@@ -174,26 +242,51 @@ class ProjectManifestModel(BaseModel):
         for role in CANONICAL_ROLES:
             v = self.roles.get(role)
             if v is None:
-                roles_out[role] = {"files": [], "globs": []}
+                roles_out[role] = {"files": [], "globs": [], "exclude": []}
                 continue
             if isinstance(v, list):
-                roles_out[role] = {"files": [str(x) for x in v], "globs": []}
+                roles_out[role] = {"files": [str(x) for x in v], "globs": [], "exclude": []}
             elif isinstance(v, dict):
                 files = v.get("files", [])
                 globs = v.get("globs", [])
+                excl = v.get("exclude", [])
                 if isinstance(files, str):
                     files = [files]
                 if isinstance(globs, str):
                     globs = [globs]
+                if isinstance(excl, str):
+                    excl = [excl]
                 roles_out[role] = {
                     "files": [str(x) for x in (files or [])],
                     "globs": [str(x) for x in (globs or [])],
+                    "exclude": [str(x) for x in (excl or [])] if isinstance(excl, list) else [],
                 }
             else:
-                roles_out[role] = {"files": [str(v)], "globs": []}
+                roles_out[role] = {"files": [str(v)], "globs": [], "exclude": []}
+
+        # Canonical exclude mapping
+        excl = self.exclude
+        if isinstance(excl, list):
+            excl_out = {"files": [str(x) for x in excl], "globs": []}
+        elif isinstance(excl, dict):
+            files = excl.get("files", [])
+            globs = excl.get("globs", [])
+            if isinstance(files, str):
+                files = [files]
+            if isinstance(globs, str):
+                globs = [globs]
+            excl_out = {
+                "files": [str(x) for x in (files or [])],
+                "globs": [str(x) for x in (globs or [])],
+            }
+        elif isinstance(excl, str):
+            excl_out = {"files": [excl], "globs": []}
+        else:
+            excl_out = {"files": [], "globs": []}
 
         return {
             "schema": self.schema_id,
+            "exclude": excl_out,
             "roles": roles_out,
             "groups": self.groups or {},
             "active_group": self.active_group,
@@ -263,7 +356,8 @@ def default_project_manifest_dict() -> dict[str, Any]:
     # keep optional sunsky for SCORPIO flats variants
     roles["SUNSKY_FRAMES"] = {"files": [], "globs": []}
     return {
-        "schema": "scorpio-pipe.project-manifest.v1",
+        "schema": "scorpio-pipe.project-manifest.v1.1",
+        "exclude": {"files": [], "globs": []},
         "roles": roles,
         "groups": {},
         "active_group": None,
@@ -281,14 +375,24 @@ def write_default_project_manifest(path: str | Path) -> Path:
     return p
 
 
-def find_project_manifest(*, work_dir: Path | None, config_dir: Path | None) -> Path | None:
+def find_project_manifest(
+    *,
+    data_dir: Path | None,
+    work_dir: Path | None,
+    config_dir: Path | None,
+) -> Path | None:
     """Find manifest by convention.
 
     Priority:
-      1) work_dir/project_manifest.yaml
-      2) config_dir/project_manifest.yaml
+      1) data_dir/project_manifest.yaml  (night-level; best for collaboration)
+      2) work_dir/project_manifest.yaml
+      3) config_dir/project_manifest.yaml
     """
 
+    if data_dir is not None:
+        cand = (Path(data_dir) / DEFAULT_MANIFEST_NAME)
+        if cand.is_file():
+            return cand
     if work_dir is not None:
         cand = (Path(work_dir) / DEFAULT_MANIFEST_NAME)
         if cand.is_file():
@@ -330,26 +434,51 @@ def _expand_globs(patterns: list[str], *, data_dir: Path, manifest_dir: Path) ->
     return out
 
 
-def _parse_role_entry(v: Any) -> tuple[list[str], list[str]]:
-    """Return (files, globs) from a role entry.
+def _split_glob_like(items: list[str]) -> tuple[list[str], list[str]]:
+    """Split patterns into (files, globs) conservatively.
+
+    Heuristic: treat strings containing glob metacharacters (* ? [) as globs.
+    """
+    files: list[str] = []
+    globs: list[str] = []
+    for s in items:
+        ss = str(s or "").strip()
+        if not ss:
+            continue
+        if any(ch in ss for ch in ("*", "?", "[")):
+            globs.append(ss)
+        else:
+            files.append(ss)
+    return files, globs
+
+
+def _parse_role_entry(v: Any) -> tuple[list[str], list[str], list[str]]:
+    """Return (files, globs, exclude) from a role entry.
 
     Accepts:
       - list[str]  -> treated as files
       - {files: [...], globs: [...]}
     """
     if v is None:
-        return [], []
+        return [], [], []
     if isinstance(v, list):
-        return [str(x) for x in v], []
+        return [str(x) for x in v], [], []
     if isinstance(v, dict):
         files = v.get("files", [])
         globs = v.get("globs", [])
+        excl = v.get("exclude", [])
         if isinstance(files, str):
             files = [files]
         if isinstance(globs, str):
             globs = [globs]
-        return [str(x) for x in (files or [])], [str(x) for x in (globs or [])]
-    return [], []
+        if isinstance(excl, str):
+            excl = [excl]
+        return (
+            [str(x) for x in (files or [])],
+            [str(x) for x in (globs or [])],
+            [str(x) for x in (excl or [])] if isinstance(excl, list) else [],
+        )
+    return [], [], []
 
 
 def load_project_manifest(path: str | Path) -> dict[str, Any]:
@@ -379,11 +508,14 @@ def apply_project_manifest_to_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
     # best-effort paths
     work_dir = Path(str(cfg.get("work_dir", ""))).expanduser() if cfg.get("work_dir") else None
     config_dir = Path(str(cfg.get("config_dir", ""))).expanduser() if cfg.get("config_dir") else None
+    data_dir = Path(str(cfg.get("data_dir", ""))).expanduser() if cfg.get("data_dir") else None
 
     if work_dir is not None and not work_dir.is_absolute() and config_dir is not None:
         work_dir = (config_dir / work_dir).resolve()
     if config_dir is not None:
         config_dir = config_dir.resolve()
+    if data_dir is not None:
+        data_dir = data_dir.resolve()
 
     manifest_path = None
     if cfg.get("project_manifest_path"):
@@ -391,12 +523,13 @@ def apply_project_manifest_to_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
         if not manifest_path.is_absolute() and work_dir is not None:
             manifest_path = (work_dir / manifest_path).resolve()
     else:
-        manifest_path = find_project_manifest(work_dir=work_dir, config_dir=config_dir)
+        manifest_path = find_project_manifest(data_dir=data_dir, work_dir=work_dir, config_dir=config_dir)
 
     meta: dict[str, Any] = {
         "has_manifest": False,
         "path": None,
         "roles_present": [],
+        "exclude": [],
         "has_sky_frames": False,
         "n_sky_frames": 0,
         "frames_source": "config",
@@ -409,6 +542,41 @@ def apply_project_manifest_to_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
     manifest_path = Path(manifest_path).resolve()
     manifest_dir = manifest_path.parent
     manifest = load_project_manifest(manifest_path)
+
+    # Global exclude (applies to all roles / all processing).
+    excl_files_s, excl_globs_s = [], []
+    excl_raw = manifest.get("exclude")
+    if isinstance(excl_raw, list):
+        excl_files_s = [str(x) for x in excl_raw]
+    elif isinstance(excl_raw, dict):
+        files = excl_raw.get("files", [])
+        globs = excl_raw.get("globs", [])
+        if isinstance(files, str):
+            files = [files]
+        if isinstance(globs, str):
+            globs = [globs]
+        if isinstance(files, list):
+            excl_files_s = [str(x) for x in files]
+        if isinstance(globs, list):
+            excl_globs_s = [str(x) for x in globs]
+
+    excluded_paths: list[Path] = []
+    try:
+        excluded_paths.extend(
+            [_resolve_one(x, data_dir=data_dir or manifest_dir, manifest_dir=manifest_dir) for x in excl_files_s]
+        )
+        excluded_paths.extend(_expand_globs(excl_globs_s, data_dir=data_dir or manifest_dir, manifest_dir=manifest_dir))
+    except Exception:
+        excluded_paths = []
+
+    # De-duplicate stable
+    excluded_abs: list[str] = []
+    seen_ex: set[str] = set()
+    for p in excluded_paths:
+        ps = str(p.resolve())
+        if ps not in seen_ex:
+            seen_ex.add(ps)
+            excluded_abs.append(ps)
 
     # choose group if requested
     active_group = manifest.get("active_group")
@@ -425,7 +593,7 @@ def apply_project_manifest_to_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
         roles = {}
 
     # data_dir resolution
-    data_dir = Path(str(cfg.get("data_dir") or (config_dir or manifest_dir))).expanduser().resolve()
+    data_dir_eff = Path(str(cfg.get("data_dir") or (config_dir or manifest_dir))).expanduser().resolve()
 
     frames = cfg.get("frames") if isinstance(cfg.get("frames"), dict) else {}
     if not isinstance(frames, dict):
@@ -436,19 +604,35 @@ def apply_project_manifest_to_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
     for role, frames_key in ROLE_TO_FRAMES_KEY.items():
         if role not in roles:
             continue
-        files_s, globs_s = _parse_role_entry(roles.get(role))
-        files = [_resolve_one(x, data_dir=data_dir, manifest_dir=manifest_dir) for x in files_s]
-        globbed = _expand_globs(globs_s, data_dir=data_dir, manifest_dir=manifest_dir)
+        files_s, globs_s, excl_s = _parse_role_entry(roles.get(role))
+        files = [_resolve_one(x, data_dir=data_dir_eff, manifest_dir=manifest_dir) for x in files_s]
+        globbed = _expand_globs(globs_s, data_dir=data_dir_eff, manifest_dir=manifest_dir)
+        # Role-level exclude (paths or glob-like patterns).
+        excl_files, excl_globs = _split_glob_like([str(x) for x in (excl_s or [])])
+        role_excl = [_resolve_one(x, data_dir=data_dir_eff, manifest_dir=manifest_dir) for x in excl_files]
+        role_excl += _expand_globs(excl_globs, data_dir=data_dir_eff, manifest_dir=manifest_dir)
+        role_excl_set = {str(p) for p in role_excl}
         # de-duplicate preserving order
         out_paths: list[str] = []
         seen: set[str] = set()
         for p in [*files, *globbed]:
             ps = str(p)
+            if ps in role_excl_set:
+                continue
             if ps not in seen:
                 seen.add(ps)
                 out_paths.append(ps)
         frames[frames_key] = out_paths
         applied_roles.append(role)
+
+    # Global exclude (applies to all roles and all products).
+    if excluded_abs:
+        ex_set = set(excluded_abs)
+        for k, v in list(frames.items()):
+            if isinstance(v, list):
+                frames[k] = [str(x) for x in v if str(x) not in ex_set]
+        # Stages/dataset builder can use this unified list.
+        cfg["exclude_frames"] = excluded_abs
 
     cfg["frames"] = frames
 
@@ -459,6 +643,7 @@ def apply_project_manifest_to_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
             "has_manifest": True,
             "path": str(manifest_path),
             "roles_present": sorted(list(roles_present(manifest))),
+            "exclude": list(excluded_abs) if excluded_abs else [],
             "has_sky_frames": bool(sky_list),
             "n_sky_frames": int(len(sky_list)) if isinstance(sky_list, list) else 0,
             "frames_source": "manifest",
@@ -472,9 +657,13 @@ def apply_project_manifest_to_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
 ProjectManifest = ProjectManifestModel
 
 __all__ = [
-    "Role",
     "ProjectManifestModel",
     "ProjectManifest",
-    "load_or_create_manifest",
-    "save_manifest",
+    "DEFAULT_MANIFEST_NAME",
+    "resolve_project_manifest_path",
+    "read_project_manifest",
+    "write_project_manifest",
+    "write_default_project_manifest",
+    "find_project_manifest",
+    "apply_project_manifest_to_cfg",
 ]

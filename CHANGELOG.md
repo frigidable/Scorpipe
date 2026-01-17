@@ -1,3 +1,126 @@
+## [6.0.13] - 2026-01-16
+
+### Added
+- P0-K: **Absolute exclude** now applies to the dataset-manifest builder: if `data_dir/project_manifest.yaml` exists, its `exclude` is applied **before** building pools/matches; excluded frames are recorded in `dataset_manifest.json` as `excluded_summary`.
+- P0-K: stages that consume `dataset_manifest.json` (e.g. flatfield) apply a final safety filter by `exclude` and emit `MANIFEST_EXCLUDE_APPLIED` (WARN) if anything is removed.
+- P0-L: downstream stages propagate sky-degradation: `stack2d` and `extract1d` carry `QADEGRD=1` when upstream sky pass-through happened and add `UPSTREAM_SKY_PASSTHROUGH` (WARN) to their `done.json`.
+- P0-L: `stack2d.reject_if_mask_bits` (default empty) allows operator-controlled rejection, e.g. `[SKYMODEL_FAIL]`.
+- P0-M: lamp contract for wavelength calibration: explicit `lamp_type` (`HeNeAr|Ne|Unknown`) with provenance (`config|header|default|none`), defaulting to **HeNeAr** for long-slit SCORPIO/SCORPIO-2; the chosen line-list is recorded in wavesolution `done.json`.
+- P0-N: wavesolution validates configuration **per setup** (setup_signature). Multiple distinct setups in one run are rejected in strict mode with a clear explanation.
+
+### Changed
+- P0-M: `OBJECT=NEON` is treated as a weak label (not sufficient evidence for `lamp_type=Ne`), preventing silent HeNeAr-vs-Ne systematics.
+
+### Fixed
+- P0-M: align lamp/linelist helper API used by `wavesolution` (`resolve_lamp_type(..., arc_path=..., instrument_hint=...)` and `resolve_linelist_csv_path`).
+- P0-L: QC report now emits a high-visibility warning alert `QC_SKY_SUB_SKIPPED` when any stage reports sky pass-through.
+
+### Tests
+- Add regression tests for lamp contract defaulting and for extract1d propagation of upstream sky pass-through.
+
+## [6.0.12] - 2026-01-16
+
+### Added
+- P0-J: `sky.failure_policy: soft|strict` (default **soft**) to control whether sky subtraction failures abort the run.
+- P0-J (soft): degradable sky-fit failures now emit `QADEGRD=1`, set the MASK bit `SKYMODEL_FAIL`, and write a clearly marked **pass-through** product (`*_skysub_raw.fits`) with QC flag `SKY_SUB_PASSTHROUGH` (WARN).
+
+### Fixed
+- P0-J: `NO_SKY_WINDOWS` and related geometry errors are downgraded to WARN in `sky.failure_policy=soft`, so extended objects / small sky windows no longer make the stage (and night run) fail.
+
+### Tests
+- Add a synthetic regression test ensuring soft-mode sky pass-through produces a WARN-level stage and correct flags/headers/mask bits.
+
+## [6.0.11] - 2026-01-16
+
+### Added
+- P0-I: project manifest search order is now **night-level first**: `data_dir/project_manifest.yaml` → `work_dir/...` → `config_dir/...`.
+- P0-I: `project_manifest.yaml` schema **v1.1** adds a **global exclude** block (`exclude: {files, globs}`) and role-level `exclude` lists.
+- P0-I GUI: Project Manifest dialog adds **Exclude selected / Restore** controls and a **Suggested SKY candidates** panel (conservative hints; requires explicit "Accept → SKY_FRAMES").
+
+### Changed
+- Excluded frames are removed from all role lists before downstream products are built (bias/flat/sky template/stack).
+
+## [6.0.10] - 2026-01-16
+
+### Added
+- P0-H: calibration compatibility contract is now applied to **ARCs** in the wavesolution stage. QC-only mismatches emit the same flags as flats: `CALIB_ROT_MISMATCH`, `CALIB_SLITPOS_MISMATCH`, `CALIB_READOUT_DIFF`.
+- P0-H: `sky_scale_raw` now filters `SKY_FRAMES` by must-match configuration (instrument/mode/disperser/slit/binning/geometry). Incompatible sky frames are rejected with `SKY_TEMPLATE_INCOMPATIBLE` (WARN) and listed in the stage metadata.
+
+## [6.0.9] - 2026-01-16
+
+### Added
+- P0-G ARC matching: arcs can now **prefer same readout but allow** gain/rate mismatch (NODE remains strict), mirroring the flat policy.
+- Dataset manifest now records transparent arc readout-selection provenance in `matches[].arc_meta`: `readout_policy`, `science_readout`, `selected_readout`, `selected_readout_match`, `n_hard_arc`, `n_same_readout_arc`, `selection_reason`.
+
+### Changed
+- Dataset builder defaults `arc_allow_readout_diff=True` for long-slit SCORPIO/SCORPIO-2 (can be overridden).
+
+### Fixed
+- Nights with science in Normal readout but arc/flat in Fast/low gain no longer silently end up “without an arc”; a deterministic fallback is used and explicitly flagged.
+
+## [6.0.8] - 2026-01-16
+
+### Fixed
+- Dataset manifest builder now actually attaches the P0-F flat readout selection provenance into `matches[].flat_meta` (previously computed but not written).
+
+## [6.0.7] - 2026-01-15
+
+### Added
+- P0-F calibration compatibility contract: **must-match** (geometry) vs **QC-only** (orientation/position) fields.
+- QC-only mismatches now emit explicit flags: `CALIB_ROT_MISMATCH`, `CALIB_SLITPOS_MISMATCH`, `CALIB_READOUT_DIFF`.
+- Flatfield stage writes canonical `done.json` (in addition to legacy `flatfield_done.json`) and carries QC flags into the report.
+- Dataset manifest now records transparent readout-selection reasoning for flats (policy + selected/science readout + rationale).
+
+### Changed
+- Flat matching now **prefers same readout** for flats when gain/rate mismatches are allowed, but falls back deterministically when none exist.
+- QC report aggregation includes `flatfield` stage flags.
+
+### Fixed
+- `ROTANGLE` and small `SLITPOS` differences no longer abort flat application; they are surfaced as QC warnings instead.
+
+## [6.0.6] - 2026-01-15
+
+### Added
+- P0-E MasterFlat (long-slit): per-science-set MasterFlat built strictly from `dataset_manifest.json` associations.
+- MasterFlat preprocessing is **readout-aware per input flat**: each flat is bias-subtracted using a MasterBias selected by the flat's own readout signature.
+- MasterFlat products are MEF FITS with `SCI`+`VAR`+`MASK` (PRIMARY=SCI for backward compatibility).
+- Flat application includes flat variance contribution when available: `Var(S/F)=Var(S)/F^2+S^2 Var(F)/F^4`.
+- Flatfield stage can run in `use_manifest` mode and writes `masterflats` mapping + per-set QC stats into `flatfield_done.json`.
+
+### Changed
+- Dataset manifest builder now records `flat_ids` (full flat set) in `matches` while keeping `flat_id` as the representative "best" flat for backward compatibility.
+
+### Fixed
+- Flatfield stage now propagates flat MASK when present.
+
+## [6.0.5] - 2026-01-14
+
+### Added
+- P0-D noise contract: compact FITS noise keywords stamped on electron-standardized products: `GAIN`, `RDNOISE`, `RN_SRC`, `NOISRC`.
+- ReadNoisePolicy with strict provenance: read-noise is resolved from override/header/config/bias-estimate/docs/fallback (never silently guessed).
+- MasterBias now estimates read-noise from bias pairs and stores it in products (`RNADU`, `RNPAIR`) and in `master_bias_index.json` (schema v2, `noise` block).
+- Sky subtraction adds an explicit sky-model variance term when residuals exceed predicted VAR (`SKYVADD`, `SKYVMOD`, `SKYMSIG`, `SKYVSRC`).
+
+### Fixed
+- Flat-field stage: bias VAR is added exactly once; invalid flat pixels are flagged as `BADPIX` and do not produce NaNs in outputs.
+
+## [6.0.3] - 2026-01-13
+
+### Added
+- P0-C2 VAR contract foundation: new `scorpio_pipe.variance_model` with CCD variance estimation + deterministic propagation helpers (add/sub/divide/scale/weighted-mean) and a robust reduced-chi^2 sanity metric.
+
+### Changed
+- MASK schema upgraded to **v2** (still `uint16`): adds bits `OUTSIDE_SLIT`, `INVALID_WAVELENGTH`, `SKYMODEL_FAIL`. Schema is written using compact <=8-char FITS keywords (`SCORPMKV`, `SCORPMB0..SCORPMB9`).
+- Boundary contract now requires declared MASK schema cards and enforces schema version match (prevents silent drift in bit meanings).
+
+## [6.0.2] - 2026-01-12
+
+### Added
+- P0-B1 Dataset Builder: generates explicit `dataset_manifest.json` with `science_sets`, calibration pools, deterministic `matches`, and `warnings` (no silent "closest enough" calibration selection).
+- P0-B2 Strict calibration matching: must-match keys (instrument/geometry/readout and for flats/arcs spectro), plus soft-match selection by |Δt| with SPERANGE/SLITPOS tie-breakers.
+- CLI: `scorpio-pipe dataset-manifest --data-dir <RAW_NIGHT>` to generate the manifest (supports `--hash`, `--no-frames`, `--no-recursive`, `--strict`).
+- Tests: unit coverage for must-match and soft-match selection via the manifest builder.
+
 ## [6.0.1] - 2026-01-12
 
 ### Added

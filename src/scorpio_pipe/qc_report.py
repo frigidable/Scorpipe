@@ -139,8 +139,10 @@ def _collect_stage_flags(work_dir: Path) -> list[dict[str, Any]]:
         "QC_STACK2D_REJECTED": "REJECTED_FRAC_HIGH",
     }
 
+    # Include flatfield (P0-F): calibration compatibility warnings (e.g.
+    # ROTANGLE/SLITPOS mismatches) must be visible in the QC report.
     # Include extract so that NO_SKY_WINDOWS and other object-level QC appears.
-    for stg in ("wavesol", "sky", "linearize", "stack", "extract"):
+    for stg in ("flatfield", "wavesol", "sky", "linearize", "stack", "extract"):
         try:
             d = _read_json_safely(stage_dir(work_dir, stg) / "done.json")
             if not d:
@@ -838,6 +840,32 @@ def build_qc_report(
     # Collect stage QC flags (minimal mandatory set is enforced by stage code;
     # we just aggregate them here for the GUI).
     stage_flags = _collect_stage_flags(work_dir)
+
+    # P0-L: high-visibility warning when sky subtraction was skipped (pass-through).
+    try:
+        sky_codes = {"SKY_SUB_PASSTHROUGH", "UPSTREAM_SKY_PASSTHROUGH"}
+        hits = [f for f in stage_flags if str(f.get("code") or "").strip() in sky_codes]
+        if hits and not any(str(a.get("code") or "") == "QC_SKY_SUB_SKIPPED" for a in alerts):
+            stems = set()
+            for h in hits:
+                for k in ("stem", "frame", "id", "path"):
+                    v = h.get(k)
+                    if isinstance(v, str) and v.strip():
+                        stems.add(v.strip())
+                        break
+            n = len(stems) if stems else len(hits)
+            alerts.insert(
+                0,
+                {
+                    "severity": "warn",
+                    "code": "QC_SKY_SUB_SKIPPED",
+                    "message": f"Sky subtraction was skipped (pass-through) for {n} exposure(s); downstream products are degraded.",
+                    "hint": "Inspect SKYMODEL_FAIL/QADEGRD. Consider stack2d.reject_if_mask_bits: [SKYMODEL_FAIL] or exclude affected frames in project_manifest.yaml.",
+                    "n": int(n),
+                },
+            )
+    except Exception:
+        pass
 
     qc = {
         "thresholds": thresholds.to_dict(),

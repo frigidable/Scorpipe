@@ -592,13 +592,96 @@ def run_stack2d(
 
     # Open all MEFs (memmap) and collect per-input metadata.
     hduls = [open_fits_smart(p, memmap="auto") for p in files]
+
+
+    # P0-L: upstream degradation propagation + optional operator-controlled rejection.
+    # By default we *do not* auto-exclude frames; we only propagate QADEGRD.
+    from scorpio_pipe.maskbits import SKYMODEL_FAIL
+
+    reject_names = st_cfg.get("reject_if_mask_bits") or []
+    if isinstance(reject_names, (str, int, float)):
+        reject_names = [reject_names]
+
+    reject_bitmask = 0
+    reject_unknown: list[str] = []
+    if reject_names:
+        import scorpio_pipe.maskbits as mb
+
+        for name in reject_names:
+            if name is None:
+                continue
+            n = str(name).strip()
+            if not n:
+                continue
+            if hasattr(mb, n):
+                reject_bitmask |= int(getattr(mb, n))
+            else:
+                reject_unknown.append(n)
+
+    inputs_meta: list[dict[str, object]] = []
+    kept_files: list[Path] = []
+    kept_hduls = []
+
+    for pth, hdul in zip(files, hduls):
+        hdr = hdul[0].header
+
+        qadegrd = int(hdr.get("QADEGRD", 0) or 0)
+        skyok = hdr.get("SKYOK", None)
+
+        # mask bit presence is a strong indicator of upstream sky-model failures
+        md0 = _get_ext(hdul, "MASK")
+        mask = hdul[md0].data
+        has_skymodel_fail = bool(np.any(mask & SKYMODEL_FAIL))
+
+        rejected = False
+        reject_reason = None
+        if reject_bitmask != 0 and bool(np.any(mask & reject_bitmask)):
+            rejected = True
+            reject_reason = {
+                "mask_bits": [str(x) for x in reject_names],
+                "bitmask": int(reject_bitmask),
+            }
+
+        inputs_meta.append(
+            {
+                "path": str(pth),
+                "qadegrd": qadegrd,
+                "skyok": skyok,
+                "has_skymodel_fail": has_skymodel_fail,
+                "rejected": rejected,
+                "reject_reason": reject_reason,
+            }
+        )
+
+        if rejected:
+            try:
+                hdul.close()
+            except Exception:
+                pass
+        else:
+            kept_files.append(pth)
+            kept_hduls.append(hdul)
+
+    files = kept_files
+    hduls = kept_hduls
+
+    if not files:
+        raise RuntimeError(
+            "All inputs were rejected by stack2d.reject_if_mask_bits; nothing left to stack."
+        )
+
+    upstream_degraded = any(
+        (m.get("qadegrd", 0) == 1) or (m.get("has_skymodel_fail", False) is True)
+        for m in inputs_meta
+        if not m.get("rejected", False)
+    )
     report: dict[str, Any] = {
         "ok": False,
         "status": "fail",
         "stage": "stack2d",
         "pipeline_version": PIPELINE_VERSION,
         "started_at_unix": float(t0),
-        "inputs": [],
+        "inputs": inputs_meta,
         "config": {
             "method": method,
             "robust_iter": robust_iter,
@@ -608,6 +691,8 @@ def run_stack2d(
             "chunk_rows": chunk,
             "y_align_enabled": bool(y_align_enabled),
             "y_align_max_shift_pix": int(y_align_max),
+            "reject_if_mask_bits": [str(x) for x in reject_names] if reject_names else [],
+            "reject_unknown_mask_bits": reject_unknown,
         },
     }
 
@@ -1122,7 +1207,11 @@ def run_stack2d(
 
         # Write outputs.
         hdr = hdr0.copy()
-        hdr["HISTORY"] = f"Scorpio Pipe {PIPELINE_VERSION}: stack2d"
+        if upstream_degraded:
+            hdr["QADEGRD"] = (1, "Downstream product is degraded (sky-sub pass-through upstream)")
+            hdr.add_history("Upstream sky subtraction was skipped/degraded (QADEGRD=1).")
+
+        hdr.add_history(f"Scorpio Pipe {PIPELINE_VERSION}: stack2d")
         hdr["BUNIT"] = out_bunit
         _out_per_sec = "/s" in str(out_bunit).replace(" ", "").lower() or "s-1" in str(
             out_bunit
@@ -1270,6 +1359,19 @@ def run_stack2d(
 
             thr, thr_meta = compute_thresholds(cfg)
             stage_flags: list[dict[str, Any]] = []
+
+            # P0-L: carry upstream sky-sub pass-through into downstream QC
+            if upstream_degraded:
+                stage_flags.append(
+                    make_flag(
+                        "UPSTREAM_SKY_PASSTHROUGH",
+                        "WARN",
+                        "Upstream sky subtraction was skipped/degraded; downstream products are degraded",
+                        upstream=upstream_reasons,
+                        rejected_inputs=[m for m in inputs_meta if m.get("rejected")],
+                    )
+                )
+
 
             cov_nonzero = float(report.get("metrics", {}).get("cov_nonzero", 0.0) or 0.0)
             rejected_pix_frac = float(np.mean((out_mask & MASK_ROBUST_REJECTED) != 0)) if out_mask.size else 0.0

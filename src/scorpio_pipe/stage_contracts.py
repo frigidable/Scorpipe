@@ -49,10 +49,47 @@ CONTRACTS: dict[str, StageContract] = {
     ),
     "superbias": StageContract(
         stage="superbias",
-        title="Superbias",
+        title="Superbias / MasterBias (readout-aware)",
         inputs=("raw/bias/*.fits",),
-        outputs=("superbias_fits",),
-        metrics=("superbias.n_inputs", "superbias.combine", "superbias.sigma_clip"),
+        outputs=(
+            "master_bias_index",
+            "master_bias_fits",
+            "master_bias_var_fits",
+            "master_bias_dq_fits",
+            "superbias_fits",  # legacy compatibility
+        ),
+        metrics=(
+            "superbias.n_inputs",
+            "superbias.combine",
+            "superbias.sigma_clip",
+            "superbias.n_groups",
+            "superbias.default_gid",
+        ),
+    ),
+    # P0-C1 alias
+    "bias_combine": StageContract(
+        stage="bias_combine",
+        title="MasterBias (readout-aware)",
+        inputs=("raw/bias/*.fits",),
+        outputs=(
+            "master_bias_index",
+            "master_bias_fits",
+            "master_bias_var_fits",
+            "master_bias_dq_fits",
+            "superbias_fits",
+        ),
+    ),
+    "masterbias": StageContract(
+        stage="masterbias",
+        title="MasterBias (readout-aware)",
+        inputs=("raw/bias/*.fits",),
+        outputs=(
+            "master_bias_index",
+            "master_bias_fits",
+            "master_bias_var_fits",
+            "master_bias_dq_fits",
+            "superbias_fits",
+        ),
     ),
     "superflat": StageContract(
         stage="superflat",

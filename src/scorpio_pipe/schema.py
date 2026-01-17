@@ -154,6 +154,11 @@ class CalibBlock(BaseModel):
     bias_combine: str = "median"  # median|mean
     bias_sigma_clip: float = 0.0
 
+    # P0-C1: how strictly to enforce MasterBias readout matching.
+    # - strict: raise if no exact (geometry+readout) match exists.
+    # - degraded: allow best-effort fallback, but never silently.
+    bias_policy: str = "degraded"  # strict|degraded
+
 
 class SuperneonBlock(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -468,6 +473,7 @@ _TOP_KEYS = {
     "sky",
     "stack2d",
     "extract1d",
+    "noise",
     "qc",
     "profiles",
     "config_path",
@@ -475,6 +481,9 @@ _TOP_KEYS = {
     "project_root",
     "work_dir_abs",
     "setup",
+    # P0-B/P0-E: manifest override path for per-science-set calibration
+    "dataset_manifest_path",
+    "manifest_path",
     "_profiles_applied",
 }
 
@@ -534,7 +543,20 @@ _WAVESOL_KEYS = {
     "qc",
 }
 
-_CALIB_KEYS = {"superbias_path", "superflat_path", "bias_combine", "bias_sigma_clip"}
+_CALIB_KEYS = {
+    "superbias_path",
+    "superflat_path",
+    "bias_combine",
+    "bias_sigma_clip",
+    # P0-C1: strict/degraded MasterBias matching
+    "bias_policy",
+    # P0-E: MasterFlat controls
+    "flat_combine",
+    "flat_sigma_clip",
+    "dispersion_axis",
+    "flat_smooth_win",
+    "flat_coverage_min",
+}
 
 _SUPERNEON_KEYS = {"bias_sub"}
 
@@ -568,7 +590,22 @@ _COSMICS_KEYS = {
     "lap_dilate",
 }
 
-_FLATFIELD_KEYS = {"enabled", "method", "norm", "bias_subtract", "save_png", "apply_to"}
+_FLATFIELD_KEYS = {
+    "enabled",
+    "method",
+    "norm",
+    "bias_subtract",
+    "save_png",
+    "apply_to",
+    # P0-E: per-science-set MasterFlat
+    "use_manifest",
+    "science_sets",
+    "rebuild_superflat",
+    "rebuild_masterflat",
+    # Optional explicit noise overrides
+    "gain_e_per_adu",
+    "read_noise_e",
+}
 
 _QC_KEYS = {"thresholds", "auto"}
 

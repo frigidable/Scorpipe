@@ -204,6 +204,7 @@ work/
 - `frames` описывает выбранные файлы (science/calibs) и setup (`frames.__setup__`).
 - для каждой стадии есть свой раздел параметров (`cosmics`, `superneon`, `wavesol`, `linearize`, `sky`, `stack2d`, `extract1d`…).
 - параметры в GUI применяются через **Apply**, и только затем используются **Run**.
+- `sky.failure_policy: soft|strict` — политика отказа на стадии sky: **soft** (default) не валит прогон при отсутствии/плохих sky-окон и выпускает pass-through продукт с `QADEGRD=1` и MASK битом `SKYMODEL_FAIL`; **strict** делает это ошибкой.
 
 Полезные команды:
 - `scorpio-pipe validate --config ...` — валидация + предупреждения о типичных ошибках.

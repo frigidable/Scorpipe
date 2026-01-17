@@ -407,6 +407,9 @@ TASKS: dict[str, TaskFn] = {
     # canonical names
     "manifest": _task_manifest,
     "superbias": _task_superbias,
+    # P0-C1 naming (alias to superbias task)
+    "bias_combine": _task_superbias,
+    "masterbias": _task_superbias,
     "superflat": _task_superflat,
     "flatfield": _task_flatfield,
     "cosmics": _task_cosmics,
@@ -538,6 +541,9 @@ def canonical_task_name(name: str) -> str:
     n = (name or "").strip().lower()
     # tolerate old naming
     aliases = {
+        # P0-C1 naming
+        "bias_combine": "superbias",
+        "masterbias": "superbias",
         "wavesol": "wavesolution",
         "wavesol2d": "wavesolution",
         "wavelength_solution": "wavesolution",
@@ -569,6 +575,8 @@ def _stage_cfg_for_hash(cfg: dict[str, Any], task: str) -> dict[str, Any]:
     sec_map = {
         "manifest": {},
         "superbias": cfg.get("calib", {}),
+        "bias_combine": cfg.get("calib", {}),
+        "masterbias": cfg.get("calib", {}),
         "superflat": cfg.get("calib", {}),
         "flatfield": cfg.get("flatfield", {}),
         "cosmics": cfg.get("cosmics", {}),

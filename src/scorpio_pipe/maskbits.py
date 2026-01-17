@@ -21,7 +21,9 @@ from __future__ import annotations
 import numpy as np
 
 
-MASK_SCHEMA_VERSION = "v1"
+# IMPORTANT: keep this an int so downstream JSON can safely cast it.
+# FITS headers store it under a compact <=8-char keyword (SCORPMKV).
+MASK_SCHEMA_VERSION = 2
 
 # --- Canonical bit assignments (uint16) ---
 
@@ -45,6 +47,15 @@ USER = np.uint16(1 << 5)
 
 # 6: rejected by robust combine (sigma-clip, outlier rejection)
 REJECTED = np.uint16(1 << 6)
+
+# 7: pixel outside slit / extraction aperture (geometric mask)
+OUTSIDE_SLIT = np.uint16(1 << 7)
+
+# 8: wavelength is invalid (e.g., outside calibrated lambda_map)
+INVALID_WAVELENGTH = np.uint16(1 << 8)
+
+# 9: sky model failed / unreliable sky subtraction
+SKYMODEL_FAIL = np.uint16(1 << 9)
 
 
 def header_cards(prefix: str = "SCORP") -> dict[str, str]:
@@ -77,6 +88,9 @@ def header_cards(prefix: str = "SCORP") -> dict[str, str]:
         _k("MB4"): "EDGE",
         _k("MB5"): "USER",
         _k("MB6"): "REJECTED",
+        _k("MB7"): "OUTSIDE_SLIT",
+        _k("MB8"): "INVALID_WAVELENGTH",
+        _k("MB9"): "SKYMODEL_FAIL",
     }
 
 
@@ -90,6 +104,9 @@ def bitname(bit: int) -> str:
         4: "EDGE",
         5: "USER",
         6: "REJECTED",
+        7: "OUTSIDE_SLIT",
+        8: "INVALID_WAVELENGTH",
+        9: "SKYMODEL_FAIL",
     }
     return names.get(int(bit), f"BIT{int(bit)}")
 
@@ -106,4 +123,7 @@ def summarize(mask: np.ndarray) -> dict[str, float]:
         "edge_frac": float(np.count_nonzero(m & EDGE) / tot),
         "user_frac": float(np.count_nonzero(m & USER) / tot),
         "rejected_frac": float(np.count_nonzero(m & REJECTED) / tot),
+        "outside_slit_frac": float(np.count_nonzero(m & OUTSIDE_SLIT) / tot),
+        "invalid_wavelength_frac": float(np.count_nonzero(m & INVALID_WAVELENGTH) / tot),
+        "skymodel_fail_frac": float(np.count_nonzero(m & SKYMODEL_FAIL) / tot),
     }

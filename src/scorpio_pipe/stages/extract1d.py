@@ -902,6 +902,13 @@ def _write_spec1d_fits(
     if "ETAPATH" in hdr0:
         ph["ETAPATH"] = hdr0["ETAPATH"]
 
+    # Upstream degradation flags (P0-L)
+    if "QADEGRD" in hdr0:
+        ph["QADEGRD"] = hdr0["QADEGRD"]
+    for _k in ("SKYOK", "SKYMD"):
+        if _k in hdr0:
+            ph[_k] = hdr0[_k]
+
     # Optional provenance links (done.json of upstream stages)
     for k in list(hdr0.keys()):
         if str(k).startswith("PROV"):
@@ -1120,6 +1127,23 @@ def _run_extract1d_impl(
         raise ValueError(f"extract1d expects a 2D (y,λ) frame; got {sci.shape} from {in_fits}")
     ny, nlam = sci.shape
     wave = _linear_wave_axis(hdr0, nlam)
+
+    # ---------------- upstream sky degradation propagation (P0-L) ----------------
+    from scorpio_pipe.maskbits import SKYMODEL_FAIL
+
+    in_qadegrd = int(hdr0.get("QADEGRD", 0) or 0) == 1
+    try:
+        has_skyfail = bool((((np.asarray(mask, dtype=np.uint16)) & np.uint16(SKYMODEL_FAIL)) != 0).any())
+    except Exception:
+        has_skyfail = False
+    upstream_sky_passthrough = bool(in_qadegrd or has_skyfail)
+    if upstream_sky_passthrough and not in_qadegrd:
+        # Raise downstream degradation even if upstream header lacked QADEGRD.
+        hdr0["QADEGRD"] = (1, "Upstream degraded (SKYMODEL_FAIL present)")
+        try:
+            hdr0.add_history("Downstream: QADEGRD raised due to SKYMODEL_FAIL in input MASK.")
+        except Exception:
+            pass
 
     # ------------------------------ ETA stamp ------------------------------
     eta_appl = hdr0.get("ETAAPPL", None)
@@ -1412,6 +1436,9 @@ def _run_extract1d_impl(
     if trace_method == "fallback_fixed":
         flag_codes.append("TRACE_FALLBACK_USED")
 
+    if upstream_sky_passthrough:
+        flag_codes.append("UPSTREAM_SKY_PASSTHROUGH")
+
     # 1D mask coverage diagnostics
     from scorpio_pipe.maskbits import NO_COVERAGE
     mask_no_cov_tr = float(((np.asarray(mask_tr, dtype=int) & int(NO_COVERAGE)) != 0).mean())
@@ -1435,6 +1462,11 @@ def _run_extract1d_impl(
             "WARN",
             "Large fraction of 1D spectrum has NO_COVERAGE mask.",
             "Verify slit illumination/coverage and earlier stages (linearize/stack).",
+        ),
+        "UPSTREAM_SKY_PASSTHROUGH": (
+            "WARN",
+            "Sky subtraction was skipped upstream (pass-through product).",
+            "Inspect SKYMODEL_FAIL/QADEGRD; consider excluding affected exposures in stack2d.",
         ),
     }
     stage_flags = []

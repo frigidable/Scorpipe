@@ -10,9 +10,7 @@ from rich.markup import escape
 from rich.table import Table
 
 from scorpio_pipe.autocfg import build_autoconfig
-from scorpio_pipe.inspect import inspect_dataset
 from scorpio_pipe.log import setup_logging
-from scorpio_pipe.ui.pipeline_runner import run_sequence
 from scorpio_pipe.validation import validate_config
 from scorpio_pipe.version import PIPELINE_VERSION, __version__
 
@@ -47,6 +45,10 @@ def cmd_version(_args: argparse.Namespace) -> int:
 
 def cmd_inspect(args: argparse.Namespace) -> int:
     data_dir = Path(args.data_dir)
+    # Lazy import: lets users run `scorpio-pipe version/validate` in minimal
+    # environments (e.g. without Astropy).
+    from scorpio_pipe.inspect import inspect_dataset
+
     res = inspect_dataset(data_dir, max_files=args.max_files)
     df = res.table
 
@@ -122,6 +124,8 @@ def _infer_night_dir(res) -> str | None:
 
 def cmd_run(args: argparse.Namespace) -> int:
     data_dir = Path(args.data_dir)
+    from scorpio_pipe.inspect import inspect_dataset
+
     res = inspect_dataset(data_dir)
     df = res.table
     if df.empty:
@@ -205,6 +209,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         "qc_report",
     ]
     print(f"\n[bold]Executing tasks:[/bold] {', '.join(tasks)}")
+    # Lazy import: UI runner pulls heavier optional deps.
+    from scorpio_pipe.ui.pipeline_runner import run_sequence
+
     out = run_sequence(
         cfg_path,
         tasks,
@@ -384,6 +391,42 @@ def cmd_export_package(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_dataset_manifest(args: argparse.Namespace) -> int:
+    """Build dataset_manifest.json for a raw-night directory."""
+
+    from scorpio_pipe.dataset import build_dataset_manifest
+
+    data_dir = Path(args.data_dir).expanduser().resolve()
+    out_path = Path(args.out).expanduser().resolve() if args.out else (data_dir / "dataset_manifest.json")
+
+    man = build_dataset_manifest(
+        data_dir,
+        out_path=out_path,
+        recursive=not bool(getattr(args, "no_recursive", False)),
+        max_files=getattr(args, "max_files", None),
+        include_hashes=bool(getattr(args, "hash", False)),
+        include_frame_index=not bool(getattr(args, "no_frames", False)),
+        night_id=getattr(args, "night_id", None),
+        pipeline_version=PIPELINE_VERSION,
+    )
+
+    # Exit code: 0 OK, 1 warnings only, 2 errors.
+    # Convenience: in --strict mode warnings also become a failure.
+    severities = [w.severity for w in (man.warnings or [])]
+    if any(s == "ERROR" for s in severities):
+        print(f"[red]Wrote:[/red] {_esc(out_path)} (with ERRORs)")
+        return 2
+    if any(s == "WARN" for s in severities):
+        if bool(getattr(args, "strict", False)):
+            print(f"[red]Wrote:[/red] {_esc(out_path)} (warnings; strict mode)")
+            return 2
+        print(f"[yellow]Wrote:[/yellow] {_esc(out_path)} (with warnings)")
+        return 1
+
+    print(f"[green]Wrote:[/green] {_esc(out_path)}")
+    return 0
+
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="scorpio-pipe")
@@ -403,6 +446,44 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-files", type=int, default=None, help="Limit FITS scan (debug)"
     )
     p_ins.set_defaults(func=cmd_inspect)
+
+    p_dm = sub.add_parser(
+        "dataset-manifest",
+        help="Build dataset_manifest.json for a raw-night directory",
+    )
+    p_dm.add_argument("--data-dir", required=True, help="Raw night directory with FITS files")
+    p_dm.add_argument(
+        "--out",
+        default=None,
+        help="Output manifest path (default: <data-dir>/dataset_manifest.json)",
+    )
+    p_dm.add_argument(
+        "--max-files", type=int, default=None, help="Limit FITS scan (debug)"
+    )
+    p_dm.add_argument(
+        "--no-recursive", action="store_true", help="Do not scan subdirectories"
+    )
+    p_dm.add_argument(
+        "--hash",
+        action="store_true",
+        help="Compute SHA256 and file sizes for frames (slower)",
+    )
+    p_dm.add_argument(
+        "--no-frames",
+        action="store_true",
+        help="Do not include full frame index in manifest (smaller JSON)",
+    )
+    p_dm.add_argument(
+        "--night-id",
+        default=None,
+        help="Override inferred night id (dd_mm_yyyy)",
+    )
+    p_dm.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit with code 2 if warnings are present (errors always fail)",
+    )
+    p_dm.set_defaults(func=cmd_dataset_manifest)
 
     p_val = sub.add_parser("validate", help="Validate config.yaml")
     p_val.add_argument("--config", required=True)

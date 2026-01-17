@@ -864,8 +864,23 @@ def prepare_lineid(
         hand_file = (work_dir / hand_file).resolve()
 
     wcfg = cfg.get("wavesol", {}) or {}
+
+    # P0-M: resolve lamp_type and choose the most appropriate line list.
+    from scorpio_pipe.lamp_contract import resolve_lamp_type, resolve_linelist_csv_path
+
+    instrument_hint = str(((cfg.get("frames", {}) or {}).get("__setup__", {}) or {}).get("instrument", "") or "")
+    lamp_info = resolve_lamp_type(
+        cfg,
+        arc_path=superneon_fits,
+        instrument_hint=instrument_hint,
+    )
+
+    # Backward compatibility: "neon_lines_csv" remains supported.
+    # New preferred key: wavesol.linelist_csv, or auto by lamp_type.
     if neon_lines_csv is None:
-        neon_lines_csv = wcfg.get("neon_lines_csv", "neon_lines.csv")
+        neon_lines_csv = wcfg.get("linelist_csv") or wcfg.get("neon_lines_csv")
+    if neon_lines_csv is None:
+        neon_lines_csv = resolve_linelist_csv_path(cfg, lamp_info.lamp_type)
 
     from scorpio_pipe.resource_utils import resolve_resource
 
@@ -877,7 +892,6 @@ def prepare_lineid(
         allow_package=True,
     )
     neon_lines_csv = neon_lines_csv_res.path
-
     img = fits.getdata(superneon_fits, memmap=False).astype(float)
     prof = _profile_1d(img, y_half=y_half)
     x = np.arange(prof.size, dtype=float)

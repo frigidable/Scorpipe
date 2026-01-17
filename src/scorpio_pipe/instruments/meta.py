@@ -94,6 +94,11 @@ class FrameMeta:
     date_time_utc: datetime
     object_name: str
 
+    # P0-M: explicit lamp contract for wavelength work (recorded in provenance).
+    lamp_raw: str = ""
+    lamp_type: str = "Unknown"  # HeNeAr | Ne | Unknown
+    lamp_source: str = "none"  # header | config | default | none
+
     @property
     def binning_key(self) -> str:
         return f"{self.binning_x}x{self.binning_y}"

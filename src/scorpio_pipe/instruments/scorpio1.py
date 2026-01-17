@@ -19,6 +19,14 @@ from .meta import (
     parse_int,
 )
 
+from scorpio_pipe.lamp_contract import (
+    LAMP_HENEAR,
+    LAMP_NE,
+    LAMP_UNKNOWN,
+    infer_lamp_from_header,
+)
+
+
 
 def _parse_slit_width_arcsec(h: Mapping[str, Any], *, strict: bool) -> float:
     """SCORPIO-1 slit width logic.
@@ -156,6 +164,13 @@ class Scorpio1HeaderParser:
 
         obj = norm_str(_get(h, "OBJECT", "OBJNAME") or "")
 
+        # P0-M: explicit lamp type (header inference + SCORPIO default).
+        lamp_raw, lamp_type = infer_lamp_from_header(h)
+        lamp_source = "header" if lamp_type != LAMP_UNKNOWN else "none"
+        if imagetyp == "neon" and mode == "Spectra" and lamp_type in (LAMP_NE, LAMP_UNKNOWN):
+            lamp_type = LAMP_HENEAR
+            lamp_source = "default"
+
         return FrameMeta(
             instrument=instr,
             mode=mode,
@@ -170,4 +185,7 @@ class Scorpio1HeaderParser:
             readout_key=ReadoutKey(node=node, rate=float(rate), gain=float(gain)),
             date_time_utc=dt_utc,
             object_name=obj,
+            lamp_raw=str(lamp_raw or ""),
+            lamp_type=str(lamp_type or LAMP_UNKNOWN),
+            lamp_source=str(lamp_source or "none"),
         )

@@ -31,7 +31,7 @@ from typing import Any
 import numpy as np
 from astropy.io import fits
 
-from scorpio_pipe.noise_model import NoiseParams, resolve_noise_params
+from scorpio_pipe.noise_model import NoiseParams, resolve_noise_params, stamp_noise_keywords
 
 
 class UnitModel(str, Enum):
@@ -125,8 +125,11 @@ def ensure_electron_units(
     var: np.ndarray | None,
     hdr: fits.Header,
     *,
+    cfg: dict | None = None,
     gain_override: float | None = None,
     rdnoise_override: float | None = None,
+    bias_rn_est_adu: float | None = None,
+    bias_rn_est_e: float | None = None,
     instrument_hint: str | None = None,
     require_gain: bool = False,
 ) -> tuple[np.ndarray, np.ndarray | None, fits.Header, UnitProvenance, NoiseParams]:
@@ -145,8 +148,11 @@ def ensure_electron_units(
 
     params = resolve_noise_params(
         hdr_out,
+        cfg=cfg,
         gain_override=gain_override,
         rdnoise_override=rdnoise_override,
+        bias_rn_est_adu=bias_rn_est_adu,
+        bias_rn_est_e=bias_rn_est_e,
         instrument_hint=instrument_hint,
         require_gain=require_gain if model_in == UnitModel.ADU else False,
     )
@@ -174,6 +180,15 @@ def ensure_electron_units(
         noise_source=str(params.source),
     )
     stamp_unit_provenance(hdr_out, prov)
+    # Compact <=8-char noise cards for interoperability.
+    hdr_out = stamp_noise_keywords(hdr_out, params, overwrite=True)
+    try:
+        hdr_out.add_history(
+            f"scorpio_pipe units: ELECTRON gain={gain:.6g} rdnoise_e={rn:.6g} rn_src={params.rn_src}"
+        )
+    except Exception:
+        pass
+
     return (
         np.asarray(sci_e, dtype=np.float32),
         None if var_e2 is None else np.asarray(var_e2, dtype=np.float32),

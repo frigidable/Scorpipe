@@ -137,6 +137,39 @@ def list_products(cfg: dict[str, Any]) -> list[Product]:
             "fits",
             optional=True,
         ),
+        # P0-C1: readout-aware master bias (default group)
+        Product(
+            "master_bias_fits",
+            "superbias",
+            superbias_stage / "master_bias.fits",
+            "fits",
+            optional=True,
+            description="Master bias (SCI, default group)",
+        ),
+        Product(
+            "master_bias_var_fits",
+            "superbias",
+            superbias_stage / "master_bias_var.fits",
+            "fits",
+            optional=True,
+            description="Master bias variance (VAR, default group)",
+        ),
+        Product(
+            "master_bias_dq_fits",
+            "superbias",
+            superbias_stage / "master_bias_dq.fits",
+            "fits",
+            optional=True,
+            description="Master bias data-quality mask (DQ, default group)",
+        ),
+        Product(
+            "master_bias_index",
+            "superbias",
+            superbias_stage / "master_bias_index.json",
+            "json",
+            optional=True,
+            description="Master bias group index (geometry+readout)",
+        ),
         Product(
             "superflat_fits",
             "superflat",
@@ -494,7 +527,10 @@ def group_by_stage(products: Iterable[Product]) -> dict[str, list[Product]]:
 _TASK_COMPLETION: dict[str, list[list[str]]] = {
     # Each inner list is an OR-group (any existing product from the group satisfies that requirement).
     "manifest": [["manifest"]],
-    "superbias": [["superbias_fits"]],
+    # P0-C1: prefer readout-aware master bias index, keep legacy superbias.fits fallback
+    "superbias": [["master_bias_index", "superbias_fits"]],
+    "bias_combine": [["master_bias_index", "superbias_fits"]],
+    "masterbias": [["master_bias_index", "superbias_fits"]],
     "superflat": [["superflat_fits"]],
     "flatfield": [["flatfield_done"]],
     "cosmics": [["cosmics_summary"]],

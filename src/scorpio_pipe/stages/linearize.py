@@ -2003,6 +2003,7 @@ def run_linearize(
                 var_est, _npar2 = estimate_variance_adu2(
                     data,
                     hdr,
+                    cfg=cfg,
                     gain_override=gain_override_f,
                     rdnoise_override=rdnoise_override_f,
                     require_gain=True,
@@ -2015,6 +2016,7 @@ def run_linearize(
                 data,
                 var,
                 hdr,
+                cfg=cfg,
                 gain_override=gain_override_f,
                 rdnoise_override=rdnoise_override_f,
                 require_gain=True,

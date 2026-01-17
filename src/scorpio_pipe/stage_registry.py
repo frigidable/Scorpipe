@@ -83,6 +83,9 @@ ALIASES: dict[str, str] = {
     "setup": "setup",
     # Calibs / flats
     "superbias": "biascorr",
+    # P0-C1 naming (readout-aware master bias)
+    "bias_combine": "biascorr",
+    "masterbias": "biascorr",
     "bias": "biascorr",
     "biascorr": "biascorr",
     "superflat": "flatfield",

@@ -48,7 +48,7 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import lsqr
 
 from scorpio_pipe.io.mef import write_sci_var_mask
-from scorpio_pipe.maskbits import BADPIX, COSMIC, NO_COVERAGE, REJECTED, SATURATED, USER
+from scorpio_pipe.maskbits import BADPIX, COSMIC, NO_COVERAGE, REJECTED, SATURATED, USER, SKYMODEL_FAIL
 from scorpio_pipe.paths import resolve_work_dir
 from scorpio_pipe.provenance import add_provenance
 from scorpio_pipe.qc.flags import make_flag, max_severity
@@ -68,6 +68,41 @@ log = logging.getLogger(__name__)
 
 
 FATAL_BITS = int(NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED)
+
+
+
+def _sev_for_policy(policy: str, sev: str) -> str:
+    """Map ERROR/FATAL to WARN for soft-mode stages."""
+
+    pol = str(policy or "").strip().lower()
+    s = str(sev or "").strip().upper()
+    if pol == "soft" and s in {"ERROR", "FATAL"}:
+        return "WARN"
+    return s if s else "INFO"
+
+
+def _is_degradable_sky_error(e: Exception) -> bool:
+    """Return True if the error likely indicates insufficient sky data.
+
+    We keep this conservative: only known "fit/coverage" failure modes are
+    treated as degradable in `sky.failure_policy=soft`.
+    """
+
+    msg = str(e or "").lower()
+    pats = (
+        "no sky windows",
+        "no valid sky windows",
+        "no sky pixels",
+        "too few good sky pixels",
+        "too few valid sky pixels",
+        "too few sky pixels",
+        "not enough spline basis",
+        "sigma-clipping",
+        "sky_scale_raw fit",
+        "kelson_raw fit",
+        "no readable sky frames",
+    )
+    return any(p in msg for p in pats)
 
 
 def _read_lambda_map(
@@ -1116,6 +1151,24 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
     per_exp: list[dict[str, Any]] = []
     qc_rows: list[dict[str, Any]] = []
 
+    # P0-J: sky failure policy
+    raw_pol = sky_cfg.get("failure_policy")
+    failure_policy = str(raw_pol or "soft").strip().lower()
+    if failure_policy not in {"soft", "strict"}:
+        stage_flags.append(
+            make_flag(
+                "SKY_FAILURE_POLICY_INVALID",
+                "WARN",
+                "Invalid sky.failure_policy; falling back to soft",
+                value=str(raw_pol),
+            )
+        )
+        failure_policy = "soft"
+
+    def _sev(sev: str) -> str:
+        return _sev_for_policy(failure_policy, sev)
+
+
     outs: dict[str, Path] = {
         "done_json": done_path,
         "sky_done": sky_done_path,
@@ -1265,8 +1318,91 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                     "Open Project → Manifest… and assign dedicated sky frames (or switch to kelson_raw)."
                 )
             if sky_frames:
-                sky_inputs = [_resolve_best(_resolve_input(p), kind="sky") for p in sky_frames]
-                sky_template, _hdr_t = _median_template(sky_inputs)
+                # --- P0-H: filter SKY_FRAMES by must-match configuration ---
+                # Policy:
+                # - must-match mismatch: reject this sky frame + WARN (SKY_TEMPLATE_INCOMPATIBLE)
+                # - QC-only mismatch (rot/slitpos/readout): WARN but still use
+                from scorpio_pipe.calib_compat import compare_compat_headers
+                from scorpio_pipe.qc.flags import make_flag
+
+                sky_inputs_all = [_resolve_best(_resolve_input(p), kind="sky") for p in sky_frames]
+
+                # Reference science header: use the first raw object input (same config).
+                sci_ref_path = Path(str(raw_inputs[0]))
+                try:
+                    from astropy.io import fits  # type: ignore
+                    with fits.open(sci_ref_path, memmap=False) as hdul:  # type: ignore[attr-defined]
+                        sci_hdr = dict(hdul[0].header)
+                        try:
+                            if "SCI" in hdul:
+                                sci_hdr = dict(hdul["SCI"].header)
+                        except Exception:
+                            pass
+                except Exception as e:
+                    raise RuntimeError(f"Failed to read science header for SKY template filtering: {e}")
+
+                sky_inputs_ok = []
+                rejected = []
+                for sp in sky_inputs_all:
+                    try:
+                        with fits.open(sp, memmap=False) as hdul:  # type: ignore[attr-defined]
+                            sh = dict(hdul[0].header)
+                            try:
+                                if "SCI" in hdul:
+                                    sh = dict(hdul["SCI"].header)
+                            except Exception:
+                                pass
+                        meta = compare_compat_headers(
+                            sci_hdr,
+                            sh,
+                            kind="sky",
+                            strict=False,
+                            allow_readout_diff=True,
+                            stage_flags=stage_flags,
+                        )
+                        must = meta.get("must_diffs") if isinstance(meta, dict) else None
+                        if isinstance(must, dict) and must:
+                            stage_flags.append(
+                                make_flag(
+                                    "SKY_TEMPLATE_INCOMPATIBLE",
+                                    "WARN",
+                                    "Rejected SKY frame with incompatible configuration",
+                                    "Use dedicated SKY frames taken with the same instrument/mode/grism/slit/binning/geometry.",
+                                    path=str(sp),
+                                    must_diffs=must,
+                                )
+                            )
+                            rejected.append({"path": str(sp), "must_diffs": must})
+                            continue
+                        sky_inputs_ok.append(sp)
+                    except Exception as e:
+                        stage_flags.append(
+                            make_flag(
+                                "SKY_TEMPLATE_READ_FAILED",
+                                "WARN",
+                                f"Failed to inspect SKY frame header: {e}",
+                                path=str(sp),
+                            )
+                        )
+
+                if not sky_inputs_ok:
+                    raise RuntimeError(
+                        "No compatible SKY_FRAMES remain after configuration filtering. "
+                        "Check project_manifest.yaml or switch to kelson_raw."
+                    )
+
+                sky_template, _hdr_t = _median_template(sky_inputs_ok)
+
+                # record for done.json
+                try:
+                    sky_cfg["_sky_template_filter"] = {
+                        "ref_science": str(sci_ref_path),
+                        "n_total": int(len(sky_inputs_all)),
+                        "n_used": int(len(sky_inputs_ok)),
+                        "rejected": rejected,
+                    }
+                except Exception:
+                    pass
             else:
                 raise RuntimeError(
                     "primary_method=sky_scale_raw requires SKY_FRAMES in project_manifest.yaml (cfg.frames.sky is empty). "
@@ -1276,6 +1412,11 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
         # process exposures
         for p in raw_inputs:
             stem = _raw_stem_from_path(p)
+            sci = None
+            var = None
+            hdr = None
+            mask = None
+            geom = None
             try:
                 sci, hdr = _read_image(p)
                 _fail_if_rectified(hdr, path=p)
@@ -1313,6 +1454,7 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                 var_in, _noise_params0, _model_name = estimate_variance_auto(
                     sci,
                     hdr,
+                    cfg=cfg,
                     gain_override=gain_override,
                     rdnoise_override=rn_override,
                     instrument_hint=str(cfg.get("instrument_hint") or ""),
@@ -1322,6 +1464,7 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                     sci,
                     var_in,
                     hdr,
+                    cfg=cfg,
                     gain_override=gain_override,
                     rdnoise_override=rn_override,
                     instrument_hint=str(cfg.get("instrument_hint") or ""),
@@ -1346,10 +1489,25 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                     contamination_sigma=float(geom_cfg.get("contamination_sigma", 3.0) or 3.0),
                     contamination_frac_warn=float(geom_cfg.get("contamination_frac_warn", 0.15) or 0.15),
                 )
-
                 # propagate geom flags
+                # P0-J: in soft mode, downgrade geometry ERRORs that indicate missing/poor sky to WARN
                 for f in geom.metrics.get("flags") or []:
-                    stage_flags.append(make_flag(str(f.get("code")), str(f.get("severity") or "INFO"), str(f.get("message") or ""), **{k: v for k, v in f.items() if k not in {"code", "severity", "message"}}))
+                    code = str(f.get("code") or "")
+                    sev0 = str(f.get("severity") or "INFO")
+                    # Sky-geometry emits a few ERROR-level conditions (e.g. NO_SKY_WINDOWS)
+                    # which are degradable in sky.failure_policy=soft.
+                    if failure_policy == "soft" and sev0.strip().upper() in {"ERROR", "FATAL"} and (code in {"NO_SKY_WINDOWS", "PROFILE_TOO_SPARSE", "ROI_INVALID"}):
+                        sev = _sev_for_policy(failure_policy, sev0)
+                    else:
+                        sev = sev0
+                    stage_flags.append(
+                        make_flag(
+                            code,
+                            str(sev),
+                            str(f.get("message") or ""),
+                            **{k: v for k, v in f.items() if k not in {"code", "severity", "message"}},
+                        )
+                    )
 
                 # build sky pixel list
                 ny, nx = sci.shape
@@ -1429,7 +1587,7 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                     stage_flags.append(
                         make_flag(
                             'NO_SKY_WINDOWS',
-                            'ERROR',
+                            _sev("ERROR"),
                             'No valid sky windows could be defined',
                             hint='Provide ROI (sky_top/sky_bot) or ensure the slit is not filled',
                             stem=stem,
@@ -1444,7 +1602,7 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                     stage_flags.append(
                         make_flag(
                             "NO_SKY_WINDOWS",
-                            "ERROR",
+                            _sev("ERROR"),
                             "No valid sky windows could be defined",
                             hint="Provide ROI (sky_top/sky_bot) or ensure the slit is not filled",
                             stem=stem,
@@ -1459,6 +1617,15 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                 y_idx = y_idx[good_pix]
                 x_idx = x_idx[good_pix]
                 if y_idx.size < 100:
+                    stage_flags.append(
+                        make_flag(
+                            "TOO_FEW_SKY_PIXELS",
+                            _sev("ERROR"),
+                            "Too few good sky pixels after masking",
+                            stem=stem,
+                            n_good=int(y_idx.size),
+                        )
+                    )
                     raise RuntimeError("Too few good sky pixels after masking")
 
                 lam_s = lam_eff[y_idx, x_idx].astype(float)
@@ -1599,6 +1766,38 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
 
                 skysub = (sci.astype(np.float32) - model.astype(np.float32)).astype(np.float32)
 
+                # P0-D: variance after sky subtraction.
+                # Minimal honest model: add an extra scalar variance term estimated
+                # from robust sky residual scatter beyond the predicted VAR.
+                var_out = var
+                var_model = None
+                try:
+                    # Use the same sky pixels used for QC (y_idx,x_idx).
+                    res_sky = skysub[y_idx, x_idx]
+                    vv = var[y_idx, x_idx]
+                    okv = np.isfinite(res_sky) & np.isfinite(vv) & (vv > 0)
+                    if np.any(okv):
+                        sig_res = float(_robust_sigma(res_sky[okv]))
+                        med_var = float(np.nanmedian(vv[okv]))
+                        add = max(sig_res * sig_res - med_var, 0.0)
+                        if np.isfinite(add) and add > 0:
+                            var_model = np.full_like(var, add, dtype=np.float32)
+                            var_out = (var + var_model).astype(np.float32)
+                            hdr['SKYVADD'] = (True, 'Variance includes sky-model term')
+                            hdr['SKYVMOD'] = (float(add), 'Added sky-model variance [e-^2]')
+                            hdr['SKYVSRC'] = ('RESMAD', 'Sky-model variance source')
+                            hdr['SKYMSIG'] = (float(sig_res), 'Sky residual sigma [e-]')
+                        else:
+                            hdr['SKYVADD'] = (False, 'No sky-model variance added')
+                    else:
+                        hdr['SKYVADD'] = (False, 'No sky pixels for VAR model')
+                except Exception:
+                    try:
+                        hdr['SKYVADD'] = (False, 'Sky-model VAR failed')
+                    except Exception:
+                        pass
+
+
                 # QC on sky residuals
                 res = skysub[y_idx, x_idx]
                 rms_sky = float(np.sqrt(np.nanmean((res[np.isfinite(res)]) ** 2))) if np.isfinite(res).any() else None
@@ -1655,8 +1854,8 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                 skymodel_path = out_dir / f"{stem}_skymodel_raw.fits"
                 skysub_path = out_dir / f"{stem}_skysub_raw.fits"
                 # `write_sci_var_mask` uses keyword-only args for VAR/MASK.
-                write_sci_var_mask(skymodel_path, model, var=var, mask=mask, header=hdr0)
-                write_sci_var_mask(skysub_path, skysub, var=var, mask=mask, header=hdr0)
+                write_sci_var_mask(skymodel_path, model, var=(var_model if var_model is not None else var), mask=mask, header=hdr0)
+                write_sci_var_mask(skysub_path, skysub, var=var_out, mask=mask, header=hdr0)
 
                 # Backward-compatible aliases (synthetic smoke tests / legacy scripts).
                 # Keep these as plain copies to avoid cross-platform symlink issues.
@@ -1801,19 +2000,118 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                     srf = float(geom.metrics.get("sky_rows_frac") or 0.0)
 
                     if srf < float(getattr(thr, "sky_rows_frac_bad", 0.10)):
-                        stage_flags.append(make_flag("NO_SKY_WINDOWS", "ERROR", "Sky window rows fraction is too low", stem=stem, sky_rows_frac=srf))
+                        stage_flags.append(make_flag("NO_SKY_WINDOWS", _sev("ERROR"), "Sky window rows fraction is too low", stem=stem, sky_rows_frac=srf))
                     elif srf < float(getattr(thr, "sky_rows_frac_warn", 0.20)):
                         stage_flags.append(make_flag("SKY_ROWS_LOW", "WARN", "Sky window rows fraction is low", stem=stem, sky_rows_frac=srf))
 
                     if sgf < float(getattr(thr, "sky_good_frac_bad", 0.60)):
-                        stage_flags.append(make_flag("SKY_COVERAGE_TOO_LOW", "ERROR", "Sky good-pixel coverage is too low", stem=stem, sky_good_frac=sgf))
+                        stage_flags.append(make_flag("SKY_COVERAGE_TOO_LOW", _sev("ERROR"), "Sky good-pixel coverage is too low", stem=stem, sky_good_frac=sgf))
                     elif sgf < float(getattr(thr, "sky_good_frac_warn", 0.80)):
                         stage_flags.append(make_flag("SKY_COVERAGE_LOW", "WARN", "Sky good-pixel coverage is low", stem=stem, sky_good_frac=sgf))
                 except Exception:
                     pass
 
             except Exception as e:
-                stage_flags.append(make_flag("SKY_SUB_FAILED", "FATAL", str(e), stem=stem, input=str(p)))
+                # P0-J (soft): produce a pass-through product rather than blocking the whole night.
+                if (
+                    failure_policy == "soft"
+                    and _is_degradable_sky_error(e)
+                    and sci is not None
+                    and var is not None
+                    and hdr is not None
+                    and mask is not None
+                ):
+                    try:
+                        sci0 = np.asarray(sci, dtype=np.float32)
+                        var0 = np.asarray(var, dtype=np.float32)
+                        m0 = np.asarray(mask, dtype=np.uint16)
+                        m0 = np.bitwise_or(m0, np.uint16(SKYMODEL_FAIL))
+
+                        hdr0 = fits.Header(hdr)
+                        try:
+                            hdr0["QADEGRD"] = (1, "QA degraded (sky subtraction skipped)")
+                            hdr0["SKYOK"] = (0, "Sky subtraction succeeded")
+                            hdr0["SKYMD"] = ("none", "Sky model method")
+                            msg = (str(e) or "sky_sub failed").encode("ascii", "replace").decode("ascii")
+                            hdr0["SKYERR"] = (msg[:60], "Sky-sub failure (truncated)")
+                        except Exception:
+                            pass
+                        hdr0 = add_provenance(hdr0, cfg, stage="sky")
+
+                        skymodel_path = out_dir / f"{stem}_skymodel_raw.fits"
+                        skysub_path = out_dir / f"{stem}_skysub_raw.fits"
+                        skymodel_png = out_dir / f"{stem}_skymodel_raw.png"
+                        skysub_png = out_dir / f"{stem}_skysub_raw.png"
+                        skysub_skywin_png = out_dir / f"{stem}_skysub_raw_skywin.png"
+
+                        model0 = np.zeros_like(sci0, dtype=np.float32)
+                        write_sci_var_mask(skymodel_path, model0, var=var0, mask=m0, header=hdr0)
+                        write_sci_var_mask(skysub_path, sci0, var=var0, mask=m0, header=hdr0)
+
+                        # Backward-compatible aliases.
+                        for _alias in (f"{stem}_skysub.fits", f"{stem}_sky_sub.fits"):
+                            try:
+                                shutil.copy2(skysub_path, out_dir / _alias)
+                            except Exception:
+                                pass
+                        for _alias in (f"{stem}_skymodel.fits", f"{stem}_sky_model.fits"):
+                            try:
+                                shutil.copy2(skymodel_path, out_dir / _alias)
+                            except Exception:
+                                pass
+
+                        if bool(sky_cfg.get("save_png", True)):
+                            try:
+                                quicklook_from_mef(skysub_path, skysub_png, k=4.0, method="asinh")
+                                quicklook_from_mef(skymodel_path, skymodel_png, k=4.0, method="linear")
+                            except Exception:
+                                pass
+
+                        stage_flags.append(
+                            make_flag(
+                                "SKY_SUB_PASSTHROUGH",
+                                "WARN",
+                                "Sky subtraction skipped; pass-through product written",
+                                stem=stem,
+                                input=str(p),
+                                error=str(e),
+                            )
+                        )
+
+                        preview_stack.append(sci0)
+                        per_exp.append(
+                            {
+                                "stem": stem,
+                                "input": str(p),
+                                "outputs": {
+                                    "skymodel_raw": str(skymodel_path),
+                                    "skysub_raw": str(skysub_path),
+                                    "skymodel_raw_png": str(skymodel_png),
+                                    "skysub_raw_png": str(skysub_png),
+                                    "skysub_raw_skywin_png": str(skysub_skywin_png),
+                                },
+                                "method": {"name": "passthrough", "params": {}},
+                                "roi_used": getattr(geom, "roi_used", None) if geom is not None else None,
+                                "geometry_metrics": getattr(geom, "metrics", None) if geom is not None else None,
+                                "fit": {"ok": False, "error": str(e)},
+                                "flexure": None,
+                                "metrics": {"passthrough": True},
+                            }
+                        )
+                        qc_rows.append({"stem": stem, "metrics": {"passthrough": True}})
+                    except Exception as e2:
+                        stage_flags.append(
+                            make_flag(
+                                "SKY_SUB_FAILED",
+                                "FATAL",
+                                f"{type(e2).__name__}: {e2}",
+                                stem=stem,
+                                input=str(p),
+                                original=str(e),
+                            )
+                        )
+                else:
+                    stage_flags.append(make_flag("SKY_SUB_FAILED", "FATAL", str(e), stem=stem, input=str(p)))
 
         # preview
         if preview_stack:
@@ -1958,6 +2256,7 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
             },
             params={
                 "primary_method": str(primary),
+                "failure_policy": str(failure_policy),
                 "geometry": geom_cfg,
                 "kelson_raw": kel_cfg,
                 "sky_scale_raw": scl_cfg,

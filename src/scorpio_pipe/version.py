@@ -12,10 +12,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-__version__ = "6.0.1"
+__version__ = "6.0.13"
 
 # Backward-compatible alias used by the UI/CI and older QC JSON writers.
-PIPELINE_VERSION = __version__
+PIPELINE_VERSION = "6.0.13"
 
 
 @dataclass(frozen=True)
