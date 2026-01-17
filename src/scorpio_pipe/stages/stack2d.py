@@ -628,9 +628,13 @@ def run_stack2d(
         qadegrd = int(hdr.get("QADEGRD", 0) or 0)
         skyok = hdr.get("SKYOK", None)
 
-        # mask bit presence is a strong indicator of upstream sky-model failures
-        md0 = _get_ext(hdul, "MASK")
-        mask = hdul[md0].data
+        # Mask bit presence is a strong indicator of upstream sky-model failures.
+        # Use our local MEF helper (P1-E contract) and fall back to zeros for
+        # legacy/synthetic inputs that may lack MASK.
+        try:
+            mask = _get_mask_data(hdul)
+        except Exception:
+            mask = np.zeros_like(_get_sci_data(hdul), dtype=np.uint16)
         has_skymodel_fail = bool(np.any(mask & SKYMODEL_FAIL))
 
         rejected = False
