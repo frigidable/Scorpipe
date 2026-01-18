@@ -415,10 +415,92 @@ def build_superneon(cfg: dict[str, Any]) -> SuperNeonResult:
 
     outdir = _ensure_dir(wavesol_dir(cfg))
 
-    neon_list = [Path(p) for p in cfg["frames"].get("neon", [])]
+    # P0-B4: prefer dataset_manifest-driven associations when available.
+    used_manifest = False
+    manifest_info: dict[str, Any] = {}
+    neon_list: list[Path] = []
+
+    try:
+        from scorpio_pipe.dataset.manifest_io import load_dataset_manifest, uniq_keep_order
+        from scorpio_pipe.wavesol_paths import get_selected_disperser
+        from scorpio_pipe.exclude_policy import resolve_exclude_set
+
+        man, man_path = load_dataset_manifest(cfg, work_dir, require=False, require_v3=False)
+        if man is not None and man_path is not None:
+            target_disp = str(get_selected_disperser(cfg) or "").strip()
+            # If config doesn't pin a disperser and manifest is multi-disperser, don't guess.
+            if not target_disp:
+                disps = sorted({str(s.config.spectro.disperser) for s in (man.science_sets or []) if s.config and s.config.spectro})
+                if len(disps) > 1:
+                    raise RuntimeError(
+                        "dataset_manifest has multiple dispersers; set wavesol.disperser (or frames.__setup__.disperser) "
+                        "to select which arcs to use for superneon."
+                    )
+                target_disp = disps[0] if disps else ""
+
+            sel_sets = [s for s in (man.science_sets or []) if (str(s.config.spectro.disperser).strip().upper() == target_disp.strip().upper())]
+            match_by_set = {str(m.science_set_id): m for m in (man.matches or [])}
+            arc_ids: list[str] = []
+            for s in sel_sets:
+                m = match_by_set.get(str(s.science_set_id))
+                if m and m.arc_id:
+                    arc_ids.append(str(m.arc_id))
+            arc_ids = uniq_keep_order(arc_ids)
+
+            # Resolve arc paths from calibration pools (preferred), else frame index.
+            base_dir = Path(str(getattr(man, "data_dir", None) or cfg.get("data_dir") or work_dir)).expanduser().resolve()
+            arc_pool = {str(c.calib_id): c for c in ((man.calibration_pools.arc or []) if man.calibration_pools is not None else [])}
+            frame_by_id = {str(f.frame_id): f for f in (man.frames or [])} if getattr(man, "frames", None) else {}
+
+            ex = resolve_exclude_set(cfg, data_dir=cfg.get("data_dir"))
+            excluded_abs = set(ex.excluded_abs)
+
+            def _resolve_path(p: str) -> Path:
+                pp = Path(str(p)).expanduser()
+                if not pp.is_absolute():
+                    pp = (base_dir / pp).resolve()
+                return pp
+
+            def _is_excluded(pp: Path) -> bool:
+                try:
+                    return str(pp.resolve()) in excluded_abs
+                except Exception:
+                    return str(pp) in excluded_abs
+
+            for aid in arc_ids:
+                item = arc_pool.get(str(aid))
+                if item is not None:
+                    pp = _resolve_path(item.path)
+                else:
+                    fe = frame_by_id.get(str(aid))
+                    if fe is None:
+                        continue
+                    pp = _resolve_path(fe.path)
+                if _is_excluded(pp):
+                    continue
+                neon_list.append(pp)
+
+            if neon_list:
+                used_manifest = True
+                manifest_info = {
+                    "path": str(man_path),
+                    "schema": getattr(man, "schema_id", None),
+                    "schema_version": getattr(man, "schema_version", None),
+                    "target_disperser": target_disp,
+                    "science_sets": [str(s.science_set_id) for s in sel_sets],
+                    "arc_ids": arc_ids,
+                }
+    except Exception as _e:
+        # Fall back to explicit config list; avoid hidden directory searches.
+        manifest_info = {"error": str(_e)}
+
+    if not neon_list:
+        neon_list = [Path(p) for p in cfg["frames"].get("neon", [])]
+
     if not neon_list:
         raise RuntimeError(
-            "Нет neon кадров в cfg['frames']['neon']. Inspect видит neon — значит autoconfig должен их записать."
+            "Нет neon кадров: ни в dataset_manifest.json (arc associations), ни в cfg['frames']['neon']. "
+            "Постройте manifest (`scorpio-pipe dataset-manifest ...`) или укажите frames.neon."
         )
 
     # --- bias subtraction control ---
@@ -712,6 +794,7 @@ def build_superneon(cfg: dict[str, Any]) -> SuperNeonResult:
             "signature": ref_sig.to_dict(),
             "shift_method": "xcorr_int",
             "xshift_max_abs": int(xshift_max),
+            "dataset_manifest": {"used": bool(used_manifest), **(manifest_info or {})},
             "rows": shifts_rows,
             "summary": {
                 "shift_median_px": float(np.median(dxs)),
@@ -730,6 +813,7 @@ def build_superneon(cfg: dict[str, Any]) -> SuperNeonResult:
             "signature": ref_sig.to_dict(),
             "bias_subtracted": bool(did_sub),
             "superbias_path": (str(superbias_path) if (superbias_path is not None) else ""),
+            "dataset_manifest": {"used": bool(used_manifest), **(manifest_info or {})},
             "alignment": {
                 "method": "xcorr_int",
                 "profile_y": [int(y0), int(y1)],

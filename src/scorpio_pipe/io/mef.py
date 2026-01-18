@@ -12,6 +12,8 @@ DEFAULT_FATAL_BITS = int(NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJE
 
 
 from scorpio_pipe.version import as_header_cards
+from scorpio_pipe.contracts.data_model import stamp_data_model
+from scorpio_pipe.contracts.units import infer_sci_bunit_from_unit_model, var_bunit_from_sci_bunit
 from scorpio_pipe import maskbits
 
 
@@ -134,6 +136,23 @@ def write_sci_var_mask(
     # Record the strict mask schema (even if MASK is absent; this makes downstream checks simpler).
     _apply_cards(phdr, maskbits.header_cards(prefix="SCORP"))
 
+    # P0-B1: data model version + explicit unit tags
+    stamp_data_model(phdr)
+    try:
+        bunit0 = str(phdr.get("BUNIT", "") or "").strip()
+    except Exception:
+        bunit0 = ""
+    if not bunit0:
+        u = infer_sci_bunit_from_unit_model(str(phdr.get("SCORPUM", "") or ""))
+        if u:
+            try:
+                phdr["BUNIT"] = (str(u), "Data unit (SCI)")
+            except Exception:
+                try:
+                    phdr["BUNIT"] = str(u)
+                except Exception:
+                    pass
+
     if scorpnan > 0:
         try:
             phdr["SCORPNAN"] = (int(scorpnan), "Non-finite SCI/VAR sanitized to 0 (NO_COVERAGE)")
@@ -189,6 +208,19 @@ def write_sci_var_mask(
         vhdr = fits.Header()
         if grid is not None:
             _apply_cards(vhdr, grid.to_wcs_cards())
+        # P0-B1: explicit squared unit for variance plane
+        try:
+            bunit_sci = str(shdr.get("BUNIT", phdr.get("BUNIT", "")) or "").strip()
+        except Exception:
+            bunit_sci = ""
+        if bunit_sci:
+            try:
+                vhdr["BUNIT"] = (var_bunit_from_sci_bunit(bunit_sci), "Data unit (VAR)")
+            except Exception:
+                try:
+                    vhdr["BUNIT"] = var_bunit_from_sci_bunit(bunit_sci)
+                except Exception:
+                    pass
         hdus.append(
             fits.ImageHDU(
                 data=np.asarray(var, dtype=np.float32), header=vhdr, name="VAR"

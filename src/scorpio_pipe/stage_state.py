@@ -75,6 +75,7 @@ def compute_stage_hash(
     stage: str,
     stage_cfg: dict[str, Any] | None = None,
     input_paths: Iterable[Path] | None = None,
+    reference_context_id: str | None = None,
 ) -> str:
     """Compute a stable hash for stage "up-to-date" checks.
 
@@ -85,6 +86,7 @@ def compute_stage_hash(
     stage_cfg_num = _stable_cfg(stage_cfg or {})
     payload = {
         "pipeline": prov,
+        "reference_context_id": str(reference_context_id or ""),
         "stage": stage,
         "stage_cfg": stage_cfg_num,
         "inputs": [_file_sig(Path(x)) for x in (input_paths or [])],

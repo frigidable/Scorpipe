@@ -45,6 +45,7 @@ from scorpio_pipe import maskbits
 from scorpio_pipe.paths import resolve_work_dir
 from scorpio_pipe.provenance import add_provenance
 from scorpio_pipe.version import PIPELINE_VERSION
+from scorpio_pipe.contracts.data_model import stamp_data_model
 
 log = logging.getLogger(__name__)
 
@@ -880,6 +881,8 @@ def _write_spec1d_fits(
     # Required stage-level provenance.
     ph["PIPEVER"] = (str(PIPELINE_VERSION), "Pipeline version")
     ph["STAGE"] = ("12_extract", "Pipeline stage (directory name)")
+    stamp_data_model(ph)
+
 
     if "INPUT2D" in hdr0:
         ph["INPUT2D"] = (str(hdr0["INPUT2D"]), "2D input FITS used for extraction")

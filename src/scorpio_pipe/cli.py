@@ -210,7 +210,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     ]
     print(f"\n[bold]Executing tasks:[/bold] {', '.join(tasks)}")
     # Lazy import: UI runner pulls heavier optional deps.
-    from scorpio_pipe.ui.pipeline_runner import run_sequence
+    from scorpio_pipe.pipeline.engine import run_sequence
 
     out = run_sequence(
         cfg_path,
@@ -409,6 +409,15 @@ def cmd_dataset_manifest(args: argparse.Namespace) -> int:
         night_id=getattr(args, "night_id", None),
         pipeline_version=PIPELINE_VERSION,
     )
+
+    # Validate on-disk contract (P0-B4)
+    try:
+        from scorpio_pipe.calib.manifest_schema import validate_dataset_manifest_file
+
+        validate_dataset_manifest_file(out_path, require_v3=True)
+    except Exception as e:
+        print(f"[red]Manifest validation failed:[/red] {e}")
+        return 2
 
     # Exit code: 0 OK, 1 warnings only, 2 errors.
     # Convenience: in --strict mode warnings also become a failure.

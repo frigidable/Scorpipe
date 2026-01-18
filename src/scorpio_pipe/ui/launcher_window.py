@@ -5,34 +5,16 @@ import traceback
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import yaml
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from scorpio_pipe.inspect import inspect_dataset, InspectResult
-from scorpio_pipe.autocfg import build_autoconfig
-from scorpio_pipe.config import load_config
 from scorpio_pipe.ui.qt_log import install as install_qt_log
-from scorpio_pipe.ui.pipeline_runner import (
-    load_context,
-    run_sequence,
-    run_lineid_prepare,
-    run_wavesolution,
-)
-from scorpio_pipe.ui.qc_viewer import QCViewer
-from scorpio_pipe.ui.pair_rejector import clean_pairs_interactively
-from scorpio_pipe.ui.cosmics_manual import CosmicsManualDialog
-from scorpio_pipe.ui.frame_browser import SelectedFrame
-from scorpio_pipe.ui.project_manifest_dialog import ProjectManifestDialog
 from scorpio_pipe.ui.outputs_panel import OutputsToolDialog
 from scorpio_pipe.ui.config_defaults import schema_default
 from scorpio_pipe.ui.param_metadata import get_param_meta
 from scorpio_pipe.ui.delayed_tooltip import install_delayed_tooltip
-from scorpio_pipe.ui.run_plan_dialog import RunPlanDialog
-from scorpio_pipe.ui.config_diff import ConfigDiffDialog
-from scorpio_pipe.paths import resolve_work_dir
-from scorpio_pipe.wavesol_paths import wavesol_dir
 from scorpio_pipe.stage_registry import iter_gui_stages
 from scorpio_pipe.pairs_library import (
     list_pair_sets,
@@ -43,9 +25,46 @@ from scorpio_pipe.pairs_library import (
     export_user_library_zip,
 )
 from scorpio_pipe.ui.theme import apply_theme, load_ui_settings
-from scorpio_pipe.instrument_db import find_grism
 from scorpio_pipe.qc.gate import QCGateError
+from scorpio_pipe.paths import resolve_work_dir
+from scorpio_pipe.wavesol_paths import wavesol_dir
+from scorpio_pipe.instrument_db import find_grism
 
+if TYPE_CHECKING:  # pragma: no cover
+    from scorpio_pipe.inspect import InspectResult
+    from scorpio_pipe.ui.qc_viewer import QCViewer
+    from scorpio_pipe.ui.frame_browser import SelectedFrame
+
+
+
+
+def _lazy_pipeline_runner():
+    # Import the heavy pipeline runner lazily (keeps UI startup snappy in frozen builds).
+    from scorpio_pipe.ui import pipeline_runner as _pr
+
+    return _pr
+
+
+def load_context(cfg_path):  # type: ignore[override]
+    return _lazy_pipeline_runner().load_context(cfg_path)
+
+
+def run_sequence(ctx_or_path, tasks, *, resume=True, force=False, qc_override=False):  # type: ignore[override]
+    return _lazy_pipeline_runner().run_sequence(
+        ctx_or_path,
+        tasks,
+        resume=resume,
+        force=force,
+        qc_override=qc_override,
+    )
+
+
+def run_lineid_prepare(ctx):  # type: ignore[override]
+    return _lazy_pipeline_runner().run_lineid_prepare(ctx)
+
+
+def run_wavesolution(ctx):  # type: ignore[override]
+    return _lazy_pipeline_runner().run_wavesolution(ctx)
 
 
 # --------------------------- tiny widgets ---------------------------
@@ -341,35 +360,49 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         # Per-page Outputs drawer state
         # Outputs are shown in a detached tool window (not inside stage pages).
+        # Pages are built lazily to keep startup fast (especially in frozen builds).
+        self._pages_built: set[int] = set()
+        self._page_specs: dict[int, tuple[str, str, callable]] = {
+            0: ("project", "page_project", self._build_page_project),
+            1: ("setup", "page_config", self._build_page_config),
+            2: ("biascorr", "page_calib", self._build_page_calib),
+            3: ("cosmics", "page_cosmics", self._build_page_cosmics),
+            4: ("flatfield", "page_flatfield", self._build_page_flatfield),
+            5: ("superneon", "page_superneon", self._build_page_superneon),
+            6: ("arclineid", "page_lineid", self._build_page_lineid),
+            7: ("wavesol", "page_wavesol", self._build_page_wavesol),
+            8: ("linearize", "page_linearize", self._build_page_linearize),
+            9: ("sky", "page_sky", self._build_page_sky),
+            10: ("stack2d", "page_stack2d", self._build_page_stack2d),
+            11: ("extract1d", "page_extract1d", self._build_page_extract1d),
+        }
+        self._page_widgets: dict[int, QtWidgets.QWidget] = {}
 
-        # Create pages
-        self.page_project = self._build_page_project()
-        self.page_config = self._build_page_config()
-        self.page_calib = self._build_page_calib()
-        self.page_cosmics = self._build_page_cosmics()
-        self.page_flatfield = self._build_page_flatfield()
-        self.page_superneon = self._build_page_superneon()
-        self.page_lineid = self._build_page_lineid()
-        self.page_wavesol = self._build_page_wavesol()
-        self.page_linearize = self._build_page_linearize()
-        self.page_sky = self._build_page_sky()
-        self.page_stack2d = self._build_page_stack2d()
-        self.page_extract1d = self._build_page_extract1d()
-        for p in [
-            self.page_project,
-            self.page_config,
-            self.page_calib,
-            self.page_cosmics,
-            self.page_flatfield,
-            self.page_superneon,
-            self.page_lineid,
-            self.page_wavesol,
-            self.page_linearize,
-            self.page_sky,
-            self.page_stack2d,
-            self.page_extract1d,
-        ]:
-            self.stack.addWidget(p)
+        def _mk_placeholder(title: str) -> QtWidgets.QWidget:
+            pw = QtWidgets.QWidget()
+            v = QtWidgets.QVBoxLayout(pw)
+            v.setContentsMargins(24, 24, 24, 24)
+            v.setSpacing(12)
+            lbl = QtWidgets.QLabel(f"Loading…\n{title}")
+            lbl.setAlignment(QtCore.Qt.AlignCenter)
+            lbl.setStyleSheet("font-size: 14px; color: rgba(220,220,220,160);")
+            v.addStretch(1)
+            v.addWidget(lbl)
+            v.addStretch(1)
+            return pw
+
+        for i in range(12):
+            title = self._stage_titles[i] if i < len(self._stage_titles) else f"Page {i}"
+            ph = _mk_placeholder(title)
+            self.stack.addWidget(ph)
+            self._page_widgets[i] = ph
+            spec = self._page_specs.get(i)
+            if spec is not None:
+                _, attr, _ = spec
+                setattr(self, attr, ph)
+
+
+        
 
         # Map canonical stage list (01..12) to actual UI pages.
         _page_by_stage_key = {
@@ -389,6 +422,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._stage_page_index = [_page_by_stage_key[k] for k in self._stage_keys]
 
         self.steps.currentRowChanged.connect(self._on_step_changed)
+
+        # Build the initial Project page after the event loop starts.
+        # This keeps the splash screen time minimal on slow/frozen environments.
+        QtCore.QTimer.singleShot(0, lambda: self._ensure_page_built(0))
 
         # Dock: log (collapsible)
         self.log_view = QtWidgets.QPlainTextEdit()
@@ -451,7 +488,98 @@ class LauncherWindow(QtWidgets.QMainWindow):
             pass
         try:
             if hasattr(self, "lbl_wavesol_dir") and self._cfg:
+                from scorpio_pipe.wavesol_paths import wavesol_dir
                 self.lbl_wavesol_dir.setText(f"wavesol: {wavesol_dir(self._cfg)}")
+        except Exception:
+            pass
+
+
+    # --------------------------- lazy pages ---------------------------
+
+    def _ensure_page_built(self, page_idx: int) -> None:
+        """Build a stage page the first time it is needed.
+
+        This keeps UI startup fast by avoiding heavy widget construction until the
+        user navigates to the stage.
+        """
+        try:
+            i = int(page_idx)
+        except Exception:
+            return
+        try:
+            built = getattr(self, "_pages_built", set())
+            if i in built:
+                return
+            specs = getattr(self, "_page_specs", {})
+            spec = specs.get(i)
+            if spec is None:
+                return
+            stage_key, attr, builder = spec
+        except Exception:
+            return
+
+        try:
+            w = builder()
+        except Exception as e:
+            # Show error on the page (and log if possible), but keep the app alive.
+            try:
+                self._log_exception(e)
+            except Exception:
+                pass
+            w = QtWidgets.QWidget()
+            lay = QtWidgets.QVBoxLayout(w)
+            lay.setContentsMargins(20, 20, 20, 20)
+            lay.setSpacing(12)
+            lbl = QtWidgets.QLabel(
+                f"Failed to build UI page: {stage_key}\n\n{type(e).__name__}: {e}\n\nSee Log for details."
+            )
+            lbl.setWordWrap(True)
+            lay.addWidget(lbl, 0, QtCore.Qt.AlignTop)
+
+        old = None
+        try:
+            old = getattr(self, "_page_widgets", {}).get(i)
+        except Exception:
+            old = None
+
+        try:
+            if old is not None:
+                self.stack.removeWidget(old)
+        except Exception:
+            pass
+
+        try:
+            self.stack.insertWidget(i, w)
+        except Exception:
+            try:
+                self.stack.addWidget(w)
+            except Exception:
+                pass
+
+        try:
+            if old is not None and hasattr(old, "deleteLater"):
+                old.deleteLater()
+        except Exception:
+            pass
+
+        try:
+            self._page_widgets[i] = w
+        except Exception:
+            pass
+
+        try:
+            setattr(self, attr, w)
+        except Exception:
+            pass
+
+        try:
+            self._pages_built.add(i)
+        except Exception:
+            pass
+
+        # Update ...
+        try:
+            self._update_enables()
         except Exception:
             pass
 
@@ -1235,6 +1363,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
             return
         self._set_step_status(0, "running")
         try:
+            from scorpio_pipe.inspect import inspect_dataset
+
             self._log_info(f"Inspect: {data_dir}")
             self._inspect = inspect_dataset(data_dir)
             msg = f"FITS opened/found: {self._inspect.n_opened}/{self._inspect.n_found}"
@@ -1359,6 +1489,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             return
 
         from scorpio_pipe.workdir import RunSignature, pick_smart_run_dir
+        from scorpio_pipe.autocfg import build_autoconfig
 
         data_dir = Path(self.edit_data_dir.text()).expanduser()
         root = getattr(self, "_pipeline_root", None) or (
@@ -1597,6 +1728,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 cfg_stub.setdefault("config_dir", str(Path(self.edit_cfg_path.text()).expanduser().resolve().parent))
             except Exception:
                 cfg_stub.setdefault("config_dir", str(work_dir))
+
+            from scorpio_pipe.ui.project_manifest_dialog import ProjectManifestDialog
 
             dlg = ProjectManifestDialog(cfg=cfg_stub, inspect_df=self._inspect.table, parent=self)
             dlg.manifestSaved.connect(lambda *_: self._on_project_manifest_saved())
@@ -2495,6 +2628,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         try:
             work_dir.mkdir(parents=True, exist_ok=True)
             cfg_path = work_dir / "config.yaml"
+            from scorpio_pipe.autocfg import build_autoconfig
             ac = build_autoconfig(
                 self._inspect.table,
                 data_dir,
@@ -2525,6 +2659,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
     def _load_config(self, cfg_path: Path) -> None:
         cfg_path = cfg_path.expanduser().resolve()
         try:
+            from scorpio_pipe.config import load_config
+
             cfg = load_config(cfg_path)
         except Exception as e:
             self._log_exception(e)
@@ -2609,6 +2745,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
             title = "Config diff"
             if self._cfg_path:
                 title += f" — {self._cfg_path.name}"
+            from scorpio_pipe.ui.config_diff import ConfigDiffDialog
+
             ConfigDiffDialog(title, old_text, new_text, parent=self).exec()
         except Exception as e:
             self._log_exception(e)
@@ -4353,6 +4491,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         try:
             if not self._ensure_cfg_saved():
                 return
+            from scorpio_pipe.ui.cosmics_manual import CosmicsManualDialog
+
             dlg = CosmicsManualDialog(self._cfg_path, parent=self)
             dlg.exec()
             # Refresh outputs panel (masks/clean may have changed)
@@ -6709,6 +6849,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._log_error("Pairs file not found (run LineID first)")
             return
         deg = int(self._get_cfg_value("wavesol.poly_deg_1d", 4) or 4)
+        from scorpio_pipe.ui.pair_rejector import clean_pairs_interactively
         out = clean_pairs_interactively(p, poly_deg=deg, parent=self)
         if out is None:
             return
@@ -8332,6 +8473,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         if self._cfg_path and not wd.is_absolute():
             wd = (self._cfg_path.parent / wd).resolve()
         if self._qc is None:
+            from scorpio_pipe.ui.qc_viewer import QCViewer
+
             self._qc = QCViewer(wd)
         else:
             self._qc.set_work_dir(wd)
@@ -8359,6 +8502,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         try:
             i = int(idx)
             page_i = self._stage_page_index[i] if hasattr(self, "_stage_page_index") else i
+            self._ensure_page_built(int(page_i))
             self.stack.setCurrentIndex(int(page_i))
         except Exception:
             pass
@@ -8643,6 +8787,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
             if not self._cfg:
                 self._log_error("No config loaded")
                 return
+            from scorpio_pipe.ui.run_plan_dialog import RunPlanDialog
+
             RunPlanDialog(self._cfg, parent=self).exec()
         except Exception as e:
             self._log_exception(e)
@@ -8741,27 +8887,58 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 break
 
     def _update_enables(self) -> None:
+        """Enable/disable actions based on current state.
+
+        Must be safe even when some pages are not built yet (lazy UI).
+        """
+
         has_inspect = self._inspect is not None
-        self.btn_make_cfg.setEnabled(has_inspect)
-        self.btn_suggest_workdir.setEnabled(True)
-        self.btn_run_calib.setEnabled(
-            self._cfg_path is not None or bool(self.edit_cfg_path.text().strip())
-        )
-        self.btn_run_cosmics.setEnabled(self.btn_run_calib.isEnabled())
-        if hasattr(self, "btn_run_flatfield"):
-            self.btn_run_flatfield.setEnabled(self.btn_run_calib.isEnabled())
-        self.btn_run_superneon.setEnabled(self.btn_run_calib.isEnabled())
-        self.btn_open_lineid.setEnabled(self.btn_run_calib.isEnabled())
-        self.btn_run_wavesol.setEnabled(self.btn_run_calib.isEnabled())
+
+        try:
+            if hasattr(self, "btn_make_cfg"):
+                self.btn_make_cfg.setEnabled(has_inspect)
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, "btn_suggest_workdir"):
+                self.btn_suggest_workdir.setEnabled(True)
+        except Exception:
+            pass
+
+        has_cfg = False
+        try:
+            has_cfg = bool(self._cfg_path)
+        except Exception:
+            has_cfg = False
+        try:
+            if not has_cfg and hasattr(self, "edit_cfg_path"):
+                has_cfg = bool((self.edit_cfg_path.text() or "").strip())
+        except Exception:
+            pass
+
+        for name in (
+            "btn_run_calib",
+            "btn_run_cosmics",
+            "btn_run_flatfield",
+            "btn_run_superneon",
+            "btn_open_lineid",
+            "btn_run_wavesol",
+        ):
+            try:
+                if hasattr(self, name):
+                    getattr(self, name).setEnabled(bool(has_cfg))
+            except Exception:
+                pass
 
         # "Previous state" is available only when there is an opened run and at
         # least one snapshot in ui/history.
         try:
-            rr_txt = (self.edit_work_dir.text() or "").strip()
-            from scorpio_pipe.ui.session_store import list_snapshots
+            if hasattr(self, "btn_prev_state") and hasattr(self, "edit_work_dir"):
+                rr_txt = (self.edit_work_dir.text() or "").strip()
+                from scorpio_pipe.ui.session_store import list_snapshots
 
-            has_hist = bool(rr_txt) and bool(list_snapshots(Path(rr_txt), limit=1))
-            if hasattr(self, "btn_prev_state"):
+                has_hist = bool(rr_txt) and bool(list_snapshots(Path(rr_txt), limit=1))
                 self.btn_prev_state.setEnabled(bool(has_hist))
         except Exception:
             try:
@@ -8769,6 +8946,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
                     self.btn_prev_state.setEnabled(False)
             except Exception:
                 pass
+
 
     def _run_sequence_with_qc_prompt(
         self,
@@ -8784,6 +8962,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         Here we provide an explicit UX: cancel or proceed with an override.
         """
         try:
+            from scorpio_pipe.ui.pipeline_runner import run_sequence
+
             return run_sequence(ctx_or_path, tasks, resume=resume, force=force, qc_override=False)
         except QCGateError as ge:
             sev = str(getattr(ge, "upstream_max_severity", "ERROR") or "ERROR").upper()

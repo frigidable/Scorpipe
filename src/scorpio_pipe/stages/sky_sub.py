@@ -1322,7 +1322,7 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                 # Policy:
                 # - must-match mismatch: reject this sky frame + WARN (SKY_TEMPLATE_INCOMPATIBLE)
                 # - QC-only mismatch (rot/slitpos/readout): WARN but still use
-                from scorpio_pipe.calib_compat import compare_compat_headers
+                from scorpio_pipe.calib.compat import compare_compat_headers
 
                 sky_inputs_all = [_resolve_best(_resolve_input(p), kind="sky") for p in sky_frames]
 

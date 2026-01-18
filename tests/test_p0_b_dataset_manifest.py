@@ -269,3 +269,62 @@ def test_p0_g_arc_prefers_same_readout_when_available_over_time_closeness():
 
     codes = {w.code for w in (man.warnings or [])}
     assert "ARC_READOUT_MISMATCH_ALLOWED" not in codes
+
+
+def test_p0_b4_suboptimal_match_warning_and_meta_fields_for_flat_readout_mismatch():
+    t0 = dt0()
+
+    r_s1 = rec("SCI1", mk_meta(imagetyp="obj", when=t0 + timedelta(minutes=0), gain=0.90, rate=145.0))
+    r_s2 = rec("SCI2", mk_meta(imagetyp="obj", when=t0 + timedelta(minutes=60), gain=0.90, rate=145.0))
+
+    r_b = rec("BIAS_OK", mk_meta(imagetyp="bias", when=t0 - timedelta(hours=2), gain=0.90, rate=145.0))
+    r_a = rec("ARC1", mk_meta(imagetyp="neon", when=t0 - timedelta(minutes=5), gain=0.90, rate=145.0))
+
+    # Only flat has different readout; allowed.
+    r_f = rec("FLAT_MISMATCH", mk_meta(imagetyp="flat", when=t0 + timedelta(minutes=10), gain=1.10, rate=185.0))
+
+    man = build_dataset_manifest_from_records(
+        [r_s1, r_s2, r_b, r_a, r_f],
+        pipeline_version="6.0.23",
+        flat_allow_readout_diff=True,
+    )
+
+    m = _single_match(man)
+    assert m.flat_id == "FLAT_MISMATCH"
+    assert m.flat_meta is not None
+    assert m.flat_meta.match_reason is not None
+    assert isinstance(m.flat_meta.qc_deltas, dict)
+    assert m.flat_meta.qc_deltas.get("selected_readout_match") is False
+
+    codes = {w.code for w in (man.warnings or [])}
+    assert "CALIB_SUBOPTIMAL_MATCH" in codes
+
+
+
+def test_p0_b4_suboptimal_match_warning_and_meta_fields_for_arc_readout_mismatch():
+    t0 = dt0()
+
+    r_s1 = rec("SCI1", mk_meta(imagetyp="obj", when=t0 + timedelta(minutes=0), gain=0.90, rate=145.0))
+    r_s2 = rec("SCI2", mk_meta(imagetyp="obj", when=t0 + timedelta(minutes=60), gain=0.90, rate=145.0))
+
+    r_b = rec("BIAS_OK", mk_meta(imagetyp="bias", when=t0 - timedelta(hours=2), gain=0.90, rate=145.0))
+    r_f = rec("FLAT1", mk_meta(imagetyp="flat", when=t0 - timedelta(minutes=10), gain=0.90, rate=145.0))
+
+    # Only arc has different readout; allowed.
+    r_a = rec("ARC_MISMATCH", mk_meta(imagetyp="neon", when=t0 - timedelta(minutes=5), gain=1.10, rate=185.0))
+
+    man = build_dataset_manifest_from_records(
+        [r_s1, r_s2, r_b, r_f, r_a],
+        pipeline_version="6.0.23",
+        arc_allow_readout_diff=True,
+    )
+
+    m = _single_match(man)
+    assert m.arc_id == "ARC_MISMATCH"
+    assert m.arc_meta is not None
+    assert m.arc_meta.match_reason is not None
+    assert isinstance(m.arc_meta.qc_deltas, dict)
+    assert m.arc_meta.qc_deltas.get("selected_readout_match") is False
+
+    codes = {w.code for w in (man.warnings or [])}
+    assert "CALIB_SUBOPTIMAL_MATCH" in codes

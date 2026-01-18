@@ -33,11 +33,13 @@ from astropy.io import fits  # noqa: E402
 from scorpio_pipe.navigator import build_navigator
 from scorpio_pipe.qc_report import build_qc_report
 from scorpio_pipe.run_passport import ensure_run_passport
+from scorpio_pipe.refs.context import ensure_reference_context
 from scorpio_pipe.stages.extract1d import run_extract1d
 from scorpio_pipe.stages.linearize import run_linearize
 from scorpio_pipe.stages.sky_sub import run_sky_sub
 from scorpio_pipe.stages.stack2d import run_stack2d
 from scorpio_pipe.work_layout import ensure_work_layout
+from scorpio_pipe.version import __version__ as PIPELINE_VERSION
 
 
 GOLDEN = Path(__file__).parent / "golden" / "smoke_signature.json"
@@ -123,7 +125,8 @@ def test_smoke_synthetic_chain_golden():
         # Provide minimal wavelength metadata to avoid QC_LAMBDA_MAP_META warnings.
         hdr = fits.Header()
         hdr["WAVEUNIT"] = "Angstrom"
-        hdr["WAVEREF"] = "PIX"
+        hdr["WAVEREF"] = "air"
+        hdr["SCORPVER"] = PIPELINE_VERSION
         wavesol_dir = work_dir / "wavesol"
         wavesol_dir.mkdir(parents=True, exist_ok=True)
         _write(wavesol_dir / "lambda_map.fits", lambda_map, header=hdr)
@@ -171,6 +174,23 @@ def test_smoke_synthetic_chain_golden():
             "extract1d": {"mode": "boxcar", "aperture_half_width": 4},
         }
 
+        # P0-B3/P0-B6: create a minimal reference_context.json so QC can surface
+        # reference provenance and include it in the compliance block.
+        resources_dir = Path(td) / "resources"
+        resources_dir.mkdir(parents=True, exist_ok=True)
+        (resources_dir / "linelist.csv").write_text("wavelength,intensity\n5000,1\n", encoding="utf-8")
+        (resources_dir / "atlas.pdf").write_bytes(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n")
+
+        cfg["resources_dir"] = str(resources_dir)
+        cfg["wavesol"] = {
+            "linelist_csv": "linelist.csv",
+            "atlas_pdf": "atlas.pdf",
+        }
+
+        rc = ensure_reference_context(cfg, resources_dir=resources_dir, overwrite=True)
+        assert Path(rc["reference_context_json"]).exists()
+
+
         # Canonical order.
         run_sky_sub(cfg)
         lin = run_linearize(cfg)
@@ -188,6 +208,11 @@ def test_smoke_synthetic_chain_golden():
         assert Path(st["stacked2d_fits"]).exists()
         assert Path(ex["spec1d_fits"]).exists()
 
+        # End-to-end contract check: data model stamp must be present in the final product.
+        with fits.open(ex["spec1d_fits"], memmap=False) as hdul:
+            assert "SCORPDMV" in hdul[0].header
+
+
         ensure_run_passport(work_dir, overwrite=True)
 
         qc_out = build_qc_report(cfg)
@@ -199,6 +224,12 @@ def test_smoke_synthetic_chain_golden():
         assert nav_data.exists()
 
         qc_doc = json.loads(qc_json.read_text(encoding="utf-8", errors="replace"))
+        # P0-B6: QC report must surface reference_context + compliance.
+        assert isinstance(qc_doc.get("reference_context"), dict)
+        assert qc_doc["reference_context"].get("context_id")
+        assert isinstance(qc_doc.get("compliance"), dict)
+        assert qc_doc["compliance"].get("schema") == "scorpio_pipe.compliance"
+        assert qc_doc["compliance"].get("reference_context_present") is True
         nav_doc = json.loads(nav_data.read_text(encoding="utf-8", errors="replace"))
 
         sig = _signature(qc_doc, nav_doc)

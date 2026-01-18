@@ -48,7 +48,7 @@ from scorpio_pipe.dataset.match import (
     select_best,
     select_flat_set,
 )
-from scorpio_pipe.instruments import HeaderContractError, FrameMeta, parse_frame_meta
+from scorpio_pipe.metadata import HeaderContractError, FrameMeta, parse_frame_meta
 
 
 _FITS_SUFFIXES = (".fits", ".fit", ".fts", ".fz")
@@ -114,15 +114,6 @@ class FrameRecord:
     @property
     def is_longslit(self) -> bool:
         return is_longslit_mode(self.meta)
-
-
-def _extract_sperange(hdr: Mapping[str, Any]) -> str | None:
-    # Instrument archives are inconsistent; accept a small alias set.
-    for k in ("SPERANGE", "SPERANG", "SPECRANGE", "SPECRANG", "SPEC_RNG"):
-        if k in hdr and hdr.get(k) not in (None, ""):
-            v = str(hdr.get(k)).strip()
-            return v or None
-    return None
 
 
 def scan_fits_directory(
@@ -198,6 +189,8 @@ def scan_fits_directory(
 
         try:
             meta = parse_frame_meta(hdr)
+            # FrameMeta is the single source of truth; stamp deterministic frame_id here.
+            meta = meta.with_frame_id(frame_id)
         except HeaderContractError as e:
             warns.append(
                 ManifestWarning(
@@ -219,6 +212,25 @@ def scan_fits_directory(
             )
             continue
 
+        # P0-B2 QA: record optional-missing and fallback usage explicitly.
+        if getattr(meta, "meta_missing_optional", None):
+            warns.append(
+                ManifestWarning(
+                    code="META_MISSING_OPTIONAL",
+                    severity="WARN",
+                    message="Some optional metadata keys are missing.",
+                    context={"path": rel_s, "missing": list(meta.meta_missing_optional)},
+                )
+            )
+        if getattr(meta, "meta_fallback_used", None):
+            warns.append(
+                ManifestWarning(
+                    code="META_FALLBACK_USED",
+                    severity="WARN",
+                    message="Metadata fallback values were applied.",
+                    context={"path": rel_s, "fallback": dict(meta.meta_fallback_used)},
+                )
+            )
         fc = classify_frame(meta)
         size = None
         try:
@@ -227,7 +239,7 @@ def scan_fits_directory(
             size = None
 
         sh = _read_file_sha256(p) if include_hashes else None
-        sper = _extract_sperange(hdr)
+        sper = meta.sperange
 
         recs.append(
             FrameRecord(
@@ -287,7 +299,10 @@ def build_dataset_manifest_from_records(
     This function has **no Astropy dependency** and can be unit-tested.
     """
 
-    records = list(records)
+    # Deterministic ordering: avoid filesystem-dependent scan order leaking into
+    # dataset_manifest.json (P0-B6).
+    records = sorted(list(records), key=lambda r: (str(r.frame_id), str(r.path)))
+
     if night_id is None and data_dir is not None:
         night_id = _guess_night_id(Path(data_dir), records)
 
@@ -394,6 +409,16 @@ def build_dataset_manifest_from_records(
             )
             pools.arc.append(ce)
             calib_index[ce.calib_id] = ce
+
+    # Stable ordering for deterministic JSON output (P0-B6).
+    if include_frame_index:
+        frame_index.sort(key=lambda e: (str(e.frame_id), str(e.path)))
+    try:
+        pools.bias.sort(key=lambda c: (str(c.instrument), str(c.date_time_utc), str(c.calib_id)))
+        pools.flat.sort(key=lambda c: (str(c.instrument), str(c.date_time_utc), str(c.calib_id)))
+        pools.arc.sort(key=lambda c: (str(c.instrument), str(c.date_time_utc), str(c.calib_id)))
+    except Exception:
+        pass
 
     # Build science sets: only long-slit science frames
     science_frames = [r for r in records if (r.frame_class == FrameClass.SCIENCE and r.is_longslit)]
@@ -594,11 +619,57 @@ def build_dataset_manifest_from_records(
             allow_readout_diff=bool(arc_allow),
         )
 
+        def _build_match_reason(kind: str, sel, extra: dict[str, Any] | None) -> str:
+            # Deterministic ranking used by dataset.match.select_best.
+            # Keep this string stable for provenance/QC.
+            parts: list[str] = []
+            if extra and extra.get("readout_policy") == "prefer_same_readout_but_allow":
+                parts.append("prefer_same_readout")
+            parts += ["abs_dt_s", "sperange_mismatch", "slitpos_diff", "calib_id"]
+            return f"ranked_by:{','.join(parts)}"
 
-        def _meta(sel, *, extra: dict | None = None) -> MatchSelectionMeta:
+
+        def _build_qc_deltas(sel, extra: dict[str, Any] | None) -> dict[str, Any]:
+            qc: dict[str, Any] = {}
+            # Explicit QC-only deltas (redundant with top-level fields, but convenient).
+            if sel.abs_dt_s is not None:
+                qc["abs_dt_s"] = float(sel.abs_dt_s)
+            if sel.sperange_mismatch is not None:
+                qc["sperange_mismatch"] = bool(sel.sperange_mismatch)
+            if sel.slitpos_diff is not None:
+                qc["slitpos_diff"] = float(sel.slitpos_diff)
+            if extra:
+                # Readout mismatch allowance is QC-only for some kinds.
+                if "selected_readout_match" in extra:
+                    qc["selected_readout_match"] = bool(extra.get("selected_readout_match"))
+                for k in ("flat_set_n", "flat_set_in_time_window", "flat_time_window_s", "flat_set_readout_unique"):
+                    if k in extra:
+                        qc[k] = extra.get(k)
+            return qc
+
+
+        def _is_suboptimal_match(kind: str, sel, extra: dict[str, Any] | None, warn_codes: set[str]) -> tuple[bool, str]:
+            # Suboptimal = hard-compatible, but with QC-only degradations.
+            reasons: list[str] = []
+            if sel.sperange_mismatch:
+                reasons.append("sperange_mismatch")
+            if sel.slitpos_diff is not None and float(sel.slitpos_diff) != 0.0:
+                reasons.append("slitpos_diff")
+            if extra and extra.get("readout_policy") == "prefer_same_readout_but_allow":
+                if extra.get("selected_readout_match") is False:
+                    reasons.append("readout_mismatch_allowed")
+            if kind == "flat" and ("FLAT_NO_IN_TIME_WINDOW" in warn_codes):
+                reasons.append("no_flat_in_time_window")
+            # Leave bias alone: if it matches, it is hard-compatible by definition.
+            return (len(reasons) > 0, ",".join(reasons) if reasons else "")
+
+
+        def _meta(sel, kind: str, *, extra: dict[str, Any] | None = None, warn_codes: set[str] | None = None) -> MatchSelectionMeta:
             # MatchSelectionMeta is intentionally permissive (extra=allow).
-            # We attach additional provenance fields when useful.
-            return MatchSelectionMeta(
+            warn_codes = warn_codes or set()
+            reason = _build_match_reason(kind, sel, extra)
+            qc_deltas = _build_qc_deltas(sel, extra)
+            meta = MatchSelectionMeta(
                 n_pool=sel.n_pool,
                 n_hard_compatible=sel.n_hard_compatible,
                 abs_dt_s=sel.abs_dt_s,
@@ -606,8 +677,32 @@ def build_dataset_manifest_from_records(
                 slitpos_diff=sel.slitpos_diff,
                 tie_n=sel.tie_n,
                 tie_break=sel.tie_break,
+                match_reason=reason,
+                qc_deltas=qc_deltas,
                 **(extra or {}),
             )
+
+            subopt, sub_reason = _is_suboptimal_match(kind, sel, extra, warn_codes)
+            if subopt and sel.selected_id is not None:
+                warnings.append(
+                    ManifestWarning(
+                        code="CALIB_SUBOPTIMAL_MATCH",
+                        severity="WARN",
+                        message=(
+                            f"Suboptimal {kind} association for science_set={ss.science_set_id}; reason={sub_reason}"
+                        ),
+                        context={
+                            "science_set_id": ss.science_set_id,
+                            "kind": kind,
+                            "calib_id": str(sel.selected_id),
+                            "reason": sub_reason,
+                            "qc_deltas": qc_deltas,
+                            "match_reason": reason,
+                        },
+                    )
+                )
+
+            return meta
 
         # P0-F: Add transparent readout reasoning for flats when readout
         # (gain/rate) mismatches are allowed.
@@ -662,6 +757,12 @@ def build_dataset_manifest_from_records(
                 if sel_set:
                     ro_set = {(c.readout.node, c.readout.rate, c.readout.gain) for c in sel_set}
                     flat_meta_extra["flat_set_readout_unique"] = len(ro_set)
+
+        # P0-B4: explicit flat-set association context (QC-only)
+        flat_meta_extra["flat_set_n"] = int(len(flat_ids or []))
+        if flat_time_window_s is not None:
+            flat_meta_extra["flat_time_window_s"] = float(flat_time_window_s)
+            flat_meta_extra["flat_set_in_time_window"] = ("FLAT_NO_IN_TIME_WINDOW" not in {str(w.get("code")) for w in (wf or [])})
         # P0-G: transparent readout reasoning for arcs when readout (gain/rate)
         # mismatches are allowed.
         arc_meta_extra: dict[str, Any] = {}
@@ -709,6 +810,10 @@ def build_dataset_manifest_from_records(
                         "Preferred same-readout arcs (available) and selected best by |Δtime| (then id)."
                     )
 
+        bias_warn_codes = {str(w.get("code")) for w in (wb or []) if str(w.get("code"))}
+        flat_warn_codes = {str(w.get("code")) for w in (wf or []) if str(w.get("code"))}
+        arc_warn_codes = {str(w.get("code")) for w in (wa or []) if str(w.get("code"))}
+
 
         matches.append(
             MatchEntry(
@@ -720,11 +825,11 @@ def build_dataset_manifest_from_records(
                 flat_id=sel_f.selected_id,
                 flat_ids=flat_ids,
                 arc_id=sel_a.selected_id,
-                bias_meta=_meta(sel_b),
+                bias_meta=_meta(sel_b, "bias", warn_codes=bias_warn_codes),
                 # P0-F: attach transparent readout-selection provenance for flats
                 # when gain/rate mismatches are allowed.
-                flat_meta=_meta(sel_f, extra=flat_meta_extra or None),
-                arc_meta=_meta(sel_a, extra=arc_meta_extra or None),
+                flat_meta=_meta(sel_f, "flat", extra=flat_meta_extra or None, warn_codes=flat_warn_codes),
+                arc_meta=_meta(sel_a, "arc", extra=arc_meta_extra or None, warn_codes=arc_warn_codes),
             )
         )
 

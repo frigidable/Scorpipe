@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from scorpio_pipe.instruments.meta import FrameMeta
+from scorpio_pipe.metadata import FrameMeta
 
 
 class FrameClass(str, Enum):

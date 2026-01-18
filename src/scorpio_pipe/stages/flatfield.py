@@ -7,7 +7,7 @@ import numpy as np
 from astropy.io import fits
 
 from scorpio_pipe.app_paths import ensure_dir
-from scorpio_pipe.calib_compat import ensure_compatible_calib
+from scorpio_pipe.calib.compat import ensure_compatible_calib
 from scorpio_pipe.fits_utils import open_fits_smart
 from scorpio_pipe import maskbits
 from scorpio_pipe.io.mef import write_sci_var_mask
@@ -257,6 +257,15 @@ def apply_flat(
     corr = corr_e
     var_corr = var_corr_e
     hdr = hdr_e
+
+    # Contract (P0-B): MEF products must always carry a MASK plane.
+    # Upstream inputs may lack a DQ/mask, in which case we create an all-zero mask
+    # for determinism and downstream compatibility.
+    if mask is None:
+        mask = np.zeros(corr.shape, dtype=np.uint16)
+    else:
+        if getattr(mask, "dtype", None) != np.uint16:
+            mask = np.asarray(mask, dtype=np.uint16)
 
     ensure_dir(out_path.parent)
     write_sci_var_mask(

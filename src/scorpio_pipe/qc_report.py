@@ -295,6 +295,63 @@ def _metrics_calibs(work_dir: Path) -> dict[str, Any]:
 
 
 
+def _metrics_calibration_associations(cfg: dict[str, Any], work_dir: Path) -> dict[str, Any]:
+    """Calibration association audit block (P0-B4).
+
+    Summarizes which calibrations were associated to each science_set, and any
+    QC-only compromises (match_reason / qc_deltas).
+    """
+
+    try:
+        from scorpio_pipe.dataset.manifest_io import load_dataset_manifest
+
+        man, path = load_dataset_manifest(cfg, work_dir, require=False, require_v3=False)
+        if man is None or path is None:
+            return {}
+
+        # Aggregate manifest warnings
+        warn_counts: dict[str, int] = {}
+        for w in (man.warnings or []):
+            code = str(getattr(w, "code", "") or "")
+            if not code:
+                continue
+            warn_counts[code] = int(warn_counts.get(code, 0)) + 1
+
+        by_set: list[dict[str, Any]] = []
+        ss_by_id = {str(s.science_set_id): s for s in (man.science_sets or [])}
+        for m in (man.matches or []):
+            sid = str(m.science_set_id)
+            ss = ss_by_id.get(sid)
+            by_set.append(
+                {
+                    "science_set_id": sid,
+                    "object": (ss.object if ss is not None else ""),
+                    "config": (ss.config.as_compact_str() if ss is not None else ""),
+                    "bias_id": (m.bias_id or None),
+                    "flat_ids": list(m.flat_ids or ([] if m.flat_id is None else [m.flat_id])),
+                    "arc_id": (m.arc_id or None),
+                    "bias_meta": (m.bias_meta.model_dump(exclude_none=True) if m.bias_meta else None),
+                    "flat_meta": (m.flat_meta.model_dump(exclude_none=True) if m.flat_meta else None),
+                    "arc_meta": (m.arc_meta.model_dump(exclude_none=True) if m.arc_meta else None),
+                }
+            )
+
+        return {
+            "path": _rel(work_dir, path),
+            "schema": getattr(man, "schema_id", None),
+            "schema_version": getattr(man, "schema_version", None),
+            "generated_utc": getattr(man, "generated_utc", None),
+            "n_science_sets": int(len(man.science_sets or [])),
+            "n_matches": int(len(man.matches or [])),
+            "warnings": warn_counts,
+            "by_set": by_set,
+            "excluded_summary": (man.excluded_summary or {}),
+        }
+    except Exception:
+        return {}
+
+
+
 def _metrics_superneon(work_dir: Path, products: list[Product]) -> dict[str, Any]:
     qc_p = _product_path_any(products, ("superneon_qc_json",), require_exists=True)
     shifts_p = _product_path_any(products, ("superneon_shifts_json",), require_exists=True)
@@ -783,6 +840,10 @@ def build_qc_report(
     if cal:
         metrics["calibs"] = cal
 
+    assoc = _metrics_calibration_associations(cfg, work_dir)
+    if assoc:
+        metrics["calibration_associations"] = assoc
+
     sig = _metrics_signatures(products)
     if sig:
         metrics["signatures"] = sig
@@ -893,6 +954,82 @@ def build_qc_report(
         "qc": qc,
     }
 
+    # P0-B3: surface reference context (manifest/reference_context.json).
+    try:
+        from scorpio_pipe.refs.context import load_reference_context
+
+        ref_ctx = load_reference_context(work_dir)
+        if isinstance(ref_ctx, dict) and ref_ctx.get("context_id"):
+            payload["reference_context"] = {
+                "context_id": str(ref_ctx.get("context_id")),
+                "references": list(ref_ctx.get("references") or []),
+            }
+    except Exception:
+        pass
+
+    # P0-B6: contract compliance snapshot (non-fatal). This is a lightweight
+    # provenance block for QA consumers to quickly verify that core contracts
+    # are in place for a run.
+    try:
+        from scorpio_pipe.contracts.data_model import DATA_MODEL_VERSION
+        from scorpio_pipe.contracts.validators import ProductContractError, validate_product
+        from scorpio_pipe.stage_contracts import validate_contracts
+
+        compliance: dict = {
+            "schema": "scorpio_pipe.compliance",
+            "schema_version": 1,
+            "data_model_version": int(DATA_MODEL_VERSION),
+            "stage_contracts_registry_ok": True,
+            "reference_context_present": bool(payload.get("reference_context")),
+            "product_contracts": [],
+        }
+
+        try:
+            validate_contracts(cfg)
+        except Exception as e:
+            compliance["stage_contracts_registry_ok"] = False
+            compliance["stage_contracts_error"] = str(e)
+
+        # Validate a small, representative subset of products if they exist.
+        key_allow = {"lambda_map", "stack2d_fits", "stacked2d_fits", "spec1d_fits"}
+        checks = []
+        for r in prod_rows:
+            try:
+                if not r.get("exists"):
+                    continue
+                if str(r.get("key") or "") not in key_allow:
+                    continue
+                rel = str(r.get("path") or "")
+                pth = (work_dir / rel).resolve() if rel else None
+                if pth is None or not pth.exists():
+                    continue
+
+                ok = True
+                err = None
+                try:
+                    validate_product(pth, stage=str(r.get("stage") or "qc"))
+                except ProductContractError as pe:
+                    ok = False
+                    err = {"code": pe.code, "message": pe.message}
+                except Exception as e:
+                    ok = False
+                    err = {"code": "ERROR", "message": str(e)}
+
+                checks.append({
+                    "key": str(r.get("key") or ""),
+                    "stage": str(r.get("stage") or ""),
+                    "path": rel,
+                    "ok": bool(ok),
+                    "error": err,
+                })
+            except Exception:
+                continue
+
+        compliance["product_contracts"] = checks
+        payload["compliance"] = compliance
+    except Exception:
+        pass
+
     out_json = qc_dir / "qc_report.json"
     legacy_json = legacy_dir / "qc_report.json"
     atomic_write_json(out_json, payload, indent=2, ensure_ascii=False)
@@ -910,6 +1047,37 @@ def build_qc_report(
         )
     except Exception:
         timings_total = None
+
+    # P0-B3: reference context box.
+    ref_ctx_html = ""
+    try:
+        rc = payload.get("reference_context") or {}
+        cid = rc.get("context_id")
+        refs = rc.get("references") or []
+        if cid:
+            rows = ""
+            for r in refs:
+                if not isinstance(r, dict):
+                    continue
+                name = _html_escape(str(r.get("name") or ""))
+                req = _html_escape(str(r.get("requested") or ""))
+                sha = str(r.get("sha256") or "")
+                sha12 = _html_escape(sha[:12] + ("…" if len(sha) > 12 else ""))
+                ver = _html_escape(str(r.get("version") or ""))
+                rows += f"<tr><td>{name}</td><td>{req}</td><td><code>{sha12}</code></td><td>{ver}</td></tr>"
+            ref_ctx_html = (
+                "<div class='box' style='margin-top:14px'>"
+                "<h2>Reference context</h2>"
+                f"<div class='meta'>context_id: <code>{_html_escape(str(cid))}</code></div>"
+                "<details><summary>Show references</summary>"
+                "<table class='mini'><thead><tr>"
+                "<th>Name</th><th>Requested</th><th>SHA256</th><th>Version</th>"
+                "</tr></thead><tbody>"
+                f"{rows}"
+                "</tbody></table></details></div>"
+            )
+    except Exception:
+        ref_ctx_html = ""
 
     html = f"""<!doctype html>
 <html lang='en'>
@@ -966,6 +1134,8 @@ def build_qc_report(
       </div>
       <div class='meta'>{"" if timings_total is None else "Last run total: " + _html_escape(_fmt_seconds(float(timings_total)))}</div>
     </div>
+
+    {ref_ctx_html}
 
     <div class='box' style='margin-top:14px'>
       <h2>Alerts</h2>

@@ -1,531 +1,212 @@
+"""Doit workflow adapter for scorpio-pipe.
+
+Contract (P0-A)
+---------------
+This file must NOT implement its own execution semantics.
+
+All stage execution, skip/re-run logic, QC gating, done.json/stage_state updates
+and boundary-contract validation are delegated to the core engine:
+
+    scorpio_pipe.pipeline.engine
+
+Doit remains responsible only for ergonomics (DAG dependencies, CLI sugar).
+"""
+
 from __future__ import annotations
 
-from pathlib import Path
-import json
-import time
-import shutil
-from typing import Any
-
 import os
+from pathlib import Path
+from typing import Any, Iterable
 
-from doit import get_var
+# doit is an optional dependency (workflow is used only when installed).
+try:
+    from doit import get_var  # type: ignore
+except Exception:  # pragma: no cover
+    def get_var(name: str):  # type: ignore
+        return None
 
-from scorpio_pipe.config import load_config
-from scorpio_pipe.manifest import write_manifest
+
 from scorpio_pipe.log import setup_logging
-from scorpio_pipe.wavesol_paths import resolve_work_dir
-
-setup_logging(os.environ.get("SCORPIO_LOG_LEVEL"))
-
-
-def _project_root() -> Path:
-    # .../scorpio_pipe/workflow/dodo.py -> .../scorpio_pipe
-    return Path(__file__).resolve().parents[1]
-
-
-def _resolve_from_root(p: str | Path) -> Path:
-    p = Path(p)
-    return p if p.is_absolute() else (_project_root() / p).resolve()
+from scorpio_pipe.config import load_config_any
+from scorpio_pipe.paths import resolve_work_dir
+from scorpio_pipe.pipeline.engine import (
+    canonical_task_name,
+    done_json_path_for_task,
+    run_sequence,
+)
 
 
-def _write_manifest_both(*, out_path: Path, cfg: dict[str, Any], cfg_path: Path, work_dir: Path) -> None:
-    """Write manifest into qc/ and mirror into legacy report/."""
-    p = write_manifest(out_path=out_path, cfg=cfg, cfg_path=cfg_path)
-    try:
-        legacy = work_dir / "report"
-        legacy.mkdir(parents=True, exist_ok=True)
-        (legacy / "manifest.json").write_text(p.read_text(encoding="utf-8"), encoding="utf-8")
-    except Exception:
-        pass
+setup_logging()
 
-
-def _touch(path: Path, payload: dict | None = None) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if payload is None:
-        path.write_text(f"created {time.ctime()}\n", encoding="utf-8")
-    else:
-        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-
-
-def _timed(stage: str, work_dir: Path, fn) -> None:
-    """Run a task action and append timing into report/timings.json.
-
-    Timings must be best-effort and never break the workflow.
-    """
-    try:
-        from scorpio_pipe.timings import timed_stage
-
-        with timed_stage(work_dir=work_dir, stage=stage):
-            fn()
-    except Exception:
-        # If timings infra fails for any reason, still run the task.
-        fn()
-
-
-_CFG_CACHE: dict | None = None
+_CFG_CACHE: dict[str, Any] | None = None
 
 
 def _cfg_path() -> Path:
-    """Resolve config path.
+    """Return config path from doit variable or environment.
 
-    Priority:
-      1) doit var:  config=path.yaml
-      2) env var:   CONFIG=path.yaml
-
-    If the path is relative, it's interpreted relative to project root
-    (directory above `workflow/`).
+    Supported:
+      - doit: `doit CONFIG=path/to/config.yaml <task>`
+      - env:  `CONFIG=path/to/config.yaml doit <task>`
     """
-    raw = (get_var("config") or os.environ.get("CONFIG") or "").strip()
-    if not raw:
-        raise RuntimeError(
-            "Config is required. Example (PowerShell):\n"
-            "  $env:CONFIG=(Resolve-Path .\\work\\run1\\config.yaml).Path\n"
-            "  .\\.venv\\Scripts\\doit.exe -f workflow/dodo.py list\n\n"
-            "Or:  .\\.venv\\Scripts\\doit.exe -f workflow/dodo.py config=work/<dd_mm_yyyy>/config.yaml list"
-        )
 
-    p = Path(raw).expanduser()
-    if not p.is_absolute():
-        p = (_project_root() / p).resolve()
-    if not p.exists():
-        raise FileNotFoundError(f"Config not found: {p}")
-    return p
+    v = get_var("CONFIG") or os.environ.get("CONFIG") or "config.yaml"
+    return Path(str(v)).expanduser().resolve()
 
 
-def _load_cfg() -> dict:
+def _load_cfg() -> dict[str, Any]:
     global _CFG_CACHE
     if _CFG_CACHE is None:
-        _CFG_CACHE = load_config(_cfg_path())
+        _CFG_CACHE = load_config_any(_cfg_path())
     return _CFG_CACHE
 
+
+def _work_dir() -> Path:
+    return resolve_work_dir(_load_cfg())
+
+
+def _bool_var(name: str, default: bool = False) -> bool:
+    raw = get_var(name)
+    if raw is None:
+        raw = os.environ.get(name.upper())
+    if raw is None:
+        return default
+    s = str(raw).strip().lower()
+    if s in {"1", "true", "yes", "y", "on"}:
+        return True
+    if s in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _engine_run(task_names: Iterable[str]) -> dict[str, Any]:
+    cfg_path = _cfg_path()
+    return run_sequence(
+        cfg_path,
+        list(task_names),
+        resume=_bool_var("resume", True),
+        force=_bool_var("force", False),
+        qc_override=_bool_var("qc_override", False),
+        config_path=cfg_path,
+    )
+
+
+def _doit_task(name: str, *, task_dep: list[str] | None = None) -> dict[str, Any]:
+    canon = canonical_task_name(name)
+    wd = _work_dir()
+    target = done_json_path_for_task(wd, canon)
+
+    return {
+        "actions": [(lambda n=name: _engine_run([n]))],
+        # Doit should not decide up-to-date based on file mtimes;
+        # engine handles resume/force deterministically via stage_state hashes.
+        "uptodate": [False],
+        "targets": [str(target)],
+        "task_dep": task_dep or [],
+    }
+
+
+# --- Canonical tasks ---
+
 def task_manifest():
-    """
-    Общий manifest для воспроизводимости: что было выбрано и где work_dir.
-    """
-    cfg = _load_cfg()
-    work_dir = resolve_work_dir(cfg)
-    out = work_dir / "qc" / "manifest.json"
+    return _doit_task("manifest")
 
-    def _action():
-        _timed("manifest", work_dir, lambda: _write_manifest_both(out_path=out, cfg=cfg, cfg_path=_cfg_path(), work_dir=work_dir))
-
-    return {
-        "actions": [_action],
-        "file_dep": [_cfg_path()],
-        "targets": [out],
-        "clean": True,
-    }
-
-
-def task_qc_report():
-    """Lightweight QC summary (JSON + HTML index)."""
-    cfg = _load_cfg()
-    work_dir = resolve_work_dir(cfg)
-    out_html = work_dir / "qc" / "index.html"
-    out_json = work_dir / "qc" / "qc_report.json"
-
-    def _action():
-        def _run():
-            from scorpio_pipe.qc_report import build_qc_report
-            build_qc_report(cfg, out_dir=out_html.parent)
-
-        _timed("qc_report", work_dir, _run)
-
-    return {
-        "actions": [_action],
-        "file_dep": [ _cfg_path(), work_dir / "qc" / "manifest.json" ],
-        "targets": [out_html, out_json],
-        "task_dep": ["manifest"],
-        "clean": True,
-    }
 
 def task_superbias():
-    cfg = _load_cfg()
-    work_dir = resolve_work_dir(cfg)
-    out = work_dir / "calibs" / "superbias.fits"
-
-    bias_list = cfg["frames"].get("bias", [])
-
-    def _action():
-        def _run():
-            from scorpio_pipe.stages.calib import build_superbias
-            # передаём путь к YAML-конфигу, который задан через $env:CONFIG
-            build_superbias(_cfg_path(), out_path=out)
-            # legacy mirror
-            try:
-                legacy = work_dir / "calib" / "superbias.fits"
-                legacy.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(out, legacy)
-            except Exception:
-                pass
-
-        _timed("superbias", work_dir, _run)
-
-    return {
-        "actions": [_action],
-        "file_dep": [_cfg_path()] + [Path(p) for p in bias_list],
-        "targets": [out],
-        "clean": True,
-    }
+    return _doit_task("superbias", task_dep=["manifest"])
 
 
 def task_superflat():
-    cfg = _load_cfg()
-    work_dir = resolve_work_dir(cfg)
-    out = work_dir / "calibs" / "superflat.fits"
-
-    flat_list = cfg["frames"].get("flat", [])
-
-    def _action():
-        def _run():
-            from scorpio_pipe.stages.calib import build_superflat
-            # передаём путь к YAML-конфигу, который задан через $env:CONFIG
-            build_superflat(_cfg_path(), out_path=out)
-            # legacy mirror
-            try:
-                legacy = work_dir / "calib" / "superflat.fits"
-                legacy.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(out, legacy)
-            except Exception:
-                pass
-
-        _timed("superflat", work_dir, _run)
-
-    superbias = work_dir / "calibs" / "superbias.fits"
-
-    return {
-        "actions": [_action],
-        "file_dep": [_cfg_path(), superbias] + [Path(p) for p in flat_list],
-        "targets": [out],
-        "task_dep": ["superbias"],
-        "clean": True,
-    }
+    return _doit_task("superflat", task_dep=["superbias"])
 
 
 def task_cosmics():
-    cfg = _load_cfg()
-    work_dir = resolve_work_dir(cfg)
-    out = work_dir / "cosmics" / "summary.json"
-
-    obj_list = cfg["frames"].get("obj", [])
-    sky_list = cfg["frames"].get("sky", [])
-    file_dep = [_cfg_path()] + [Path(p) for p in obj_list + sky_list]
-
-    cosmics_cfg = (cfg.get("cosmics") or {}) if isinstance(cfg.get("cosmics"), dict) else {}
-    bias_sub = bool(cosmics_cfg.get("bias_subtract", True))
-    task_dep = []
-    if bias_sub:
-        superbias = work_dir / "calibs" / "superbias.fits"
-        file_dep.append(superbias)
-        task_dep.append("superbias")
-
-    def _action():
-        def _run():
-            from scorpio_pipe.stages.cosmics import clean_cosmics
-            clean_cosmics(_cfg_path(), out_dir=out.parent)
-
-        _timed("cosmics", work_dir, _run)
-
-    return {
-        "actions": [_action],
-        "file_dep": file_dep,
-        "targets": [out],
-        "task_dep": task_dep,
-        "clean": True,
-    }
+    return _doit_task("cosmics", task_dep=["superbias"])
 
 
 def task_flatfield():
-    """Apply superflat to selected frame kinds.
-
-    Important ordering for science-quality runs:
-    cosmics -> flatfield -> sky_sub
-
-    Sky subtraction prefers flat-fielded products if they exist.
-    """
-
-    cfg = _load_cfg()
-    work_dir = resolve_work_dir(cfg)
-    from scorpio_pipe.workspace_paths import stage_dir
-
-    out_dir = stage_dir(work_dir, "flatfield")
-    done_json = out_dir / "done.json"
-    done_marker = out_dir / "flatfield_done.json"
-
-    ff_cfg = (cfg.get("flatfield") or {}) if isinstance(cfg.get("flatfield"), dict) else {}
-    enabled = bool(ff_cfg.get("enabled", False))
-
-    frames = cfg.get("frames", {}) or {}
-    flat_list = frames.get("flat", []) or []
-
-    # Inputs: flats + any kinds we are asked to correct (best-effort).
-    apply_to = list(ff_cfg.get("apply_to") or ["obj", "sky", "sunsky"])
-    inp = list(flat_list)
-    for k in apply_to:
-        inp.extend(frames.get(k, []) or [])
-
-    file_dep = [_cfg_path()] + [Path(p) for p in inp]
-
-    task_dep = []
-    if enabled:
-        # We want cosmics-cleaned inputs when available.
-        task_dep.append("cosmics")
-        # Ensure masters exist; flatfield stage can still auto-build but we keep the DAG explicit.
-        task_dep.append("superflat")
-
-    def _action():
-        from scorpio_pipe.stages.flatfield import run_flatfield
-
-        _timed("flatfield", work_dir, lambda: run_flatfield(cfg, out_dir=out_dir))
-
-    return {
-        "actions": [_action],
-        "file_dep": file_dep,
-        "targets": [done_json, done_marker],
-        "task_dep": task_dep,
-        "clean": True,
-    }
+    return _doit_task("flatfield", task_dep=["superflat"])
 
 
 def task_superneon():
-    """Build stacked super-neon + candidates."""
-    def _action():
-        cfg = _load_cfg()
-        def _run():
-            from scorpio_pipe.stages.superneon import build_superneon
-            build_superneon(cfg)
+    return _doit_task("superneon", task_dep=["manifest"])
 
-        _timed("superneon", resolve_work_dir(cfg), _run)
-
-    cfg = _load_cfg()
-    work_dir = resolve_work_dir(cfg)
-    from scorpio_pipe.wavesol_paths import wavesol_dir as _wavesol_dir
-    outdir = _wavesol_dir(cfg)
-    neon_list = cfg["frames"].get("neon", [])
-
-    # bias subtraction in superneon is optional
-    superneon_cfg = (cfg.get("superneon") or {}) if isinstance(cfg.get("superneon"), dict) else {}
-    bias_sub = bool(superneon_cfg.get("bias_sub", True))
-
-    from scorpio_pipe.stages.calib import _resolve_superbias_path as _resolve_sb
-    superbias = _resolve_sb(cfg, work_dir)
-    targets = [
-        outdir / "superneon.fits",
-        outdir / "superneon.png",
-        outdir / "peaks_candidates.csv",
-    ]
-
-    file_dep = [_cfg_path()] + [Path(p) for p in neon_list]
-    task_dep = []
-    if bias_sub:
-        file_dep.append(superbias)
-        task_dep.append("superbias")
-
-    return {
-        "actions": [_action],
-        "file_dep": file_dep,
-        "targets": targets,
-        "task_dep": task_dep,
-        "clean": True,
-    }
 
 def task_lineid_prepare():
-    cfg = _load_cfg()
-    w = resolve_work_dir(cfg)
-    from scorpio_pipe.wavesol_paths import wavesol_dir as _wavesol_dir
-    wsol_dir = _wavesol_dir(cfg)
-
-    superneon_fits = wsol_dir / "superneon.fits"
-    peaks_csv = wsol_dir / "peaks_candidates.csv"
-    hand_file = wsol_dir / "hand_pairs.txt"   # итог ручной привязки
-
-    # neon_lines.csv: resolve from work_dir/config_dir/project_root or packaged resource
-    from scorpio_pipe.resource_utils import resolve_resource
-    lines_csv = cfg.get("wavesol", {}).get("neon_lines_csv", "neon_lines.csv")
-    lines_path = resolve_resource(lines_csv, work_dir=w, config_dir=Path(cfg.get("config_dir", w)), project_root=Path(cfg.get("project_root", _project_root())), allow_package=True).path
-
-    def _action():
-        def _run():
-            from scorpio_pipe.stages.lineid import prepare_lineid
-            prepare_lineid(
-                cfg,
-                superneon_fits=superneon_fits,
-                peaks_candidates_csv=peaks_csv,
-                hand_file=hand_file,
-                neon_lines_csv=lines_path,
-                y_half=int(cfg.get("wavesol", {}).get("y_half", 20)),
-            )
-
-        _timed("lineid_prepare", w, _run)
-
-    return {
-        "actions": [_action],
-        "file_dep": [_cfg_path(), superneon_fits, peaks_csv, lines_path],
-        "targets": [hand_file],
-        "verbosity": 2,
-    }
+    return _doit_task("lineid_prepare", task_dep=["superneon"])
 
 
-def task_wavesol():
-    cfg = _load_cfg()
-    from scorpio_pipe.stages.wavesolution import build_wavesolution
-    from scorpio_pipe.wavesol_paths import resolve_work_dir
-    from scorpio_pipe.wavesol_paths import wavesol_dir
-
-    outdir = wavesol_dir(cfg)
-    superneon_fits = outdir / "superneon.fits"
-    hand_pairs = outdir / "hand_pairs.txt"
-
-    def _action():
-        _timed("wavesolution", resolve_work_dir(cfg), lambda: build_wavesolution(cfg))
-
-    return {
-        "actions": [_action],
-        "file_dep": [_cfg_path(), superneon_fits, hand_pairs],
-        "targets": [
-            outdir / "wavesolution_1d.png",
-            outdir / "wavesolution_1d.json",
-            outdir / "residuals_1d.csv",
-            outdir / "wavesolution_2d.json",
-            outdir / "residuals_2d.csv",
-            outdir / "lambda_map.fits",
-            outdir / "wavelength_matrix.png",
-            outdir / "residuals_2d.png",
-        ],
-        "task_dep": ["superneon", "lineid_prepare"],
-        "clean": True,
-    }
-
-
-def task_sky_sub():
-    """Kelson-style sky subtraction (per exposure by default)."""
-    cfg = _load_cfg()
-    work_dir = resolve_work_dir(cfg)
-    from scorpio_pipe.workspace_paths import stage_dir
-    from scorpio_pipe.wavesol_paths import wavesol_dir
-
-    out_dir = stage_dir(work_dir, "sky")
-    done_json = out_dir / "done.json"
-    done_marker = out_dir / "sky_done.json"
-
-    def _action():
-        from scorpio_pipe.stages.sky_sub import run_sky_sub
-
-        _timed("sky_sub", work_dir, lambda: run_sky_sub(cfg, out_dir=out_dir))
-
-    return {
-        "actions": [_action],
-        "file_dep": [
-            _cfg_path(),
-            wavesol_dir(cfg) / "lambda_map.fits",
-            stage_dir(work_dir, "flatfield") / "flatfield_done.json",
-        ],
-        "targets": [done_json, done_marker, out_dir / "qc_sky.json", out_dir / "roi.json"],
-        "task_dep": ["wavesol", "cosmics", "flatfield"],
-        "clean": True,
-    }
-
-
-def task_wavelength_solution():
-    # alias, чтобы читалось красиво в графе зависимостей
-    return {"actions": None, "task_dep": ["wavesol"]}
+def task_wavesolution():
+    return _doit_task("wavesolution", task_dep=["lineid_prepare"])
 
 
 def task_linearize():
-    """Rectify per-pixel spectra to a common linear wavelength grid (per exposure)."""
-    cfg = _load_cfg()
-    work_dir = resolve_work_dir(cfg)
-    from scorpio_pipe.workspace_paths import stage_dir
-    from scorpio_pipe.wavesol_paths import wavesol_dir
-
-    out_dir = stage_dir(work_dir, "linearize")
-    done = out_dir / "linearize_done.json"
-
-    def _action():
-        from scorpio_pipe.stages.linearize import run_linearize
-
-        _timed("linearize", work_dir, lambda: run_linearize(cfg, out_dir=out_dir))
-
-    # wavesol provides the lambda_map; sky_sub provides 09_sky/*_skysub_raw.fits
-
-    return {
-        "actions": [_action],
-        "file_dep": [_cfg_path(), wavesol_dir(cfg) / "lambda_map.fits", stage_dir(work_dir, "sky") / "sky_done.json"],
-        "targets": [
-            done,
-            out_dir / "wave_grid.json",
-            work_dir / "qc" / "linearize_qc.json",
-            out_dir / "lin_preview.fits",
-            out_dir / "lin_preview.png",
-        ],
-        "task_dep": ["wavesol", "sky_sub"],
-        "clean": True,
-    }
+    return _doit_task("linearize", task_dep=["wavesolution", "flatfield", "cosmics"])
 
 
-def _collect_sky_sub_frames(cfg: dict[str, Any]) -> list[Path]:
-    wd = resolve_work_dir(cfg)
-    from scorpio_pipe.workspace_paths import stage_dir
-
-    lin_dir = stage_dir(wd, "linearize")
-    frames = sorted(lin_dir.glob("*_skysub.fits"))
-    return [p for p in frames if p.is_file()]
+def task_sky():
+    return _doit_task("sky", task_dep=["linearize"])
 
 
 def task_stack2d():
-    """Stack per-exposure sky-subtracted rectified frames into a single 2D product."""
-    cfg = _load_cfg()
-    work_dir = resolve_work_dir(cfg)
-    from scorpio_pipe.workspace_paths import stage_dir
-
-    out_dir = stage_dir(work_dir, "stack2d")
-    done = out_dir / "stack2d_done.json"
-
-    def _action():
-        from scorpio_pipe.stages.stack2d import run_stack2d
-
-        def _run():
-            inputs = _collect_sky_sub_frames(cfg)
-            return run_stack2d(cfg, inputs=inputs, out_dir=out_dir)
-
-        _timed("stack2d", work_dir, _run)
-
-    return {
-        "actions": [_action],
-        "file_dep": [_cfg_path(), stage_dir(work_dir, "linearize") / "linearize_done.json"],
-        "targets": [done, out_dir / "stacked2d.fits", out_dir / "coverage.png"],
-        "task_dep": ["linearize"],
-        "clean": True,
-    }
-
-
-def task_stack():
-    """Legacy alias for stack2d."""
-    return {"actions": None, "task_dep": ["stack2d"]}
+    return _doit_task("stack2d", task_dep=["sky"])
 
 
 def task_extract1d():
-    """1D extraction (boxcar/optimal) from the stacked 2D product."""
-    cfg = _load_cfg()
-    work_dir = resolve_work_dir(cfg)
-    from scorpio_pipe.workspace_paths import stage_dir
+    return _doit_task("extract1d", task_dep=["stack2d"])
 
-    out_dir = stage_dir(work_dir, "extract1d")
-    done = out_dir / "extract1d_done.json"
 
-    def _action():
-        from scorpio_pipe.stages.extract1d import run_extract1d
+def task_qc_report():
+    return _doit_task("qc_report", task_dep=["extract1d", "wavesolution", "manifest"])
 
-        _timed("extract1d", work_dir, lambda: run_extract1d(cfg, out_dir=out_dir))
 
-    return {
-        "actions": [_action],
-        "file_dep": [_cfg_path(), stage_dir(work_dir, "stack2d") / "stacked2d.fits"],
-        "targets": [done, out_dir / "spec1d.fits", out_dir / "spec1d.png"],
-        "task_dep": ["stack2d"],
-        "clean": True,
-    }
+def task_navigator():
+    return _doit_task("navigator", task_dep=["qc_report"])
+
+
+# --- Aliases (backward compatibility) ---
+
+def task_wavesol():
+    return _doit_task("wavesol", task_dep=["lineid_prepare"])
+
+
+def task_wavelength_solution():
+    # Historical name used by some notebooks
+    return _doit_task("wavelength_solution", task_dep=["lineid_prepare"])
+
+
+def task_sky_sub():
+    return _doit_task("sky_sub", task_dep=["linearize"])
+
+
+def task_stack():
+    return _doit_task("stack", task_dep=["sky"])
 
 
 def task_run_all():
-    return {"actions": None, "task_dep": ["manifest", "extract1d"]}
+    """Convenience task: run the full default chain via the engine."""
+
+    chain = [
+        "manifest",
+        "superbias",
+        "superflat",
+        "cosmics",
+        "flatfield",
+        "superneon",
+        "lineid_prepare",
+        "wavesolution",
+        "linearize",
+        "sky",
+        "stack2d",
+        "extract1d",
+        "qc_report",
+        "navigator",
+    ]
+
+    wd = _work_dir()
+    target = done_json_path_for_task(wd, "navigator")
+    return {
+        "actions": [(lambda: _engine_run(chain))],
+        "uptodate": [False],
+        "targets": [str(target)],
+        "task_dep": [],
+    }

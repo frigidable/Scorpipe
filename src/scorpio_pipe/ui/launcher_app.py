@@ -20,6 +20,7 @@ from pathlib import Path
 import logging
 import sys
 import time
+import traceback
 
 
 def _log_progress(msg: str) -> None:
@@ -109,11 +110,29 @@ def main() -> None:
         pass
 
     # Heavy import: main window (pulls in most of the pipeline + UI widgets).
-    _log_progress("launcher_app: importing LauncherWindow")
-    from scorpio_pipe.ui.launcher_window import LauncherWindow  # noqa: PLC0415
+    try:
+        _log_progress("launcher_app: importing LauncherWindow")
+        from scorpio_pipe.ui.launcher_window import LauncherWindow  # noqa: PLC0415
 
-    _log_progress("launcher_app: constructing LauncherWindow")
-    w = LauncherWindow()
+        _log_progress("launcher_app: constructing LauncherWindow")
+        w = LauncherWindow()
+    except Exception:
+        tb = traceback.format_exc()
+        _log_progress("launcher_app: FAILED to initialize UI\n" + tb)
+        lp = _guess_log_path()
+        msg = "Не удалось запустить интерфейс Scorpipe.\n\n" + tb
+        if lp:
+            msg += f"\n\nЛог: {lp}"
+        try:
+            QtWidgets.QMessageBox.critical(None, "Scorpipe", msg)
+        except Exception:
+            pass
+        try:
+            if splash is not None:
+                splash.close()
+        except Exception:
+            pass
+        raise SystemExit(1)
 
     # User preference: open maximized by default.
     try:
