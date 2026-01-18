@@ -5,6 +5,13 @@
 - GUI startup diagnostics: timestamped progress logs in per-user `scorpipe_gui.log` and periodic faulthandler stack dumps during startup (automatically cancelled once the main window is shown).
 - Frozen build safety: added `multiprocessing.freeze_support()` to GUI entrypoints to prevent rare spawn recursion / deadlocks in packaged builds.
 
+## [6.1.0](https://github.com/frigidable/Scorpipe/compare/scorpipe-v6.0.2...scorpipe-v6.1.0) (2026-01-18)
+
+
+### Features
+
+* **sky/linearize:** move sky before linearize; split raw vs rectified skysub contract ([b7ec59e](https://github.com/frigidable/Scorpipe/commit/b7ec59ed77ed4d1c35807bd5b76e2b563aaf8140))
+
 ## [6.0.16] - 2026-01-17
 
 ### Fixed
