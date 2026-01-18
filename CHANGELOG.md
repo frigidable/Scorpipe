@@ -1,3 +1,10 @@
+## [6.0.17] - 2026-01-17
+
+### Fixed
+- Windows installer / PyInstaller GUI startup: show a splash screen and defer heavy imports until after Qt is initialized, avoiding the "process in Task Manager but no window" symptom on slow machines / first start.
+- GUI startup diagnostics: timestamped progress logs in per-user `scorpipe_gui.log` and periodic faulthandler stack dumps during startup (automatically cancelled once the main window is shown).
+- Frozen build safety: added `multiprocessing.freeze_support()` to GUI entrypoints to prevent rare spawn recursion / deadlocks in packaged builds.
+
 ## [6.0.16] - 2026-01-17
 
 ### Fixed

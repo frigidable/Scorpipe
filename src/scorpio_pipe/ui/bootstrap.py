@@ -21,6 +21,10 @@ from pathlib import Path
 from datetime import datetime
 
 
+# Keep a reference so faulthandler keeps writing to the correct file in frozen builds.
+_FAULT_FILE = None
+
+
 def _user_log_dir() -> Path:
     # Prefer LOCALAPPDATA on Windows, else fall back to ~/.local/share.
     base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
@@ -127,6 +131,14 @@ def _install_excepthook(log_path: Path) -> None:
 
 
 def run_gui() -> None:
+    # Windows frozen builds (PyInstaller) + multiprocessing: prevent spawn recursion/hangs.
+    try:
+        import multiprocessing as _mp
+
+        _mp.freeze_support()
+    except Exception:
+        pass
+
     log_dir = _user_log_dir()
     log_path = log_dir / "scorpipe_gui.log"
 
@@ -145,8 +157,14 @@ def run_gui() -> None:
     _install_excepthook(log_path)
 
     # Capture hard crashes / segfaults into the log when possible.
+    # Also dump a traceback later if startup appears stuck (helps diagnose "no window" cases).
+    global _FAULT_FILE
     try:
-        faulthandler.enable(open(log_path, "a", encoding="utf-8"))
+        if _FAULT_FILE is None:
+            _FAULT_FILE = open(log_path, "a", encoding="utf-8")
+        faulthandler.enable(_FAULT_FILE)
+        # If startup hangs (deadlock/slow imports), this will periodically write stack traces.
+        faulthandler.dump_traceback_later(30, repeat=True)
     except Exception:
         pass
 
