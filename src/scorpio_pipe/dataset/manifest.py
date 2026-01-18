@@ -10,7 +10,7 @@ Design goals
 * Deterministic selection rules.
 * Importable in lightweight environments: **no Astropy imports**.
 
-Schema v2 (P0-E)
+Schema v3 (P0-B4)
 ----------------
 Adds list-valued association fields for calibrations that may be combined:
 
@@ -21,7 +21,7 @@ Adds list-valued association fields for calibrations that may be combined:
 Backward compatibility
 ----------------------
 Older manifests (schema_version=1) only contain singular ``flat_id``/``arc_id``.
-The v2 loader auto-populates the list fields from the singular ones.
+The v2/v3 loader auto-populates the list fields from the singular ones.
 """
 
 from datetime import datetime, timezone
@@ -155,13 +155,19 @@ class CalibrationPools(BaseModel):
 class MatchSelectionMeta(BaseModel):
     model_config = ConfigDict(extra="allow")
 
+    # Basic selection pool stats
     n_pool: int = 0
     n_hard_compatible: int = 0
+    # QC-only deltas
     abs_dt_s: float | None = None
     sperange_mismatch: bool | None = None
     slitpos_diff: float | None = None
+    # Deterministic tie breaking diagnostics
     tie_n: int | None = None
     tie_break: str | None = None
+    # B4.3: explicit, serializable association rationale
+    match_reason: str | None = None
+    qc_deltas: Dict[str, Any] = Field(default_factory=dict)
 
 
 class MatchEntry(BaseModel):
@@ -209,8 +215,8 @@ class DatasetManifest(BaseModel):
     # "schema" via an alias.
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
-    schema_id: str = Field(default="scorpio-pipe.dataset-manifest.v2", alias="schema")
-    schema_version: int = Field(default=2)
+    schema_id: str = Field(default="scorpio-pipe.dataset-manifest.v3", alias="schema")
+    schema_version: int = Field(default=3)
     pipeline_version: str
     generated_utc: str
 

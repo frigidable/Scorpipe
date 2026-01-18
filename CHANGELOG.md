@@ -1,3 +1,126 @@
+## [6.0.27] - 2026-01-19
+
+### Added
+- P0-A8: documentation “law” for execution semantics: `docs/EXECUTION_CONTRACT.md` (resume/force, QC gate, done.json, stage_state).
+
+### Changed
+- P0-A7: `STAGE_SPECS` now declares outputs for **all** canonical tasks (100% coverage) and includes optional `output_keys` aligned with `scorpio_pipe.products`.
+- CI test now enforces `set(CANONICAL_TASKS) == set(STAGE_SPECS)` and requires non-empty `StageSpec.validate_globs` for every canonical task.
+
+## [6.0.26] - 2026-01-18
+
+### Added
+- P0-B6: unit tests for product contract validator (missing HDU, dtype, variance sanity, shape mismatch, mandatory header keys).
+- P0-B6: variance propagation unit tests (multiply/scale, divide incl. divisor-variance, weighted-mean stacking, contract cleanup).
+- P0-B6: FrameMeta policy unit tests (required missing key error, optional-missing recorded, fallback provenance recorded).
+- P0-B6: dataset_manifest deterministic-JSON integration test (input order independent).
+- P0-B6: QC report now includes a non-fatal `compliance` block summarizing core contract wiring (data model version, stage-contract registry, reference_context presence, spot product validations).
+
+### Changed
+- Dataset manifest builder now sorts input records and pool/frame_index ordering to make `dataset_manifest.json` deterministic independent of filesystem scan order.
+- Smoke end-to-end test now creates a minimal `reference_context.json`, writes a contract-compliant `lambda_map.fits`, and asserts `SCORPDMV` + `compliance`/`reference_context` presence in the QC report.
+
+## [6.0.25] - 2026-01-18
+
+### Fixed
+- Flatfield stage now guarantees a MASK plane in ``*_flat.fits`` MEF products even when upstream inputs lacked any DQ/mask information (writes an all-zero mask).
+
+### Added
+- P0-B5 (stage 2): engine boundary-contract enforcement expanded to MEF products from `flatfield`, `sky`, and `linearize` using explicit `STAGE_SPECS.validate_globs`.
+- `StageSpec.contract_kind` now supports `lambda_map`, allowing `wavesolution` contract validation to be expressed declaratively in `STAGE_SPECS`.
+
+### Changed
+- Engine boundary-contract validation is now driven by `STAGE_SPECS` (less duplication; easier to expand coverage safely).
+
+### Tests
+- Add regression test asserting `flatfield.apply_flat()` always writes a MEF with a `MASK` extension.
+
+## [6.0.24] - 2026-01-18
+
+### Fixed
+- P0-B5 (stage 1): engine boundary-contract validation now runs against the actual stage output directory (``out_dir``), so contract violations are no longer silently skipped.
+
+### Added
+- P0-B5 (stage 1): new contract validator for wavesolution ``lambda_map.fits`` (minimal header+data requirements) and engine enforcement after `wavesolution`.
+
+### Changed
+- P0-B5 (stage 1): boundary-contract enforcement is intentionally limited to high-value product stages: `stack2d`, `extract1d`, and `wavesolution` (coverage expands in later migration stages).
+- Dataset frame classifier now imports the canonical `FrameMeta` from `scorpio_pipe.metadata` (instrument shim remains for backward compatibility).
+
+### Tests
+- Add regression tests for `lambda_map.fits` contract validation and for engine boundary validation operating on `out_dir`.
+
+## [6.0.23] - 2026-01-18
+
+### Added
+- P0-B4: dataset_manifest schema v3 (`scorpio-pipe.dataset-manifest.v3`) now records per-match `match_reason` and `qc_deltas` for calibration associations.
+- P0-B4: new manifest validator (`scorpio_pipe.calib.manifest_schema`) with strict schema/version checks; CLI `dataset-manifest` validates the on-disk JSON after writing.
+- P0-B4: QC report block `calibration_associations` summarizing selected calibrations per science_set, suboptimal matches, and warning counts.
+
+### Changed
+- P0-B4: dataset-manifest builder emits `CALIB_SUBOPTIMAL_MATCH` warnings when a physically compatible but QC-suboptimal calibration is selected (e.g., readout mismatch allowed, spectral-range mismatch, time-window fallback).
+- P0-B4: wavesolution and superneon stages prefer calibration associations from dataset_manifest when present; they do not perform any directory search.
+
+### Tests
+- Add regression tests asserting `CALIB_SUBOPTIMAL_MATCH` + `match_reason/qc_deltas` for suboptimal flat/arc readout mismatch selections.
+
+## [6.0.22] - 2026-01-18
+
+### Added
+- P0-B3: CRDS-lite reference context (`manifest/reference_context.json`) capturing resolved reference resources (linelists/atlases/...) with SHA256 hashes and a stable `context_id`.
+- P0-B3: `context_id` is recorded into per-stage `done.json` and surfaced in the QC report (JSON + HTML).
+
+### Changed
+- Stage hashing now includes `reference_context_id`, so changes in any tracked reference force a re-run of affected stages.
+
+## [6.0.21] - 2026-01-18
+
+### Added
+- P0-B2: metadata contract layer (`scorpio_pipe.metadata`) now provides the canonical `FrameMeta` with per-field `meta_provenance`, `meta_missing_optional`, and `meta_fallback_used`.
+- P0-B2: `FrameMeta.from_header(...)` constructor supporting missing-key policy and explicit fallback sources.
+
+### Changed
+- Dataset manifest scanning uses only `FrameMeta` for normalized keys (including spectral range) and emits QA warnings when optional keys are missing or fallbacks are used.
+- Calibration compatibility QC (GAIN/RATE/RDNOISE) prefers normalized values from `FrameMeta` instead of ad-hoc raw header lookups.
+- `scorpio_pipe.calib.compat` is fixed as a stable import path and stages now import compat checks from it.
+
+## [6.0.20] - 2026-01-18
+
+### Added
+- P0-B: introduced `scorpio_pipe/contracts` (data model, units, variance, maskbits, validators) as a stable, testable contract layer.
+- P0-B: introduced stable import shims `scorpio_pipe.metadata`, `scorpio_pipe.refs`, and `scorpio_pipe.calib` (thin wrappers over existing implementations).
+
+### Changed
+- MEF writer now stamps `SCORPDMV=1` and sets per-extension `BUNIT` on `SCI` and the corresponding squared `BUNIT` on `VAR` (with auto-inference from legacy `SCORPUM`).
+- `extract1d` now stamps `SCORPDMV` into `spec1d.fits` primary header.
+- Pipeline runner maps product contract violations to `done.json` `error_code=CONTRACT`.
+
+### Tests
+- Updated boundary contract tests to assert P0-B1 stamps (`SCORPDMV`, per-extension `BUNIT`) and to match the new noise-provenance validation order.
+
+## [6.0.19] - 2026-01-18
+
+### Fixed
+- GUI startup hang on Windows ("Загрузка интерфейса..." forever): main window pages are now constructed lazily (on-demand) instead of all at once during startup, preventing long freezes / apparent hangs in frozen builds.
+- GUI startup robustness: `launcher_app` now shows a crash dialog with full traceback and the GUI log path if the main window fails to import/construct.
+
+## [6.0.18] - 2026-01-18
+
+### Added
+- P0-A: core execution engine moved to `scorpio_pipe.pipeline.engine` as the single source of truth for stage execution semantics (resume/force hashing, QC gate blocking, boundary contract validation, done.json/stage_state/provenance updates).
+- P0-A: `workflow/dodo.py` is now a pure adapter: each doit task delegates execution to the engine, eliminating UI/CLI/doit divergence.
+
+### Changed
+- `scorpio_pipe.ui.pipeline_runner` is now a backward-compatible shim re-exporting the core engine API plus a small set of GUI helpers.
+- CLI execution (`scorpio-pipe run --execute`) now imports the engine directly.
+
+### Fixed
+- Runner provenance: `done.json` upsert no longer references an undefined `effective_config` variable.
+- `done.json` now records the expected `stage_hash` even for `skipped/blocked/cancelled` statuses (best-effort), improving traceability.
+
+### Tests
+- Add regression tests ensuring `workflow/dodo.py` does not execute stages directly and that it produces engine-standard artifacts (`manifest/stage_state.json`, per-task `done.json`).
+
 ## [6.0.17] - 2026-01-17
 
 ### Fixed

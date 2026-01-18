@@ -882,16 +882,17 @@ def prepare_lineid(
     if neon_lines_csv is None:
         neon_lines_csv = resolve_linelist_csv_path(cfg, lamp_info.lamp_type)
 
-    from scorpio_pipe.resource_utils import resolve_resource
+    from scorpio_pipe.refs.store import resolve_reference
 
-    neon_lines_csv_res = resolve_resource(
+    neon_lines_csv_res = resolve_reference(
         neon_lines_csv,
+        resources_dir=cfg.get("resources_dir"),
         work_dir=work_dir,
         config_dir=base,
-        project_root=cfg.get("project_root"),
+        project_root=cfg.get("project_root") or cfg.get("data_dir"),
         allow_package=True,
     )
-    neon_lines_csv = neon_lines_csv_res.path
+    neon_lines_csv = neon_lines_csv_res.resolved_path
     img = fits.getdata(superneon_fits, memmap=False).astype(float)
     prof = _profile_1d(img, y_half=y_half)
     x = np.arange(prof.size, dtype=float)
@@ -915,16 +916,15 @@ def prepare_lineid(
     atlas_pdf = wcfg.get("atlas_pdf", "HeNeAr_atlas.pdf")
     atlas_path: Optional[Path] = None
     if atlas_pdf:
-        from scorpio_pipe.resource_utils import resolve_resource_maybe
-
-        atlas_res = resolve_resource_maybe(
+        atlas_res = resolve_reference(
             atlas_pdf,
+            resources_dir=cfg.get("resources_dir"),
             work_dir=work_dir,
             config_dir=base,
-            project_root=cfg.get("project_root"),
+            project_root=cfg.get("project_root") or cfg.get("data_dir"),
             allow_package=True,
         )
-        atlas_path = atlas_res.path if atlas_res else None
+        atlas_path = atlas_res.resolved_path
 
     # Try to open the relevant atlas page automatically (0-indexed) + set λ window from instrument DB
     setup = (cfg.get("frames", {}) or {}).get("__setup__", {}) or {}

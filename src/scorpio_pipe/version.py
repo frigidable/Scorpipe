@@ -1,21 +1,18 @@
 """Project version + minimal pipeline provenance helpers.
 
 Historically, several modules imported a :func:`get_provenance` helper from this
-module. During refactors, it was accidentally removed, which broke imports in
-both the CLI and the CI smoke/regression tests.
-
-This module intentionally keeps provenance *stable* (no timestamps) so stage
-hashing and caching remain deterministic.
+module. This module intentionally keeps provenance *stable* (no timestamps) so
+stage hashing and caching remain deterministic.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-__version__ = "6.0.17"
+__version__ = "6.0.27"
 
 # Backward-compatible alias used by the UI/CI and older QC JSON writers.
-PIPELINE_VERSION = "6.0.17"
+PIPELINE_VERSION = __version__
 
 
 @dataclass(frozen=True)

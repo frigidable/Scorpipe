@@ -1042,11 +1042,154 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
     compat_meta: dict[str, Any] = {}
     lamp_meta: dict[str, Any] = {}
 
-    from scorpio_pipe.calib_compat import CalibrationMismatchError
+    from scorpio_pipe.calib.compat import CalibrationMismatchError
 
     # Input lists (may be empty in special workflows)
-    obj_list = [Path(x) for x in (cfg.get("frames", {}) or {}).get("obj", [])]  # type: ignore[union-attr]
-    arc_list = [Path(x) for x in (cfg.get("frames", {}) or {}).get("neon", [])]  # type: ignore[union-attr]
+    used_manifest = False
+    manifest_info: dict[str, Any] = {}
+
+    obj_list: list[Path] = []
+    arc_list: list[Path] = []
+
+    # P0-B4: Prefer dataset_manifest-derived associations when available.
+    try:
+        from scorpio_pipe.dataset.manifest_io import load_dataset_manifest, uniq_keep_order
+        from scorpio_pipe.wavesol_paths import get_selected_disperser
+        from scorpio_pipe.exclude_policy import resolve_exclude_set
+
+        man, man_path = load_dataset_manifest(cfg, work_dir, require=False, require_v3=False)
+        if man is not None and man_path is not None:
+            setup = (cfg.get("frames", {}) or {}).get("__setup__", {}) or {}
+            target_disp = str(get_selected_disperser(cfg) or "").strip()
+
+            # If config doesn't pin a disperser and manifest is multi-disperser, don't guess.
+            if not target_disp:
+                disps = sorted(
+                    {
+                        str(s.config.spectro.disperser)
+                        for s in (man.science_sets or [])
+                        if s.config is not None and s.config.spectro is not None
+                    }
+                )
+                if len(disps) > 1:
+                    raise RuntimeError(
+                        "dataset_manifest has multiple dispersers; set wavesol.disperser (or frames.__setup__.disperser) "
+                        "to select which science_set(s) to use for wavesolution."
+                    )
+                target_disp = disps[0] if disps else ""
+
+            # Optional slit selection: required if multiple slits exist for the selected disperser.
+            wcfg2 = cfg.get("wavesol", {}) if isinstance(cfg.get("wavesol"), dict) else {}
+            slit_hint = str(wcfg2.get("slit") or setup.get("slit") or "").strip()
+
+            sel_sets = [
+                s
+                for s in (man.science_sets or [])
+                if (str(s.config.spectro.disperser).strip().upper() == target_disp.strip().upper())
+            ]
+
+            def _slit_match(s) -> bool:
+                if not slit_hint:
+                    return True
+                # Try numeric match (arcsec) first
+                try:
+                    v = float(slit_hint)
+                    sw = s.config.spectro.slit_width_arcsec
+                    if sw is None:
+                        return False
+                    return abs(float(sw) - v) <= 0.05
+                except Exception:
+                    pass
+                return str(s.config.spectro.slit_width_key or "").strip() == slit_hint
+
+            if slit_hint:
+                sel_sets = [s for s in sel_sets if _slit_match(s)]
+            else:
+                slits = sorted({str(s.config.spectro.slit_width_key or "") for s in sel_sets})
+                if len([x for x in slits if x]) > 1:
+                    raise RuntimeError(
+                        "dataset_manifest has multiple slit configurations for this disperser; set wavesol.slit "
+                        "(or frames.__setup__.slit) to select which science_set(s) to use."
+                    )
+
+            match_by_set = {str(m.science_set_id): m for m in (man.matches or [])}
+            frame_by_id = {str(f.frame_id): f for f in (man.frames or [])} if getattr(man, "frames", None) else {}
+            arc_pool = {str(c.calib_id): c for c in ((man.calibration_pools.arc or []) if man.calibration_pools is not None else [])}
+
+            arc_ids: list[str] = []
+            frame_ids: list[str] = []
+            for s in sel_sets:
+                frame_ids.extend([str(x) for x in (s.frame_ids or [])])
+                m = match_by_set.get(str(s.science_set_id))
+                if m and m.arc_id:
+                    arc_ids.append(str(m.arc_id))
+
+            arc_ids = uniq_keep_order(arc_ids)
+            frame_ids = uniq_keep_order(frame_ids)
+
+            base_dir = Path(str(getattr(man, "data_dir", None) or cfg.get("data_dir") or work_dir)).expanduser().resolve()
+
+            ex = resolve_exclude_set(cfg, data_dir=cfg.get("data_dir"))
+            excluded_abs = set(ex.excluded_abs)
+
+            def _resolve_path(p: str) -> Path:
+                pp = Path(str(p)).expanduser()
+                if not pp.is_absolute():
+                    pp = (base_dir / pp).resolve()
+                return pp
+
+            def _is_excluded(pp: Path) -> bool:
+                try:
+                    return str(pp.resolve()) in excluded_abs
+                except Exception:
+                    return str(pp) in excluded_abs
+
+            # Build obj_list from science_set frame_ids.
+            for fid in frame_ids:
+                fe = frame_by_id.get(str(fid))
+                if fe is None:
+                    continue
+                pp = _resolve_path(fe.path)
+                if _is_excluded(pp):
+                    continue
+                obj_list.append(pp)
+
+            # Build arc_list from associated arc_id(s).
+            for aid in arc_ids:
+                item = arc_pool.get(str(aid))
+                if item is not None:
+                    pp = _resolve_path(item.path)
+                else:
+                    fe = frame_by_id.get(str(aid))
+                    if fe is None:
+                        continue
+                    pp = _resolve_path(fe.path)
+                if _is_excluded(pp):
+                    continue
+                arc_list.append(pp)
+
+            if obj_list or arc_list:
+                used_manifest = True
+                manifest_info = {
+                    "path": str(man_path),
+                    "schema": getattr(man, "schema_id", None),
+                    "schema_version": getattr(man, "schema_version", None),
+                    "target_disperser": target_disp,
+                    "slit_hint": slit_hint,
+                    "science_sets": [str(s.science_set_id) for s in sel_sets],
+                    "arc_ids": arc_ids,
+                    "n_obj": int(len(obj_list)),
+                    "n_arc": int(len(arc_list)),
+                }
+
+    except Exception as _e:
+        manifest_info = {"error": str(_e)}
+
+    # Fallback: explicit config lists.
+    if not obj_list:
+        obj_list = [Path(x) for x in (cfg.get("frames", {}) or {}).get("obj", [])]  # type: ignore[union-attr]
+    if not arc_list:
+        arc_list = [Path(x) for x in (cfg.get("frames", {}) or {}).get("neon", [])]  # type: ignore[union-attr]
 
     # Safety-net exclude application (absolute policy).
     try:
@@ -1070,6 +1213,13 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
     except Exception:
         # Exclude should never break the stage.
         pass
+
+    # P0-B4: record whether dataset_manifest was used for input selection.
+    compat_meta["dataset_manifest"] = {"used": bool(used_manifest), **(manifest_info or {})}
+    compat_meta["input_lists"] = {
+        "n_obj": int(len(obj_list)),
+        "n_arc": int(len(arc_list)),
+    }
 
     # Resolve lamp type + line list (always recorded).
     try:
@@ -1181,7 +1331,7 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
                 )
 
             # ARC compatibility: check against the (single) setup representative.
-            from scorpio_pipe.calib_compat import ensure_compatible_calib
+            from scorpio_pipe.calib.compat import ensure_compatible_calib
             from scorpio_pipe.qc.flags import make_flag
 
             sci_path = Path(next(iter(next(iter(setup_groups.values()))))) if setup_groups else obj_list[0]

@@ -11,9 +11,11 @@ from scorpio_pipe.maskbits import NO_COVERAGE
 
 def _hdr_with_units() -> fits.Header:
     h = fits.Header()
+    # legacy compact unit/noise cards remain supported
     h["SCORPUM"] = ("e-", "SCI/VAR units model")
     h["SCORPGN"] = (1.7, "Gain used")
     h["SCORPRN"] = (3.2, "Read-noise used")
+    h["SCORPNS"] = ("model", "Noise model source")
     return h
 
 
@@ -31,12 +33,18 @@ def test_boundary_contract_mef_requires_units(tmp_path):
     # should validate
     validate_mef_product(p, stage="linearize")
 
+    # writer must stamp data model + per-extension units
+    with fits.open(p, memmap=False) as hdul:
+        assert int(hdul[0].header.get("SCORPDMV")) == 1
+        assert str(hdul["SCI"].header.get("BUNIT"))
+        assert str(hdul["VAR"].header.get("BUNIT"))
+
     # now without required unit/noise provenance
     p2 = tmp_path / "prod2.fits"
     write_sci_var_mask(p2, sci, var=var, mask=mask, header=fits.Header(), grid=grid)
     with pytest.raises(ProductContractError) as e:
         validate_mef_product(p2, stage="linearize")
-    assert e.value.code == "UNITS_MISSING"
+    assert e.value.code == "NOISE_PROV_MISSING"
 
 
 def test_boundary_contract_mef_requires_waveref_when_wavelength_exists(tmp_path):

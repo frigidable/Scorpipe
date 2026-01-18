@@ -238,7 +238,8 @@ def choose_linelist_name(lamp_type: str) -> str:
 def resolve_linelist_csv(cfg: dict[str, Any], *, lamp_type: str) -> str:
     """Resolve the line-list CSV path (string) for UI/provenance."""
 
-    from scorpio_pipe.resource_utils import resolve_resource
+    from scorpio_pipe.paths import resolve_work_dir
+    from scorpio_pipe.refs.store import resolve_reference
 
     wcfg = cfg.get("wavesol", {}) if isinstance(cfg.get("wavesol"), dict) else {}
 
@@ -253,14 +254,15 @@ def resolve_linelist_csv(cfg: dict[str, Any], *, lamp_type: str) -> str:
     if not csv_name:
         csv_name = choose_linelist_name(lamp_type)
 
-    rr = resolve_resource(
+    rr = resolve_reference(
         str(csv_name),
-        work_dir=cfg.get("work_dir"),
+        resources_dir=cfg.get("resources_dir"),
+        work_dir=resolve_work_dir(cfg),
         config_dir=cfg.get("config_dir"),
         project_root=cfg.get("data_dir") or cfg.get("project_root"),
         allow_package=True,
     )
-    return str(Path(rr.path).expanduser())
+    return str(Path(rr.resolved_path).expanduser())
 
 
 def resolve_linelist_csv_path(cfg: dict[str, Any], lamp_type: str) -> Path:

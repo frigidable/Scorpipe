@@ -178,16 +178,17 @@ def prepare_lineid(cfg: dict[str, Any]) -> dict[str, Path]:
         )
 
     wcfg = cfg.get("wavesol", {}) or {}
-    from scorpio_pipe.resource_utils import resolve_resource
+    from scorpio_pipe.refs.store import resolve_reference
 
-    lines_res = resolve_resource(
+    lines_res = resolve_reference(
         (wcfg.get("neon_lines_csv", "neon_lines.csv")),
+        resources_dir=cfg.get("resources_dir"),
         work_dir=work_dir,
         config_dir=cfg.get("config_dir"),
-        project_root=cfg.get("project_root"),
+        project_root=cfg.get("project_root") or cfg.get("data_dir"),
         allow_package=True,
     )
-    lines_path = lines_res.path
+    lines_path = lines_res.resolved_path
     if not lines_path.exists():
         raise FileNotFoundError(f"neon_lines.csv not found: {lines_path}")
 

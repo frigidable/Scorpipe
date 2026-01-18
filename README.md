@@ -290,6 +290,7 @@ setup.bat --installer
 Внутренние документы проекта:
 - [`MANUAL.md`](docs/MANUAL.md) — руководство пользователя
 - [`RUNBOOK.md`](docs/RUNBOOK.md) — шпаргалка “как прогнать пайплайн”
+- [`EXECUTION_CONTRACT.md`](docs/EXECUTION_CONTRACT.md) — “закон” исполнения (resume/force/QC gate/done.json)
 - [`CHANGELOG.md`](CHANGELOG.md) — заметки релизов и hotfix‑ов
 - [`AUDIT.md`](docs/AUDIT.md) — честный аудит стадий и статуса “заглушек/готового”
 

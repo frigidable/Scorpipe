@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from scorpio_pipe.instruments import HeaderContractError, parse_frame_meta
+from scorpio_pipe.metadata import HeaderContractError, parse_frame_meta
 from scorpio_pipe.qc.flags import make_flag
 
 
@@ -74,6 +74,8 @@ class CalibMustKey:
             node = _norm(m.readout_key.node)
             naxis1 = str(int(m.naxis1))
             naxis2 = str(int(m.naxis2))
+            detector = str(getattr(m, 'detector', '') or '')
+            slitmask = str(getattr(m, 'slitmask', '') or '')
         except HeaderContractError:
             # Fallback for non-SCORPIO headers or legacy datasets.
             instrume = _norm(h.get("INSTRUME", h.get("TELESCOP", "")))
@@ -84,17 +86,19 @@ class CalibMustKey:
             node = _norm(h.get("NODE", h.get("READMODE", "")))
             naxis1 = _s(h.get("NAXIS1", ""))
             naxis2 = _s(h.get("NAXIS2", ""))
+            detector = _norm(h.get('DETECTOR', h.get('CCDNAME', h.get('CCD', ''))))
+            slitmask = _norm(h.get('SLITMASK', ''))
 
         return cls(
             instrume=instrume,
-            detector=_norm(h.get("DETECTOR", h.get("CCDNAME", h.get("CCD", "")))),
+            detector=_norm(detector),
             mode=mode,
             disperse=disperse,
             binning=binning,
             naxis1=_norm(naxis1),
             naxis2=_norm(naxis2),
             slitwid=slitwid,
-            slitmask=_norm(h.get("SLITMASK", "")),
+            slitmask=_norm(slitmask),
             node=node,
         )
 
@@ -232,12 +236,25 @@ def compare_compat_headers(
 
     # Readout gain/rate/readnoise differences are QC-only.
     if allow_readout_diff:
-        g_sci = sci_hdr.get("GAIN", sci_hdr.get("EGAIN", None))
-        g_cal = calib_hdr.get("GAIN", calib_hdr.get("EGAIN", None))
-        r_sci = sci_hdr.get("RATE", None)
-        r_cal = calib_hdr.get("RATE", None)
-        rn_sci = sci_hdr.get("RDNOISE", sci_hdr.get("READNOISE", None))
-        rn_cal = calib_hdr.get("RDNOISE", calib_hdr.get("READNOISE", None))
+        # P0-B2: prefer normalized FrameMeta for readout values.
+        g_sci = g_cal = r_sci = r_cal = rn_sci = rn_cal = None
+        try:
+            ms = parse_frame_meta(sci_hdr, strict=False)
+            mc = parse_frame_meta(calib_hdr, strict=False)
+            g_sci = ms.readout_key.gain
+            g_cal = mc.readout_key.gain
+            r_sci = ms.readout_key.rate
+            r_cal = mc.readout_key.rate
+            rn_sci = ms.readout_key.rdnoise
+            rn_cal = mc.readout_key.rdnoise
+        except Exception:
+            # Fallback for non-SCORPIO headers.
+            g_sci = sci_hdr.get("GAIN", sci_hdr.get("EGAIN", None))
+            g_cal = calib_hdr.get("GAIN", calib_hdr.get("EGAIN", None))
+            r_sci = sci_hdr.get("RATE", None)
+            r_cal = calib_hdr.get("RATE", None)
+            rn_sci = sci_hdr.get("RDNOISE", sci_hdr.get("READNOISE", None))
+            rn_cal = calib_hdr.get("RDNOISE", calib_hdr.get("READNOISE", None))
 
         readout_mismatch = False
         if (g_sci is not None and g_cal is not None and str(g_sci) != str(g_cal)):
