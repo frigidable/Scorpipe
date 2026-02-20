@@ -303,7 +303,11 @@ def ensure_reference_context(
         # If we cannot write, fail loudly: provenance is a hard contract for B3.
         raise
 
-    return ctx
+    # Return payload, but also include an absolute path pointer for callers (tests/UI)
+    # without polluting the serialized JSON (paths are environment-dependent).
+    ret = dict(ctx)
+    ret["reference_context_json"] = str(out_path)
+    return ret
 
 
 def load_reference_context(work_dir: str | Path) -> dict[str, Any] | None:
