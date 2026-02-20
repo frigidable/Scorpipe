@@ -53,6 +53,28 @@ class OutputsPanel(QtWidgets.QWidget):
         self.btn_open_folder.clicked.connect(self._open_folder)
         self.tree.itemDoubleClicked.connect(self._open_selected)
 
+    def _open_selected(
+        self,
+        item: QtWidgets.QTreeWidgetItem,
+        column: int | None = None,  # Qt passes (item, column)
+    ) -> None:
+        """Open the selected product path (or its parent folder).
+
+        Qt's ``itemDoubleClicked`` signal provides (item, column).
+        This handler must exist to keep the launcher UI startable.
+        """
+
+        _ = column
+        try:
+            p = Path(str(item.data(0, QtCore.Qt.ItemDataRole.UserRole) or ""))
+            if p.exists():
+                QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(p)))
+                return
+            if p.parent.exists():
+                QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(p.parent)))
+        except Exception:
+            pass
+
     def set_context(self, cfg: dict[str, Any] | None, stage: str | None = None) -> None:
         self._cfg = cfg
         self._stage = stage

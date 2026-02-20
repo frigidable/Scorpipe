@@ -11,7 +11,6 @@ import yaml
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from scorpio_pipe.ui.qt_log import install as install_qt_log
-from scorpio_pipe.ui.outputs_panel import OutputsToolDialog
 from scorpio_pipe.ui.config_defaults import schema_default
 from scorpio_pipe.ui.param_metadata import get_param_meta
 from scorpio_pipe.ui.delayed_tooltip import install_delayed_tooltip
@@ -43,6 +42,13 @@ def _lazy_pipeline_runner():
     from scorpio_pipe.ui import pipeline_runner as _pr
 
     return _pr
+
+def _lazy_outputs_tool_dialog():
+    # Import outputs tool lazily; it is a convenience feature and must not
+    # prevent the main UI from starting (especially in frozen builds).
+    from scorpio_pipe.ui.outputs_panel import OutputsToolDialog as _OTD  # noqa: PLC0415
+    return _OTD
+
 
 
 def load_context(cfg_path):  # type: ignore[override]
@@ -462,14 +468,28 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._build_toolbar()
 
         # Outputs: a detached tool window (keeps stage pages layout stable).
-        self.outputs_tool = OutputsToolDialog(parent=self)
-        self.outputs_tool.hide()
+        # This tool is optional; failures must not prevent UI startup.
+        self.outputs_tool = None
         try:
-            self.outputs_tool.visibilityChanged.connect(
-                self._on_outputs_tool_visibility_changed
-            )
+            OutputsToolDialog = _lazy_outputs_tool_dialog()
+            self.outputs_tool = OutputsToolDialog(parent=self)
+            self.outputs_tool.hide()
+            try:
+                self.outputs_tool.visibilityChanged.connect(
+                    self._on_outputs_tool_visibility_changed
+                )
+            except Exception:
+                pass
         except Exception:
-            pass
+            try:
+                import logging as _logging
+
+                _logging.getLogger("scorpio_pipe.ui").exception(
+                    "Failed to init Outputs tool window"
+                )
+            except Exception:
+                pass
+            self.outputs_tool = None
 
         self._build_statusbar_widgets()
         self._install_shortcuts()
