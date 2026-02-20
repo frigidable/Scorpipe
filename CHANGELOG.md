@@ -1,3 +1,35 @@
+## [7.0.0] - 2026-02-20
+
+### Added
+- P0-A1: preflight ядро: детерминированный ранний скан raw-night директории.
+  Новые артефакты в run_root:
+  - `manifest/night_profile.json`
+  - `manifest/preflight_report.json` (OK/WARN/ERROR + причины)
+  - `quarantine/*.json` + `manifest/quarantine_index.json`
+  Preflight использует строгий контракт ключей (strict=True) для обязательных
+  метаданных и помечает мягкие/опциональные проблемы как WARN.
+
+### Changed
+- `manifest` task теперь запускает preflight автоматически перед записью `manifest/manifest.json`.
+- QC viewer (GUI) отображает новые JSON-артефакты preflight.
+
+### Tests
+- Добавлен интеграционный тест на детерминизм preflight JSON.
+
+## [6.0.28-pre1] - 2026-01-30
+
+### Fixed
+- P0-B7: engine boundary validation now matches the real sky preview product name (`preview.fits`).
+
+### Changed
+- P0-B10: reference_context no longer hardcodes a historical lamp default ("Ne"); it uses `lamp_contract.resolve_lamp_type()` so the long-slit default is HeNeAr.
+- P0-B10: reference_context additionally tracks all built-in package reference resources (CSV/YAML/PDF/JSON) excluding documentation-only files, so any shipped-resource change updates `context_id` and triggers reruns.
+- P0-B11: linearize forbids legacy directory search for `lambda_map*.fits` when a validated `dataset_manifest.json` is present; legacy discovery remains available only without a manifest, with a WARN surfaced in QC.
+
+### Tests
+- Add regression test for sky preview glob coverage.
+- Add regression test enforcing "no directory search" for linearize when `dataset_manifest.json` exists.
+
 ## [6.0.27] - 2026-01-19
 
 ### Added

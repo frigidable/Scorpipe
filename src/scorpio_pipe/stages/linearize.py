@@ -1460,6 +1460,15 @@ def run_linearize(
         lambda_map_sha256: str | None = None
         lam_path: Path | None = None
         rect_model: dict[str, Any] | None = None
+        legacy_discovery_used = False
+
+        # P0-B11: if a validated dataset_manifest.json exists, forbid any
+        # directory search for calibration artifacts. The manifest must be the
+        # single source of truth.
+        from scorpio_pipe.dataset.manifest_io import load_dataset_manifest
+
+        # If the manifest exists but is invalid, this raises immediately.
+        _, manifest_path = load_dataset_manifest(cfg, work_dir, require=False, require_v3=True)
 
         def _sha256(p: Path) -> str:
             import hashlib
@@ -1527,9 +1536,30 @@ def run_linearize(
 
         # 3) Last resort: legacy discovery (kept ONLY for old workspaces)
         if lam_path is None:
+            if manifest_path is not None:
+                raise FileNotFoundError(
+                    "lambda_map could not be resolved from canonical artifacts, and legacy directory search is disabled "
+                    f"because dataset_manifest.json is present: {manifest_path}. "
+                    "Re-run the formal wavesolution stage (08_wavesol) to regenerate rectification_model.json/lambda_map, "
+                    "or fix the workspace layout."
+                )
+
+            # Legacy-only fallback: directory search (explicitly warned + surfaced in QC).
             base = work_dir / "wavesol"
             cand = list(base.rglob("lambda_map.fits")) + list(base.rglob("lambda_map*.fits"))
             lam_path = cand[0] if cand else None
+            if lam_path is not None:
+                legacy_discovery_used = True
+                try:
+                    from loguru import logger
+
+                    logger.warning(
+                        "Using legacy directory search for lambda_map (no dataset_manifest.json). "
+                        "This is deprecated; prefer rectification_model.json in 08_wavesol. "
+                        f"Selected: {lam_path}"
+                    )
+                except Exception:
+                    pass
 
         if lam_path is None or not lam_path.exists():
             raise FileNotFoundError(
@@ -2805,6 +2835,16 @@ def run_linearize(
 
             thr, thr_meta = compute_thresholds(cfg)
             qc_flags: list[dict[str, Any]] = []
+
+            if legacy_discovery_used:
+                qc_flags.append(
+                    make_flag(
+                        "LEGACY_LAMBDA_MAP_DISCOVERY",
+                        "WARN",
+                        "lambda_map was located via legacy directory search (no dataset_manifest.json)",
+                        hint="Re-run 08_wavesol to regenerate rectification_model.json and avoid guessing.",
+                    )
+                )
 
             # Lambda-map metadata: prefer explicit WAVEUNIT/WAVEREF, but allow
             # heuristic inference for legacy/synthetic data.

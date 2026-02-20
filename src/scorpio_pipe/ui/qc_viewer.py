@@ -19,6 +19,9 @@ class QCItem:
 DEFAULT_QC_ITEMS: list[QCItem] = [
     # Canonical (v5.40.6): QC lives in run_root/qc, HTML entrypoint at run_root/index.html.
     QCItem("Manifest (JSON)", "manifest/manifest.json", "text"),
+    QCItem("Preflight report (JSON)", "manifest/preflight_report.json", "text"),
+    QCItem("Night profile (JSON)", "manifest/night_profile.json", "text"),
+    QCItem("Quarantine index (JSON)", "manifest/quarantine_index.json", "text"),
     QCItem("Products manifest (JSON)", "manifest/products_manifest.json", "text"),
     QCItem("QC report (HTML)", "index.html", "text"),
     QCItem("QC report (HTML, qc/)", "qc/qc_report.html", "text"),

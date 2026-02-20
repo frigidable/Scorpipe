@@ -102,6 +102,44 @@ def _parse_text_version(path: Path) -> str | None:
         return None
 
 
+def _iter_package_resources_for_tracking() -> list[str]:
+    """Return package resource paths (relative to scorpio_pipe/resources).
+
+    P0-B10: track *all* built-in scientific reference resources by default so
+    any change triggers a new ``context_id`` and appropriate stage reruns.
+
+    We intentionally exclude documentation-only files to keep the context
+    stable with respect to prose changes.
+    """
+
+    try:
+        base = (Path(__file__).resolve().parents[1] / "resources").resolve()
+        if not base.exists():
+            return []
+    except Exception:
+        return []
+
+    exts = {".csv", ".yaml", ".yml", ".json", ".pdf"}
+    out: list[str] = []
+    for p in base.rglob("*"):
+        try:
+            if not p.is_file():
+                continue
+            if p.suffix.lower() not in exts:
+                continue
+            rel = p.relative_to(base).as_posix()
+            # Exclude docs and README-like files.
+            low = rel.lower()
+            if low.startswith("docs/"):
+                continue
+            if p.name.lower().startswith("readme"):
+                continue
+            out.append(rel)
+        except Exception:
+            continue
+    return sorted(set(out))
+
+
 def _resolve_ref(
     requested: str,
     *,
@@ -132,15 +170,14 @@ def _gather_requests(cfg: dict[str, Any]) -> list[tuple[str, str]]:
     wcfg = wcfg or {}
 
     # Linelist CSV: new key wavesol.linelist_csv; legacy neon_lines_csv.
-    lamp_type = str(wcfg.get("lamp_type") or wcfg.get("lamp") or "").strip()
-    if not lamp_type:
-        # Default aligns with historical pipeline behavior.
-        lamp_type = "Ne"
-
+    # P0-B10: do not hardcode historical lamp defaults here. Use the lamp
+    # contract resolver so the default (HeNeAr for long-slit SCORPIO/SCORPIO-2)
+    # and its provenance are consistent across the pipeline.
     try:
-        from scorpio_pipe.lamp_contract import choose_linelist_name
+        from scorpio_pipe.lamp_contract import choose_linelist_name, resolve_lamp_type
 
-        default_ll = choose_linelist_name(lamp_type)
+        lr = resolve_lamp_type(cfg, strict=False)
+        default_ll = choose_linelist_name(lr.lamp_type)
     except Exception:
         default_ll = "neon_lines.csv"
 
@@ -156,6 +193,18 @@ def _gather_requests(cfg: dict[str, Any]) -> list[tuple[str, str]]:
 
     # Instrument DB is shipped with the package (affects auto-config / metadata).
     reqs.append(("instrument_db", "instruments/scorpio_instruments.yaml"))
+
+    # Track all built-in science reference resources (CSV/YAML/PDF/JSON) so
+    # any change alters the context id and forces correct reruns.
+    # These are additional to the explicit logical entries above.
+    try:
+        explicit_requested = {str(r[1]) for r in reqs}
+        for rel in _iter_package_resources_for_tracking():
+            if rel in explicit_requested:
+                continue
+            reqs.append((f"pkg_resource.{rel}", rel))
+    except Exception:
+        pass
 
     return reqs
 
