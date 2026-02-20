@@ -35,7 +35,6 @@ from statistics import median
 from typing import Any, Iterable, Mapping
 
 from scorpio_pipe.exclude_policy import resolve_exclude_set, resolve_data_dir
-from scorpio_pipe.frame_signature import FrameSignature
 from scorpio_pipe.metadata import HeaderContractError, FrameMeta, parse_frame_meta
 from scorpio_pipe.version import PIPELINE_VERSION
 
@@ -161,13 +160,19 @@ def _read_frame_meta(hdr: Mapping[str, Any]) -> FrameMeta:
     return parse_frame_meta(hdr, strict=True)
 
 
-def _read_frame_signature(hdr: Mapping[str, Any], meta: FrameMeta | None) -> FrameSignature:
+def _read_frame_signature(hdr: Mapping[str, Any], meta: FrameMeta | None) -> Any:
     fallback_shape = None
     if meta is not None:
         try:
             fallback_shape = (int(meta.naxis2), int(meta.naxis1))
         except Exception:
             fallback_shape = None
+    try:
+        from scorpio_pipe.frame_signature import FrameSignature
+    except Exception as e:
+        raise ImportError(
+            "FrameSignature is unavailable. This usually means required dependencies are missing."
+        ) from e
     # FrameSignature expects an Astropy Header, but it only accesses mapping keys.
     # Be defensive: if the input type is not a real Header, convert to dict.
     try:
@@ -249,7 +254,7 @@ def run_preflight(
 
         hdr: Mapping[str, Any] | None = None
         meta: FrameMeta | None = None
-        sig: FrameSignature | None = None
+        sig: Any | None = None
         if not excluded:
             try:
                 hdr = _read_header(p_abs)
@@ -467,8 +472,97 @@ def run_preflight(
     }
 
 
+def _read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        if not path.exists():
+            return None
+        obj = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None
+
+
+def ensure_preflight(
+    cfg: dict[str, Any],
+    run_root: str | Path,
+    *,
+    recursive: bool = True,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Ensure preflight artifacts exist and return a small summary.
+
+    This is the *single preflight entry point* used by the engine and tasks.
+    It is intentionally conservative:
+    - If artifacts exist and are readable, it reuses them (unless ``force=True``).
+    - Otherwise, it runs :func:`run_preflight`.
+    - If preflight fails unexpectedly, it writes a deterministic ERROR report
+      and returns ``{"status": "ERROR", ...}``.
+    """
+
+    run_root_p = Path(run_root).expanduser().resolve()
+    man_dir = run_root_p / "manifest"
+    report_p = man_dir / "preflight_report.json"
+    night_p = man_dir / "night_profile.json"
+    qidx_p = man_dir / "quarantine_index.json"
+
+    if not force and report_p.exists() and night_p.exists() and qidx_p.exists():
+        rep = _read_json(report_p) or {}
+        status = str(rep.get("status") or "").upper()
+        if status in {"OK", "WARN", "ERROR"}:
+            # Best-effort: also return the most important counters.
+            summ = rep.get("summary") if isinstance(rep.get("summary"), dict) else {}
+            return {
+                "status": status,
+                "n_total_fits": int((summ or {}).get("n_total_fits") or 0),
+                "n_quarantine": int((summ or {}).get("n_quarantine") or 0),
+                "reused": True,
+            }
+
+    try:
+        res = run_preflight(cfg, run_root_p, recursive=recursive)
+        out = dict(res)
+        out["reused"] = False
+        # Normalise status for callers.
+        out["status"] = str(out.get("status") or "").upper()
+        return out
+    except Exception as e:
+        # Best-effort: still write a deterministic ERROR report.
+        try:
+            man_dir.mkdir(parents=True, exist_ok=True)
+            data_dir_p = None
+            try:
+                data_dir_p = resolve_data_dir(cfg)
+            except Exception:
+                data_dir_p = None
+            payload = {
+                "schema": "scorpio-pipe.preflight-report.v1",
+                "status": "ERROR",
+                "data_dir": str(data_dir_p) if data_dir_p is not None else None,
+                "summary": {"error": str(e)},
+                "reasons": [
+                    {
+                        "severity": "ERROR",
+                        "code": "PREFLIGHT_FAILED",
+                        "n": 1,
+                        "sample_paths": [],
+                    }
+                ],
+            }
+            report_p.write_text(_json_dumps(payload), encoding="utf-8")
+        except Exception:
+            pass
+        return {
+            "status": "ERROR",
+            "n_total_fits": 0,
+            "n_quarantine": 0,
+            "reused": False,
+            "error": str(e),
+        }
+
+
 __all__ = [
     "run_preflight",
+    "ensure_preflight",
     # reason codes
     "RC_EXCLUDED_BY_POLICY",
     "RC_FITS_OPEN_ERROR",

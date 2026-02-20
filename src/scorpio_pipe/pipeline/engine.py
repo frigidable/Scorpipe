@@ -333,41 +333,18 @@ def _task_manifest(
     cancel_token: CancelToken | None = None,
 ) -> Path:
     from scorpio_pipe.manifest import write_manifest
-    from scorpio_pipe.preflight import run_preflight
+    from scorpio_pipe.preflight import ensure_preflight
 
     _ = ensure_work_layout(out_dir)
 
-    # P0-A1: deterministic preflight scan (quarantine + night profile).
-    # Executed as part of the manifest task so every run has early diagnostics.
-    try:
-        run_preflight(cfg, out_dir)
-    except Exception as e:
-        # Best-effort: still write a deterministic ERROR report to manifest/.
-        try:
-            import json
-
-            man_dir = Path(out_dir) / "manifest"
-            man_dir.mkdir(parents=True, exist_ok=True)
-            payload = {
-                "schema": "scorpio-pipe.preflight-report.v1",
-                "status": "ERROR",
-                "summary": {"error": str(e)},
-                "reasons": [
-                    {
-                        "severity": "ERROR",
-                        "code": "PREFLIGHT_FAILED",
-                        "n": 1,
-                        "sample_paths": [],
-                    }
-                ],
-            }
-            (man_dir / "preflight_report.json").write_text(
-                json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
-        except Exception:
-            pass
-        raise
+    # P0-A1/P0-A2: preflight is mandatory and centralized.
+    # If it already ran at the engine entry gate, this is a cheap reuse.
+    pf = ensure_preflight(cfg, out_dir)
+    if str((pf or {}).get("status") or "").upper() == "ERROR":
+        raise RuntimeError(
+            "Preflight gate blocked run (status=ERROR). "
+            f"See: {Path(out_dir) / 'manifest' / 'preflight_report.json'}"
+        )
 
     # Canonical location (run_root/manifest/manifest.json).
     p = write_manifest(
@@ -1146,6 +1123,27 @@ def run_sequence(
     except Exception as e:
         raise RuntimeError(
             f"Invalid run folder layout: {out_dir}\n{e}"
+        ) from e
+
+    # ------------------------------------------------------------------
+    # P0-A2: Preflight is a mandatory *engine gate* (single law).
+    # Any entry point that reaches run_sequence must pass this check.
+    # ------------------------------------------------------------------
+    try:
+        from scorpio_pipe.preflight import ensure_preflight
+
+        pf = ensure_preflight(cfg, out_dir)
+        if str((pf or {}).get("status") or "").upper() == "ERROR":
+            raise RuntimeError(
+                "Preflight gate blocked run (status=ERROR). "
+                f"See: {out_dir / 'manifest' / 'preflight_report.json'}"
+            )
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise RuntimeError(
+            "Preflight gate failed unexpectedly. "
+            f"See: {out_dir / 'manifest' / 'preflight_report.json'}\n{e}"
         ) from e
 
     # P0-B3: create/update manifest/reference_context.json (hard contract).
