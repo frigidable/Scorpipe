@@ -31,9 +31,11 @@ def _minimal_hdr(shape: tuple[int, int]) -> fits.Header:
     # Units
     hdr["BUNIT"] = ("ADU", "Raw detector units")
 
-    # NAXIS1/2 are written by FITS automatically, but keep them explicit for clarity.
-    hdr["NAXIS1"] = int(shape[1])
-    hdr["NAXIS2"] = int(shape[0])
+    # NOTE: Do NOT set NAXIS1/2 manually.
+    # Astropy verifies FITS header card ordering, and NAXISn cards must appear
+    # in the mandatory block right after NAXIS. When using convenience writers
+    # (fits.writeto), NAXISn are derived from the data shape and written in the
+    # correct place automatically.
     return hdr
 
 

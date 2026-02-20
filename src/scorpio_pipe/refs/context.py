@@ -277,6 +277,7 @@ def ensure_reference_context(
     cfg: dict[str, Any],
     *,
     resources_dir: str | Path | None = None,
+    overwrite: bool = False,
 ) -> dict[str, Any]:
     """Ensure ``manifest/reference_context.json`` exists and is up to date.
 
@@ -288,7 +289,7 @@ def ensure_reference_context(
 
     ctx = build_reference_context(cfg, resources_dir=resources_dir)
 
-    # Write if missing or changed.
+    # Write if missing or changed (or explicitly forced).
     try:
         old = None
         if out_path.exists():
@@ -296,7 +297,7 @@ def ensure_reference_context(
                 old = json.loads(out_path.read_text(encoding="utf-8"))
             except Exception:
                 old = None
-        if not isinstance(old, dict) or old.get("context_id") != ctx.get("context_id"):
+        if overwrite or (not isinstance(old, dict)) or old.get("context_id") != ctx.get("context_id"):
             atomic_write_json(out_path, ctx, indent=2, ensure_ascii=False)
     except Exception:
         # If we cannot write, fail loudly: provenance is a hard contract for B3.

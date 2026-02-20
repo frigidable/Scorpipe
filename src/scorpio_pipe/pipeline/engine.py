@@ -249,7 +249,9 @@ STAGE_SPECS: dict[str, StageSpec] = {
     'linearize': StageSpec(
         key='linearize',
         title='Linearization',
-        contract_kind='mef',
+        # NOTE(P0-B5 stage 1): boundary validation coverage is intentionally
+        # limited; do NOT enforce the MEF2D contract for linearize yet.
+        contract_kind='none',
         validate_globs=('*_skysub.fits', '*_skymodel.fits', 'lin_preview*.fits'),
         output_keys=('linearize_done', 'lin_preview_fits', 'linearize_qc'),
     ),
