@@ -73,12 +73,26 @@ def iter_gui_stages() -> Iterator[GuiStageDef]:
 
 CANONICAL_TASKS: tuple[str, ...] = tuple(STAGE_CATALOG.task_keys())
 
+_LEGACY_STAGE_SPEC_KINDS = {"none", "mef", "spec1d", "lambda_map", "calib_bias_triplet", "calib_flat", "calib_neon"}
+
+
+def _legacy_stage_spec_kind(task) -> str:
+    kind = str(getattr(task, "contract_kind", "none") or "none").strip().lower()
+    if kind in _LEGACY_STAGE_SPEC_KINDS:
+        return kind
+    if kind in {"standard_prepare", "sensfunc", "telluric_model", "line_measure", "science_report"}:
+        return "spec1d"
+    if kind in {"fluxcal_apply"}:
+        return "mef"
+    return "none"
+
+
 STAGE_SPECS: dict[str, StageSpec] = {
     t.key: StageSpec(
         key=t.key,
         title=str(t.label),
         validate_globs=t.validate_globs,
-        contract_kind=t.contract_kind,
+        contract_kind=_legacy_stage_spec_kind(t),
         output_keys=t.product_keys,
     )
     for t in STAGE_CATALOG.task_infos()
@@ -97,16 +111,19 @@ TASK_ENTRYPOINTS: dict[str, str] = {
 }
 
 # Canonical task + aliases -> entrypoint string (UI help text / membership checks).
-TASKS: dict[str, str] = {}
+class _TaskEntry(str):
+    pass
+
+TASKS: dict[str, _TaskEntry] = {}
 for _t in STAGE_CATALOG.task_infos():
     _ep = str(_t.entrypoint or '').strip()
     if not _ep:
         continue
-    TASKS[_t.key] = _ep
+    TASKS[_t.key] = _TaskEntry(_ep)
     for _a in (_t.aliases or ()):  # type: ignore[truthy-bool]
         aa = str(_a).strip()
         if aa:
-            TASKS[aa] = _ep
+            TASKS[aa] = _TaskEntry(_ep)
 
 
 def validate_and_canonicalize_tasks(task_names: Iterable[str]) -> tuple[list[str], list[str]]:

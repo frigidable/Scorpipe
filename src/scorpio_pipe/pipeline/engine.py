@@ -208,12 +208,26 @@ class _StageResourceMonitor:
 # Canonical task list and task specs are derived from StageCatalog (single source of truth).
 CANONICAL_TASKS: tuple[str, ...] = tuple(STAGE_CATALOG.task_keys())
 
+_LEGACY_STAGE_SPEC_KINDS = {"none", "mef", "spec1d", "lambda_map", "calib_bias_triplet", "calib_flat", "calib_neon"}
+
+
+def _legacy_stage_spec_kind(task) -> str:
+    kind = str(getattr(task, "contract_kind", "none") or "none").strip().lower()
+    if kind in _LEGACY_STAGE_SPEC_KINDS:
+        return kind
+    if kind in {"standard_prepare", "sensfunc", "telluric_model", "line_measure", "science_report"}:
+        return "spec1d"
+    if kind in {"fluxcal_apply"}:
+        return "mef"
+    return "none"
+
+
 STAGE_SPECS: dict[str, StageSpec] = {
     t.key: StageSpec(
         key=t.key,
         title=str(t.label),
         validate_globs=t.validate_globs,
-        contract_kind=t.contract_kind,
+        contract_kind=_legacy_stage_spec_kind(t),
         output_keys=t.product_keys,
     )
     for t in STAGE_CATALOG.task_infos()
@@ -282,17 +296,45 @@ TASK_ENTRYPOINTS: dict[str, str] = {
 }
 
 # Compatibility mapping: canonical keys + aliases -> entrypoint string.
-# This is used only for membership checks / help text; execution resolves
-# canonical names via StageCatalog first.
-TASKS: dict[str, str] = {}
+# Historically some callers expected TASKS[name] to be directly callable.
+class _TaskEntry(str):
+    def __new__(cls, entrypoint: str):
+        return str.__new__(cls, str(entrypoint))
+
+    def __call__(self, cfg: Any, run_root: Any | None = None, **kwargs: Any) -> Any:
+        fn = resolve_entrypoint(str(self))
+        if run_root is not None and "out_dir" not in kwargs:
+            try:
+                from scorpio_pipe.workspace_paths import stage_dir as _stage_dir
+                ep = str(self)
+                mod = ep.split(":", 1)[0]
+                guessed = None
+                if mod.endswith("entry_linearize"):
+                    guessed = "linearize"
+                elif mod.endswith("entry_extract1d"):
+                    guessed = "extract1d"
+                elif mod.endswith("entry_stack2d"):
+                    guessed = "stack2d"
+                elif mod.endswith("entry_sky_sub"):
+                    guessed = "sky"
+                elif mod.endswith("entry_cosmics"):
+                    guessed = "cosmics"
+                if guessed is not None:
+                    kwargs["out_dir"] = _stage_dir(run_root, guessed)
+            except Exception:
+                pass
+        return fn(cfg, **kwargs)
+
+
+TASKS: dict[str, _TaskEntry] = {}
 for _t in STAGE_CATALOG.task_infos():
     _ep = str(_t.entrypoint or '').strip()
     if _ep:
-        TASKS[_t.key] = _ep
+        TASKS[_t.key] = _TaskEntry(_ep)
         for _a in (_t.aliases or ()):  # type: ignore[truthy-bool]
             aa = str(_a).strip()
             if aa:
-                TASKS[aa] = _ep
+                TASKS[aa] = _TaskEntry(_ep)
 
 
 # Resolver cache (entrypoint string -> callable).
@@ -454,27 +496,28 @@ def _collect_output_paths(res: Any) -> list[Path]:
     return uniq
 
 
-def _validate_task_products(cfg: dict[str, Any], task: str, out_dir: Path) -> None:
+def _validate_task_products(cfg: dict[str, Any] | str, task: str | Path, out_dir: Path | None = None) -> None:
     """Validate boundary contract for *this* task outputs (hard-fail).
 
-    P0-ARCH-01.2: validation is driven by (stage_key, product_keys) rather than
-    ad-hoc globs scattered across modules.
-
-    Parameters
-    ----------
-    cfg
-        Pipeline config.
-    task
-        Canonical task key.
-    out_dir
-        Directory of the stage outputs (``run_root/NN_slug``).
+    Backward compatibility: older tests/utilities still call this helper as
+    ``_validate_task_products(task, out_dir)``. Newer engine code passes
+    ``(cfg, task, out_dir)``.
     """
+
+    if out_dir is None:
+        cfg_dict: dict[str, Any] = {}
+        task_name = str(cfg)
+        out_dir = Path(task)
+    else:
+        cfg_dict = cfg if isinstance(cfg, dict) else {}
+        task_name = str(task)
+
 
     # Keep existing gating semantics: only enforce when the stage declares a
     # non-trivial contract kind.
     tinfo = None
     try:
-        tinfo = STAGE_CATALOG.get_task(task)
+        tinfo = STAGE_CATALOG.get_task(task_name)
     except Exception:
         tinfo = None
     if tinfo is None:
@@ -506,7 +549,7 @@ def _validate_task_products(cfg: dict[str, Any], task: str, out_dir: Path) -> No
         from scorpio_pipe.catalog.products import CATALOG as PRODUCT_CATALOG
 
         PRODUCT_CATALOG.validate_products(
-            cfg,
+            cfg_dict,
             stage_key=str(tinfo.key),
             product_keys=tuple(tinfo.product_keys or ()),
             run_root=Path(out_dir),

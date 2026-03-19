@@ -31,6 +31,7 @@ _ALLOWED_BY_KIND: dict[CalibrationProductKind, tuple[str, ...]] = {
         CalibrationStatus.RELATIVE.value,
         CalibrationStatus.RELATIVE_TELLURIC.value,
         CalibrationStatus.ABSOLUTE_APPROX.value,
+        CalibrationStatus.ABSOLUTE_TRUSTED.value,
     ),
 }
 

@@ -1,4 +1,4 @@
-## 7.70.0
+## 8.0.0
 
 - feat(p0-semantics): froze calibration-stack semantics by synchronizing `contracts/calibration.py`, calibrated-product validators, and spec docs so 1D/2D status claims are explicit and machine-checked. In particular, 2D calibrated products may no longer claim `ABSOLUTE_TRUSTED`.
 - feat(p0-metadata): tightened `FrameMeta` provenance handling with explicit provenance helpers (`header` / `derived` / `fallback` / `missing` / `untracked`) and made standard association / sensfunc logic downgrade trust when atmospheric metadata is weak instead of silently overclaiming.
