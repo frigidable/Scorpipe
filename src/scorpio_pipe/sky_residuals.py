@@ -486,7 +486,8 @@ def run_sky_residual_refine(cfg: dict[str, Any], *, out_dir: Path) -> dict[str, 
                 taper = _taper(int(x1 - x0 + 1))[None, :]
                 gain_metric = None
                 if action == "apply" and alpha is not None and beta is not None and gamma is not None:
-                    grad_full = np.gradient(model[:, sl].astype(float), axis=1)
+                    model_sl = model[:, sl].astype(float)
+                    grad_full = np.gradient(model_sl, axis=1) if model_sl.ndim >= 2 and model_sl.shape[1] >= 2 else np.zeros_like(model_sl, dtype=float)
                     local_strength = lsf_strength if classification == "lsf_mismatch" else strength
                     corr_win = (alpha * model[:, sl] + beta * grad_full + gamma).astype(np.float32)
                     # Never correct more than a fixed fraction of the measured residual amplitude in sky rows.

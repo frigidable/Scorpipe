@@ -1925,6 +1925,7 @@ def run_extract1d(
                 error_message=str(e),
                 inputs={"fits": str(in_fits or stacked_fits) if (in_fits or stacked_fits) is not None else None},
                 outputs={},
+                flags=[{"code": "STAGE_FAILED", "severity": "ERROR", "message": str(e)}],
                 legacy_paths=[Path(out_dir) / "extract1d_done.json", Path(out_dir) / "extract_done.json"],
             )
         except Exception:

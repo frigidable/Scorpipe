@@ -2610,9 +2610,26 @@ def run_sky_sub(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[str
 
     Engine code should pass ``out_dir`` explicitly. For backward compatibility with
     older tests and helper scripts, infer the canonical stage directory when it is
-    omitted.
+    omitted and emit ``done.json`` on failure.
     """
 
     if out_dir is None:
         out_dir = stage_dir(resolve_work_dir(cfg), "sky")
-    return _run_sky_sub_impl(cfg, out_dir=out_dir)
+    try:
+        return _run_sky_sub_impl(cfg, out_dir=out_dir)
+    except Exception as e:
+        try:
+            from scorpio_pipe.io.done_json import write_done_json
+            write_done_json(
+                stage="sky",
+                stage_dir=Path(out_dir),
+                status="fail",
+                error_code=type(e).__name__,
+                error_message=str(e),
+                flags=[{"code": "STAGE_FAILED", "severity": "ERROR", "message": str(e)}],
+                outputs={},
+                legacy_paths=[Path(out_dir) / "sky_done.json"],
+            )
+        except Exception:
+            pass
+        raise

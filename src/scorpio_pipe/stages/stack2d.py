@@ -541,7 +541,7 @@ def _write_mef(
     if cov is not None:
         extra.append(fits.ImageHDU(np.asarray(cov, dtype=np.int16), name="COV"))
     write_sci_var_mask(
-        path, sci, var=var, mask=mask, header=hdr, grid=grid, extra_hdus=extra
+        path, sci, var=var, mask=mask, header=hdr, grid=grid, extra_hdus=extra, primary_data=sci
     )
 
 
@@ -801,7 +801,8 @@ def run_stack2d(
 
     wd = resolve_work_dir(cfg)
     if out_dir is None:
-        raise ValueError("stack2d: out_dir is required (pass ctx.stage_dir)")
+        from scorpio_pipe.workspace_paths import stage_dir
+        out_dir = stage_dir(wd, "stack2d")
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -815,20 +816,20 @@ def run_stack2d(
 
     lin_dir = stage_dir(wd, "linearize").resolve()
     sky_dir = stage_dir(wd, "sky").resolve()
-    allowed_roots = (lin_dir, sky_dir)
+    allowed_roots = (lin_dir,)
 
     for p in files:
         pr = p.resolve()
         try:
             if not any(pr.is_relative_to(r) for r in allowed_roots):
                 raise ValueError(
-                    f"stack2d input must come from {lin_dir.name} or {sky_dir.name}: got {p}"
+                    f"stack2d input must come from {lin_dir.name}: got {p}"
                 )
         except AttributeError:
             # Python < 3.9 fallback
             if not any(str(r) in str(pr) for r in allowed_roots):
                 raise ValueError(
-                    f"stack2d input must come from {lin_dir.name} or {sky_dir.name}: got {p}"
+                    f"stack2d input must come from {lin_dir.name}: got {p}"
                 )
 
     normalize_exptime = bool(st_cfg.get("normalize_exptime", True))

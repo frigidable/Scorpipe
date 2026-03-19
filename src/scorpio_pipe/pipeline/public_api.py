@@ -112,7 +112,35 @@ TASK_ENTRYPOINTS: dict[str, str] = {
 
 # Canonical task + aliases -> entrypoint string (UI help text / membership checks).
 class _TaskEntry(str):
-    pass
+    def __new__(cls, entrypoint: str):
+        return str.__new__(cls, str(entrypoint))
+
+    def __call__(self, cfg: Any, run_root: Any | None = None, **kwargs: Any) -> Any:
+        from scorpio_pipe.pipeline.engine import resolve_entrypoint as _resolve_entrypoint
+
+        fn = _resolve_entrypoint(str(self))
+        if run_root is not None and "out_dir" not in kwargs:
+            try:
+                from scorpio_pipe.workspace_paths import stage_dir as _stage_dir
+
+                ep = str(self)
+                mod = ep.split(":", 1)[0]
+                guessed = None
+                if mod.endswith("entry_linearize"):
+                    guessed = "linearize"
+                elif mod.endswith("entry_extract1d"):
+                    guessed = "extract1d"
+                elif mod.endswith("entry_stack2d"):
+                    guessed = "stack2d"
+                elif mod.endswith("entry_sky_sub"):
+                    guessed = "sky"
+                elif mod.endswith("entry_cosmics"):
+                    guessed = "cosmics"
+                if guessed is not None:
+                    kwargs["out_dir"] = _stage_dir(run_root, guessed)
+            except Exception:
+                pass
+        return fn(cfg, **kwargs)
 
 TASKS: dict[str, _TaskEntry] = {}
 for _t in STAGE_CATALOG.task_infos():

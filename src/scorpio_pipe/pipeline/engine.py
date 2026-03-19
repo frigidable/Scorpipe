@@ -548,11 +548,16 @@ def _validate_task_products(cfg: dict[str, Any] | str, task: str | Path, out_dir
     try:
         from scorpio_pipe.catalog.products import CATALOG as PRODUCT_CATALOG
 
+        validate_root = Path(out_dir)
+        # Product patterns are expressed relative to the run root; callers pass
+        # the task-specific output directory here, so validate against its parent.
+        if validate_root.name:
+            validate_root = validate_root.parent
         PRODUCT_CATALOG.validate_products(
             cfg_dict,
             stage_key=str(tinfo.key),
             product_keys=tuple(tinfo.product_keys or ()),
-            run_root=Path(out_dir),
+            run_root=validate_root,
         )
     except Exception:
         # Raise into the engine wrapper (it will wrap non-ProductContractError into ProductContractError)

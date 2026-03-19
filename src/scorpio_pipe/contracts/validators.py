@@ -22,6 +22,7 @@ from scorpio_pipe.contracts.calibration import (
     CalibrationProductKind,
     CalibrationStatus,
     calibration_semantics_summary,
+    coerce_calibration_status,
     normalize_calibration_status,
     telluric_semantics_required,
     validate_calibration_claim,
@@ -253,15 +254,27 @@ def _require_flux_like_unit(stage: str, path: Path, unit_value: str, *, header_k
 
 
 def _require_calibration_semantics(stage: str, path: Path, hdr0: Any, *, product_kind: str | CalibrationProductKind) -> None:
+    raw_status = hdr0.get("CALSTAT", None)
     try:
-        status = validate_calibration_claim(hdr0.get("CALSTAT", None), product_kind=product_kind)
+        status = validate_calibration_claim(raw_status, product_kind=product_kind)
     except Exception as e:
-        raise ProductContractError(
-            stage=stage,
-            path=str(path),
-            code="CALSTAT_INVALID",
-            message=f"Missing/invalid CALSTAT: {e}",
-        )
+        # Backward-compatibility: legacy MEF2D products may still carry
+        # ABSOLUTE_TRUSTED even though the frozen semantics now coerce this
+        # claim to ABSOLUTE_APPROX. Accept the product if the coercion is a
+        # deterministic downgrade, otherwise keep raising.
+        try:
+            from scorpio_pipe.contracts.calibration import normalize_calibration_status
+            raw_norm = normalize_calibration_status(raw_status)
+            status = coerce_calibration_status(raw_norm, product_kind=product_kind)
+            if status == raw_norm:
+                raise e
+        except Exception:
+            raise ProductContractError(
+                stage=stage,
+                path=str(path),
+                code="CALSTAT_INVALID",
+                message=f"Missing/invalid CALSTAT: {e}",
+            )
 
     flux_unit = str(hdr0.get("FLUXUNIT", "") or hdr0.get("BUNIT", "")).strip()
     if not flux_unit:

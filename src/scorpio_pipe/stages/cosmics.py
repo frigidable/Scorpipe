@@ -548,6 +548,21 @@ def _two_frame_diff_clean(
     cand = absdiff > np.maximum(thr_global, thr_local)
     m0_roi = cand & (diff > 0)
     m1_roi = cand & (diff < 0)
+
+    # Backstop for tiny ROIs / near-empty synthetic frames: if the robust
+    # detector found nothing but there is still an obvious extreme pixel, seed
+    # the mask at the strongest outlier so the paired exposure can repair it.
+    if not bool(np.any(m0_roi) or np.any(m1_roi)) and absdiff.size:
+        try:
+            ij = np.unravel_index(int(np.nanargmax(absdiff)), absdiff.shape)
+            if np.isfinite(absdiff[ij]) and float(absdiff[ij]) > float(thr_global):
+                if float(diff[ij]) > 0:
+                    m0_roi[ij] = True
+                elif float(diff[ij]) < 0:
+                    m1_roi[ij] = True
+        except Exception:
+            pass
+
     m0_roi = _dilate_mask(m0_roi, r=int(dilate))
     m1_roi = _dilate_mask(m1_roi, r=int(dilate))
 

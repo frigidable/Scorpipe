@@ -260,18 +260,15 @@ def inspect_dataset(
 
         meta = None
         try:
-            hdr, meta = get_header_and_frame_meta(fp, strict=False)
-        except HeaderContractError as e:
-            if len(open_errors) < 5:
-                open_errors.append(f"{fp} -> HeaderContractError: {e}")
+            hdr = _open_fits_header_safe(fp)
             try:
-                hdr = _open_fits_header_safe(fp)
-            except Exception as e2:
+                meta = get_frame_meta(fp, strict=False)
+            except HeaderContractError as e:
                 if len(open_errors) < 5:
-                    open_errors.append(f"{fp} -> {type(e2).__name__}: {e2}")
-                _emit_progress(progress, n_found=n_found, n_opened=n_opened, current_path=str(fp), force=True)
-                continue
-            meta = None
+                    open_errors.append(f"{fp} -> HeaderContractError: {e}")
+                meta = None
+            except Exception:
+                meta = None
         except Exception as e:
             if len(open_errors) < 5:
                 open_errors.append(f"{fp} -> {type(e).__name__}: {e}")
