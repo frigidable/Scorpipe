@@ -1,0 +1,15 @@
+{
+  "source": "golden-mini-night-baseline",
+  "wavelength_solution": {
+    "rms": 0.03
+  },
+  "sky_subtraction": {
+    "sky_rms": 4.0
+  },
+  "extraction": {
+    "trace_stability_px": 0.12,
+    "contamination_risk": 0.10
+  },
+  "response_calibration": {},
+  "science_outputs": {}
+}

@@ -1,0 +1,10 @@
+# version: 2026.03
+# units: f_lambda
+# wavelength_convention: air
+# sampling: tabulated
+# standard_name: BD+28 4211
+wavelength_A,flux
+4000,1.02e-14
+5000,9.61e-15
+6000,8.74e-15
+7000,7.88e-15

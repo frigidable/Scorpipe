@@ -10,6 +10,7 @@ from typing import Any, Dict, Tuple, Iterable
 
 import numpy as np
 from astropy.io import fits
+from scorpio_pipe.io.atomic_fits import atomic_write_fits
 
 from scorpio_pipe.frame_signature import FrameSignature, format_signature_mismatch
 from scorpio_pipe.instruments import parse_frame_meta
@@ -19,29 +20,46 @@ from scorpio_pipe import maskbits
 import logging
 
 
-def _write_calib_done(work_dir: Path, name: str, payload: dict) -> Path:
+def _write_calib_done(
+    *,
+    stage_dir: Path,
+    name: str,
+    payload: dict,
+    run_root: Path | None = None,
+    allow_legacy_mirrors: bool = True,
+) -> Path:
     """Write a small JSON marker for calibration builders.
 
-    GUI stages historically use per-stage *_done.json files. Superbias/superflat
-    builders did not have them, but we add them for transparency/debugging.
-    """
-    from scorpio_pipe.work_layout import ensure_work_layout
-    from scorpio_pipe.workspace_paths import stage_dir
+    P0-ARCH-07
+    -----------
+    The engine controls stage directories. Builders must write markers under the
+    provided ``stage_dir`` (typically ``ctx.stage_dir``), never by re-deriving
+    paths from ``work_dir``.
 
-    layout = ensure_work_layout(work_dir)
-    p = stage_dir(work_dir, name) / f"{name}_done.json"
+    Legacy mirrors are optional and require ``run_root``.
+    """
+
+    stage_dir = Path(stage_dir)
+    p = (stage_dir / f"{name}_done.json").resolve()
     p.parent.mkdir(parents=True, exist_ok=True)
+
     txt = json.dumps(payload, indent=2, ensure_ascii=False)
     p.write_text(txt, encoding="utf-8")
 
-    # Optional legacy mirrors (do not create directories automatically).
-    for legacy_root in (layout.calibs, layout.calib_legacy):
-        if legacy_root.is_dir():
-            try:
-                lp = legacy_root / f"{name}_done.json"
-                lp.write_text(txt, encoding="utf-8")
-            except Exception:
-                pass
+    if bool(allow_legacy_mirrors) and run_root is not None:
+        try:
+            from scorpio_pipe.work_layout import ensure_work_layout
+
+            layout = ensure_work_layout(Path(run_root))
+            for legacy_root in (layout.calibs, layout.calib_legacy):
+                if legacy_root.is_dir():
+                    try:
+                        lp = legacy_root / f"{name}_done.json"
+                        lp.write_text(txt, encoding="utf-8")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     return p
 
@@ -1174,7 +1192,14 @@ def build_masterflat_set(
     return out_path, stats
 
 
-def build_superbias(cfg: Any, out_path: str | Path | None = None) -> Path:
+def build_superbias(
+    cfg: Any,
+    out_path: str | Path | None = None,
+    *,
+    run_root: Path | None = None,
+    stage_dir: Path | None = None,
+    allow_legacy_mirrors: bool = True,
+) -> Path:
     """Build MasterBias artifacts per (instrument + geometry + readout).
 
     P0-C1 contract
@@ -1192,12 +1217,30 @@ def build_superbias(cfg: Any, out_path: str | Path | None = None) -> Path:
     """
 
     from scorpio_pipe.work_layout import ensure_work_layout
-    from scorpio_pipe.workspace_paths import stage_dir
     from scorpio_pipe import maskbits
 
     c = _load_cfg_any(cfg)
-    work_dir = _resolve_work_dir(c)
-    layout = ensure_work_layout(work_dir)
+    work_dir = (
+        Path(run_root).expanduser().resolve()
+        if run_root is not None
+        else _resolve_work_dir(c)
+    )
+
+    # P0-ARCH-07: stage must not derive its own stage directory.
+    if stage_dir is None and out_path is None:
+        raise ValueError("superbias: stage_dir is required (pass ctx.stage_dir)")
+
+    if stage_dir is not None:
+        out_dir = Path(stage_dir).resolve()
+    else:
+        pp = Path(str(out_path)).expanduser()
+        if not pp.is_absolute():
+            pp = (work_dir / pp).resolve()
+        out_dir = pp.parent.resolve()
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    layout = ensure_work_layout(work_dir) if bool(allow_legacy_mirrors) else None
 
     frames = c.get("frames", {}) or {}
     bias_in = frames.get("bias") or []
@@ -1233,8 +1276,7 @@ def build_superbias(cfg: Any, out_path: str | Path | None = None) -> Path:
     expected_sig = _expected_signature_from_cfg(c, fallback_path=bias_paths[0])
     default_key = _select_default_bias_group(groups, expected=expected_sig)
 
-    out_dir = stage_dir(work_dir, "superbias")
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # out_dir is provided by the engine (stage_dir arg)
 
     def _combine_group(paths: list[Path]) -> tuple[np.ndarray, np.ndarray, np.ndarray, fits.Header | None, dict[str, Any]]:
         shape: tuple[int, int] | None = None
@@ -1411,14 +1453,14 @@ def build_superbias(cfg: Any, out_path: str | Path | None = None) -> Path:
         hsci = fits.Header(hdr0)
         _stamp_common(hsci)
         hsci.add_history("Built by scorpio_pipe.stages.calib.build_superbias (MasterBias)")
-        fits.writeto(sci_f, sci.astype(np.float32), hsci, overwrite=True)
+        atomic_write_fits(sci_f, sci.astype(np.float32), header=hsci)
 
         # VAR
         hv = fits.Header(hdr0)
         _stamp_common(hv)
         hv["BUNIT"] = ("ADU^2", "Variance unit")
         hv.add_history("MasterBias VAR (per-pixel MAD^2)")
-        fits.writeto(var_f, var.astype(np.float32), hv, overwrite=True)
+        atomic_write_fits(var_f, var.astype(np.float32), header=hv)
 
         # DQ
         hdq = fits.Header(hdr0)
@@ -1426,7 +1468,7 @@ def build_superbias(cfg: Any, out_path: str | Path | None = None) -> Path:
         for kk, vv in maskbits.header_cards(prefix="SCORP").items():
             hdq[kk] = vv
         hdq.add_history("MasterBias DQ (uint16 mask)")
-        fits.writeto(dq_f, dq.astype(np.uint16), hdq, overwrite=True)
+        atomic_write_fits(dq_f, dq.astype(np.uint16), header=hdq)
 
         index["groups"].append(
             {
@@ -1489,22 +1531,23 @@ def build_superbias(cfg: Any, out_path: str | Path | None = None) -> Path:
     shutil.copy2(sci_src, legacy_sb)
 
     # Optional: mirror to legacy roots, only if dirs exist.
-    for root in (layout.calibs, layout.calib_legacy):
-        try:
-            if root.is_dir():
-                shutil.copy2(master_sci, root / "master_bias.fits")
-                shutil.copy2(master_var, root / "master_bias_var.fits")
-                shutil.copy2(master_dq, root / "master_bias_dq.fits")
-                shutil.copy2(legacy_sb, root / "superbias.fits")
-        except Exception:
-            pass
+    if bool(allow_legacy_mirrors) and layout is not None:
+        for root in (layout.calibs, layout.calib_legacy):
+            try:
+                if root.is_dir():
+                    shutil.copy2(master_sci, root / "master_bias.fits")
+                    shutil.copy2(master_var, root / "master_bias_var.fits")
+                    shutil.copy2(master_dq, root / "master_bias_dq.fits")
+                    shutil.copy2(legacy_sb, root / "superbias.fits")
+            except Exception:
+                pass
 
     # done marker
     try:
         _write_calib_done(
-            work_dir,
-            "superbias",
-            {
+            stage_dir=out_dir,
+            name="superbias",
+            payload={
                 "status": "ok",
                 "n_groups": int(len(index.get("groups") or [])),
                 "default_gid": str(index.get("default_gid") or ""),
@@ -1512,6 +1555,8 @@ def build_superbias(cfg: Any, out_path: str | Path | None = None) -> Path:
                 "combine": str(combine),
                 "sigma_clip": float(sigma_clip),
             },
+            run_root=work_dir,
+            allow_legacy_mirrors=bool(allow_legacy_mirrors),
         )
     except Exception:
         pass
@@ -1528,7 +1573,14 @@ def build_superbias(cfg: Any, out_path: str | Path | None = None) -> Path:
     return master_sci
 
 
-def build_superflat(cfg: Any, out_path: str | Path | None = None) -> Path:
+def build_superflat(
+    cfg: Any,
+    out_path: str | Path | None = None,
+    *,
+    run_root: Path | None = None,
+    stage_dir: Path | None = None,
+    allow_legacy_mirrors: bool = True,
+) -> Path:
     """
     Строит normalized superflat (median ~ 1) из flat-кадров.
 
@@ -1544,7 +1596,11 @@ def build_superflat(cfg: Any, out_path: str | Path | None = None) -> Path:
     """
     c = _load_cfg_any(cfg)
 
-    work_dir = _resolve_work_dir(c)
+    work_dir = (
+        Path(run_root).expanduser().resolve()
+        if run_root is not None
+        else _resolve_work_dir(c)
+    )
     flat_paths = [Path(p) for p in c["frames"]["flat"]]
 
     if not flat_paths:
@@ -1597,16 +1653,33 @@ def build_superflat(cfg: Any, out_path: str | Path | None = None) -> Path:
     except Exception:
         pass
 
-    # output paths (canonical + legacy mirroring)
-    from scorpio_pipe.work_layout import ensure_work_layout
-    from scorpio_pipe.workspace_paths import stage_dir
 
-    layout = ensure_work_layout(work_dir)
-    canonical = (stage_dir(work_dir, "superflat") / "superflat.fits").resolve()
-    legacy_candidates = [
-        (layout.calibs / "superflat.fits").resolve(),
-        (layout.calib_legacy / "superflat.fits").resolve(),
-    ]
+    # output paths (canonical + optional legacy mirroring)
+    from scorpio_pipe.work_layout import ensure_work_layout
+
+    layout = ensure_work_layout(work_dir) if bool(allow_legacy_mirrors) else None
+
+    # P0-ARCH-07: stage must not derive its own stage directory.
+    if stage_dir is None and out_path is None:
+        raise ValueError("superflat: stage_dir is required (pass ctx.stage_dir)")
+
+    if stage_dir is not None:
+        sd = Path(stage_dir).resolve()
+    else:
+        pp = Path(str(out_path)).expanduser()
+        if not pp.is_absolute():
+            pp = (work_dir / pp).resolve()
+        sd = pp.parent.resolve()
+
+    sd.mkdir(parents=True, exist_ok=True)
+
+    canonical = (sd / "superflat.fits").resolve()
+    legacy_candidates = []
+    if layout is not None:
+        legacy_candidates = [
+            (layout.calibs / "superflat.fits").resolve(),
+            (layout.calib_legacy / "superflat.fits").resolve(),
+        ]
 
     if out_path is None:
         out_path = canonical
@@ -1623,7 +1696,7 @@ def build_superflat(cfg: Any, out_path: str | Path | None = None) -> Path:
     hdr["SB_PATH"] = (superbias_path.name, "Superbias path (basename)")
     hdr["SB_FULL"] = (str(superbias_path), "Superbias full path")
 
-    fits.writeto(out_path, superflat, hdr, overwrite=True)
+    atomic_write_fits(out_path, superflat, header=hdr)
     log.info("Wrote superflat: %s", out_path)
 
     # Mirror policy:
@@ -1635,9 +1708,10 @@ def build_superflat(cfg: Any, out_path: str | Path | None = None) -> Path:
             if canonical != out_res:
                 shutil.copy2(out_path, canonical)
         else:
-            for lp in legacy_candidates:
-                if lp.parent.is_dir() and lp.resolve() != out_res:
-                    shutil.copy2(out_path, lp)
+            if bool(allow_legacy_mirrors) and legacy_candidates:
+                for lp in legacy_candidates:
+                    if lp.parent.is_dir() and lp.resolve() != out_res:
+                        shutil.copy2(out_path, lp)
     except Exception:
         pass
 
@@ -1645,9 +1719,9 @@ def build_superflat(cfg: Any, out_path: str | Path | None = None) -> Path:
     try:
         sig_out = FrameSignature.from_header(hdr, fallback_shape=superflat.shape)
         _write_calib_done(
-            work_dir,
-            "superflat",
-            {
+            stage_dir=canonical.parent,
+            name="superflat",
+            payload={
                 "status": "ok",
                 "frame_signature": sig_out.to_dict(),
                 "used_signature": sig_out.to_dict(),
@@ -1655,6 +1729,8 @@ def build_superflat(cfg: Any, out_path: str | Path | None = None) -> Path:
                 "superbias": superbias_path.name,
                 "n_inputs": int((_stats or {}).get("n_used", 0)),
             },
+            run_root=work_dir,
+            allow_legacy_mirrors=bool(allow_legacy_mirrors),
         )
     except Exception:
         pass

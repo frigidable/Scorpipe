@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 import traceback
 from dataclasses import dataclass
 from datetime import datetime
@@ -14,7 +15,7 @@ from scorpio_pipe.ui.qt_log import install as install_qt_log
 from scorpio_pipe.ui.config_defaults import schema_default
 from scorpio_pipe.ui.param_metadata import get_param_meta
 from scorpio_pipe.ui.delayed_tooltip import install_delayed_tooltip
-from scorpio_pipe.stage_registry import iter_gui_stages
+from scorpio_pipe.pipeline.public_api import iter_gui_stages
 from scorpio_pipe.pairs_library import (
     list_pair_sets,
     save_user_pair_set,
@@ -28,6 +29,8 @@ from scorpio_pipe.qc.gate import QCGateError
 from scorpio_pipe.paths import resolve_work_dir
 from scorpio_pipe.wavesol_paths import wavesol_dir
 from scorpio_pipe.instrument_db import find_grism
+from scorpio_pipe.metadata.fits_cache import get_header_fields
+from scorpio_pipe.ui.slow_action_profiler import profile_ui_action
 
 if TYPE_CHECKING:  # pragma: no cover
     from scorpio_pipe.inspect import InspectResult
@@ -37,11 +40,11 @@ if TYPE_CHECKING:  # pragma: no cover
 
 
 
-def _lazy_pipeline_runner():
-    # Import the heavy pipeline runner lazily (keeps UI startup snappy in frozen builds).
-    from scorpio_pipe.ui import pipeline_runner as _pr
+def _lazy_pipeline_api():
+    # Import the pipeline public API lazily (keeps UI startup snappy in frozen builds).
+    from scorpio_pipe.pipeline import public_api as _api
 
-    return _pr
+    return _api
 
 def _lazy_outputs_tool_dialog():
     # Import outputs tool lazily; it is a convenience feature and must not
@@ -51,29 +54,68 @@ def _lazy_outputs_tool_dialog():
 
 
 
+def _representative_header_from_inspect_df(df: Any) -> dict[str, Any] | None:
+    try:
+        if df is None or getattr(df, "empty", True) or "path" not in df.columns:
+            return None
+
+        def _pick(kind: str) -> str | None:
+            try:
+                sub = df[df.get("kind") == kind]
+                if not sub.empty:
+                    return str(sub.iloc[0]["path"])
+            except Exception:
+                return None
+            return None
+
+        p0 = _pick("obj") or _pick("arc") or str(df.iloc[0]["path"])
+        if not p0:
+            return None
+        return dict(get_header_fields(Path(p0)))
+    except Exception:
+        return None
+
+
 def load_context(cfg_path):  # type: ignore[override]
-    return _lazy_pipeline_runner().load_context(cfg_path)
+    return _lazy_pipeline_api().load_context(cfg_path)
 
 
-def run_sequence(ctx_or_path, tasks, *, resume=True, force=False, qc_override=False):  # type: ignore[override]
-    return _lazy_pipeline_runner().run_sequence(
+def run_sequence(
+    ctx_or_path,
+    tasks,
+    *,
+    resume=True,
+    force=False,
+    qc_override=False,
+    preflight_override=False,
+    preflight_override_reason=None,
+    preflight_override_source=None,
+):  # type: ignore[override]
+    return _lazy_pipeline_api().run_sequence_locked(
         ctx_or_path,
         tasks,
         resume=resume,
         force=force,
         qc_override=qc_override,
+        preflight_override=preflight_override,
+        preflight_override_reason=preflight_override_reason,
+        preflight_override_source=preflight_override_source,
     )
 
 
 def run_lineid_prepare(ctx):  # type: ignore[override]
-    return _lazy_pipeline_runner().run_lineid_prepare(ctx)
+    return _lazy_pipeline_api().run_lineid_prepare(ctx)
 
 
 def run_wavesolution(ctx):  # type: ignore[override]
-    return _lazy_pipeline_runner().run_wavesolution(ctx)
+    return _lazy_pipeline_api().run_wavesolution(ctx)
 
 
 # --------------------------- tiny widgets ---------------------------
+
+
+class _InspectProgressProxy(QtCore.QObject):
+    progress = QtCore.Signal(int, int, str, int)
 
 
 class ParamLabel(QtWidgets.QLabel):
@@ -312,6 +354,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
             pass
 
         self._inspect: InspectResult | None = None
+        self._inspect_job = None
+        self._inspect_cancel_event: threading.Event | None = None
+        self._inspect_request_id: int = 0
+        self._inspect_progress_dialog: QtWidgets.QProgressDialog | None = None
+        self._inspect_progress_proxy = _InspectProgressProxy(self)
+        self._inspect_progress_proxy.progress.connect(self._on_inspect_progress)
         self._cfg_path: Path | None = None
         self._cfg: dict[str, Any] | None = None
         self._yaml_saved_text: str = ""
@@ -648,6 +696,13 @@ class LauncherWindow(QtWidgets.QMainWindow):
             return int(getattr(self, '_stage_row', {}).get(stage_key, -1))
         except Exception:
             return -1
+
+    def closeEvent(self, ev: QtGui.QCloseEvent) -> None:
+        try:
+            self._cancel_inspect()
+        except Exception:
+            pass
+        super().closeEvent(ev)
 
     def _open_in_explorer(self, path: Path) -> None:
         try:
@@ -1233,13 +1288,18 @@ class LauncherWindow(QtWidgets.QMainWindow):
         if getattr(self, "outputs_tool", None) is None:
             return
         if bool(checked):
-            self._update_outputs_tool_context()
-            try:
-                self.outputs_tool.show()
-                self.outputs_tool.raise_()
-                self.outputs_tool.activateWindow()
-            except Exception:
-                self.outputs_tool.show()
+            with profile_ui_action(
+                "ui.outputs.show",
+                work_dir=self._current_work_dir_resolved(),
+                extra={"stage": self._current_outputs_stage()},
+            ):
+                self._update_outputs_tool_context()
+                try:
+                    self.outputs_tool.show()
+                    self.outputs_tool.raise_()
+                    self.outputs_tool.activateWindow()
+                except Exception:
+                    self.outputs_tool.show()
         else:
             try:
                 self.outputs_tool.hide()
@@ -1377,36 +1437,219 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.edit_data_dir.setText(d)
 
     def _do_inspect(self) -> None:
+        try:
+            if self._inspect_job is not None and not self._inspect_job.is_done:
+                self._cancel_inspect()
+                return
+        except Exception:
+            pass
+
         data_dir = Path(self.edit_data_dir.text()).expanduser()
         if not data_dir.exists():
             self._log_error("Data directory does not exist")
             return
-        self._set_step_status(0, "running")
-        try:
-            from scorpio_pipe.inspect import inspect_dataset
 
-            self._log_info(f"Inspect: {data_dir}")
-            self._inspect = inspect_dataset(data_dir)
-            msg = f"FITS opened/found: {self._inspect.n_opened}/{self._inspect.n_found}"
-            if self._inspect.nightlog_path:
-                msg += f"\nNightlog: {self._inspect.nightlog_path} (rows={self._inspect.n_nightlog_rows})"
-            if self._inspect.open_errors:
-                msg += "\nOpen errors (first):\n" + "\n".join(self._inspect.open_errors)
-            self.lbl_inspect.setText(msg)
-            self._populate_objects_from_inspect()
-            self._refresh_overview_from_inspect()
-            # If work dir is still empty, auto-suggest a sensible default.
-            try:
-                if (not self.edit_work_dir.text().strip()) and (
-                    not getattr(self, "_workdir_user_edited", False)
-                ):
-                    self._suggest_work_dir()
-            except Exception:
-                pass
-            self._set_step_status(0, "ok")
+        try:
+            from scorpio_pipe.inspect import InspectCancelled, inspect_dataset
+            from scorpio_pipe.ui.async_worker import run_in_thread
         except Exception as e:
             self._set_step_status(0, "fail")
             self._log_exception(e)
+            return
+
+        self._inspect_request_id += 1
+        req_id = int(self._inspect_request_id)
+        cancel_event = threading.Event()
+        self._inspect_cancel_event = cancel_event
+
+        self._set_step_status(0, "running")
+        self.btn_inspect.setText("Cancel Inspect")
+        self.lbl_inspect.setText("Inspecting…\nFITS found/opened: 0/0")
+        self._log_info(f"Inspect: {data_dir}")
+
+        dlg = QtWidgets.QProgressDialog("Inspecting…", "Cancel", 0, 0, self)
+        dlg.setWindowTitle("Inspect dataset")
+        dlg.setWindowModality(QtCore.Qt.NonModal)
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        dlg.canceled.connect(self._cancel_inspect)
+        dlg.show()
+        self._inspect_progress_dialog = dlg
+
+        def _progress_cb(info) -> None:
+            if cancel_event.is_set():
+                return
+            try:
+                self._inspect_progress_proxy.progress.emit(
+                    int(getattr(info, "n_found", 0) or 0),
+                    int(getattr(info, "n_opened", 0) or 0),
+                    str(getattr(info, "current_path", "") or ""),
+                    req_id,
+                )
+            except Exception:
+                pass
+
+        def _job():
+            try:
+                res = inspect_dataset(
+                    data_dir,
+                    progress=_progress_cb,
+                    should_cancel=cancel_event.is_set,
+                )
+                return ("ok", res)
+            except InspectCancelled:
+                return ("cancelled", None)
+
+        h = run_in_thread(
+            _job,
+            name=f"inspect:{data_dir}",
+            dedupe_key=f"inspect:{Path(data_dir).resolve()}",
+        )
+        self._inspect_job = h
+
+        def _done(payload) -> None:
+            if req_id != self._inspect_request_id:
+                return
+            try:
+                status, result = payload
+            except Exception:
+                status, result = "ok", payload
+
+            if status == "cancelled" or cancel_event.is_set():
+                self._finish_inspect_cancelled()
+                return
+
+            try:
+                self._inspect = result
+                self.lbl_inspect.setText(self._format_inspect_summary(result))
+                self._populate_objects_from_inspect()
+                self._refresh_overview_from_inspect()
+                try:
+                    if (not self.edit_work_dir.text().strip()) and (
+                        not getattr(self, "_workdir_user_edited", False)
+                    ):
+                        self._suggest_work_dir()
+                except Exception:
+                    pass
+                self._set_step_status(0, "ok")
+            except Exception as e:
+                self._set_step_status(0, "fail")
+                self._log_exception(e)
+            finally:
+                self._finish_inspect_ui()
+
+        def _fail(tb: str) -> None:
+            if req_id != self._inspect_request_id:
+                return
+            if cancel_event.is_set():
+                self._finish_inspect_cancelled()
+                return
+            self._set_step_status(0, "fail")
+            self._finish_inspect_ui()
+            self._log_error("Inspect failed")
+            try:
+                self.log_view.appendPlainText(str(tb))
+            except Exception:
+                pass
+
+        h.worker.finished.connect(_done)
+        h.worker.failed.connect(_fail)
+
+    def _format_inspect_summary(self, result) -> str:
+        msg = f"FITS opened/found: {result.n_opened}/{result.n_found}"
+        if result.nightlog_path:
+            msg += f"\nNightlog: {result.nightlog_path} (rows={result.n_nightlog_rows})"
+        if result.open_errors:
+            msg += "\nOpen errors (first):\n" + "\n".join(result.open_errors)
+        return msg
+
+    def _finish_inspect_ui(self) -> None:
+        try:
+            self.btn_inspect.setText("Inspect dataset")
+            self.btn_inspect.setEnabled(True)
+        except Exception:
+            pass
+        try:
+            if self._inspect_progress_dialog is not None:
+                self._inspect_progress_dialog.close()
+        except Exception:
+            pass
+        self._inspect_progress_dialog = None
+        self._inspect_cancel_event = None
+        self._inspect_job = None
+        try:
+            self._update_enables()
+        except Exception:
+            pass
+
+    def _finish_inspect_cancelled(self) -> None:
+        try:
+            self._log_warn("Inspect cancelled by user")
+        except Exception:
+            pass
+        try:
+            self.lbl_inspect.setText("Inspect cancelled.")
+        except Exception:
+            pass
+        try:
+            if self._inspect is not None:
+                self._set_step_status(0, "ok")
+            else:
+                self._set_step_status(0, "idle")
+        except Exception:
+            pass
+        self._finish_inspect_ui()
+
+    def _cancel_inspect(self) -> None:
+        ev = self._inspect_cancel_event
+        if ev is None or ev.is_set():
+            return
+        ev.set()
+        try:
+            self.btn_inspect.setEnabled(False)
+            self.btn_inspect.setText("Cancelling…")
+        except Exception:
+            pass
+        try:
+            self.lbl_inspect.setText("Cancelling inspect…")
+        except Exception:
+            pass
+        try:
+            if self._inspect_progress_dialog is not None:
+                self._inspect_progress_dialog.setLabelText("Cancelling inspect…")
+                self._inspect_progress_dialog.setCancelButton(None)
+        except Exception:
+            pass
+
+    @QtCore.Slot(int, int, str, int)
+    def _on_inspect_progress(
+        self,
+        n_found: int,
+        n_opened: int,
+        current_path: str,
+        req_id: int,
+    ) -> None:
+        if req_id != self._inspect_request_id:
+            return
+        current_name = ""
+        try:
+            current_name = Path(current_path).name if current_path else ""
+        except Exception:
+            current_name = ""
+
+        msg = f"Inspecting…\nFITS found/opened: {int(n_found)}/{int(n_opened)}"
+        if current_name:
+            msg += f"\nCurrent: {current_name}"
+        try:
+            self.lbl_inspect.setText(msg)
+        except Exception:
+            pass
+        try:
+            if self._inspect_progress_dialog is not None:
+                self._inspect_progress_dialog.setLabelText(msg)
+        except Exception:
+            pass
 
     def _refresh_overview_from_inspect(self) -> None:
         """Fill the Project page overview panel from InspectResult."""
@@ -1596,7 +1839,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
             best: Path | None = None
             try:
                 cands: list[Path] = []
-                for cp in base.rglob("config.yaml"):
+                import os
+                for dp, _dn, fns in os.walk(base):
+                    if "config.yaml" not in fns:
+                        continue
+                    cp = Path(dp) / "config.yaml"
                     if obj.lower() in str(cp.parent).lower():
                         cands.append(cp)
                 if cands:
@@ -1668,45 +1915,50 @@ class LauncherWindow(QtWidgets.QMainWindow):
     def _open_frames_window(self, stage_key: str) -> None:
         """Open a non-modal per-stage Frames Browser window."""
         try:
-            from scorpio_pipe.ui.stage_frames_window import StageFramesWindow
+            with profile_ui_action(
+                f"ui.open_frames_window:{stage_key}",
+                work_dir=self._current_work_dir_resolved(),
+                extra={"stage_key": str(stage_key)},
+            ):
+                from scorpio_pipe.ui.stage_frames_window import StageFramesWindow
 
-            if not hasattr(self, "_frames_windows"):
-                self._frames_windows = {}
+                if not hasattr(self, "_frames_windows"):
+                    self._frames_windows = {}
 
-            win = self._frames_windows.get(stage_key)
-            if win is None:
-                win = StageFramesWindow(stage_key, parent=self)
+                win = self._frames_windows.get(stage_key)
+                if win is None:
+                    win = StageFramesWindow(stage_key, parent=self)
+                    if stage_key == "project":
+                        try:
+                            win.useSetupRequested.connect(self._use_setup_from_frame)
+                        except Exception:
+                            pass
+                    self._frames_windows[stage_key] = win
+
+                inspect_df = None
+                data_dir = None
+                try:
+                    if getattr(self, "_inspect", None) is not None:
+                        inspect_df = getattr(self._inspect, "table", None)
+                        data_dir = getattr(self._inspect, "data_dir", None)
+                except Exception:
+                    pass
+
                 if stage_key == "project":
-                    try:
-                        win.useSetupRequested.connect(self._use_setup_from_frame)
-                    except Exception:
-                        pass
-                self._frames_windows[stage_key] = win
+                    win.set_context(
+                        getattr(self, "_cfg", None),
+                        inspect_df=inspect_df,
+                        data_dir=data_dir,
+                    )
+                else:
+                    win.set_context(getattr(self, "_cfg", None))
 
-            inspect_df = None
-            data_dir = None
-            try:
-                if getattr(self, "_inspect", None) is not None:
-                    inspect_df = getattr(self._inspect, "table", None)
-                    data_dir = getattr(self._inspect, "data_dir", None)
-            except Exception:
-                pass
-
-            if stage_key == "project":
-                win.set_context(
-                    getattr(self, "_cfg", None),
-                    inspect_df=inspect_df,
-                    data_dir=data_dir,
-                )
-            else:
-                win.set_context(getattr(self, "_cfg", None))
-
-            try:
-                win.showMaximized()
-            except Exception:
-                win.show()
-            win.raise_()
-            win.activateWindow()
+                try:
+                    win.showMaximized()
+                except Exception:
+                    win.show()
+                win.raise_()
+                win.activateWindow()
         except Exception as e:
             self._log_exception(e)
 
@@ -2221,22 +2473,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             header = None
             try:
                 if self._inspect is not None and getattr(self._inspect, "table", None) is not None:
-                    df = self._inspect.table
-                    if df is not None and not df.empty and "path" in df.columns:
-                        def _pick(kind: str) -> str | None:
-                            try:
-                                sub = df[df.get("kind") == kind]
-                                if not sub.empty:
-                                    return str(sub.iloc[0]["path"])
-                            except Exception:
-                                return None
-                            return None
-
-                        p0 = _pick("obj") or _pick("arc") or str(df.iloc[0]["path"])
-                        if p0:
-                            from astropy.io import fits
-
-                            header = fits.getheader(p0, memmap=False)
+                    header = _representative_header_from_inspect_df(self._inspect.table)
             except Exception:
                 header = None
 
@@ -2334,29 +2571,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             header = None
             try:
                 if self._inspect is not None and getattr(self._inspect, "table", None) is not None:
-                    df = self._inspect.table
-                    if df is not None and not df.empty and "path" in df.columns:
-                        # prefer science/obj, otherwise arc
-                        p0 = None
-                        try:
-                            sub = df[df.get("kind") == "obj"]
-                            if not sub.empty:
-                                p0 = str(sub.iloc[0]["path"])
-                        except Exception:
-                            p0 = None
-                        if not p0:
-                            try:
-                                sub = df[df.get("kind") == "arc"]
-                                if not sub.empty:
-                                    p0 = str(sub.iloc[0]["path"])
-                            except Exception:
-                                p0 = None
-                        if not p0:
-                            p0 = str(df.iloc[0]["path"])
-                        if p0:
-                            from astropy.io import fits
-
-                            header = fits.getheader(p0, memmap=False)
+                    header = _representative_header_from_inspect_df(self._inspect.table)
             except Exception:
                 header = None
 
@@ -5516,7 +5731,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             # 2) Open the interactive LineID GUI to create/update hand_pairs.txt.
             try:
                 from scorpio_pipe.wavesol_paths import wavesol_dir
-                from scorpio_pipe.stages.lineid_gui import prepare_lineid
+                from scorpio_pipe.pipeline.public_api import prepare_lineid
 
                 wdir = wavesol_dir(ctx.cfg)
                 superneon_f = wdir / "superneon.fits"
@@ -7914,7 +8129,17 @@ class LauncherWindow(QtWidgets.QMainWindow):
             cand = sorted(cos_root.glob("*_clean.fits")) if cos_root.exists() else []
             if not cand:
                 # fallback: any clean product under the cosmics stage
-                cand = sorted(stage_dir(work, "cosmics").rglob("*_clean.fits"))
+                # Fast recursive search with early-exit (avoid Path.rglob on big trees)
+                import os
+                root = stage_dir(work, "cosmics")
+                cand = []
+                for dp, _dn, fns in os.walk(root):
+                    for fn in fns:
+                        if fn.lower().endswith("_clean.fits"):
+                            cand = [Path(dp) / fn]
+                            break
+                    if cand:
+                        break
             if not cand:
                 self._log_warn("No cosmic-cleaned frames found. Run Cosmics first.")
                 return
@@ -7952,7 +8177,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 # try any per-exp sky frame
                 # Fallback: any sky product in canonical stage tree.
                 sky_root = stage_dir(work, "sky")
-                cand = list(sky_root.rglob("*.fits"))
+                from scorpio_pipe.ui.fs_scan import find_first
+                fp = find_first(sky_root)
+                cand = [fp] if fp else []
                 if cand:
                     fits_path = cand[0]
             if not fits_path.exists():
@@ -8486,24 +8713,28 @@ class LauncherWindow(QtWidgets.QMainWindow):
         return True
 
     def _open_qc_viewer(self) -> None:
-        if not self._ensure_cfg_saved():
-            return
-        cfg = self._cfg or {}
-        wd = Path(str(cfg.get("work_dir", ""))).expanduser()
-        if self._cfg_path and not wd.is_absolute():
-            wd = (self._cfg_path.parent / wd).resolve()
-        if self._qc is None:
-            from scorpio_pipe.ui.qc_viewer import QCViewer
+        with profile_ui_action(
+            "ui.open_qc_viewer",
+            work_dir=self._current_work_dir_resolved(),
+        ):
+            if not self._ensure_cfg_saved():
+                return
+            cfg = self._cfg or {}
+            wd = Path(str(cfg.get("work_dir", ""))).expanduser()
+            if self._cfg_path and not wd.is_absolute():
+                wd = (self._cfg_path.parent / wd).resolve()
+            if self._qc is None:
+                from scorpio_pipe.ui.qc_viewer import QCViewer
 
-            self._qc = QCViewer(wd)
-        else:
-            self._qc.set_work_dir(wd)
-        try:
-            self._qc.showMaximized()
-        except Exception:
-            self._qc.show()
-        self._qc.raise_()
-        self._qc.activateWindow()
+                self._qc = QCViewer(wd)
+            else:
+                self._qc.set_work_dir(wd)
+            try:
+                self._qc.showMaximized()
+            except Exception:
+                self._qc.show()
+            self._qc.raise_()
+            self._qc.activateWindow()
 
     # --------------------------- navigation glue ---------------------------
 
@@ -8802,14 +9033,18 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
     def _open_run_plan(self) -> None:
         try:
-            if not self._sync_cfg_from_editor():
-                return
-            if not self._cfg:
-                self._log_error("No config loaded")
-                return
-            from scorpio_pipe.ui.run_plan_dialog import RunPlanDialog
+            with profile_ui_action(
+                "ui.open_run_plan_dialog",
+                work_dir=self._current_work_dir_resolved(),
+            ):
+                if not self._sync_cfg_from_editor():
+                    return
+                if not self._cfg:
+                    self._log_error("No config loaded")
+                    return
+                from scorpio_pipe.ui.run_plan_dialog import RunPlanDialog
 
-            RunPlanDialog(self._cfg, parent=self).exec()
+                RunPlanDialog(self._cfg, parent=self, config_path=self._cfg_path).exec()
         except Exception as e:
             self._log_exception(e)
 
@@ -8968,9 +9203,85 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 pass
 
 
+    def _run_callable_with_progress(
+        self,
+        fn,
+        *,
+        title: str = "Running…",
+        cancel_token=None,
+    ):
+        """Run a callable in a background thread while keeping the GUI responsive.
+
+        We show a modal progress dialog with a Cancel button. Cancellation is
+        cooperative via ``CancelToken`` (the engine checks it between stages and
+        some stages check it internally).
+        """
+        try:
+            from PySide6 import QtCore, QtWidgets
+            from scorpio_pipe.ui.async_worker import run_in_thread
+        except Exception:
+            # Fallback: run in the UI thread.
+            return fn()
+
+        dlg = QtWidgets.QProgressDialog(title, "Cancel", 0, 0, self)
+        dlg.setWindowModality(QtCore.Qt.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+
+        loop = QtCore.QEventLoop(self)
+        result_box = {"res": None, "tb": None}
+
+        h = run_in_thread(fn)
+
+        def _done(res_obj):
+            result_box["res"] = res_obj
+            try:
+                dlg.close()
+            except Exception:
+                pass
+            loop.quit()
+
+        def _fail(tb: str):
+            result_box["tb"] = tb
+            try:
+                dlg.close()
+            except Exception:
+                pass
+            loop.quit()
+
+        h.worker.finished.connect(_done)
+        h.worker.failed.connect(_fail)
+
+        def _cancel():
+            try:
+                if cancel_token is not None:
+                    cancel_token.cancel()
+            except Exception:
+                pass
+            try:
+                dlg.setLabelText("Cancelling… (will stop after current stage)")
+                dlg.setCancelButtonText("Cancelling…")
+            except Exception:
+                pass
+
+        dlg.canceled.connect(_cancel)
+        dlg.show()
+        loop.exec()
+
+        try:
+            h.wait(2000)
+        except Exception:
+            pass
+
+        if result_box["tb"]:
+            raise RuntimeError(result_box["tb"])
+        return result_box["res"]
+
+
     def _run_sequence_with_qc_prompt(
         self,
-        ctx_or_path: dict[str, Any] | Path,
+        ctx_or_path: Any,
         tasks: list[str],
         *,
         resume: bool = True,
@@ -8981,10 +9292,60 @@ class LauncherWindow(QtWidgets.QMainWindow):
         The runner enforces a fail-fast QC gate based on upstream ``done.json`` flags.
         Here we provide an explicit UX: cancel or proceed with an override.
         """
+        # ------------------------------------------------------------------
+        # P0-A4: GUI Wizard step #1 (mandatory): Preflight gate.
+        # Show dialog for WARN/ERROR; block on ERROR unless user enables explicit override.
+        # ------------------------------------------------------------------
         try:
-            from scorpio_pipe.ui.pipeline_runner import run_sequence
+            from scorpio_pipe.config import load_config_any
+            from scorpio_pipe.ui.preflight_dialog import run_preflight_gate
+            from scorpio_pipe.pipeline.public_api import run_sequence_locked as run_sequence
 
-            return run_sequence(ctx_or_path, tasks, resume=resume, force=force, qc_override=False)
+            cfg = None
+            try:
+                if hasattr(ctx_or_path, "cfg"):
+                    cfg = getattr(ctx_or_path, "cfg")
+                if cfg is None and isinstance(ctx_or_path, dict):
+                    cfg = ctx_or_path
+            except Exception:
+                cfg = None
+
+            if cfg is None:
+                cfg = load_config_any(ctx_or_path)
+
+            run_root = resolve_work_dir(cfg)
+            pf_res = run_preflight_gate(self, cfg=cfg, run_root=run_root, show_on_ok=False)
+            if not pf_res.allowed:
+                self._log_warn("Run cancelled by preflight gate dialog.")
+                return {}
+
+            from scorpio_pipe.pipeline.context import CancelToken
+
+
+            cancel = CancelToken()
+
+
+
+            def _call():
+
+
+                return run_sequence(
+                ctx_or_path,
+                tasks,
+                resume=resume,
+                force=force,
+                qc_override=False,
+                preflight_override=bool(pf_res.preflight_override),
+                preflight_override_reason=pf_res.override_reason,
+                preflight_override_source="gui",
+                cancel_token=cancel,
+            )
+
+            return self._run_callable_with_progress(
+                _call,
+                title="Running pipeline…",
+                cancel_token=cancel,
+            )
         except QCGateError as ge:
             sev = str(getattr(ge, "upstream_max_severity", "ERROR") or "ERROR").upper()
             box = QtWidgets.QMessageBox(self)
@@ -9019,8 +9380,26 @@ class LauncherWindow(QtWidgets.QMainWindow):
             if btn_override is not None and box.clickedButton() is btn_override:
                 self._log_warn("QC override enabled by user; proceeding.")
                 try:
-                    return run_sequence(
-                        ctx_or_path, tasks, resume=resume, force=force, qc_override=True
+                    from scorpio_pipe.pipeline.context import CancelToken
+                    cancel = CancelToken()
+
+                    def _call():
+                        return run_sequence(
+                            ctx_or_path,
+                            tasks,
+                            resume=resume,
+                            force=force,
+                            qc_override=True,
+                            preflight_override=False,
+                            preflight_override_reason=None,
+                            preflight_override_source="gui",
+                            cancel_token=cancel,
+                        )
+
+                    return self._run_callable_with_progress(
+                        _call,
+                        title="Running pipeline (QC override)…",
+                        cancel_token=cancel,
                     )
                 except QCGateError as ge2:
                     # Most likely: upstream has FATAL blockers.

@@ -1,0 +1,9 @@
+# version: 2026.03
+# units: relative_transmission
+# wavelength_convention: air
+# sampling: tabulated
+wavelength_A,transmission
+6800,0.98
+6900,0.75
+7600,0.68
+7700,0.96

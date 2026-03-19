@@ -19,6 +19,7 @@ dependencies = [
   "doit",
   "rich",
   "loguru",
+  "psutil>=5.9",
   "matplotlib",
   # Scientific stack: do not skimp on accuracy.
   "scipy>=1.10",
@@ -43,10 +44,16 @@ science = [
   "scipy>=1.10"
 ]
 
+# Optional performance accelerators. Runtime degrades gracefully without them.
+perf = [
+  "numba>=0.59"
+]
+
 # Dev tooling (tests / lint). Optional.
 dev = [
   "pytest>=8",
-  "ruff>=0.7"
+  "ruff>=0.7",
+  "grimp>=3.4"
 ]
 
 [project.scripts]

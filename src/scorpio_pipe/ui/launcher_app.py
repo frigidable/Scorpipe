@@ -165,6 +165,22 @@ def main() -> None:
     dt = time.perf_counter() - t0
     _log_progress(f"launcher_app: main window shown in {dt:.2f}s")
 
+    # Optional: enable UI freeze watchdog (debug / advanced mode).
+    # This writes ui_freeze_dump.txt with the main-thread stack when the event loop stalls.
+    try:
+        _log_progress("launcher_app: freeze watchdog (optional)")
+        from scorpio_pipe.ui.freeze_watchdog import install_if_enabled  # noqa: PLC0415
+
+        wd = install_if_enabled(app, settings=st)
+        if wd is not None:
+            # Keep a strong reference.
+            setattr(app, "_scorpipe_freeze_watchdog", wd)
+            _log_progress("launcher_app: freeze watchdog ENABLED")
+        else:
+            _log_progress("launcher_app: freeze watchdog disabled")
+    except Exception:
+        _log_progress("launcher_app: freeze watchdog init failed:\n" + traceback.format_exc())
+
     # If, for some reason, the window didn't become visible, show a hint.
     try:
         if not w.isVisible():

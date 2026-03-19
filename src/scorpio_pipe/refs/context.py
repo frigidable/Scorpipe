@@ -18,7 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -41,6 +41,7 @@ class ReferenceEntry:
     size: int | None = None
     mtime_utc: str | None = None
     version: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self, *, work_dir: Path | None = None) -> dict[str, Any]:
         p = self.resolved_path
@@ -59,6 +60,7 @@ class ReferenceEntry:
             "size": self.size,
             "mtime_utc": self.mtime_utc,
             "version": self.version,
+            "metadata": dict(self.metadata),
         }
 
 
@@ -73,6 +75,96 @@ def reference_context_id(entries: Iterable[ReferenceEntry]) -> str:
     rows = sorted(rows, key=lambda r: str(r.get("name")))
     s = json.dumps(rows, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(s).hexdigest()
+
+
+def _slug(s: str) -> str:
+    return "".join(ch.lower() if ch.isalnum() else "_" for ch in str(s or "").strip()).strip("_") or "default"
+
+
+def _parse_text_header_metadata(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    try:
+        if path.suffix.lower() not in (".csv", ".txt", ".yaml", ".yml", ".json", ".md"):
+            return out
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[:40]
+        for ln in lines:
+            s = ln.strip()
+            if not s.startswith("#"):
+                continue
+            s = s.lstrip("#").strip()
+            if ":" not in s:
+                continue
+            k, v = s.split(":", 1)
+            kk = k.strip().lower()
+            vv = v.strip()
+            if kk and vv:
+                out[kk] = vv
+    except Exception:
+        return out
+    return out
+
+
+def _extract_reference_metadata(logical_name: str, path: Path) -> dict[str, Any]:
+    logical = str(logical_name or "")
+    hdr = _parse_text_header_metadata(path)
+    meta: dict[str, Any] = {}
+
+    if logical.startswith("standards.") and logical.endswith(".table"):
+        meta["reference_kind"] = "standard_table"
+        meta["source_name"] = hdr.get("standard_name") or logical.split(".")[1]
+        meta.setdefault("interpolation_assumption", "linear_in_wavelength")
+    elif logical.startswith("standards.library"):
+        meta["reference_kind"] = "standard_library"
+        meta["source_name"] = path.name
+        meta.setdefault("interpolation_assumption", "lookup_only")
+    elif logical.startswith("extinction_curve."):
+        meta["reference_kind"] = "extinction_curve"
+        meta["source_name"] = logical.split(".", 1)[1]
+        meta.setdefault("interpolation_assumption", "linear_in_wavelength")
+    elif logical.startswith("telluric_mask."):
+        meta["reference_kind"] = "telluric_mask"
+        meta["source_name"] = logical.split(".", 1)[1]
+        meta.setdefault("interpolation_assumption", "interval_mask_no_interp")
+    elif logical.startswith("telluric_template."):
+        meta["reference_kind"] = "telluric_template"
+        meta["source_name"] = logical.split(".", 1)[1]
+        meta.setdefault("interpolation_assumption", "linear_in_wavelength")
+
+    if not meta:
+        return {}
+
+    for src_key, dst_key in (("units", "units"), ("wavelength_convention", "wavelength_convention"), ("wavelength_ref", "wavelength_convention"), ("sampling", "sampling"), ("standard_name", "standard_name"), ("version", "version")):
+        if hdr.get(src_key):
+            meta[dst_key] = hdr[src_key]
+
+    if meta.get("reference_kind") == "standard_table":
+        meta.setdefault("units", "f_lambda")
+        meta.setdefault("unit_family", "flux_density")
+        meta.setdefault("wavelength_convention", "air")
+        meta.setdefault("sampling", "tabulated")
+    elif meta.get("reference_kind") == "extinction_curve":
+        meta.setdefault("units", "mag_per_airmass")
+        meta.setdefault("unit_family", "extinction")
+        meta.setdefault("wavelength_convention", "air")
+        meta.setdefault("sampling", "tabulated")
+    elif meta.get("reference_kind") == "telluric_mask":
+        meta.setdefault("units", "transmission_mask")
+        meta.setdefault("unit_family", "mask")
+        meta.setdefault("wavelength_convention", "air")
+        meta.setdefault("sampling", "interval_list")
+    elif meta.get("reference_kind") == "telluric_template":
+        meta.setdefault("units", "relative_transmission")
+        meta.setdefault("unit_family", "transmission")
+        meta.setdefault("wavelength_convention", "air")
+        meta.setdefault("sampling", "tabulated")
+    elif meta.get("reference_kind") == "standard_library":
+        meta.setdefault("unit_family", "catalog")
+        meta.setdefault("sampling", "lookup")
+
+    meta.setdefault("checksum_algorithm", "sha256")
+    meta.setdefault("resampling_assumption", meta.get("interpolation_assumption"))
+    meta.setdefault("logical_family", meta.get("reference_kind"))
+    return meta
 
 
 def _parse_text_version(path: Path) -> str | None:
@@ -168,6 +260,8 @@ def _gather_requests(cfg: dict[str, Any]) -> list[tuple[str, str]]:
 
     wcfg = cfg.get("wavesol") if isinstance(cfg.get("wavesol"), dict) else {}
     wcfg = wcfg or {}
+    fcfg = cfg.get("fluxcal") if isinstance(cfg.get("fluxcal"), dict) else {}
+    fcfg = fcfg or {}
 
     # Linelist CSV: new key wavesol.linelist_csv; legacy neon_lines_csv.
     # P0-B10: do not hardcode historical lamp defaults here. Use the lamp
@@ -193,6 +287,24 @@ def _gather_requests(cfg: dict[str, Any]) -> list[tuple[str, str]]:
 
     # Instrument DB is shipped with the package (affects auto-config / metadata).
     reqs.append(("instrument_db", "instruments/scorpio_instruments.yaml"))
+
+    # Calibration-domain references (P0.4): standards, extinction, telluric assets.
+    std_lib_req = str(fcfg.get("standard_library") or "").strip() or "standards/library.yaml"
+    reqs.append(("standards.library", std_lib_req))
+
+    std_name = _slug(str(fcfg.get("standard_name") or "default"))
+    std_table_req = str(fcfg.get("standard_table") or fcfg.get("standards_table") or "").strip() or "standards/bd284211.csv"
+    reqs.append((f"standards.{std_name}.table", std_table_req))
+
+    site = _slug(str(fcfg.get("site_name") or fcfg.get("observatory") or "bta"))
+    extinction_req = str(fcfg.get("extinction_curve") or "").strip() or f"extinction/{site}.csv"
+    reqs.append((f"extinction_curve.{site}", extinction_req))
+
+    tell_mask_req = str(fcfg.get("telluric_mask") or "").strip() or "telluric/default_mask.csv"
+    reqs.append(("telluric_mask.default", tell_mask_req))
+
+    tell_tmpl_req = str(fcfg.get("telluric_template") or "").strip() or "telluric/default_template.csv"
+    reqs.append(("telluric_template.default", tell_tmpl_req))
 
     # Track all built-in science reference resources (CSV/YAML/PDF/JSON) so
     # any change alters the context id and forces correct reruns.
@@ -240,6 +352,7 @@ def build_reference_context(
         h = file_hash(rr.resolved_path)
         st = reference_stat(rr.resolved_path)
         ver = _parse_text_version(rr.resolved_path)
+        meta = _extract_reference_metadata(str(logical), Path(rr.resolved_path))
         entries.append(
             ReferenceEntry(
                 name=str(logical),
@@ -250,6 +363,7 @@ def build_reference_context(
                 size=st.get("size"),
                 mtime_utc=st.get("mtime_utc"),
                 version=ver,
+                metadata=meta,
             )
         )
 

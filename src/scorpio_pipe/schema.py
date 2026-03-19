@@ -4,20 +4,31 @@ The pipeline continues to operate on a plain dict/YAML config for backward
 compatibility. This schema is used by validation/doctor to catch common issues
 and warn about likely typos.
 
+P0-ARCH-04.2 (namespace discipline)
+---------------------------------
+Historically, :func:`find_unknown_keys` contained hand-maintained allow-lists for
+multiple sections. This made it a *heuristic* and caused false positives when
+new keys were legitimately introduced.
+
+Now, unknown-key detection is derived from the schema itself and acts as an
+architectural guard:
+  - top-level namespaces are fixed/stable;
+  - any new top-level key must be added to this schema.
+
 Notes
 -----
-- We intentionally allow extra keys (forward compatibility).
-- `find_unknown_keys()` provides user-facing warnings about typos.
-- `schema_validate()` returns a small report object (ok/errors/warnings).
+- We keep backward compatibility: the runtime config is still a plain dict.
+- Nested stage blocks remain permissive for forward compatibility.
+- The *top-level* keyspace is strict and must be extended only via schema.
 """
 
 from __future__ import annotations
 
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator, field_validator
 
 
 # ---------------------------- report objects ----------------------------
@@ -51,6 +62,44 @@ class QCBlock(BaseModel):
 
     thresholds: Dict[str, float] = Field(default_factory=dict)
     auto: bool = True
+
+
+class GlobalQCBlock(BaseModel):
+    """Top-level QC namespace.
+
+    This is a stable *namespace* intended for cross-stage QC knobs and report
+    output preferences.
+    """
+
+    # Keep forward compatibility, but enforce unknown keys via find_unknown_keys
+    # (schema-derived), so new keys must still be added through schema.
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    thresholds: Dict[str, float] = Field(default_factory=dict)
+    auto: bool = True
+
+
+class IOBlock(BaseModel):
+    """Top-level IO namespace.
+
+    Stable place for paths and I/O related knobs.
+
+    Unknown keys are enforced via :func:`find_unknown_keys` (schema-derived).
+    """
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    work_dir: Optional[str] = None
+    data_dir: Optional[str] = None
+    resources_dir: Optional[str] = None
+    dataset_manifest_path: Optional[str] = None
+    manifest_path: Optional[str] = None
+
+    # computed / meta (mirrors top-level legacy keys)
+    config_path: Optional[str] = None
+    config_dir: Optional[str] = None
+    project_root: Optional[str] = None
+    work_dir_abs: Optional[str] = None
 
 
 class WavesolBlock(BaseModel):
@@ -172,6 +221,8 @@ class CosmicsBlock(BaseModel):
     enabled: bool = True
     # auto | la_cosmic | stack_mad | two_frame_diff | laplacian
     method: str = "auto"
+    # current|fast|quality (reserved for future defaults tuning)
+    mode_profile: str = "current"
     # Global detection threshold (see method-specific notes).
     k: float = 9.0
     bias_subtract: bool = True
@@ -186,6 +237,9 @@ class CosmicsBlock(BaseModel):
     # --- Common tuning knobs ---
     # Binary mask dilation radius (pixels). 0 disables.
     dilate: int = 1
+    # Optional ROI for cosmics detection only: {x0,x1,y0,y1[,pad]}.
+    # Outside the ROI, pixels are left untouched.
+    roi: Optional[Dict[str, Any]] = None
 
     # --- stack_mad tuning ---
     # Thresholding uses |x-med| / (mad_scale*MAD) > k.
@@ -423,6 +477,60 @@ class FramesBlock(BaseModel):
         return out
 
 
+class ProjectBlock(BaseModel):
+    """Project-wide settings.
+
+    ``wave_reference`` is a hard correctness knob used in headers/QC.
+    Allowed values: ``air`` or ``vacuum``.
+    """
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    wave_reference: str = Field(default="air")
+    barycentric_correction: Optional[str] = None
+
+    @field_validator("wave_reference", mode="before")
+    @classmethod
+    def _norm_wave_reference(cls, v: Any) -> str:
+        if v is None:
+            return "air"
+        s = str(v).strip().lower()
+        if not s:
+            # If user explicitly provided empty value -> error.
+            raise ValueError("project.wave_reference must be 'air' or 'vacuum' (got empty)")
+        if s not in {"air", "vacuum"}:
+            raise ValueError(f"project.wave_reference must be 'air' or 'vacuum' (got {s!r})")
+        return s
+
+
+class InstrumentBlock(BaseModel):
+    """Instrument/setup summary block (UI-facing).
+
+    This is intentionally permissive (extra keys are allowed).
+    """
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    name: Optional[str] = None
+    mode: Optional[str] = None
+    disperser: Optional[str] = None
+    slit: Optional[str] = None
+    binning: Optional[str] = None
+    window: Optional[str] = None
+    shape: Optional[str] = None
+
+
+class RuntimeBlock(BaseModel):
+    """Runtime knobs (threads, etc.)."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    n_jobs: Optional[int] = None
+    blas_threads: Optional[int] = None
+    max_rss_mb: Optional[int] = None
+    performance_mode: Optional[str] = "full"
+
+
 class ConfigSchema(BaseModel):
     """Schema for the *resolved* config dict (after load_config).
 
@@ -432,8 +540,24 @@ class ConfigSchema(BaseModel):
 
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
+    # --- legacy/compat keys (still used by stages) ---
     work_dir: str
     data_dir: str
+
+    # Common UI/autoconfig fields (optional).
+    object: Optional[str] = None
+    project: ProjectBlock = Field(default_factory=ProjectBlock)
+    instrument: InstrumentBlock = Field(default_factory=InstrumentBlock)
+    runtime: RuntimeBlock = Field(default_factory=RuntimeBlock)
+    # P0-ARCH-04.2: stable namespaces
+    io: IOBlock = Field(default_factory=IOBlock)
+    qc: GlobalQCBlock = Field(default_factory=GlobalQCBlock)
+    strict_unknown: Optional[bool] = True
+    resources_dir: Optional[str] = None
+
+    # P0-E: manifest override path for per-science-set calibration
+    dataset_manifest_path: Optional[str] = None
+    manifest_path: Optional[str] = None
 
     frames: FramesBlock = Field(default_factory=FramesBlock)
     calib: CalibBlock = Field(default_factory=CalibBlock)
@@ -446,6 +570,10 @@ class ConfigSchema(BaseModel):
     stack2d: Stack2DBlock = Field(default_factory=Stack2DBlock)
     extract1d: Extract1DBlock = Field(default_factory=Extract1DBlock)
 
+    # Deprecated/compat: historically some configs used a top-level "noise".
+    # Stages should prefer namespaced noise (e.g. wavesol.noise).
+    noise: Optional[Dict[str, Any]] = None
+
     profiles: Optional[Dict[str, Any]] = None
 
     # computed / meta
@@ -456,212 +584,99 @@ class ConfigSchema(BaseModel):
     setup: Optional[Dict[str, Any]] = None
     _profiles_applied: Optional[List[str]] = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _sync_io_namespace(cls, data: Any) -> Any:
+        """Keep backward compatibility while introducing stable IO namespace.
+
+        - If ``io`` is absent, create it.
+        - Mirror legacy top-level path keys into ``io`` (and vice versa).
+
+        This is only for validation/TypedConfig; runtime stages still read
+        legacy keys.
+        """
+
+        if not isinstance(data, dict):
+            return data
+        out = dict(data)
+        io = out.get("io")
+        if not isinstance(io, dict):
+            io = {}
+
+        # Legacy top-level keys -> io.*
+        for k in (
+            "work_dir",
+            "data_dir",
+            "resources_dir",
+            "dataset_manifest_path",
+            "manifest_path",
+            "config_path",
+            "config_dir",
+            "project_root",
+            "work_dir_abs",
+        ):
+            if out.get(k) is not None and io.get(k) is None:
+                io[k] = out.get(k)
+
+        # io.* -> legacy top-level keys
+        for k in (
+            "work_dir",
+            "data_dir",
+            "resources_dir",
+            "dataset_manifest_path",
+            "manifest_path",
+        ):
+            if io.get(k) is not None and out.get(k) is None:
+                out[k] = io.get(k)
+
+        out["io"] = io
+        return out
+
 
 # ----------------------- typo/unknown key support -----------------------
 
 
-_TOP_KEYS = {
-    "work_dir",
-    "data_dir",
-    "frames",
-    "calib",
-    "cosmics",
-    "flatfield",
-    "wavesol",
-    "superneon",
-    "linearize",
-    "sky",
-    "stack2d",
-    "extract1d",
-    "noise",
-    "qc",
-    "profiles",
-    "config_path",
-    "config_dir",
-    "project_root",
-    "work_dir_abs",
-    "setup",
-    # P0-B/P0-E: manifest override path for per-science-set calibration
-    "dataset_manifest_path",
-    "manifest_path",
-    "_profiles_applied",
-}
+def _model_allowed_keys(model_cls: type[BaseModel]) -> Set[str]:
+    """Return allowed keys for a pydantic model (field names + explicit aliases)."""
 
-_FRAMES_KEYS = {"bias", "flat", "neon", "obj", "sky", "sunsky", "__setup__"}
-
-_WAVESOL_KEYS = {
-    "disperser",
-    "slit",
-    "binning",
-    "neon_lines_csv",
-    "atlas_pdf",
-    "profile_y",
-    "y_half",
-    "xshift_max_abs",
-    "noise",
-    "peak_snr",
-    "peak_prom_snr",
-    "peak_floor_snr",
-    "peak_distance",
-    "gauss_half_win",
-    "peak_min_amp",
-    "peak_prominence",
-    "peak_autotune",
-    "peak_target_min",
-    "peak_target_max",
-    "peak_snr_min",
-    "peak_snr_max",
-    "peak_snr_relax",
-    "peak_snr_boost",
-    "peak_autotune_max_tries",
-    "gui_min_amp_sigma_k",
-    "gui_min_amp",
-    "poly_deg_1d",
-    "blend_weight",
-    "poly_sigma_clip",
-    "poly_maxiter",
-    "hand_pairs_path",
-    "model2d",
-    "edge_crop_x",
-    "edge_crop_y",
-    "trace_y0",
-    "trace_template_hw",
-    "trace_avg_half",
-    "trace_search_rad",
-    "trace_y_step",
-    "trace_amp_thresh",
-    "trace_min_pts",
-    "power_deg",
-    "power_sigma_clip",
-    "power_maxiter",
-    "cheb_degx",
-    "cheb_degy",
-    "cheb_sigma_clip",
-    "cheb_maxiter",
-    "rejected_lines_A",
-    "ignore_lines_A",
-    "qc",
-}
-
-_CALIB_KEYS = {
-    "superbias_path",
-    "superflat_path",
-    "bias_combine",
-    "bias_sigma_clip",
-    # P0-C1: strict/degraded MasterBias matching
-    "bias_policy",
-    # P0-E: MasterFlat controls
-    "flat_combine",
-    "flat_sigma_clip",
-    "dispersion_axis",
-    "flat_smooth_win",
-    "flat_coverage_min",
-}
-
-_SUPERNEON_KEYS = {"bias_sub"}
-
-_COSMICS_KEYS = {
-    "enabled",
-    "method",
-    "k",
-    "bias_subtract",
-    "save_png",
-    "save_mask_fits",
-    "apply_to",
-    # common
-    "dilate",
-    # stack_mad
-    "mad_scale",
-    "min_mad",
-    "max_frac_per_frame",
-    "stack_dilate",
-    # two_frame_diff
-    "local_r",
-    "two_diff_local_r",
-    "two_diff_k2_scale",
-    "two_diff_k2_min",
-    "two_diff_thr_local_a",
-    "two_diff_thr_local_b",
-    "two_diff_dilate",
-    # laplacian
-    "lap_local_r",
-    "lap_k_scale",
-    "lap_k_min",
-    "lap_dilate",
-}
-
-_FLATFIELD_KEYS = {
-    "enabled",
-    "method",
-    "norm",
-    "bias_subtract",
-    "save_png",
-    "apply_to",
-    # P0-E: per-science-set MasterFlat
-    "use_manifest",
-    "science_sets",
-    "rebuild_superflat",
-    "rebuild_masterflat",
-    # Optional explicit noise overrides
-    "gain_e_per_adu",
-    "read_noise_e",
-}
-
-_QC_KEYS = {"thresholds", "auto"}
+    out: Set[str] = set(model_cls.model_fields.keys())
+    for f in model_cls.model_fields.values():
+        # pydantic v2: FieldInfo.alias can be set (e.g. frames.__setup__).
+        a = getattr(f, "alias", None)
+        if a:
+            out.add(str(a))
+    return out
 
 
 def find_unknown_keys(cfg: Dict[str, Any]) -> Dict[str, List[str]]:
-    """Return unknown keys grouped by section.
+    """Return unknown keys grouped by namespace.
 
-    Keys injected by load_config are considered known.
+    P0-ARCH-04.2: This function is intentionally *not* a heuristic over nested
+    stage parameters. Its job is to guard the global namespace discipline.
     """
 
     unknown: Dict[str, List[str]] = {}
 
-    top_unknown = sorted(k for k in cfg.keys() if str(k) not in _TOP_KEYS)
+    # Top-level: strict and derived from schema.
+    allowed_top = _model_allowed_keys(ConfigSchema)
+    top_unknown = sorted(str(k) for k in cfg.keys() if str(k) not in allowed_top)
     if top_unknown:
         unknown["top"] = top_unknown
 
-    frames = cfg.get("frames")
-    if isinstance(frames, dict):
-        u = sorted(k for k in frames.keys() if str(k) not in _FRAMES_KEYS)
+    # Selected stable namespaces (strict) — derive allowed keys from their models.
+    io = cfg.get("io")
+    if isinstance(io, dict):
+        allowed_io = _model_allowed_keys(IOBlock)
+        u = sorted(str(k) for k in io.keys() if str(k) not in allowed_io)
         if u:
-            unknown["frames"] = u
+            unknown["io"] = u
 
-    w = cfg.get("wavesol")
-    if isinstance(w, dict):
-        u = sorted(k for k in w.keys() if str(k) not in _WAVESOL_KEYS)
+    qc = cfg.get("qc")
+    if isinstance(qc, dict):
+        allowed_qc = _model_allowed_keys(GlobalQCBlock)
+        u = sorted(str(k) for k in qc.keys() if str(k) not in allowed_qc)
         if u:
-            unknown["wavesol"] = u
-        qc = w.get("qc")
-        if isinstance(qc, dict):
-            u2 = sorted(k for k in qc.keys() if str(k) not in _QC_KEYS)
-            if u2:
-                unknown["wavesol.qc"] = u2
-
-    c = cfg.get("calib")
-    if isinstance(c, dict):
-        u = sorted(k for k in c.keys() if str(k) not in _CALIB_KEYS)
-        if u:
-            unknown["calib"] = u
-
-    sn = cfg.get("superneon")
-    if isinstance(sn, dict):
-        u = sorted(k for k in sn.keys() if str(k) not in _SUPERNEON_KEYS)
-        if u:
-            unknown["superneon"] = u
-
-    cm = cfg.get("cosmics")
-    if isinstance(cm, dict):
-        u = sorted(k for k in cm.keys() if str(k) not in _COSMICS_KEYS)
-        if u:
-            unknown["cosmics"] = u
-
-    ff = cfg.get("flatfield")
-    if isinstance(ff, dict):
-        u = sorted(k for k in ff.keys() if str(k) not in _FLATFIELD_KEYS)
-        if u:
-            unknown["flatfield"] = u
+            unknown["qc"] = u
 
     return unknown
 
@@ -695,6 +710,14 @@ def schema_validate(cfg: Dict[str, Any]) -> SchemaReport:
     except Exception as e:
         # Keep it human-readable; detailed trace is not useful for users.
         msg = str(e)
+        # Pydantic v2 adds "For further information visit ..." hints which are
+        # noisy in GUI/CLI. Strip them for readability.
+        if "For further information visit" in msg:
+            msg = "\n".join(
+                ln
+                for ln in msg.splitlines()
+                if "For further information visit" not in ln
+            ).strip()
         if len(msg) > 2000:
             msg = msg[:2000] + "…"
         return SchemaReport(

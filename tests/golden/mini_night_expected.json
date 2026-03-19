@@ -1,0 +1,15 @@
+{
+  "schema": "scorpio_pipe.golden_night",
+  "schema_version": 1,
+  "notes": "Tiny synthetic night. Values are compared with tolerances to catch regressions.",
+  "metrics": {
+    "wavesol_1d_rms_A": {"min": 0.0, "max": 0.05},
+    "sky_robust_sigma_r_after_median": {"min": 1.0, "max": 10.0},
+    "linearize_mask_nonzero_frac": {"min": 0.0, "max": 0.35}
+  },
+  "tolerances": {
+    "wavesol_1d_rms_A": {"abs": 0.05},
+    "sky_robust_sigma_r_after_median": {"abs": 0.8, "rel": 0.25},
+    "linearize_mask_nonzero_frac": {"abs": 0.05}
+  }
+}

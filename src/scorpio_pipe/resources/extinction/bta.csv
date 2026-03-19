@@ -1,0 +1,9 @@
+# version: 2026.03
+# units: mag_per_airmass
+# wavelength_convention: air
+# sampling: tabulated
+wavelength_A,k_lambda
+4000,0.34
+5000,0.23
+6000,0.15
+7000,0.11

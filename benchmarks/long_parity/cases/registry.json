@@ -1,0 +1,73 @@
+{
+  "schema": "scorpio_pipe.long_parity_registry",
+  "schema_version": 1,
+  "minimum_real_cases_required": 8,
+  "entries": [
+    {
+      "case_id": "mini_night_synthetic",
+      "status": "fixture",
+      "manifest": "mini_night_synthetic.case.json",
+      "category": "ci-fixture"
+    },
+    {
+      "case_id": "sc1_reference_clean",
+      "status": "pending-private-data",
+      "manifest": null,
+      "category": "reference"
+    },
+    {
+      "case_id": "sc2_reference_clean",
+      "status": "pending-private-data",
+      "manifest": null,
+      "category": "reference"
+    },
+    {
+      "case_id": "weak_neon_lines",
+      "status": "pending-private-data",
+      "manifest": null,
+      "category": "wavesolution"
+    },
+    {
+      "case_id": "skyline_rich_residuals",
+      "status": "pending-private-data",
+      "manifest": null,
+      "category": "sky"
+    },
+    {
+      "case_id": "weak_object_extraction",
+      "status": "pending-private-data",
+      "manifest": null,
+      "category": "extraction"
+    },
+    {
+      "case_id": "flexure_sensitive_setup",
+      "status": "pending-private-data",
+      "manifest": null,
+      "category": "sky"
+    },
+    {
+      "case_id": "curved_slit_geometry",
+      "status": "pending-private-data",
+      "manifest": null,
+      "category": "geometry"
+    },
+    {
+      "case_id": "mixed_slit_metadata",
+      "status": "pending-private-data",
+      "manifest": null,
+      "category": "calibration"
+    },
+    {
+      "case_id": "extended_object_sky_stress",
+      "status": "pending-private-data",
+      "manifest": null,
+      "category": "sky"
+    },
+    {
+      "case_id": "repeatability_multi_exposure",
+      "status": "pending-private-data",
+      "manifest": null,
+      "category": "repeatability"
+    }
+  ]
+}

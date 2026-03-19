@@ -35,7 +35,10 @@ from __future__ import annotations
 import json
 import logging
 import math
+import multiprocessing as mp
+import os
 import shutil
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple
@@ -721,6 +724,94 @@ def _eval_bspline(t: np.ndarray, c: np.ndarray, k: int, lam: np.ndarray) -> np.n
     return np.asarray(spl(lam_c), dtype=float)
 
 
+def _iter_row_chunks(ny: int, strip_rows: int) -> list[tuple[int, int]]:
+    """Return inclusive-exclusive row chunks for tiled model evaluation."""
+
+    step = int(max(1, strip_rows))
+    return [(int(y0), int(min(ny, y0 + step))) for y0 in range(0, int(ny), step)]
+
+
+def _eval_model_chunk_bspline(
+    lam_chunk: np.ndarray,
+    *,
+    t: np.ndarray,
+    degree: int,
+    c0: np.ndarray,
+    c1: Optional[np.ndarray],
+    y_norm_chunk: np.ndarray,
+    delta_A: float = 0.0,
+) -> np.ndarray:
+    """Evaluate the B-spline sky model on a single Y-strip."""
+
+    lam_chunk = np.asarray(lam_chunk, dtype=float)
+    nyc, nxc = lam_chunk.shape
+    lam_flat = (lam_chunk + float(delta_A)).reshape(-1)
+    B = _bspline_design_matrix(lam_flat, np.asarray(t, dtype=float), int(degree))
+    s0 = np.asarray(B @ np.asarray(c0, dtype=float), dtype=float).reshape(nyc, nxc)
+    if c1 is None:
+        return s0.astype(np.float32, copy=False)
+    s1 = np.asarray(B @ np.asarray(c1, dtype=float), dtype=float).reshape(nyc, nxc)
+    yv = np.asarray(y_norm_chunk, dtype=float).reshape(nyc, 1)
+    return (s0 + s1 * yv).astype(np.float32, copy=False)
+
+
+def _eval_model_chunk_linear_spline(
+    lam_chunk: np.ndarray,
+    *,
+    lam0: float,
+    step_A: float,
+    a_nodes: np.ndarray,
+    delta_A: float = 0.0,
+) -> np.ndarray:
+    """Evaluate the linear-spline sky-scale model on a single Y-strip."""
+
+    lam = np.asarray(lam_chunk, dtype=float)
+    tt = (lam + float(delta_A) - float(lam0)) / float(step_A)
+    ii = np.floor(tt).astype(np.int64)
+    ff = tt - ii
+    ii = np.clip(ii, 0, int(a_nodes.size) - 2)
+    aa1 = np.clip(ff, 0.0, 1.0)
+    aa0 = 1.0 - aa1
+    ii1 = ii + 1
+    out = aa0 * np.asarray(a_nodes, dtype=float)[ii] + aa1 * np.asarray(a_nodes, dtype=float)[ii1]
+    return out.astype(np.float32, copy=False)
+
+
+def _safe_parallel_workers(requested: int | None) -> int:
+    """Clamp worker count to a conservative process-pool size."""
+
+    try:
+        cpu = int(os.cpu_count() or 1)
+    except Exception:
+        cpu = 1
+    if requested is None:
+        requested_i = min(4, cpu)
+    else:
+        requested_i = int(requested)
+    return int(max(1, min(requested_i, max(1, cpu), 8)))
+
+
+def _process_pool_model(
+    worker_fn,
+    args_list: list[tuple[Any, ...]],
+    *,
+    max_workers: int,
+) -> list[np.ndarray]:
+    """Run tiled model evaluation in a small process pool (best effort)."""
+
+    if int(max_workers) <= 1 or len(args_list) <= 1:
+        return [np.asarray(worker_fn(*args), dtype=np.float32) for args in args_list]
+
+    # A small process pool is enough here; strips are coarse and memory-bound.
+    outs: list[np.ndarray] = []
+    with process_pool_blas_guard(1):
+        with ProcessPoolExecutor(max_workers=int(max_workers), mp_context=mp.get_context("spawn"), initializer=limit_child_blas_threads, initargs=(1,)) as ex:
+            futs = [ex.submit(worker_fn, *args) for args in args_list]
+            for f in futs:
+                outs.append(np.asarray(f.result(), dtype=np.float32))
+    return outs
+
+
 def _fit_kelson_bspline(
     lam: np.ndarray,
     y_norm: np.ndarray,
@@ -883,6 +974,42 @@ def _fit_kelson_bspline(
     }
 
 
+def _eval_model_chunk_bspline_job(
+    lam_chunk: np.ndarray,
+    t: np.ndarray,
+    degree: int,
+    c0: np.ndarray,
+    c1: Optional[np.ndarray],
+    y_norm_chunk: np.ndarray,
+    delta_A: float,
+) -> np.ndarray:
+    return _eval_model_chunk_bspline(
+        lam_chunk,
+        t=t,
+        degree=int(degree),
+        c0=c0,
+        c1=c1,
+        y_norm_chunk=y_norm_chunk,
+        delta_A=float(delta_A),
+    )
+
+
+def _eval_model_chunk_linear_spline_job(
+    lam_chunk: np.ndarray,
+    lam0: float,
+    step_A: float,
+    a_nodes: np.ndarray,
+    delta_A: float,
+) -> np.ndarray:
+    return _eval_model_chunk_linear_spline(
+        lam_chunk,
+        lam0=float(lam0),
+        step_A=float(step_A),
+        a_nodes=a_nodes,
+        delta_A=float(delta_A),
+    )
+
+
 def _estimate_flexure_delta(fit: dict[str, Any], *, delta_max_A: float, delta_step_A: float, n_samples: int, rng: np.random.Generator) -> dict[str, Any]:
     """Estimate δλ by scanning χ²(δ) on a small grid (Kelson RAW)."""
 
@@ -972,8 +1099,16 @@ def _eval_model_map(
     c1: Optional[np.ndarray],
     y_norm_rows: np.ndarray,
     delta_A: float = 0.0,
+    strip_rows: int | None = None,
+    n_workers: int | None = None,
+    parallel_min_pixels: int = 262144,
 ) -> np.ndarray:
-    """Evaluate S(λ,y) for the full 2D frame (B-spline basis)."""
+    """Evaluate S(λ,y) for the full 2D frame (B-spline basis).
+
+    The full-frame model is computed strip-by-strip. For large frames we can use
+    a small process pool because strips are independent after the global fit
+    coefficients have been determined.
+    """
 
     lam = np.asarray(lambda_map, dtype=float)
     ny, nx = lam.shape
@@ -992,13 +1127,35 @@ def _eval_model_map(
         # Fallback: standard symmetric normalization to [-1, +1] for rows.
         yr = np.arange(ny, dtype=float)
         y_norm = (2.0 * (yr - 0.5 * (ny - 1)) / max((ny - 1), 1.0)).reshape(ny, 1)
-    lam_e = lam + float(delta_A)
 
-    s0 = _eval_bspline(t, c0, int(degree), lam_e)
-    if c1 is None:
-        return s0.astype(np.float32)
-    s1 = _eval_bspline(t, c1, int(degree), lam_e)
-    return (s0 + s1 * y_norm).astype(np.float32)
+    strip = int(max(1, strip_rows or min(128, max(16, ny))))
+    chunks = _iter_row_chunks(ny, strip)
+    workers = _safe_parallel_workers(n_workers)
+    use_parallel = (lam.size >= int(max(1, parallel_min_pixels))) and (workers > 1) and (len(chunks) > 1)
+
+    c1_arr = (np.asarray(c1, dtype=float) if c1 is not None else None)
+    args_list = [
+        (
+            np.asarray(lam[y0:y1, :], dtype=float),
+            np.asarray(t, dtype=float),
+            int(degree),
+            np.asarray(c0, dtype=float),
+            c1_arr,
+            np.asarray(y_norm[y0:y1, 0], dtype=float),
+            float(delta_A),
+        )
+        for y0, y1 in chunks
+    ]
+
+    if use_parallel:
+        try:
+            parts = _process_pool_model(_eval_model_chunk_bspline_job, args_list, max_workers=workers)
+            return np.vstack(parts).astype(np.float32, copy=False)
+        except Exception:
+            pass
+
+    parts = _process_pool_model(_eval_model_chunk_bspline_job, args_list, max_workers=1)
+    return np.vstack(parts).astype(np.float32, copy=False)
 
 
 def _eval_linear_spline_map(
@@ -1008,19 +1165,39 @@ def _eval_linear_spline_map(
     step_A: float,
     a_nodes: np.ndarray,
     delta_A: float = 0.0,
+    strip_rows: int | None = None,
+    n_workers: int | None = None,
+    parallel_min_pixels: int = 262144,
 ) -> np.ndarray:
     """Evaluate a linear B-spline (piecewise-linear) a(λ) on the full 2D frame."""
 
     lam = np.asarray(lambda_map, dtype=float)
-    tt = (lam + float(delta_A) - float(lam0)) / float(step_A)
-    ii = np.floor(tt).astype(np.int64)
-    ff = tt - ii
-    ii = np.clip(ii, 0, int(a_nodes.size) - 2)
-    aa1 = np.clip(ff, 0.0, 1.0)
-    aa0 = 1.0 - aa1
-    ii1 = ii + 1
-    out = aa0 * a_nodes[ii] + aa1 * a_nodes[ii1]
-    return out.astype(np.float32)
+    ny, _nx = lam.shape
+    strip = int(max(1, strip_rows or min(128, max(16, ny))))
+    chunks = _iter_row_chunks(ny, strip)
+    workers = _safe_parallel_workers(n_workers)
+    use_parallel = (lam.size >= int(max(1, parallel_min_pixels))) and (workers > 1) and (len(chunks) > 1)
+
+    args_list = [
+        (
+            np.asarray(lam[y0:y1, :], dtype=float),
+            float(lam0),
+            float(step_A),
+            np.asarray(a_nodes, dtype=float),
+            float(delta_A),
+        )
+        for y0, y1 in chunks
+    ]
+
+    if use_parallel:
+        try:
+            parts = _process_pool_model(_eval_model_chunk_linear_spline_job, args_list, max_workers=workers)
+            return np.vstack(parts).astype(np.float32, copy=False)
+        except Exception:
+            pass
+
+    parts = _process_pool_model(_eval_model_chunk_linear_spline_job, args_list, max_workers=1)
+    return np.vstack(parts).astype(np.float32, copy=False)
 
 
 def _fit_sky_scale(
@@ -1123,11 +1300,18 @@ def _median_template(frames: Iterable[Path]) -> Tuple[np.ndarray, fits.Header]:
 
 
 def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[str, Path]:
-    """Entry point used by the pipeline runner."""
+    """Entry point used by the pipeline runner.
 
-    work_dir = resolve_work_dir(cfg)
-    out_dir = out_dir or stage_dir(work_dir, "sky")
+    P0-ARCH-07: stage must not derive its own stage directory.
+    The engine passes ``ctx.stage_dir`` as ``out_dir``.
+    """
+
+    if out_dir is None:
+        raise ValueError("sky: out_dir is required (pass ctx.stage_dir)")
+
+    out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    work_dir = resolve_work_dir(cfg)
 
     done_path = out_dir / "done.json"
     sky_done_path = out_dir / "sky_done.json"
@@ -1265,10 +1449,19 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
         else:
             raw_inputs = [Path(str(p)) for p in clean_inputs]
 
-    lam_map_path = stage_dir(work_dir, "wavesol") / "lambda_map.fits"
+    # P0-ARCH-06.2: wavesolution products may live in a disperser-aware subdir
+    # (08_wavesol/<slug>/...). Always resolve via wavesol_paths first.
+    from scorpio_pipe.wavesol_paths import wavesol_dir as _wavesol_dir
+
+    lam_map_path = _wavesol_dir(cfg, run_root=work_dir) / "lambda_map.fits"
     if not lam_map_path.exists():
-        # Older layout: wavesol_dir may be elsewhere
-        lam_map_path = (work_dir / "wavesol" / "lambda_map.fits")
+        # Fallback: stage root (older layouts wrote directly into 08_wavesol)
+        cand = stage_dir(work_dir, "wavesol") / "lambda_map.fits"
+        if cand.exists():
+            lam_map_path = cand
+        else:
+            # Legacy compatibility: work_dir/wavesol/lambda_map.fits
+            lam_map_path = work_dir / "wavesol" / "lambda_map.fits"
 
     lam_cfg = sky_cfg.get("lambda_map") if isinstance(sky_cfg.get("lambda_map"), dict) else {}
     allow_fallback_pix = bool(lam_cfg.get("allow_fallback_pix", False))
@@ -1663,6 +1856,15 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                 y_norm_rows = (2.0 * (y_rows - 0.5 * (ny - 1)) / max((ny - 1), 1.0)).astype(float)
                 y_s_norm = y_norm_rows[y_idx]
 
+                perf_cfg = sky_cfg.get("perf") if isinstance(sky_cfg.get("perf"), dict) else {}
+                strips_enabled = bool(perf_cfg.get("parallel_strips", True))
+                strip_rows = _cfg_int(perf_cfg, "strip_rows", 128)
+                parallel_min_pixels = _cfg_int(perf_cfg, "parallel_min_pixels", 262144)
+                raw_workers = perf_cfg.get("strip_workers")
+                strip_workers = (_safe_parallel_workers(int(raw_workers)) if raw_workers not in {None, ""} else _safe_parallel_workers(None))
+                if not strips_enabled:
+                    strip_workers = 1
+
                 # choose method
                 method_used = primary
                 flex = None
@@ -1692,13 +1894,23 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                     fit_meta = dict(fit)
                     a_nodes = np.asarray(fit["a_nodes"], dtype=float)
                     amp = _eval_linear_spline_map(
-                        lam_map,
+                        lam_eff,
                         lam0=fit["lam0"],
                         step_A=fit["step_A"],
                         a_nodes=a_nodes,
                         delta_A=0.0,
+                        strip_rows=strip_rows,
+                        n_workers=strip_workers,
+                        parallel_min_pixels=parallel_min_pixels,
                     )
                     model = (amp * sky_template.astype(np.float32)).astype(np.float32)
+                    fit_meta["model_eval"] = {
+                        "strip_rows": int(strip_rows),
+                        "strip_workers": int(strip_workers),
+                        "parallel_min_pixels": int(parallel_min_pixels),
+                        "parallel_enabled": bool(strip_workers > 1 and lam_eff.size >= parallel_min_pixels),
+                        "mode": "linear_spline_tiled",
+                    }
                 else:
                     # kelson_raw
                     _ok = np.isfinite(lam_s) & np.isfinite(y_s_norm) & np.isfinite(d_s) & np.isfinite(var_s) & (var_s > 0)
@@ -1752,7 +1964,17 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                         c1=(np.asarray(fit["coeff"]["c1"], dtype=float) if fit["coeff"]["c1"] is not None else None),
                         y_norm_rows=y_norm_rows,
                         delta_A=delta_A,
+                        strip_rows=strip_rows,
+                        n_workers=strip_workers,
+                        parallel_min_pixels=parallel_min_pixels,
                     )
+                    fit_meta["model_eval"] = {
+                        "strip_rows": int(strip_rows),
+                        "strip_workers": int(strip_workers),
+                        "parallel_min_pixels": int(parallel_min_pixels),
+                        "parallel_enabled": bool(strip_workers > 1 and lam_eff.size >= parallel_min_pixels),
+                        "mode": "bspline_tiled",
+                    }
 
                     # FLEXURE_UNCERTAIN heuristic
                     sigd = flex.get("sigma_delta_A")
@@ -2384,44 +2606,10 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
 
 
 def run_sky_sub(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[str, Path]:
-    """Sky subtraction stage with P2 reliability guard.
+    """Sky subtraction stage.
 
-    Guarantees that ``done.json`` is written even if the stage fails.
+    P0-ARCH-07: the stage must not derive its own stage directory.
+    Pass ``out_dir`` (engine uses ``ctx.stage_dir``).
     """
 
-    # Run the main implementation first; it already writes rich done.json on success.
-    try:
-        return _run_sky_sub_impl(cfg, out_dir=out_dir)
-    except Exception as e:
-        # Best-effort failure marker (must not swallow the exception).
-        from scorpio_pipe.io.done_json import write_done_json
-        from scorpio_pipe.qc.flags import make_flag
-        from scorpio_pipe.workspace_paths import stage_dir
-
-        work_dir = resolve_work_dir(cfg)
-        out_dir = stage_dir(work_dir, "sky")
-        out_dir.mkdir(parents=True, exist_ok=True)
-
-        fl = make_flag(
-            "STAGE_FAILED",
-            "ERROR",
-            f"{type(e).__name__}: {e}",
-            hint="Check the traceback and the stage log; verify inputs (lambda-map, ROI, frames).",
-        )
-        try:
-            write_done_json(
-                stage="sky",
-                stage_dir=out_dir,
-                status="fail",
-                flags=[fl],
-                qc={"flags": [fl], "max_severity": "ERROR"},
-                error={
-                    "type": type(e).__name__,
-                    "message": str(e),
-                    "repr": repr(e),
-                },
-                legacy_paths=[out_dir / "sky_done.json"],
-            )
-        except Exception:
-            pass
-        raise
+    return _run_sky_sub_impl(cfg, out_dir=out_dir)

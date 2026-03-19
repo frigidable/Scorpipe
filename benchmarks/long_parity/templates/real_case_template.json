@@ -1,0 +1,15 @@
+{
+  "case_id": "replace_me",
+  "title": "Human-readable case title",
+  "category": "reference",
+  "source_type": "real_private",
+  "description": "Describe the observing problem this case exercises.",
+  "observer_notes": "What usually goes wrong here? What does the observer watch first?",
+  "scorpipe_bundle": "../private/<case>/scorpipe_bundle.json",
+  "long_bundle": "../private/<case>/long_bundle.json",
+  "metrics": {
+    "wavelength_solution.rms": {"label": "Wave RMS [A]", "prefer": "lower"},
+    "sky_subtraction.sky_rms": {"label": "Sky residual RMS", "prefer": "lower"},
+    "extraction.snr": {"label": "Extracted S/N", "prefer": "higher"}
+  }
+}

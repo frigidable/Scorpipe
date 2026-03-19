@@ -3,7 +3,7 @@ from __future__ import annotations
 """Project-level frame role manifest.
 
 This module implements **BL-P1-PROJ-010**: a user-editable YAML file that
-explicitly declares which raw frames play which roles (obj/sky/arc/flat/bias).
+explicitly declares which raw frames play which roles (obj/sky/arc/flat/bias/standards).
 
 Rationale
 ---------
@@ -29,6 +29,12 @@ roles:
     globs: ["raw/*NGC*.fits"]
     exclude: ["raw/obj1_test.fits"]
   SKY_FRAMES:
+    files: []
+    globs: []
+  STANDARD_FRAMES:
+    files: []
+    globs: []
+  TELLURIC_STANDARD_FRAMES:
     files: []
     globs: []
   ARCS:
@@ -73,6 +79,8 @@ CANONICAL_ROLES: tuple[str, ...] = (
     "FLATS",
     "BIAS",
     "SUNSKY_FRAMES",
+    "STANDARD_FRAMES",
+    "TELLURIC_STANDARD_FRAMES",
 )
 
 
@@ -91,7 +99,7 @@ class ProjectManifestModel(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    schema_id: str = Field(default="scorpio-pipe.project-manifest.v1.1", alias="schema")
+    schema_id: str = Field(default="scorpio-pipe.project-manifest.v1.2", alias="schema")
     # Global exclude: remove frames from *all* roles and products.
     # On disk we accept either a list[str] or a mapping {files: [...], globs: [...]}
     exclude: Any = Field(default_factory=lambda: {"files": [], "globs": []})
@@ -110,6 +118,8 @@ class ProjectManifestModel(BaseModel):
             "object_frames": "OBJECT_FRAMES",
             "sky_frames": "SKY_FRAMES",
             "sunsky_frames": "SUNSKY_FRAMES",
+            "standard_frames": "STANDARD_FRAMES",
+            "telluric_standard_frames": "TELLURIC_STANDARD_FRAMES",
             "arcs": "ARCS",
             "flats": "FLATS",
             "bias": "BIAS",
@@ -222,6 +232,14 @@ class ProjectManifestModel(BaseModel):
     @property
     def sunsky_frames(self) -> list[str]:
         return self._files_for_role("SUNSKY_FRAMES")
+
+    @property
+    def standard_frames(self) -> list[str]:
+        return self._files_for_role("STANDARD_FRAMES")
+
+    @property
+    def telluric_standard_frames(self) -> list[str]:
+        return self._files_for_role("TELLURIC_STANDARD_FRAMES")
 
     @property
     def arcs(self) -> list[str]:
@@ -345,18 +363,41 @@ ROLE_TO_FRAMES_KEY: dict[str, str] = {
     # optional
     "SUNSKY_FRAMES": "sunsky",
     "SUNSKY": "sunsky",
+    "STANDARD_FRAMES": "standard",
+    "TELLURIC_STANDARD_FRAMES": "telluric_standard",
 }
 
-FRAMES_KEY_TO_ROLE: dict[str, str] = {v: k for k, v in ROLE_TO_FRAMES_KEY.items() if k in {"OBJECT_FRAMES","SKY_FRAMES","ARCS","FLATS","BIAS","SUNSKY_FRAMES","SUNSKY"}}
+FRAMES_KEY_TO_ROLE: dict[str, str] = {
+    v: k
+    for k, v in ROLE_TO_FRAMES_KEY.items()
+    if k in {
+        "OBJECT_FRAMES",
+        "SKY_FRAMES",
+        "ARCS",
+        "FLATS",
+        "BIAS",
+        "SUNSKY_FRAMES",
+        "SUNSKY",
+        "STANDARD_FRAMES",
+        "TELLURIC_STANDARD_FRAMES",
+    }
+}
 
 def default_project_manifest_dict() -> dict[str, Any]:
     roles: dict[str, Any] = {}
-    for role in ("OBJECT_FRAMES", "SKY_FRAMES", "ARCS", "FLATS", "BIAS"):
+    for role in (
+        "OBJECT_FRAMES",
+        "SKY_FRAMES",
+        "ARCS",
+        "FLATS",
+        "BIAS",
+        "SUNSKY_FRAMES",
+        "STANDARD_FRAMES",
+        "TELLURIC_STANDARD_FRAMES",
+    ):
         roles[role] = {"files": [], "globs": []}
-    # keep optional sunsky for SCORPIO flats variants
-    roles["SUNSKY_FRAMES"] = {"files": [], "globs": []}
     return {
-        "schema": "scorpio-pipe.project-manifest.v1.1",
+        "schema": "scorpio-pipe.project-manifest.v1.2",
         "exclude": {"files": [], "globs": []},
         "roles": roles,
         "groups": {},

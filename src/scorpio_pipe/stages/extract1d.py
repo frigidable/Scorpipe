@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -38,12 +39,21 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 
 import numpy as np
 from astropy.io import fits
+from scorpio_pipe.io.atomic_fits import atomic_write_fits
 from scipy.interpolate import UnivariateSpline
 from scipy.ndimage import gaussian_filter1d
+
+try:
+    from numba import njit
+    _NUMBA_OK = True
+except Exception:  # pragma: no cover - optional accelerator
+    njit = None  # type: ignore[assignment]
+    _NUMBA_OK = False
 
 from scorpio_pipe import maskbits
 from scorpio_pipe.paths import resolve_work_dir
 from scorpio_pipe.provenance import add_provenance
+from scorpio_pipe.operational_presets import resolve_extract_defaults
 from scorpio_pipe.version import PIPELINE_VERSION
 from scorpio_pipe.contracts.data_model import stamp_data_model
 
@@ -117,6 +127,90 @@ def _mad_sigma(x: np.ndarray) -> float:
 
 def _clamp_int(v: float, lo: int, hi: int) -> int:
     return int(np.clip(int(round(float(v))), lo, hi))
+
+
+def _sanitize_y_center(y_center: np.ndarray, ny: int, nlam: int) -> np.ndarray:
+    """Return a finite per-column center array with deterministic fallback."""
+    yc = np.asarray(y_center, dtype=float).reshape(-1)
+    if yc.size == 0:
+        return np.full(nlam, 0.5 * float(max(0, ny - 1)), dtype=float)
+    if yc.size != nlam:
+        if yc.size == 1:
+            yc = np.full(nlam, float(yc[0]), dtype=float)
+        else:
+            xp = np.linspace(0.0, 1.0, yc.size, dtype=float)
+            x = np.linspace(0.0, 1.0, nlam, dtype=float)
+            yc = np.interp(x, xp, yc.astype(float, copy=False))
+    finite = np.isfinite(yc)
+    if np.any(finite):
+        fill = float(np.nanmedian(yc[finite]))
+    else:
+        fill = 0.5 * float(max(0, ny - 1))
+    return np.where(finite, yc, fill).astype(float, copy=False)
+
+
+def _resolve_optimal_backend(name: str | None) -> str:
+    """Resolve optimal-extraction backend with graceful fallback."""
+    raw = str(name or os.getenv("SCORPIPE_EXTRACT1D_OPT_BACKEND", "auto") or "auto").strip().lower()
+    if raw in {"auto", "default", "numpy", "numba"}:
+        if raw == "numba" and not _NUMBA_OK:
+            return "numpy"
+        if raw == "default":
+            return "auto"
+        return raw
+    return "auto"
+
+
+if _NUMBA_OK:  # pragma: no branch - compiled only when numba is installed
+
+    @njit(cache=True)
+    def _optimal_finalize_numba(
+        P: np.ndarray,
+        sl_all: np.ndarray,
+        vv_all: np.ndarray,
+        good: np.ndarray,
+        n_tot: np.ndarray,
+        min_good_frac: float,
+        no_coverage_bit: int,
+        sky_resid: np.ndarray,
+        apply_local_sky: bool,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        nwin, nlam = P.shape
+        flux = np.empty(nlam, dtype=np.float64)
+        out_var = np.empty(nlam, dtype=np.float64)
+        out_mask = np.zeros(nlam, dtype=np.uint16)
+        out_npix = np.zeros(nlam, dtype=np.int16)
+        corr = np.full(nlam, np.nan, dtype=np.float64)
+        for j in range(nlam):
+            flux[j] = np.nan
+            out_var[j] = np.nan
+            denom = 0.0
+            num = 0.0
+            corr_num = 0.0
+            n_good = 0
+            for k in range(nwin):
+                if good[k, j]:
+                    n_good += 1
+                    vv = vv_all[k, j]
+                    pj = P[k, j]
+                    denom += (pj * pj) / vv
+                    num += pj * sl_all[k, j] / vv
+                    corr_num += pj / vv
+            out_npix[j] = np.int16(n_good)
+            if n_tot[j] <= 0 or n_good <= 0:
+                out_mask[j] = np.uint16(out_mask[j] | np.uint16(no_coverage_bit))
+                continue
+            min_need = int(math.ceil(min_good_frac * float(n_tot[j])))
+            if n_good < min_need:
+                out_mask[j] = np.uint16(out_mask[j] | np.uint16(no_coverage_bit))
+            if not (denom > 0.0):
+                out_mask[j] = np.uint16(out_mask[j] | np.uint16(no_coverage_bit))
+                continue
+            flux[j] = num / denom
+            out_var[j] = 1.0 / denom
+            if apply_local_sky:
+                corr[j] = corr_num / denom
+        return flux, out_var, out_mask, out_npix, corr
 
 
 def _safe_json(obj: Any) -> Any:
@@ -687,21 +781,13 @@ def _optimal_extract(
     smooth_lambda_sigma: float = 3.0,
     clip_negative_profile: bool = True,
     min_profile_sum: float = 1e-6,
+    backend: str = "auto",
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
     """Horne-like optimal extraction (weights by spatial profile + honest VAR).
 
-    Notes
-    -----
-    We implement the classical weighted estimator:
-
-      F(λ)   = Σ_y P(y|λ) * D(y,λ) / V(y,λ)  /  Σ_y P(y|λ)^2 / V(y,λ)
-      Var(λ) = 1 / Σ_y P(y|λ)^2 / V(y,λ)
-
-    where D is the input 2D data (background/sky already subtracted) and P is the
-    normalized spatial profile within the extraction aperture.
-
-    The profile is estimated from the data in a moving aperture around `y_center`
-    and smoothed along λ with a Gaussian filter to reduce 'learning on noise'.
+    The hot path is vectorized over λ so wide spectra do not degrade into
+    Python-level per-column loops. An optional numba backend is available for
+    the final narrow reduction loops and falls back gracefully to NumPy.
     """
     ny, nlam = sci.shape
     ap_hw = int(max(1, ap_hw))
@@ -711,123 +797,114 @@ def _optimal_extract(
     have_var = var is not None and var.shape == sci.shape
     have_mask = mask is not None and mask.shape == sci.shape
     if not have_var:
-        # Without VAR optimal extraction is undefined; fall back to VAR=1.
         var = np.ones_like(sci, dtype=float)
 
-    # Build a profile cube in aperture coordinates (k=0..nwin-1, λ).
-    prof = np.zeros((nwin, nlam), dtype=float)
-    good_prof = np.zeros((nwin, nlam), dtype=bool)
+    backend_req = _resolve_optimal_backend(backend)
+    yc = _sanitize_y_center(np.asarray(y_center, dtype=float), ny, nlam)
+    y_round = np.rint(yc).astype(np.int64, copy=False)
+    offsets = np.arange(-ap_hw, ap_hw + 1, dtype=np.int64)[:, None]
+    rows = y_round[None, :] + offsets
+    inside = (rows >= 0) & (rows < ny)
+    rows_clip = np.clip(rows, 0, ny - 1)
+    cols = np.arange(nlam, dtype=np.int64)[None, :]
 
-    for j in range(nlam):
-        yc = float(y_center[j]) if j < len(y_center) else float(np.nanmedian(y_center))
-        y0 = _clamp_int(yc - ap_hw, 0, ny - 1)
-        y1 = _clamp_int(yc + ap_hw, 0, ny - 1)
-        sl = sci[y0 : y1 + 1, j].astype(float, copy=False)
-        vv = var[y0 : y1 + 1, j].astype(float, copy=False)
-        good = np.isfinite(sl) & np.isfinite(vv) & (vv > 0)
-        if have_mask:
-            mm = mask[y0 : y1 + 1, j]
-            good &= (mm & fatal_bits) == 0
+    sl_all = np.asarray(sci[rows_clip, cols], dtype=float)
+    vv_all = np.asarray(var[rows_clip, cols], dtype=float)
 
-        if sl.size == 0:
-            continue
+    good = inside & np.isfinite(sl_all) & np.isfinite(vv_all) & (vv_all > 0)
+    if have_mask:
+        mm_all = np.asarray(mask[rows_clip, cols], dtype=np.uint16)
+        good &= (mm_all & np.uint16(fatal_bits)) == 0
 
-        p = sl.copy()
-        if clip_negative_profile:
-            p = np.where(np.isfinite(p), np.maximum(p, 0.0), 0.0)
-        else:
-            p = np.where(np.isfinite(p), p, 0.0)
+    prof = np.where(inside & np.isfinite(sl_all), sl_all, 0.0)
+    if clip_negative_profile:
+        prof = np.maximum(prof, 0.0)
 
-        # Map into fixed aperture grid.
-        k0 = int(y0 - (int(round(yc)) - ap_hw))
-        k0 = int(np.clip(k0, 0, nwin - 1))
-        k1 = min(nwin, k0 + sl.size)
-        prof[k0:k1, j] = p[: (k1 - k0)]
-        good_prof[k0:k1, j] = good[: (k1 - k0)]
+    good_prof = good
 
-    # Smooth along λ (each spatial offset independently).
     try:
         sig = float(max(0.0, smooth_lambda_sigma))
     except Exception:
         sig = 3.0
     if sig > 0:
-        for k in range(nwin):
-            prof[k, :] = gaussian_filter1d(prof[k, :], sigma=sig, mode="nearest")
+        prof = gaussian_filter1d(prof, sigma=sig, axis=1, mode="nearest")
 
-    # Normalize profile to Σ P = 1 per λ on good pixels.
+    prof_good = np.where(good_prof, prof, 0.0)
+    sum_prof = np.sum(prof_good, axis=0, dtype=float)
+    good_counts = np.sum(good_prof, axis=0, dtype=np.int32)
+    fallback = ~(sum_prof > float(min_profile_sum))
+
     P = np.zeros_like(prof, dtype=float)
-    n_fallback = 0
-    for j in range(nlam):
-        g = good_prof[:, j]
-        s = float(np.sum(prof[g, j])) if np.any(g) else 0.0
-        if not (s > min_profile_sum):
-            # Fallback: uniform on good pixels (or full aperture if nothing is good).
-            n_fallback += 1
-            if np.any(g):
-                P[g, j] = 1.0 / float(np.sum(g))
-            else:
-                P[:, j] = 1.0 / float(nwin)
-        else:
-            P[g, j] = prof[g, j] / s
+    ok = ~fallback
+    if np.any(ok):
+        P[:, ok] = np.where(good_prof[:, ok], prof_good[:, ok] / sum_prof[None, ok], 0.0)
+    if np.any(fallback):
+        fb_good = fallback & (good_counts > 0)
+        if np.any(fb_good):
+            P[:, fb_good] = np.where(
+                good_prof[:, fb_good],
+                1.0 / good_counts[fb_good][None, :].astype(float),
+                0.0,
+            )
+        fb_empty = fallback & ~(good_counts > 0)
+        if np.any(fb_empty):
+            P[:, fb_empty] = 1.0 / float(nwin)
 
-    # Now compute the optimal estimator per λ.
-    flux = np.full(nlam, np.nan, dtype=float)
-    out_var = np.full(nlam, np.nan, dtype=float)
-    out_mask = np.zeros(nlam, dtype=np.uint16)
-    out_npix = np.zeros(nlam, dtype=np.int16)
-
+    n_tot = np.sum(inside, axis=0, dtype=np.int32)
     from scorpio_pipe.maskbits import NO_COVERAGE
 
     meta: dict[str, Any] = {
         "profile_smooth_lambda_sigma": float(sig),
         "profile_clip_negative": bool(clip_negative_profile),
-        "profile_fallback_frac": float(n_fallback) / float(max(1, nlam)),
+        "profile_fallback_frac": float(np.sum(fallback)) / float(max(1, nlam)),
+        "backend_requested": str(backend_req),
+        "numba_available": bool(_NUMBA_OK),
+        "vectorized": True,
     }
 
-    for j in range(nlam):
-        yc = float(y_center[j]) if j < len(y_center) else float(np.nanmedian(y_center))
-        y0 = _clamp_int(yc - ap_hw, 0, ny - 1)
-        y1 = _clamp_int(yc + ap_hw, 0, ny - 1)
-        sl = sci[y0 : y1 + 1, j].astype(float, copy=False)
-        vv = var[y0 : y1 + 1, j].astype(float, copy=False)
-        good = np.isfinite(sl) & np.isfinite(vv) & (vv > 0)
-        if have_mask:
-            mm = mask[y0 : y1 + 1, j]
-            good &= (mm & fatal_bits) == 0
+    use_numba = backend_req == "numba" and _NUMBA_OK
+    if use_numba:
+        sky_arr = np.asarray(sky_resid, dtype=float) if sky_resid is not None else np.full(nlam, np.nan, dtype=float)
+        flux, out_var, out_mask, out_npix, corr = _optimal_finalize_numba(
+            np.ascontiguousarray(P, dtype=np.float64),
+            np.ascontiguousarray(sl_all, dtype=np.float64),
+            np.ascontiguousarray(vv_all, dtype=np.float64),
+            np.ascontiguousarray(good),
+            np.ascontiguousarray(n_tot, dtype=np.int32),
+            float(min_good_frac),
+            int(NO_COVERAGE),
+            np.ascontiguousarray(sky_arr, dtype=np.float64),
+            bool(apply_local_sky),
+        )
+        if apply_local_sky and sky_resid is not None:
+            finite = np.isfinite(sky_arr) & np.isfinite(corr)
+            flux[finite] = flux[finite] - sky_arr[finite] * corr[finite]
+        meta["backend_used"] = "numba"
+    else:
+        safe_v = np.where(good, vv_all, 1.0)
+        denom = np.sum(np.where(good, (P * P) / safe_v, 0.0), axis=0, dtype=float)
+        num = np.sum(np.where(good, (P * sl_all) / safe_v, 0.0), axis=0, dtype=float)
+        corr_num = np.sum(np.where(good, P / safe_v, 0.0), axis=0, dtype=float)
 
-        n_tot = int(y1 - y0 + 1)
-        n_good = int(np.sum(good))
-        out_npix[j] = np.int16(n_good)
+        flux = np.full(nlam, np.nan, dtype=float)
+        out_var = np.full(nlam, np.nan, dtype=float)
+        out_mask = np.zeros(nlam, dtype=np.uint16)
+        out_npix = good_counts.astype(np.int16, copy=False)
 
-        if n_tot <= 0 or n_good <= 0:
-            out_mask[j] |= np.uint16(NO_COVERAGE)
-            continue
-        if n_good < int(math.ceil(min_good_frac * n_tot)):
-            out_mask[j] |= np.uint16(NO_COVERAGE)
+        no_cov = (n_tot <= 0) | (good_counts <= 0)
+        low_frac = good_counts < np.ceil(min_good_frac * n_tot).astype(np.int32)
+        bad_denom = ~(denom > 0.0)
+        out_mask[no_cov | low_frac | bad_denom] |= np.uint16(NO_COVERAGE)
 
-        # Map P (aperture coords) to this slice.
-        k0 = int(y0 - (int(round(yc)) - ap_hw))
-        k0 = int(np.clip(k0, 0, nwin - 1))
-        k1 = min(nwin, k0 + sl.size)
-        Pj = np.zeros_like(sl, dtype=float)
-        Pj[: (k1 - k0)] = P[k0:k1, j][: (k1 - k0)]
-
-        # Classical estimator.
-        denom = float(np.sum((Pj[good] ** 2) / vv[good])) if np.any(good) else 0.0
-        if not (denom > 0):
-            out_mask[j] |= np.uint16(NO_COVERAGE)
-            continue
-        num = float(np.sum(Pj[good] * sl[good] / vv[good]))
-
-        f = num / denom
-
-        if apply_local_sky and sky_resid is not None and np.isfinite(sky_resid[j]):
-            # Subtract additive residual sky offset properly for the weighted estimator.
-            corr = float(np.sum(Pj[good] / vv[good])) / denom
-            f = f - float(sky_resid[j]) * corr
-
-        flux[j] = f
-        out_var[j] = 1.0 / denom
+        ok_flux = ~bad_denom & ~no_cov
+        if np.any(ok_flux):
+            flux[ok_flux] = num[ok_flux] / denom[ok_flux]
+            out_var[ok_flux] = 1.0 / denom[ok_flux]
+            if apply_local_sky and sky_resid is not None:
+                sky_arr = np.asarray(sky_resid, dtype=float)
+                finite = ok_flux & np.isfinite(sky_arr)
+                flux[finite] = flux[finite] - sky_arr[finite] * (corr_num[finite] / denom[finite])
+        meta["backend_used"] = "numpy"
 
     sky_out = np.asarray(sky_resid, dtype=float) if sky_resid is not None else np.full(nlam, np.nan, dtype=float)
     return flux, out_var, out_mask, sky_out, out_npix, meta
@@ -1002,7 +1079,7 @@ def _write_spec1d_fits(
         _img("SKY2", sky2, np.float32),
     ]
 
-    fits.HDUList(hdus).writeto(out_path, overwrite=True)
+    atomic_write_fits(out_path, fits.HDUList(hdus))
 
 
 def _write_quicklook_png(
@@ -1064,6 +1141,153 @@ def _write_quicklook_png(
         log.warning("Failed to write spec1d.png: %s", e)
 
 
+def _compute_extraction_diagnostics(
+    *,
+    sci: np.ndarray,
+    var: np.ndarray | None,
+    mask: np.ndarray | None,
+    trace: TraceModel,
+    sky_windows: list[tuple[int, int]] | None,
+    sky_resid: np.ndarray | None,
+    fatal_bits: int,
+    flux_trace: np.ndarray,
+    var_trace: np.ndarray,
+    flux_fixed: np.ndarray,
+    var_fixed: np.ndarray,
+) -> dict[str, Any]:
+    """Quantitative extraction diagnostics for P3.4."""
+
+    ap_hw = int(max(1, trace.aperture_half_width))
+    y_trace = np.asarray(trace.y_trace, dtype=float)
+    y_fixed = np.asarray(trace.y_fixed, dtype=float)
+
+    trace_stability_px = _mad_sigma(np.diff(y_trace)) if y_trace.size > 4 else float("nan")
+
+    # Contamination risk: how close the extraction aperture is to the nearest sky window.
+    obj_lo = float(np.nanmedian(y_trace) - ap_hw)
+    obj_hi = float(np.nanmedian(y_trace) + ap_hw)
+    min_gap = float("nan")
+    one_sided = False
+    if sky_windows:
+        gaps = []
+        below = False
+        above = False
+        for a, b in sky_windows:
+            if b <= obj_lo:
+                gaps.append(obj_lo - float(b))
+                below = True
+            elif a >= obj_hi:
+                gaps.append(float(a) - obj_hi)
+                above = True
+            else:
+                gaps.append(0.0)
+        if gaps:
+            min_gap = float(np.nanmin(gaps))
+            one_sided = bool(below) ^ bool(above)
+    risk = 0.0
+    if np.isfinite(min_gap):
+        denom = max(3.0 * ap_hw, 1.0)
+        risk = float(np.clip(1.0 - min_gap / denom, 0.0, 1.0))
+        if one_sided:
+            risk = float(np.clip(risk + 0.2, 0.0, 1.0))
+
+    # Fixed vs trace/optimal disagreement in units of combined uncertainty.
+    denom = np.sqrt(np.clip(np.asarray(var_trace, dtype=float), 0.0, None) + np.clip(np.asarray(var_fixed, dtype=float), 0.0, None))
+    diff = np.asarray(flux_trace, dtype=float) - np.asarray(flux_fixed, dtype=float)
+    good = np.isfinite(diff) & np.isfinite(denom) & (denom > 0)
+    disagreement_sigma = float(np.nanmedian(np.abs(diff[good]) / denom[good])) if np.any(good) else float("nan")
+
+    # Aperture sensitivity: compare nominal boxcar extraction with +/- 1 px apertures.
+    nominal_flux, _, _, _, _ = _boxcar_extract(
+        sci, var, mask, y_trace, ap_hw=ap_hw, fatal_bits=fatal_bits, min_good_frac=0.5, sky_resid=sky_resid, apply_local_sky=False
+    )
+    narrow_flux, _, _, _, _ = _boxcar_extract(
+        sci, var, mask, y_trace, ap_hw=max(1, ap_hw - 1), fatal_bits=fatal_bits, min_good_frac=0.5, sky_resid=sky_resid, apply_local_sky=False
+    )
+    wide_flux, _, _, _, _ = _boxcar_extract(
+        sci, var, mask, y_trace, ap_hw=ap_hw + 1, fatal_bits=fatal_bits, min_good_frac=0.5, sky_resid=sky_resid, apply_local_sky=False
+    )
+    frac_terms = []
+    for arr in (narrow_flux, wide_flux):
+        base = np.maximum(np.abs(nominal_flux), np.nanpercentile(np.abs(nominal_flux[np.isfinite(nominal_flux)]), 50) if np.isfinite(nominal_flux).any() else 1.0)
+        m = np.isfinite(arr) & np.isfinite(nominal_flux) & (base > 0)
+        if np.any(m):
+            frac_terms.append(np.nanmedian(np.abs(arr[m] - nominal_flux[m]) / base[m]))
+    aperture_sensitivity_frac = float(np.nanmax(frac_terms)) if frac_terms else float("nan")
+
+    # Local background asymmetry between nearest lower/upper sky windows.
+    asymmetry_sigma = float("nan")
+    if sky_windows:
+        lower = [w for w in sky_windows if w[1] <= obj_lo]
+        upper = [w for w in sky_windows if w[0] >= obj_hi]
+        if lower and upper:
+            lo0, lo1 = lower[-1]
+            hi0, hi1 = upper[0]
+            prof_lo = np.nanmedian(np.asarray(sci[lo0:lo1, :], dtype=float), axis=0)
+            prof_hi = np.nanmedian(np.asarray(sci[hi0:hi1, :], dtype=float), axis=0)
+            delta = prof_hi - prof_lo
+            scale = _robust_sigma(delta)
+            if scale is not None and np.isfinite(scale) and scale > 0 and np.isfinite(delta).any():
+                asymmetry_sigma = float(np.nanmedian(np.abs(delta)) / scale)
+
+    return {
+        "trace_stability_px": None if not np.isfinite(trace_stability_px) else float(trace_stability_px),
+        "contamination_risk": float(risk),
+        "min_sky_gap_px": None if not np.isfinite(min_gap) else float(min_gap),
+        "fixed_vs_trace_disagreement_sigma": None if not np.isfinite(disagreement_sigma) else float(disagreement_sigma),
+        "aperture_sensitivity_frac": None if not np.isfinite(aperture_sensitivity_frac) else float(aperture_sensitivity_frac),
+        "background_asymmetry_sigma": None if not np.isfinite(asymmetry_sigma) else float(asymmetry_sigma),
+    }
+
+
+def _write_extraction_diagnostics_png(
+    out_png: Path,
+    *,
+    wave: np.ndarray,
+    flux_trace: np.ndarray,
+    flux_fixed: np.ndarray,
+    diagnostics: dict[str, Any],
+) -> None:
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        out_png.parent.mkdir(parents=True, exist_ok=True)
+        fig = plt.figure(figsize=(10, 5), dpi=150)
+        ax1 = fig.add_subplot(211)
+        ax1.plot(wave, flux_trace, label="TRACE")
+        ax1.plot(wave, flux_fixed, label="FIXED", alpha=0.8)
+        ax1.set_ylabel("Flux")
+        ax1.grid(True, alpha=0.25)
+        ax1.legend(loc="best")
+
+        ax2 = fig.add_subplot(212)
+        denom = np.maximum(np.nanmedian(np.abs(flux_trace[np.isfinite(flux_trace)])) if np.isfinite(flux_trace).any() else 1.0, 1e-6)
+        delta = (np.asarray(flux_trace, dtype=float) - np.asarray(flux_fixed, dtype=float)) / denom
+        ax2.plot(wave, delta, label="(TRACE-FIXED)/median|TRACE|")
+        ax2.axhline(0.0, color="k", lw=0.8, alpha=0.5)
+        ax2.set_xlabel("Wavelength")
+        ax2.set_ylabel("Normalized Δ")
+        ax2.grid(True, alpha=0.25)
+
+        summary = [
+            f"trace_stability_px={diagnostics.get('trace_stability_px')}",
+            f"contamination_risk={diagnostics.get('contamination_risk')}",
+            f"fixed_vs_trace_disagreement_sigma={diagnostics.get('fixed_vs_trace_disagreement_sigma')}",
+            f"aperture_sensitivity_frac={diagnostics.get('aperture_sensitivity_frac')}",
+            f"background_asymmetry_sigma={diagnostics.get('background_asymmetry_sigma')}",
+        ]
+        ax2.text(0.01, 0.97, "\n".join(summary), transform=ax2.transAxes, va="top", ha="left", fontsize=8, bbox=dict(boxstyle="round", facecolor="white", alpha=0.8))
+
+        fig.tight_layout()
+        fig.savefig(out_png)
+        plt.close(fig)
+    except Exception as e:
+        log.warning("Failed to write extraction diagnostics PNG: %s", e)
+
+
 # ---------------------------------- API ----------------------------------
 
 
@@ -1075,6 +1299,7 @@ def _run_extract1d_impl(
     out_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     ecfg = cfg.get("extract1d", {}) if isinstance(cfg.get("extract1d"), dict) else {}
+    ecfg = resolve_extract_defaults(cfg, ecfg)
     if not bool(ecfg.get("enabled", True)):
         return {"skipped": True, "reason": "extract1d.enabled=false"}
 
@@ -1085,7 +1310,9 @@ def _run_extract1d_impl(
     from scorpio_pipe.workspace_paths import stage_dir
 
     wd = resolve_work_dir(cfg)
-    out_dir = Path(out_dir) if out_dir is not None else stage_dir(wd, "extract")
+    if out_dir is None:
+        raise ValueError("extract1d: out_dir is required (pass ctx.stage_dir)")
+    out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # ----------------------- resolve input (explicit) -----------------------
@@ -1247,6 +1474,7 @@ def _run_extract1d_impl(
         smooth_sig = float(ocfg.get("profile_smooth_lambda_sigma", 3.0))
         clip_neg = bool(ocfg.get("clip_negative_profile", True))
         min_ps = float(ocfg.get("min_profile_sum", 1e-6))
+        opt_backend = str(ocfg.get("backend", os.getenv("SCORPIPE_EXTRACT1D_OPT_BACKEND", "auto")) or "auto")
         flux_tr, var_tr, mask_tr, sky_tr, npix_tr, m_tr = _optimal_extract(
             sci,
             var,
@@ -1260,6 +1488,7 @@ def _run_extract1d_impl(
             smooth_lambda_sigma=smooth_sig,
             clip_negative_profile=clip_neg,
             min_profile_sum=min_ps,
+            backend=opt_backend,
         )
         flux_fx, var_fx, mask_fx, sky_fx, npix_fx, m_fx = _optimal_extract(
             sci,
@@ -1274,6 +1503,7 @@ def _run_extract1d_impl(
             smooth_lambda_sigma=smooth_sig,
             clip_negative_profile=clip_neg,
             min_profile_sum=min_ps,
+            backend=opt_backend,
         )
         opt_meta = {"trace": m_tr, "fixed": m_fx}
     else:
@@ -1311,7 +1541,9 @@ def _run_extract1d_impl(
     # ------------------------------- outputs ------------------------------
     out_fits = out_dir / "spec1d.fits"
     out_png = out_dir / "spec1d.png"
+    diag_png = out_dir / "extraction_diagnostics.png"
     trace_json = out_dir / "trace.json"
+    qc_json = out_dir / "extraction_qc.json"
     done_json = out_dir / "extract_done.json"
     done_legacy = out_dir / "extract1d_done.json"  # legacy alias
 
@@ -1414,6 +1646,26 @@ def _run_extract1d_impl(
     }
     trace_json.write_text(json.dumps(trace_payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
+    diagnostics = _compute_extraction_diagnostics(
+        sci=sci,
+        var=var,
+        mask=mask,
+        trace=trace,
+        sky_windows=sky_windows,
+        sky_resid=sky_resid,
+        fatal_bits=fatal_bits,
+        flux_trace=flux_tr,
+        var_trace=var_tr,
+        flux_fixed=flux_fx,
+        var_fixed=var_fx,
+    )
+    qc_payload = {
+        "stage": "extract1d",
+        "pipeline_version": str(PIPELINE_VERSION),
+        "diagnostics": diagnostics,
+    }
+    qc_json.write_text(json.dumps(_safe_json(qc_payload), indent=2, ensure_ascii=False), encoding="utf-8")
+
     # extract_done.json
     # Minimal but informative metrics for QC and downstream automation.
     def _frac_finite(x: np.ndarray) -> float:
@@ -1452,6 +1704,17 @@ def _run_extract1d_impl(
     if upstream_sky_passthrough:
         flag_codes.append("UPSTREAM_SKY_PASSTHROUGH")
 
+    if (diagnostics.get("trace_stability_px") or 0.0) > 0.35:
+        flag_codes.append("TRACE_UNSTABLE")
+    if (diagnostics.get("contamination_risk") or 0.0) > 0.60:
+        flag_codes.append("EXTRACTION_CONTAMINATION_RISK")
+    if (diagnostics.get("fixed_vs_trace_disagreement_sigma") or 0.0) > 3.0:
+        flag_codes.append("FIXED_TRACE_DISAGREE")
+    if (diagnostics.get("aperture_sensitivity_frac") or 0.0) > 0.08:
+        flag_codes.append("APERTURE_SENSITIVE")
+    if (diagnostics.get("background_asymmetry_sigma") or 0.0) > 3.0:
+        flag_codes.append("BACKGROUND_ASYMMETRIC")
+
     # 1D mask coverage diagnostics
     from scorpio_pipe.maskbits import NO_COVERAGE
     mask_no_cov_tr = float(((np.asarray(mask_tr, dtype=int) & int(NO_COVERAGE)) != 0).mean())
@@ -1480,6 +1743,31 @@ def _run_extract1d_impl(
             "WARN",
             "Sky subtraction was skipped upstream (pass-through product).",
             "Inspect SKYMODEL_FAIL/QADEGRD; consider excluding affected exposures in stack2d.",
+        ),
+        "TRACE_UNSTABLE": (
+            "WARN",
+            "Trace position varies more than expected along wavelength.",
+            "Inspect the 2D frame and tracing ROI; compare with fixed extraction.",
+        ),
+        "EXTRACTION_CONTAMINATION_RISK": (
+            "WARN",
+            "Object aperture is too close to available sky windows.",
+            "Increase sky gap or narrow the aperture if scientifically justified.",
+        ),
+        "FIXED_TRACE_DISAGREE": (
+            "WARN",
+            "TRACE and FIXED extractions disagree beyond the combined noise budget.",
+            "Inspect centering, tracing and residual sky structure.",
+        ),
+        "APERTURE_SENSITIVE": (
+            "WARN",
+            "Small aperture changes noticeably affect the extracted spectrum.",
+            "Check seeing/trace stability and consider sensitivity tests before science use.",
+        ),
+        "BACKGROUND_ASYMMETRIC": (
+            "WARN",
+            "Upper and lower local background windows are significantly asymmetric.",
+            "Inspect contamination, residual gradients or object spillover into the sky bands.",
         ),
     }
     stage_flags = []
@@ -1510,6 +1798,8 @@ def _run_extract1d_impl(
             "spec1d_fits": str(out_fits),
             "trace_json": str(trace_json),
             "spec1d_png": str(out_png) if bool(ecfg.get("save_png", True)) else None,
+            "extraction_qc_json": str(qc_json),
+            "extraction_diagnostics_png": str(diag_png) if bool(ecfg.get("save_png", True)) else None,
         },
         metrics={
             "trace_frac_finite": _frac_finite(flux_tr),
@@ -1519,6 +1809,11 @@ def _run_extract1d_impl(
             "trace_no_coverage_frac": mask_no_cov_tr,
             "fixed_no_coverage_frac": mask_no_cov_fx,
             "sky_residual_robust_sigma": _robust_sigma(sky_resid),
+            "trace_stability_px": diagnostics.get("trace_stability_px"),
+            "contamination_risk": diagnostics.get("contamination_risk"),
+            "fixed_vs_trace_disagreement_sigma": diagnostics.get("fixed_vs_trace_disagreement_sigma"),
+            "aperture_sensitivity_frac": diagnostics.get("aperture_sensitivity_frac"),
+            "background_asymmetry_sigma": diagnostics.get("background_asymmetry_sigma"),
         },
         flags=stage_flags,
         qc=qc,
@@ -1547,6 +1842,7 @@ def _run_extract1d_impl(
                     if flux_fx.size else None
                 ),
                 "optimal_meta": _safe_json(opt_meta) if opt_meta else None,
+                "diagnostics": _safe_json(diagnostics),
             },
             "warnings": [w for w in [eta_warn, geo_meta.get("warning")] if w],
             # Backward-compatible code list
@@ -1571,20 +1867,14 @@ def _run_extract1d_impl(
                 f"Spec1D — {Path(in_fits).name} | ap=±{int(trace.aperture_half_width)}px | {trace_method}"
             ),
         )
+        _write_extraction_diagnostics_png(
+            diag_png,
+            wave=wave,
+            flux_trace=flux_tr,
+            flux_fixed=flux_fx,
+            diagnostics=diagnostics,
+        )
 
-    # Legacy products directory copy (older UI/scripts).
-    try:
-        legacy = wd / "products" / "spec"
-        legacy.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(out_fits, legacy / "spec1d.fits")
-        if trace_json.exists():
-            shutil.copy2(trace_json, legacy / "trace.json")
-        shutil.copy2(done_json, legacy / "extract_done.json")
-        shutil.copy2(done_json, legacy / "extract1d_done.json")
-        if out_png.exists():
-            shutil.copy2(out_png, legacy / "spec1d.png")
-    except Exception:
-        pass
 
     return {
         "ok": True,
@@ -1593,6 +1883,8 @@ def _run_extract1d_impl(
         "trace_json": str(trace_json),
         "extract_done": str(done_json),
         "spec1d_png": str(out_png) if out_png.exists() else None,
+        "extraction_qc_json": str(qc_json),
+        "extraction_diagnostics_png": str(diag_png) if diag_png.exists() else None,
         "etaappl": bool(eta_appl),
         "products": ["TRACE", "FIXED"],
     }
@@ -1605,60 +1897,15 @@ def run_extract1d(
     stacked_fits: Optional[Path] = None,  # legacy alias
     out_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Extraction stage with P2 reliability guard.
+    """Extraction stage.
 
-    Guarantees that ``done.json`` is written even if the stage fails.
+    P0-ARCH-07: the stage must not derive its own stage directory.
+    Pass ``out_dir`` (engine uses ``ctx.stage_dir``).
     """
 
-    try:
-        return _run_extract1d_impl(
-            cfg,
-            in_fits=in_fits,
-            stacked_fits=stacked_fits,
-            out_dir=out_dir,
-        )
-    except Exception as e:
-        from datetime import datetime, timezone
-
-        from scorpio_pipe.io.done_json import write_done_json
-        from scorpio_pipe.qc.flags import make_flag, max_severity
-        from scorpio_pipe.workspace_paths import stage_dir
-
-        wd = resolve_work_dir(cfg)
-        od = out_dir or stage_dir(wd, "extract")
-        od.mkdir(parents=True, exist_ok=True)
-
-        in_path = in_fits or stacked_fits
-        flags = [
-            make_flag(
-                "STAGE_FAILED",
-                "ERROR",
-                f"{type(e).__name__}: {e}",
-                hint="See traceback/log for the exact failure location.",
-            )
-        ]
-        qc = {"flags": flags, "max_severity": max_severity(flags)}
-
-        write_done_json(
-            stage="extract",
-            stage_dir=od,
-            status="fail",
-            inputs={"fits": str(in_path) if in_path else None},
-            params={"extract1d": cfg.get("extract1d", {})},
-            outputs={},
-            metrics={},
-            flags=flags,
-            qc=qc,
-            error={
-                "type": type(e).__name__,
-                "message": str(e),
-                "repr": repr(e),
-            },
-            extra={
-                "created_utc": datetime.now(timezone.utc).isoformat(),
-                "ok": False,
-            },
-            legacy_paths=[od / "extract_done.json", od / "extract1d_done.json"],
-        )
-
-        raise
+    return _run_extract1d_impl(
+        cfg,
+        in_fits=in_fits,
+        stacked_fits=stacked_fits,
+        out_dir=out_dir,
+    )

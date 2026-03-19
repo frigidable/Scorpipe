@@ -1,27 +1,12 @@
-
 from __future__ import annotations
 
 import json
 import zipfile
-from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
 from scorpio_pipe.version import __version__
-from scorpio_pipe.work_layout import stage_dir
-
-
-def _iter_files(base: Path) -> Iterable[Path]:
-    if not base.exists():
-        return []
-    if base.is_file():
-        return [base]
-    out: list[Path] = []
-    for p in sorted(base.rglob("*")):
-        if p.is_file():
-            out.append(p)
-    return out
 
 
 def export_science_package(
@@ -34,15 +19,19 @@ def export_science_package(
 ) -> Path:
     """Export a compact, shareable result ZIP.
 
-    Contents (when available):
-      - spec1d.fits (and auxiliary 1D outputs)
-      - qc/qc_report.json
-      - ui/navigator/index.html + data.json (+ assets in the navigator dir)
-      - key PNG quicklooks (coverage/stack/spec/etc.)
+    P0-ARCH-01.2: products are resolved via :class:`ProductCatalog`.
 
-    The function is intentionally conservative: missing optional files are skipped,
-    but if spec1d is absent we still create the zip (QC-only package can be useful).
+    Contents (when available):
+      - spec1d.fits (+ trace.json)
+      - stacked2d.fits / stack2d.fits (+ eta_lambda.fits)
+      - lambda_map.fits
+      - qc/qc_report.json + index.html
+      - ui/navigator/ bundle
+      - key PNG quicklooks (coverage/spec/etc.)
+
+    Missing optional files are skipped.
     """
+
     work_dir = Path(work_dir).expanduser().resolve()
     if out_zip is None:
         out_zip = work_dir / "science_package.zip"
@@ -51,71 +40,65 @@ def export_science_package(
     if out_zip.exists() and not overwrite:
         raise FileExistsError(f"{out_zip} exists (use overwrite=True)")
 
-    # Collect core deliverables.
-    files: list[tuple[Path, str]] = []
-
-    # spec1d
+    # Best-effort load config (needed for disperser-aware wavesol paths).
+    cfg: dict = {
+        "work_dir": str(work_dir),
+        "work_dir_abs": str(work_dir),
+        "config_dir": str(work_dir),
+        "config_path": str(work_dir / "config.yaml"),
+    }
     try:
-        ext_dir = stage_dir(work_dir, "extract")
-        for p in sorted(ext_dir.glob("spec1d*.fits")):
-            files.append((p, str(p.relative_to(work_dir))))
+        from scorpio_pipe.config import load_config
+
+        cfg_path = work_dir / "config.yaml"
+        if cfg_path.is_file():
+            cfg = load_config(cfg_path)
     except Exception:
-        # Fallback: search anywhere under work_dir
-        for p in sorted(work_dir.rglob("spec1d*.fits")):
-            files.append((p, str(p.relative_to(work_dir))))
+        pass
 
-    # QC report
-    qc_json = work_dir / "qc" / "qc_report.json"
-    if qc_json.exists():
-        files.append((qc_json, str(qc_json.relative_to(work_dir))))
+    from scorpio_pipe.catalog.products import CATALOG as PRODUCT_CATALOG
 
-    # Navigator HTML bundle
+    # Curated default export set.
+    keys: list[str] = [
+        # Science deliverables
+        "spec1d_fits",
+        "trace_json",
+        "stacked2d_fits",
+        "stack2d_fits",
+        "eta_lambda_fits",
+        "lambda_map",
+        # QC + manifests
+        "qc_json",
+        "products_manifest",
+        "manifest",
+        "dependency_lock",
+        "deps_snapshot",
+    ]
+
     if include_html:
-        nav_dir = work_dir / "ui" / "navigator"
-        for p in _iter_files(nav_dir):
-            files.append((p, str(p.relative_to(work_dir))))
+        keys.extend([
+            "qc_html",
+            "navigator_dir",
+        ])
 
-    # Key PNG quicklooks
     if include_png:
-        png_names = {
-            "coverage.png",
-            "stack2d.png",
-            "eta_lambda.png",
-            "spec1d_trace.png",
-            "spec1d_fixed.png",
-            "qc_summary.png",
-            "cosmics_coverage.png",
-        }
-        for p in sorted(work_dir.rglob("*.png")):
-            if p.name in png_names:
-                files.append((p, str(p.relative_to(work_dir))))
+        keys.extend([
+            "coverage_png",
+            "spec1d_png",
+            "lin_preview_png",
+            "superneon_png",
+            "wavesolution_1d_png",
+        ])
 
-        # Also include a small curated set from common stage dirs (first 2 PNG each).
-        stage_png_dirs = [
-            work_dir / "plots",
-            work_dir / "qc",
-            stage_dir(work_dir, "stack") / "plots",
-            stage_dir(work_dir, "extract") / "plots",
-        ]
-        seen = {a for _, a in files}
-        for d in stage_png_dirs:
-            if not d.exists():
-                continue
-            cnt = 0
-            for p in sorted(d.glob("*.png")):
-                arc = str(p.relative_to(work_dir))
-                if arc in seen:
-                    continue
-                files.append((p, arc))
-                seen.add(arc)
-                cnt += 1
-                if cnt >= 2:
-                    break
+    # Collect files.
+    files: list[tuple[Path, str]] = []
+    for p, arc in PRODUCT_CATALOG.iter_export_files(cfg, product_keys=tuple(keys), include_dirs=True):
+        files.append((p, arc))
 
     # Remove duplicates, keep first occurrence.
     uniq: dict[str, Path] = {}
     for p, arc in files:
-        if arc not in uniq and p.exists():
+        if arc not in uniq and p.exists() and p.is_file():
             uniq[arc] = p
 
     manifest = {
@@ -132,4 +115,3 @@ def export_science_package(
             zf.write(p, arcname=arc)
 
     return out_zip
-

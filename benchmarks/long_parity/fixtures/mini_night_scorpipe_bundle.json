@@ -1,0 +1,18 @@
+{
+  "source": "scorpipe-fixture",
+  "wavelength_solution": {
+    "rms": 0.12
+  },
+  "sky_subtraction": {
+    "sky_rms": 1.1
+  },
+  "extraction": {
+    "snr": 25.0
+  },
+  "response_calibration": {
+    "smoothness": 0.02
+  },
+  "science_outputs": {
+    "n_detected_lines": 5
+  }
+}

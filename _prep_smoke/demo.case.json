@@ -1,0 +1,24 @@
+{
+  "case_id": "demo",
+  "title": "Demo case",
+  "category": "reference",
+  "source_type": "real_private",
+  "description": "",
+  "observer_notes": "",
+  "scorpipe_bundle": "sp.json",
+  "long_bundle": "lg.json",
+  "metrics": {
+    "wavelength_solution.rms": {
+      "label": "Wave RMS [A]",
+      "prefer": "lower"
+    },
+    "sky_subtraction.sky_rms": {
+      "label": "Sky residual RMS",
+      "prefer": "lower"
+    },
+    "extraction.snr": {
+      "label": "Extracted S/N",
+      "prefer": "higher"
+    }
+  }
+}

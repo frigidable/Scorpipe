@@ -222,7 +222,7 @@ work/
 - `work/qc/manifest.json` — манифест воспроизводимости
 - `work/qc/products_manifest.json` — индекс продуктов (в т.ч. per‑exposure деревья)
 - `work/qc/index.html`, `work/qc/qc_report.json` — отчёт
-- `work/qc/timings.json` — тайминги стадий
+- `work/manifest/timings.jsonl` — тайминги стадий (append-only JSONL; legacy `timings.json` поддерживается как fallback)
 
 ### Calibs
 - `work/calibs/superbias.fits`

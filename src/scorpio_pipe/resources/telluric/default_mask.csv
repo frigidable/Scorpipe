@@ -1,0 +1,7 @@
+# version: 2026.03
+# units: transmission_mask
+# wavelength_convention: air
+# sampling: interval_list
+lambda_min_A,lambda_max_A,label
+6860,6965,O2_B
+7580,7705,O2_A

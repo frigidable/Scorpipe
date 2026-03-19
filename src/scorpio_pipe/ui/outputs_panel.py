@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 
+import os
 from pathlib import Path
 from typing import Any
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from scorpio_pipe.products import list_products
+from scorpio_pipe.paths import resolve_work_dir
+from scorpio_pipe.ui.slow_action_profiler import profile_ui_action
+
+from scorpio_pipe.artifact_index import load_artifact_index
 
 
 class OutputsPanel(QtWidgets.QWidget):
@@ -86,9 +91,11 @@ class OutputsPanel(QtWidgets.QWidget):
         if not self._cfg:
             return
 
-        prods = list_products(self._cfg)
-        if self._stage:
-            prods = [p for p in prods if p.stage == self._stage]
+        work_dir = None
+        try:
+            work_dir = resolve_work_dir(self._cfg)
+        except Exception:
+            work_dir = None
 
         ok_icon = self.style().standardIcon(
             QtWidgets.QStyle.StandardPixmap.SP_DialogApplyButton
@@ -100,28 +107,153 @@ class OutputsPanel(QtWidgets.QWidget):
             QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning
         )
 
-        for p in prods:
-            it = QtWidgets.QTreeWidgetItem()
-            it.setData(0, QtCore.Qt.ItemDataRole.UserRole, str(p.path))
-            it.setText(1, p.key)
-            it.setText(2, str(p.path))
-            sz = p.size()
-            it.setText(
-                3,
-                ""
-                if sz is None
-                else f"{sz / 1024:.1f} KB"
-                if sz < 1024**2
-                else f"{sz / 1024**2:.2f} MB",
-            )
-            if p.exists():
-                it.setIcon(0, ok_icon)
-            else:
-                it.setIcon(0, opt_icon if p.optional else miss_icon)
-            if p.description:
-                it.setToolTip(1, p.description)
-                it.setToolTip(2, p.description)
-            self.tree.addTopLevelItem(it)
+        with profile_ui_action(
+            "ui.outputs.refresh",
+            work_dir=work_dir,
+            extra={"stage": self._stage},
+        ):
+            # PERF-20.2: prefer engine-written artifact index (no glob/os.walk scans).
+            idx = None
+            try:
+                idx = load_artifact_index(Path(work_dir)) if work_dir else None
+            except Exception:
+                idx = None
+
+            def _fmt_size(sz: int | None) -> str:
+                if sz is None:
+                    return ""
+                try:
+                    if sz < 1024**2:
+                        return f"{sz / 1024:.1f} KB"
+                    return f"{sz / 1024**2:.2f} MB"
+                except Exception:
+                    return ""
+
+            def _add_row(product: str, p: Path, *, optional: bool = True, tooltip: str | None = None) -> None:
+                it = QtWidgets.QTreeWidgetItem()
+                it.setData(0, QtCore.Qt.ItemDataRole.UserRole, str(p))
+                it.setText(1, str(product))
+                it.setText(2, str(p))
+                try:
+                    sz = int(p.stat().st_size) if p.exists() else None
+                except Exception:
+                    sz = None
+                it.setText(3, _fmt_size(sz))
+                if p.exists():
+                    it.setIcon(0, ok_icon)
+                else:
+                    it.setIcon(0, opt_icon if optional else miss_icon)
+                if tooltip:
+                    it.setToolTip(1, tooltip)
+                    it.setToolTip(2, tooltip)
+                self.tree.addTopLevelItem(it)
+
+            if isinstance(idx, dict) and isinstance(idx.get('stages'), dict) and work_dir:
+                stages = idx.get('stages') or {}
+                if not isinstance(stages, dict):
+                    stages = {}
+
+                max_files = int(os.getenv('SCORPIPE_UI_OUTPUTS_MAX_FILES', '2000'))
+
+                if self._stage:
+                    sk = str(self._stage).strip().lower()
+                    ent = stages.get(sk)
+                    if not isinstance(ent, dict):
+                        # Stage not indexed yet -> fast empty result (no disk scan).
+                        return
+
+                    keyed = ent.get('keyed') or {}
+                    files = ent.get('files') or []
+                    if not isinstance(keyed, dict):
+                        keyed = {}
+                    if not isinstance(files, list):
+                        files = []
+
+                    wd = Path(work_dir)
+
+                    # 1) keyed products
+                    for k in sorted(keyed.keys()):
+                        try:
+                            rel = str(keyed.get(k) or '').strip()
+                            if not rel:
+                                continue
+                            p = (wd / rel).resolve() if not Path(rel).is_absolute() else Path(rel)
+                            _add_row(str(k), p, optional=True)
+                        except Exception:
+                            continue
+
+                    # 2) remaining files (not keyed)
+                    keyed_paths = {str((wd / str(v)).resolve()) for v in keyed.values() if isinstance(v, str)}
+                    extra_files = []
+                    for rel in files:
+                        try:
+                            r = str(rel).strip()
+                            if not r:
+                                continue
+                            p = (wd / r).resolve() if not Path(r).is_absolute() else Path(r)
+                            sp = str(p)
+                            if sp in keyed_paths:
+                                continue
+                            extra_files.append(p)
+                        except Exception:
+                            continue
+
+                    extra_files = sorted(extra_files, key=lambda x: x.name)
+                    if len(extra_files) > max_files:
+                        extra_files = extra_files[:max_files]
+                    for p in extra_files:
+                        _add_row(p.name, p, optional=True, tooltip='Indexed file')
+                    return
+
+                # No stage selected: show keyed items across all stages (fast).
+                wd = Path(work_dir)
+                rows = []
+                for st, ent in stages.items():
+                    if not isinstance(ent, dict):
+                        continue
+                    keyed = ent.get('keyed') or {}
+                    if not isinstance(keyed, dict):
+                        continue
+                    for k, rel in keyed.items():
+                        try:
+                            r = str(rel).strip()
+                            if not r:
+                                continue
+                            p = (wd / r).resolve() if not Path(r).is_absolute() else Path(r)
+                            rows.append((f'{st}:{k}', p))
+                        except Exception:
+                            continue
+                for label, p in sorted(rows, key=lambda x: x[0]):
+                    _add_row(label, p, optional=True)
+                return
+
+            # Fallback (index missing): old behavior (may touch disk via globs).
+            prods = list_products(self._cfg)
+            if self._stage:
+                prods = [p for p in prods if p.stage == self._stage]
+
+            for p in prods:
+                it = QtWidgets.QTreeWidgetItem()
+                it.setData(0, QtCore.Qt.ItemDataRole.UserRole, str(p.path))
+                it.setText(1, p.key)
+                it.setText(2, str(p.path))
+                sz = p.size()
+                it.setText(
+                    3,
+                    ''
+                    if sz is None
+                    else f'{sz / 1024:.1f} KB'
+                    if sz < 1024**2
+                    else f'{sz / 1024**2:.2f} MB',
+                )
+                if p.exists():
+                    it.setIcon(0, ok_icon)
+                else:
+                    it.setIcon(0, opt_icon if p.optional else miss_icon)
+                if p.description:
+                    it.setToolTip(1, p.description)
+                    it.setToolTip(2, p.description)
+                self.tree.addTopLevelItem(it)
 
     def _open_folder(self) -> None:
         if not self._cfg:

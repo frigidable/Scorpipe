@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "suite": "golden-mini-night-time-budget",
+  "notes": "Soft per-stage time budget for the tiny synthetic night. Values are intentionally forgiving to avoid flaky CI while still catching meaningful slowdowns (~2x class regressions).",
+  "default_tolerance_pct": 85.0,
+  "default_abs_slack_s": 0.35,
+  "default_min_enforced_seconds": 0.2,
+  "stages": {
+    "superbias": {
+      "baseline_s": 1.2
+    },
+    "superflat": {
+      "baseline_s": 1.2
+    },
+    "superneon": {
+      "baseline_s": 1.4
+    },
+    "wavesolution": {
+      "baseline_s": 2.4
+    },
+    "sky": {
+      "baseline_s": 2.0
+    },
+    "linearize": {
+      "baseline_s": 1.0
+    },
+    "stack2d": {
+      "baseline_s": 0.9
+    },
+    "extract1d": {
+      "baseline_s": 0.7
+    },
+    "qc_report": {
+      "baseline_s": 0.9
+    },
+    "navigator": {
+      "baseline_s": 0.8
+    }
+  },
+  "family": "golden_time_budget",
+  "baseline_track": "main",
+  "baseline_version": "7.43.0"
+}

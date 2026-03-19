@@ -62,3 +62,40 @@ Attestations (на странице релиза):
 - [ ] `CI` зелёный.
 - [ ] В `CHANGELOG.md` корректно описаны изменения.
 - [ ] Версия в `src/scorpio_pipe/version.py` соответствует Release PR.
+
+
+## Observatory-ready wording
+
+Do not describe a build as **LONG-level** or **observatory-ready** unless the release also satisfies the gates in `docs/spec/OBSERVATORY_RELEASE_GATES.md`.
+Passing the public synthetic LONG fixture alone is only a check of the harness and report plumbing.
+
+
+## Release-qualification package (P5)
+
+Before calling a build **LONG-level** or **observatory-ready**, generate a certification bundle:
+
+```bash
+scorpio-pipe certify-long-parity   --registry benchmarks/long_parity/cases/registry.json   --golden-compare golden_artifacts/perf/golden_time_budget_compare.json   --known-limitations benchmarks/long_parity/certification/known_limitations.template.md   --observer-signoff "<observer name>"   --output release_qualification
+```
+
+If the summary says `observatory_ready: false`, do not use LONG-level wording in notes or releases.
+The certification summary now also prints explicit `blocker:` lines so the missing evidence is visible immediately.
+
+To fill one pending private registry slot without hand-editing JSON files, use:
+
+```bash
+scorpio-pipe prepare-long-case   --config work/<night>/<run>/config.yaml   --long-bundle /private/long/<case>/long_bundle.json   --registry benchmarks/long_parity/cases/registry.json   --case-id <registry_slot>   --title "<human title>"   --category <reference|wavesolution|sky|extraction|geometry|calibration|repeatability>
+```
+
+
+## LONG-parity bootstrap helpers
+
+Before the final certification pass you can reduce manual work with two helper commands:
+
+```bash
+scorpio-pipe inspect-long-params --long-root /path/to/LONG --output bench_work/long_setup_summary
+scorpio-pipe bootstrap-night-cases --nightlog /path/to/s251216.txt --long-root /path/to/LONG --output bench_work/night_bootstrap --write-case-drafts
+```
+
+The first command extracts setup coverage / dispersion / line-table information already present in LONG.
+The second command mines a night log and prepares `bootstrap-only` registry drafts. These drafts do **not** count as real certification evidence until Scorpipe and LONG observer bundles are attached.

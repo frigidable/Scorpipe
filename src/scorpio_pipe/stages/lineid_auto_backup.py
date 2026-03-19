@@ -19,6 +19,8 @@ def _resolve_from_root(p: str | Path) -> Path:
     return p if p.is_absolute() else (_project_root() / p).resolve()
 
 
+
+
 def _load_neon_lines_csv(path: Path) -> Tuple[np.ndarray, np.ndarray]:
     try:
         data = np.genfromtxt(
@@ -40,19 +42,41 @@ def _load_neon_lines_csv(path: Path) -> Tuple[np.ndarray, np.ndarray]:
                 ik = data.dtype.names[names.index(cand)]
                 w = np.asarray(data[ik], dtype=float)
                 break
+
+        if "priority" in names:
+            pk = data.dtype.names[names.index("priority")]
+            pr = np.asarray(data[pk], dtype=float)
+            w = w * np.clip(1.0 + 0.35 * pr, 0.25, None)
+
+        if "safe_for_auto" in names:
+            sk = data.dtype.names[names.index("safe_for_auto")]
+            safe_raw = np.asarray(data[sk])
+            safe = np.array(
+                [str(v).strip().lower() in {"1", "y", "yes", "true", "t"} for v in safe_raw],
+                dtype=bool,
+            )
+        else:
+            safe = np.ones_like(lam, dtype=bool)
+
+        if "blend_class" in names:
+            bk = data.dtype.names[names.index("blend_class")]
+            bc = np.asarray(data[bk]).astype(str)
+            severe = np.array([("weak" in b.lower()) or ("blend" in b.lower()) for b in bc], dtype=bool)
+            w = np.where(severe, 0.5 * w, w)
     except Exception:
         arr = np.genfromtxt(str(path), delimiter=",", dtype=float)
         if arr.ndim == 1:
             arr = arr[None, :]
         lam = arr[:, 0].astype(float)
         w = arr[:, 1].astype(float) if arr.shape[1] >= 2 else np.ones_like(lam)
+        safe = np.ones_like(lam, dtype=bool)
 
     if np.nanmax(lam) < 1000:
         lam = lam * 10.0
 
-    m = np.isfinite(lam)
+    m = np.isfinite(lam) & safe
     lam = lam[m]
-    w = w[m] if w.size == lam.size else np.ones_like(lam)
+    w = w[m] if w.size == m.size else np.ones_like(lam)
     w = np.where(np.isfinite(w) & (w > 0), w, 1.0)
 
     idx = np.argsort(lam)
@@ -152,7 +176,7 @@ def _suggest_linear_pairs(
     return x_pairs, lam_pairs, d_pairs, meta
 
 
-def prepare_lineid(cfg: dict[str, Any]) -> dict[str, Path]:
+def prepare_lineid(cfg: dict[str, Any], *, run_root: str | Path | None = None) -> dict[str, Path]:
     """Prepare files for the LineID GUI.
 
     Writes:
@@ -166,8 +190,8 @@ def prepare_lineid(cfg: dict[str, Any]) -> dict[str, Path]:
     from scorpio_pipe.paths import resolve_work_dir
     from scorpio_pipe.wavesol_paths import wavesol_dir
 
-    work_dir = resolve_work_dir(cfg)
-    outdir = wavesol_dir(cfg)
+    work_dir = Path(run_root).expanduser().resolve() if run_root is not None else resolve_work_dir(cfg)
+    outdir = wavesol_dir(cfg, run_root=work_dir)
     outdir.mkdir(parents=True, exist_ok=True)
 
     superneon_fits = outdir / "superneon.fits"
@@ -192,6 +216,16 @@ def prepare_lineid(cfg: dict[str, Any]) -> dict[str, Path]:
     if not lines_path.exists():
         raise FileNotFoundError(f"neon_lines.csv not found: {lines_path}")
 
+    try:
+        from scorpio_pipe.wavesol_presets import materialize_curated_linelist_csv
+
+        curated_path, curated_meta = materialize_curated_linelist_csv(cfg, run_root=work_dir, outdir=outdir)
+        if curated_path is not None and curated_path.exists() and str(Path(lines_path).name).startswith('curated_linelist_'):
+            rep_meta = outdir / 'line_priors_used.json'
+            rep_meta.write_text(__import__('json').dumps(curated_meta, indent=2, ensure_ascii=False), encoding='utf-8')
+    except Exception:
+        pass
+
     tol_A = float(wcfg.get("pair_tol_A", 2.5))
     top_peaks = int(wcfg.get("pair_top_peaks", 28))
     top_lines = int(wcfg.get("pair_top_lines", 120))
@@ -202,6 +236,18 @@ def prepare_lineid(cfg: dict[str, Any]) -> dict[str, Path]:
     fwhm = np.asarray(pk["fwhm_pix"], float)
 
     lam_lab, w_lab = _load_neon_lines_csv(lines_path)
+    long_prior_meta: dict[str, Any] = {}
+    try:
+        from scorpio_pipe.long_setup_priors import filter_lab_lines_for_setup
+
+        lam_lab, w_lab, long_prior_meta = filter_lab_lines_for_setup(
+            lam_lab,
+            w_lab,
+            setup_or_cfg=cfg,
+            boost_strong_lines=True,
+        )
+    except Exception:
+        long_prior_meta = {}
 
     tpl_path = outdir / "manual_pairs_template.csv"
     sel = np.argsort(-amp)[: min(30, amp.size)]
@@ -229,9 +275,33 @@ def prepare_lineid(cfg: dict[str, Any]) -> dict[str, Path]:
     with rep_path.open("w", encoding="utf-8") as f:
         f.write("LINE-ID (auto) report\n")
         f.write(f"lines_csv: {lines_path}\n")
+        if long_prior_meta.get("applied"):
+            cov = long_prior_meta.get("coverage_A") or []
+            disp = long_prior_meta.get("median_dispersion_A_per_px")
+            f.write(
+                "LONG setup prior: "
+                f"{long_prior_meta.get('setup')} "
+                f"coverage={cov[0]:.1f}..{cov[1]:.1f} A "
+                f"dispersion={float(disp):.4f} A/px kept={int(long_prior_meta.get('kept_n_lines') or 0)}\n"
+            )
         f.write(f"tol_A: {tol_A}\n")
         f.write(f"pairs_auto: {len(x_pairs)}\n")
         f.write(f"linear_guess: a={meta['a']:.6f} A/px, b={meta['b']:.3f} A\n")
         f.write(f"linear_rms_A: {meta['rms_A']:.3f}\n")
+
+    if long_prior_meta.get("applied"):
+        try:
+            import json as _json
+            meta_path = outdir / "line_priors_used.json"
+            merged = {}
+            if meta_path.exists():
+                try:
+                    merged = _json.loads(meta_path.read_text(encoding="utf-8"))
+                except Exception:
+                    merged = {}
+            merged["long_setup_prior"] = long_prior_meta
+            meta_path.write_text(_json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
 
     return {"template": tpl_path, "auto": auto_path, "report": rep_path}

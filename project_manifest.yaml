@@ -1,0 +1,31 @@
+schema: scorpio-pipe.project-manifest.v1.2
+exclude:
+  files: []
+  globs: []
+roles:
+  OBJECT_FRAMES:
+    files: []
+    globs: []
+  SKY_FRAMES:
+    files: []
+    globs: []
+  ARCS:
+    files: []
+    globs: []
+  FLATS:
+    files: []
+    globs: []
+  BIAS:
+    files: []
+    globs: []
+  SUNSKY_FRAMES:
+    files: []
+    globs: []
+  STANDARD_FRAMES:
+    files: []
+    globs: []
+  TELLURIC_STANDARD_FRAMES:
+    files: []
+    globs: []
+groups: {}
+active_group: null

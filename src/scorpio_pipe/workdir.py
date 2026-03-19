@@ -84,7 +84,7 @@ def signature_from_yaml(cfg_path: Path) -> RunSignature | None:
 def _is_effectively_empty(dir_path: Path) -> bool:
     if not dir_path.exists():
         return True
-    ignore = {"README.md", "README.txt", ".gitkeep"}
+    ignore = {"README.md", "README.txt", ".gitkeep", "manifest", "quarantine"}
     for p in dir_path.iterdir():
         if p.name in ignore:
             continue

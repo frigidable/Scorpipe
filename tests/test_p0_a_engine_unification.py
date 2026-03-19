@@ -79,4 +79,4 @@ def test_stage_specs_cover_canonical_tasks() -> None:
         assert tuple(spec.validate_globs), f"StageSpec.validate_globs must be non-empty for {t!r}"
 
         kind = str(getattr(spec, "contract_kind", "none") or "none").strip().lower()
-        assert kind in {"none", "mef", "spec1d", "lambda_map"}
+        assert kind in {"none", "mef", "spec1d", "lambda_map", "calib_bias_triplet", "calib_flat", "calib_neon"}

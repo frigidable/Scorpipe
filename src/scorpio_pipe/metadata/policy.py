@@ -66,5 +66,15 @@ def default_metadata_policy() -> MetadataPolicy:
         "detector": FieldRequirement.OPTIONAL,
         "slitmask": FieldRequirement.OPTIONAL,
         "sperange": FieldRequirement.OPTIONAL,
+        # Calibration-grade optional metadata (P0.2)
+        "airmass": FieldRequirement.OPTIONAL,
+        "zenith_distance_deg": FieldRequirement.OPTIONAL,
+        "parallactic_angle_deg": FieldRequirement.OPTIONAL,
+        "ra_deg": FieldRequirement.OPTIONAL,
+        "dec_deg": FieldRequirement.OPTIONAL,
+        "utc_mid_exposure": FieldRequirement.OPTIONAL,
+        "observatory": FieldRequirement.OPTIONAL,
+        "site_name": FieldRequirement.OPTIONAL,
+        "seeing_fwhm_arcsec": FieldRequirement.OPTIONAL,
     }
     return MetadataPolicy(requirements=req)

@@ -26,6 +26,7 @@ from matplotlib.figure import Figure
 from matplotlib.widgets import SpanSelector
 
 from scorpio_pipe.plot_style import mpl_style
+from scorpio_pipe.ui.mpl_render import RenderThrottle
 
 
 @dataclass
@@ -99,6 +100,7 @@ class LambdaWindowsDialog(QDialog):
         self._fits_path = Path(fits_path)
         self._roi = roi or {}
         self.windows = LambdaWindows(unit="auto")
+        self._render_throttle = RenderThrottle(self, self._plot_now, max_fps=10.0, debounce_ms=180)
 
         # --- UI ---
         lay = QVBoxLayout(self)
@@ -146,7 +148,7 @@ class LambdaWindowsDialog(QDialog):
 
         # Load + plot
         self._x, self._spec = self._make_spectrum()
-        self._plot()
+        self._request_plot()
 
         # Span selector
         self._span = SpanSelector(
@@ -229,7 +231,13 @@ class LambdaWindowsDialog(QDialog):
 
         return x, spec
 
-    def _plot(self) -> None:
+    def _request_plot(self, *, debounce: bool = False) -> None:
+        if debounce:
+            self._render_throttle.request()
+        else:
+            self._render_throttle.request_immediate()
+
+    def _plot_now(self) -> None:
         self.ax.clear()
         with mpl_style():
             self.ax.plot(self._x, self._spec)
@@ -239,6 +247,9 @@ class LambdaWindowsDialog(QDialog):
             self.ax.set_ylabel("Median sky flux")
             self.ax.grid(True, alpha=0.3)
             self.ax.set_title("Select windows with bright, narrow lines")
+            spans = self.windows.windows_A if self.windows.unit == "A" else self.windows.windows_pix
+            for a, b in spans:
+                self.ax.axvspan(float(a), float(b), alpha=0.16)
         self.fig.tight_layout()
         self.canvas.draw_idle()
 
@@ -249,6 +260,7 @@ class LambdaWindowsDialog(QDialog):
         else:
             self.windows.windows_pix.append((int(round(a)), int(round(b))))
         self._update_list()
+        self._request_plot(debounce=True)
 
     def _remove_last(self) -> None:
         if self.windows.unit == "A":
@@ -258,11 +270,13 @@ class LambdaWindowsDialog(QDialog):
             if self.windows.windows_pix:
                 self.windows.windows_pix.pop()
         self._update_list()
+        self._request_plot()
 
     def _clear(self) -> None:
         self.windows.windows_A.clear()
         self.windows.windows_pix.clear()
         self._update_list()
+        self._request_plot()
 
     def _update_list(self) -> None:
         if self.windows.unit == "A":

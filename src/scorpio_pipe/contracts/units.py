@@ -17,7 +17,7 @@ from dataclasses import dataclass
 class UnitFamily:
     """Parsed unit family for BUNIT."""
 
-    base: str  # 'electron'|'adu'|'unknown'
+    base: str  # 'electron'|'adu'|'physical_flux'|'unknown'
     per_second: bool
 
 
@@ -53,16 +53,19 @@ def parse_bunit(bunit: str) -> UnitFamily:
     if "electron" in u2 or u2 in {"e", "e-", "e_", "elec", "el"} or "e-" in u2:
         return UnitFamily(base="electron", per_second=per_second)
 
+    if any(tok in u for tok in ("erg", "flam", "jy", "w/m", "photon")):
+        return UnitFamily(base="physical_flux", per_second=per_second)
+
     return UnitFamily(base="unknown", per_second=per_second)
 
 
 def is_recognized_sci_bunit(bunit: str) -> bool:
-    return parse_bunit(bunit).base in {"electron", "adu"}
+    return parse_bunit(bunit).base in {"electron", "adu", "physical_flux"}
 
 
 def is_recognized_var_bunit(bunit: str) -> bool:
     # We accept the same families as SCI; the exponent is checked separately.
-    return parse_bunit(bunit).base in {"electron", "adu"}
+    return parse_bunit(bunit).base in {"electron", "adu", "physical_flux"}
 
 
 def var_bunit_from_sci_bunit(bunit_sci: str) -> str:
@@ -85,6 +88,10 @@ def var_bunit_from_sci_bunit(bunit_sci: str) -> str:
         out = "ADU2"
     else:
         out = "unknown2"
+
+    if base == "physical_flux":
+        out = f"({bunit_sci})^2"
+        return out
 
     if fam.per_second:
         out = f"{out}/s2"

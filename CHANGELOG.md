@@ -1,3 +1,410 @@
+## 7.70.0
+
+- feat(p0-semantics): froze calibration-stack semantics by synchronizing `contracts/calibration.py`, calibrated-product validators, and spec docs so 1D/2D status claims are explicit and machine-checked. In particular, 2D calibrated products may no longer claim `ABSOLUTE_TRUSTED`.
+- feat(p0-metadata): tightened `FrameMeta` provenance handling with explicit provenance helpers (`header` / `derived` / `fallback` / `missing` / `untracked`) and made standard association / sensfunc logic downgrade trust when atmospheric metadata is weak instead of silently overclaiming.
+- feat(p0-reference-context): strengthened reference-context metadata for standards / extinction / telluric resources with explicit logical family, unit family, interpolation assumptions, source names, checksum semantics, and richer lineage surfaced into calibration QC.
+- feat(p0-calibration-systematics): promoted `calibration_systematics.fits` to a stricter first-class contract with semantic headers plus explicit `CALSYS_TOTAL` quadrature bookkeeping, and carried separated calibration uncertainty summaries into downstream science outputs/reports.
+- feat(p0-api-catalog-sync): fixed observer-layer drift by repairing `pipeline.public_api` run-root resolution, registering `science_lines_preview_png` in stage/product catalogs, broadening observer cards, and hardening sync tests across catalog/public-api/dashboard behavior.
+- test(p0-hardening): added regression coverage for calibration status legality, provenance-aware standard-association downgrade, reference metadata semantics, and catalog/public-api consistency.
+- docs(p0): updated `FLUX_CALIBRATION_CONTRACT.md`, `CALIBRATION_STACK_v1.md`, and `SCIENCE_LAYER_v1.md` to match the hardened v7.70 behavior.
+
+## 7.65.0
+
+- feat(science-layer): implemented P3.1 by adding a dedicated `science/` domain (`lines.py`, `reddening.py`, `kinematics.py`, `report.py`) so downstream science interpretation is no longer folded into reduction/calibration stages.
+- feat(line-measure): implemented P3.2 with a real `line_measure` stage that measures calibrated 1D lines, propagates both `err_stat` and `err_cal`, writes machine-readable CSV/JSON products, and emits a preview plot.
+- feat(science-report): implemented P3.3 with a real `science_report` stage that renders compact observer-facing Markdown/HTML summaries from calibrated products, QC, measured lines, and provenance.
+- feat(observer-api): implemented P3.4 by extending `pipeline.public_api` with UI-safe summaries for sensfunc / telluric / fluxcal / science report, plus observer dashboard builders and recipe runners. Added lightweight `ui/observer_cards.py` helpers for viewer-side rendering.
+- feat(long-comparison): implemented P3.5 by adding a formal comparison harness under `src/scorpio_pipe/compare/longslit.py`, separating metric-bundle comparison against LONG from the reduction stages themselves.
+- test(observer-layer): implemented P3.6 with new regression coverage for line-measurement uncertainty propagation, report rendering, recipe definitions, public dashboard summaries, and LONG comparison metrics.
+- feat(recipes): implemented P3.7 with recipe-level workflows (`quicklook_science`, `full_reduction`, `standard_star_reduction`, `relative_flux_calibration`, `full_science_calibration_report`) under `pipeline/recipes.py`.
+- docs(observer-layer): updated architecture notes and added `SCIENCE_LAYER_v1.md` plus `LONG_COMPARISON_HARNESS_v1.md`.
+
+## 7.60.0
+
+- feat(sensfunc): implemented P2.1 with a first stable response-model builder in `calib/sensfunc.py`, including wavelength-convention normalization, extinction correction, conservative feature/telluric masking, smooth response fitting, QC JSON, and preview output.
+- feat(telluric): implemented P2.2 with an explicitly separate telluric layer in `calib/telluric.py` / `stages/telluric_model.py`, producing inspectable transmission, confidence, QC, and preview products.
+- feat(fluxcal): implemented P2.3 by replacing the `fluxcal_apply` placeholder with a real application stage that reads sensfunc/telluric products, assigns semantic calibration status, and writes calibrated 1D/2D outputs plus preview/QC artifacts.
+- feat(calibration-systematics): implemented P2.4 by writing `calibration_systematics.fits` as a companion error layer with separate relative / telluric / absolute systematic components instead of hiding them inside statistical variance.
+- feat(validators): implemented P2.5 by adding contract validators for sensfunc products, telluric products, and calibration-systematics outputs, alongside catalog wiring for the new preview/QC artifacts.
+- test(calibration-stack): implemented P2.6 with new synthetic / contract coverage for wavelength-convention round-trips, telluric-window behavior, semantic status assignment, and calibration-stack FITS validators.
+- docs(calibration-stack): updated architecture docs and added `docs/spec/CALIBRATION_STACK_v1.md` to describe the first stable P2 stack.
+
+## 7.55.0
+
+- feat(standard-prepare): implemented P1.1 by adding a real `standard_prepare` stage that selects standard / telluric-standard frames, validates science association, prepares a rectified standard input, and emits `standard_1d.fits`, `standard_trace.json`, `standard_qc.json`, and a machine-readable preparation summary.
+- refactor(extract-core): implemented P1.2 by introducing a shared extraction facade under `scorpio_pipe.extract` so the new calibration workflow reuses the same trace / aperture / boxcar mechanics as science `extract1d` instead of forking a copy-paste branch.
+- feat(standard-policy): implemented P1.3 by making wide-box extraction the default primary standard product, with optional optimal extraction kept diagnostic-only and explicit aperture-growth / flux-capture diagnostics recorded in QC.
+- feat(standard-qc): implemented P1.4 by adding standard-specific diagnostics for association status, centroid drift, masked fraction, edge truncation, contamination proxy, trace smoothness, and a `safe_for` classification (`response_only`, `approx_absolute`, `absolute_candidate`, etc.).
+- feat(public-api): implemented P1.5 by exposing `run_standard_prepare(...)` and `read_standard_prepare_summary(...)` through `pipeline.public_api`, plus UI-safe dataclasses for selected-standard summaries.
+- docs(spec): added `docs/spec/STANDARD_PREPARE_CONTRACT.md` and updated `docs/ARCHITECTURE.md` to document the flux-first standard workflow and its public boundary.
+- test(p1): added regression coverage for standard aperture policy helpers and for the new public-API summary loader.
+
+## 7.50.0
+
+- docs(architecture): implemented P0.8 by documenting the new calibration/science domain in `docs/ARCHITECTURE.md`, including the frozen boundaries, stage flow, catalog vocabulary, and semantic calibrated-output layer.
+- docs(spec): added `docs/spec/FLUX_CALIBRATION_CONTRACT.md` as the normative contract for calibrated products, covering `CALSTAT`, `FLUXUNIT`, `REFCTID`, `SENSFUNC`, `TELLURIC`, `WAVEREF`, and flux-unit semantics.
+- docs(contract-law): clarified that calibrated outputs are governed by explicit machine-readable semantics on top of the existing data-model contract, not by filenames or log conventions alone.
+
+## 7.49.0
+
+- feat(contracts): implemented P0.7 by adding calibrated-product semantic validation for `CALSTAT`, `FLUXUNIT`, `REFCTID`, `SENSFUNC`, and telluric-aware `TELLURIC` references.
+- feat(units): tightened calibrated-output unit rules so flux-calibrated products must declare physical flux-like units and reject silent drift back to detector-count units (`electron`/`ADU`).
+- test(contracts): added regression coverage for calibrated MEF/SPEC1D products, including rejection of telluric-aware outputs without `TELLURIC` and rejection of non-flux calibrated units.
+
+## 7.48.0
+
+- feat(product-catalog): implemented P0.6 by registering first-class calibration/science-domain products for standards, sensitivity functions, tellurics, flux-calibrated outputs, calibration systematics, line measurements, and science reports.
+- feat(stage-catalog): wired the new stages to canonical product keys, including both current placeholder plan artifacts and future stable output paths.
+- test(product-catalog): added regression coverage that the new calibration-domain product keys are present in `ProductCatalog`.
+
+## 7.47.0
+
+- feat(stage-catalog): implemented P0.5 by registering the new calibration/science-domain tasks in `StageCatalog`: `standard_prepare`, `sensfunc`, `telluric_model`, `fluxcal_apply`, `line_measure`, `science_report`.
+- feat(workflow): extended the doit DAG so the new tasks participate in canonical catalog order and preserve explicit dependencies from `standard_prepare` through `science_report`.
+- feat(entrypoints): added thin placeholder entrypoints for the new tasks so the catalog vocabulary is executable from day one without leaking ad-hoc task tables or legacy wrappers.
+
+## 7.46.0
+
+- feat(reference-context): implemented P0.4 by extending `refs/context.py` with first-class logical references for standards, extinction curves, telluric masks, and telluric templates.
+- feat(resources): packaged baseline calibration-domain resources under `resources/standards`, `resources/extinction`, and `resources/telluric`, with normalized metadata (`units`, `wavelength_convention`, `sampling`) captured into `reference_context.json`.
+- test(reference-context): added regression coverage that the new logical references are present and that changing a tracked standard table deterministically changes `context_id`.
+
+## 7.45.0
+
+- feat(calib-association): implemented P0.3 by replacing the placeholder association shim with a machine-readable standard/telluric compatibility policy (`INCOMPATIBLE`, `RELATIVE_RESPONSE_ONLY`, `RELATIVE_TELLURIC_ONLY`, `ABSOLUTE_APPROX`, `ABSOLUTE_TRUSTED`).
+- feat(calib-association): added downgrade diagnostics for shape, slit-width, time, and airmass mismatches, so standard-star matching can explicitly distinguish response-only vs approximate/trusted absolute calibration use.
+- test(calib-association): added regression coverage for trusted, approximate, telluric-only, and incompatible association outcomes.
+
+## 7.44.0
+
+- feat(metadata): implemented P0.2 by extending `FrameMeta` with calibration-grade fields (`airmass`, `zenith_distance_deg`, `parallactic_angle_deg`, `ra_deg`, `dec_deg`, `utc_mid_exposure`, `observatory`, `site_name`, `seeing_fwhm_arcsec`).
+- feat(metadata-provenance): added explicit provenance for the new metadata fields (`header`, `derived`, `missing`) and conservative derivations for `utc_mid_exposure` and `zenith_distance_deg` when they can be computed from trustworthy inputs.
+- test(metadata): added regression coverage for header-driven parsing, RA/DEC normalization, derived mid-exposure UTC, and preservation of missing calibration metadata as `None` without fake precision.
+
+## 7.43.0
+
+- feat(project-manifest): implemented P0.1 by extending canonical manifest roles with `STANDARD_FRAMES` and `TELLURIC_STANDARD_FRAMES`.
+- feat(project-manifest-ui): manifest dialog now exposes dedicated GUI tabs for standards and telluric standards, so the new roles survive GUI/YAML round-trips.
+- test(project-manifest): added regression coverage for defaults, legacy-shape coercion, canonical serialization, and `apply_project_manifest_to_cfg(...)` mapping to `frames.standard` / `frames.telluric_standard`.
+
+## 7.42.11
+
+- fix(engine/tests): align StageSpec contract-kind coverage with calibration contracts (`calib_bias_triplet`, `calib_flat`, `calib_neon`) and remove the stale regression in `test_p0_a_engine_unification`.
+- perf(baselines): add versioned perf baselines under `benchmarks/baselines/{microbench,golden_time_budget}/` with `main.json` rolling track plus per-version snapshots.
+- perf(ci): teach `scorpio_pipe.perf.microbench` and `scorpio_pipe.perf.golden_time_budget` to resolve versioned baselines and support advisory `--soft-fail` mode for PR checks.
+- ci(perf): run perf workflows on PRs in warning-only mode and keep weekly/workflow_dispatch runs as hard regression gates.
+
+## 7.42.10
+
+- PERF-74.2: added reproducible runtime performance profiles via `runtime.performance_mode` with two supported modes: `full` (scientific maximum) and `fast` (rapid-look / reduced-iteration profile).
+- New resolver `scorpio_pipe.perf.profiles.apply_performance_profile(...)` applies the chosen profile before planning, stage hashing, execution, provenance capture, and QC generation, so `fast -> full` reruns become explicit and deterministic.
+- Fast mode now coarsens/shortens selected heavy-stage knobs (Wave2D tracing/iterations, Kelson sky iterations and flexure sampling, linearize/stack robust passes, cosmics iteration counts) and records every applied override in `runtime.performance_profile`.
+- Provenance now captures the performance mode in `effective_config.yaml` and `manifest/run_signature.json`, while `qc_report.json` surfaces the selected mode/profile and emits a visible `QC_FAST_MODE_RUN` reminder for rapid-look runs.
+
+## 7.42.9
+
+- PERF-74.1: introduced stage-level execution budgets via `StageContext.resources` (`max_rss_mb`, `n_jobs`, `blas_threads`) with config resolution from `runtime`, top-level `resources`, and per-stage `resources` / `perf` overrides.
+- Added `scorpio_pipe.pipeline.resources` to normalize budgets, cap BLAS/OpenMP threads for a stage, and translate tight RAM budgets into safer tiling/streaming knobs (`sky.perf.strip_rows/strip_workers`, `stack2d.chunk_rows`, `linearize/cosmics/superneon` job caps).
+- Engine-created `StageContext` objects now carry the resolved budget, and stage metrics/timings include the applied resource-budget metadata for post-run diagnostics.
+
+## 7.42.8
+
+- PERF-72.2: promoted the FITS header/meta LRU cache to the single shared source for repeated scan-style callers, with a combined `get_header_and_frame_meta(...)` accessor keyed by `(path, mtime_ns, size)`.
+- `inspect`, `preflight`, and `dataset builder` now fetch header fields and `FrameMeta` through one shared cached snapshot per file instead of separate header/meta lookup paths.
+- Launcher/frame-browser setup inference now uses the same cache for representative FITS headers, so repeated work-dir/run suggestions on the same inspected night no longer reopen FITS headers.
+- Added cache diagnostics (`hits/misses/disk_loads/evictions`) and regression coverage to ensure repeated `inspect/preflight/builder` passes stay on the in-memory metadata path.
+
+## 7.42.7
+
+- PERF-72.1: artifact index migrated to append-only `manifest/artifact_index.jsonl` (schema v2), so post-stage index updates are now O(1) appends instead of full snapshot rewrites.
+- `load_artifact_index(...)` now reads the incremental JSONL format and still falls back to legacy `artifact_index.json` for backward compatibility; first write bootstraps JSONL from an existing legacy snapshot once.
+- StageFramesWindow cache invalidation now tracks the canonical artifact-index storage path (`jsonl` preferred, legacy `json` fallback), preserving the fast UI path after the storage migration.
+
+## 7.42.6
+
+- PERF-71.2: freeze watchdog dumps are now full forensic snapshots: main-thread stack, active Scorpipe QRunnable jobs (`id/name/age`), queued-log backlog size (`lines/chars`), and the last 50 profiled UI actions plus currently in-flight profiled actions.
+- Added heuristic “freeze reason hints” to the dump so common causes (matplotlib redraw, synchronous FITS I/O, filesystem walk, worker backlog, log flood) are surfaced immediately next to the stack trace.
+- `slow_action_profiler` now keeps an in-memory ring buffer of recent UI actions for post-mortem debugging, and `qt_log` exposes backlog-size diagnostics for the watchdog.
+
+## 7.42.5
+
+- PERF-71.1: UI async worker now keeps a global job registry with pool/queue diagnostics (`running`, `queued`, `cancelled`, `stale`) exposed to the freeze watchdog snapshot.
+- Added best-effort queue limiting (`SCORPIPE_UI_QUEUE_LIMIT`, default 200) with latest-wins deduplication and queued-job eviction to prevent click-storm degradation.
+- Wired dedupe keys into the hottest UI producers (`Inspect`, Sky ROI, Manual Cosmics, FITS preview, Stage scan`) so repeated clicks collapse instead of flooding the pool queue.
+
+## 7.42.1
+
+- PERF-70.1: GUI `Inspect dataset` now runs via the shared async worker pool (`QThreadPool`) instead of synchronously in the click handler, so large nights no longer freeze the UI.
+- Added live inspect feedback in the GUI (`Inspecting…`, found/opened FITS counter, current file) plus a user-cancel path wired through cooperative cancellation in `inspect_dataset(...)`.
+- Added regression coverage for inspect progress/cancellation and an integration-style GUI test that verifies the launcher remains responsive while a mocked slow inspect job is running.
+
+## 7.42.0
+
+- PERF-60.2: golden weekly workflow now checks soft per-stage time budgets from `manifest/timings.jsonl` / `manifest/metrics.json` via `scorpio_pipe.perf.golden_time_budget`, and uploads a comparison JSON artifact.
+- Golden mini-night artifacts now include `manifest/timings.jsonl` and `manifest/metrics.json` for time-budget comparison/debugging.
+
+## 7.41.0
+
+- PERF-60.1: added a lightweight microbench suite for hot kernels (`linearize_core`, `sky_fit_core`, `cosmics_core`, `stack_accumulator`) with JSON results, JSON baseline, and per-benchmark tolerance gates.
+- Added weekly/manual GitHub Actions workflow `perf-microbench.yml` that runs the suite, compares against `benchmarks/microbench_baseline.json`, uploads artifacts, and fails on meaningful regressions.
+
+## 7.40.0
+
+- PERF-50.2: multiprocessing backends now force BLAS/OpenMP thread caps (`OPENBLAS_NUM_THREADS=1`, `MKL_NUM_THREADS=1`, `OMP_NUM_THREADS=1`, etc.) during child-process spawn and again inside workers, preventing oversubscription like `16 processes × 16 BLAS threads`.
+- The direct process-pool path in `sky_sub` now uses the same guard, so all current multiprocessing entry points inherit the same protection.
+
+## 7.39.0
+
+- PERF-50.1: added a shared stage-level `parallel_map(...)` adapter with `thread` / `process` / best-effort `loky` backends and conservative worker caps (`min(8, cpu_count)`).
+- `linearize` now routes per-exposure rectification through the shared parallel helper (default backend: `thread`), so independent frames can be processed concurrently while preserving ordered outputs.
+- `cosmics` now uses the same helper for per-frame output emission in `stack_mad` / `two_frame_diff`, removing stage-local ad-hoc loops and centralizing backend selection in `cosmics.perf`.
+
+## 7.38.0
+
+- PERF-40.5: accelerated Extract1D optimal extraction with vectorized per-column aperture math and optional numba backend (`extract1d.optimal.backend=numba` or `SCORPIPE_EXTRACT1D_OPT_BACKEND=numba`) with graceful NumPy fallback.
+
+## 7.37.0
+
+- PERF-40.4: Stack2D now uses streaming accumulation per Y-chunk instead of building full `(nexp, y, x)` cubes in RAM. The default mean / invvar / Huber paths keep only block-sized accumulators in memory, stabilizing RAM usage on long exposure series.
+- Added a regression test guarding against reintroducing `np.stack`-based full-cube stacking in Stack2D.
+
+## 7.36.0
+
+- PERF-40.3: `cosmics` теперь умеет ограничивать детекцию ROI (`cosmics.roi`) и оставляет остальной кадр нетронутым, что резко уменьшает объём вычислений на больших сериях.
+- Для масок космиков добавлен fast-path dilation через `scipy.ndimage.binary_dilation` (с автоматическим fallback на legacy NumPy-реализацию), а ROI и `mode_profile` теперь отражаются в `summary.json` / `qc.json`.
+
+## 7.35.0
+
+- PERF-40.2: sky subtraction full-frame model evaluation is now tiled by Y-strips with best-effort process-pool parallelism and per-strip basis reuse for large frames.
+
+## [7.34.0] - 2026-03-06
+
+### Changed
+- PERF-40.1: `linearize` теперь строит и LRU-кеширует resampling/mapping grid по `(FrameSignature, lambda_map_sha256, shape, wave0, dw, nlam)` и переиспользует его на сериях кадров одной конфигурации вместо повторного пересчёта overlap-grid на каждом кадре.
+- В `linearize` добавлена диагностика `payload["resampling"]["grid_cache"]` (`enabled/hit/frame_signature/lambda_map_key`) для воспроизводимого контроля попаданий в кеш.
+
+
+## [7.33.0] - 2026-03-06
+
+### Changed
+- PERF-30.3: добавлен LRU-кеш FITS header/meta по ключу `(path, mtime_ns, size)`; `preflight`, `inspect/frame browser` и `dataset builder` теперь переиспользуют кэш и не открывают одни и те же FITS тысячи раз при повторных операциях по одной ночи.
+
+
+## [7.32.0] - 2026-03-06
+
+### Changed
+- PERF-30.2: `manifest/metrics.json` теперь пишется атомарно через `atomic_write_json` вместо прямого `write_text`, поэтому файл не остаётся частично записанным при crash/kill и UI не натыкается на битый JSON.
+
+
+## [7.31.0] - 2026-03-06
+
+### Changed
+- PERF-30.1: `manifest/timings.json` переведён в append-only формат `manifest/timings.jsonl` (одна запись = одна строка). Запись делается через безопасный append (flush+fsync best-effort), поэтому тайминги не замедляют пайплайн даже на длинных сессиях. Чтение поддерживает legacy `timings.json` как fallback.
+
+
+## [7.30.0] - 2026-03-05
+
+### Changed
+- PERF-20.2: UI — StageFramesWindow и OutputsPanel теперь предпочитают `manifest/artifact_index.json` для списков файлов/артефактов и не запускают дисковый обход/глоб-поиск при кликах по поздним стадиям. `scan_tree` остаётся только fallback, когда индекс отсутствует.
+
+
+## [7.29.0] - 2026-03-05
+
+### Changed
+- PERF-20.1: Engine теперь пишет `manifest/artifact_index.json` после каждой стадии (индекс файлов по продуктам: `files[]` + `keyed{product_key:path}`), чтобы UI не делал `os.walk` по stage_dir.
+- StageFramesWindow теперь предпочитает `artifact_index.json` для вкладок со списком файлов и использует скан по диску только как fallback (если индекс отсутствует/не содержит нужной стадии).
+
+
+## [7.28.0] - 2026-03-05
+
+### Changed
+- PERF-10.5: UI log backpressure — при большом backlog очередь начинает дропать DEBUG (а при экстремальном backlog — INFO), и периодически вставляет схлопнутую строку вида “N lines skipped”.
+- Добавлен UI-фильтр уровня логов (INFO/WARN/ERROR) через контекстное меню log панели (фильтр также поднимает level UI-handler, чтобы снизить нагрузку).
+
+
+## [7.27.0] - 2026-02-24
+
+### Changed
+- PERF-10.4: UI — добавлен UiRunCache (plan_sequence + stage_status/done.json snapshot) с инвалидацией по mtime `manifest/stage_state.json` и `manifest/metrics.json`. Run Plan dialog теперь использует кеш и не пересчитывает план заново на каждый клик.
+
+
+## [7.26.0] - 2026-02-24
+
+### Changed
+- PERF-10.3: FITS preview — добавлен “quick peek” (header + strided sampling через `HDU.section`, без чтения всего SCI) и LRU-кеш превью по ключу `(path, mtime, size)` (файл `manifest/ui_perf.jsonl` по-прежнему помогает ловить медленные apply/render).
+
+
+## [7.25.0] - 2026-02-24
+
+### Changed
+- PERF-10.2: StageFramesWindow — scan jobs теперь дедуплицированы “по вкладке”: хранится один job на tab (tab->job), при refresh/close jobs отменяются и отписываются (disconnect), после завершения ссылки удаляются для корректного GC.
+
+
+## [7.24.0] - 2026-02-24
+
+### Changed
+- PERF-10.1: UI async_worker переведён с модели “QThread per job” на `QThreadPool.globalInstance()` + `QRunnable` с лимитом потоков `min(8, cpu_count)` (override: `SCORPIPE_UI_MAX_THREADS`).
+- Добавлены `job_id` и best-effort `cancel()/mark_stale()` (stale jobs не эмитят сигналы; если ещё не стартовали — выходят сразу).
+- StageFramesWindow больше не копит хэндлы сканов: предыдущие in-flight scans помечаются stale при refresh/close, хэндлы очищаются по завершению.
+
+
+## [7.23.0] - 2026-02-24
+
+### Changed
+- PERF-00.3: добавлен UI slow-action profiler `profile_ui_action(name)` — логирует всё, что >200ms (duration + stack) и пишет JSONL в `manifest/ui_perf.jsonl`.
+- Профилирование включено на ключевых UI-действиях: открытие StageFramesWindow, загрузка FITS preview (apply/render), открытие QC Viewer и рендер QC-артефактов, Outputs (refresh), расчёт Run plan (refresh).
+
+## [7.22.0] - 2026-02-24
+
+### Changed
+- PERF-00.2: добавлен UI Freeze Watchdog (в debug/advanced режиме). При зависании event loop (>~1.25s без heartbeat) пишет `ui_freeze_dump.txt` в папку логов (stack главного треда + stacks всех Python threads + snapshot активных QThreads + backlog UI-логов).
+- Watchdog включён по умолчанию в dev (не frozen) режиме; в frozen builds включается через env: `SCORPIPE_UI_WATCHDOG=1` (или `SCORPIPE_UI_DEBUG=1`) / CLI: `--watchdog`.
+
+## [7.21.0] - 2026-02-24
+
+### Changed
+- PERF-00.1: добавлены per-stage resource metrics (CPU/RSS/IO) через psutil: пишутся в `manifest/timings.json` (через `extra`, начиная с 7.31.0 — `manifest/timings.jsonl`) и в `manifest/metrics.json` (через `qc.metrics_store.update_after_stage`).
+- Engine теперь пишет timing-строки также для skipped/blocked/cancelled стадий (0s, с флагами в `extra`).
+
+## [7.20.0] - 2026-02-23
+
+### Changed
+- P0-ARCH-11: добавлен weekly/manual workflow `.github/workflows/golden.yml` (pytest -m golden) с публикацией артефактов mini-night (qc_report + ключевые продукты).
+- CI (pull_request) ускорен: fast тесты исключают `golden` (pytest -m "not smoke and not golden"); pytest marker `golden` зарегистрирован.
+- Golden E2E тест теперь опционально сохраняет артефакты в `SCORPIPE_CI_ARTIFACTS_DIR` (для upload-artifact в golden workflow).
+
+## [7.19.0] - 2026-02-23
+
+### Changed
+- P0-ARCH-10: добавлен dependency lock (requirements.lock) + sha256 в run manifest (manifest.json: dependency_lock {path, sha256, tool, created_utc}).
+- Добавлен полный deps snapshot `manifest/deps_snapshot.json` (importlib.metadata; name/version) и включён в export science package.
+- ProductCatalog/StageCatalog расширены продуктами `dependency_lock` и `deps_snapshot` для boundary enforcement.
+
+## [7.18.0] - 2026-02-23
+
+### Changed
+- P0-ARCH-09: введены строгие контракт-kind для калибровок: `calib_bias_triplet`, `calib_flat`, `calib_neon` (StageCatalog + engine boundary enforcement).
+- Добавлены stage-level валидаторы в `scorpio_pipe.contracts.validators`: ловят битые калибровки на своей стадии с понятными кодами (например `bias_var_shape_mismatch`, `flat_has_nan`, `neon_empty`).
+- Исправлен ProductCatalog: `master_bias.fits` больше не ошибочно валидируется как MEF (`required_headers_contract` → `none`), так как superbias использует отдельные файлы SCI/VAR/DQ.
+
+## [7.17.0] - 2026-02-23
+
+### Changed
+- P0-ARCH-08: workflow/dodo.py теперь дериватив StageCatalog: канонический порядок задач берётся из каталога и защищает инвариант wavesolution → sky → linearize (исправлена инверсия SKY↔LINEARIZE в doit DAG; stack2d зависит от linearize).
+- Добавлен архитектурный тест `tests/test_workflow_matches_catalog.py`: doit-граф не может противоречить StageCatalog order и ловит регрессии в PR.
+
+## [7.16.0] - 2026-02-21
+
+### Changed
+- P0-ARCH-07: стадии больше не вычисляют `stage_dir` из `work_dir` для записи: `sky/flatfield/cosmics/linearize/stack2d/extract1d` требуют явный `out_dir` (engine передаёт `ctx.stage_dir`).
+- Убраны stage-level "fail done.json" guards из `sky_sub.run_sky_sub`, `extract1d.run_extract1d`, `linearize.run_linearize`, `stack2d.run_stack2d`: при исключении источник истины — `engine._upsert_stage_done_json`.
+- `flatfield` больше не автособирает `superbias/superflat` (и не пишет в чужие stage dirs): теперь жёстко требует продукты от стадий `superbias` и `superflat`.
+- `build_superbias/build_superflat` принимают `stage_dir=...` (обычно `ctx.stage_dir`) и пишут *_done.json маркеры строго в него; legacy-mirrors выполняются только при явном `allow_legacy_mirrors=True`.
+- Убраны legacy-write копии продуктов из стадий (например в `work_dir/lin` и `work_dir/products/spec`).
+
+## [7.15.0] - 2026-02-21
+
+### Changed
+- P0-ARCH-06.2: добавлен каркас Golden-nights: `tests/golden/mini_night.py` + E2E тест `tests/test_golden_mini_night_e2e.py`.
+- Sky stage теперь резолвит `lambda_map.fits` через `wavesol_paths.wavesol_dir()` (поддержка disperser-aware `08_wavesol/<slug>/...`).
+
+## [7.14.0] - 2026-02-21
+
+### Changed
+- P0-ARCH-06.1: добавлен CI-enforcement архитектурных импорт-правил через `grimp` + pytest тест `tests/test_arch_no_forbidden_imports.py`.
+- Введён файл правил `tools/arch_imports.yml`.
+- UI больше не импортирует `scorpio_pipe.stages.*` напрямую: добавлен стабильный `scorpio_pipe.pipeline.public_api` (lazy wrappers).
+- pipeline больше не импортирует `scorpio_pipe.ui.*`: session-store перенесён в `scorpio_pipe.pipeline.session_store` (UI путь оставлен как re-export).
+
+## [7.13.0] - 2026-02-21
+
+### Changed
+- P0-ARCH-05.1: введён порт `InstrumentAdapter` (`scorpio_pipe.ports.instrument`) и lazy-реестр инструментов (`scorpio_pipe.catalog.instruments`) с адаптерами для SCORPIO/SCORPIO-2.
+- Header parsing теперь диспатчится через реестр адаптеров (без прямых SCORPIO-ветвлений в preflight/metadata). Добавление нового инструмента = новый адаптер + запись в реестр.
+
+## [7.12.0] - 2026-02-21
+
+### Changed
+- P0-ARCH-04.2: формализованы стабильные top-level namespaces конфигурации: добавлены `io` и `qc` (в pydantic-схеме), а также правило "namespace discipline".
+- `find_unknown_keys()` больше не эвристика по вложенным stage-параметрам: теперь unknown-key check выводится из pydantic-схемы и работает как архитектурный страж (строгий top-level + строгие `io`/`qc`).
+- Валидация поддерживает обратную совместимость: legacy path-ключи (`work_dir`, `data_dir`, `resources_dir`, `dataset_manifest_path`, ...) зеркалируются в `io.*` для TypedConfig.
+
+## [7.11.0] - 2026-02-21
+
+### Changed
+- P0-ARCH-04.1: введён единый typed-конфиг (pydantic) поверх текущего dict: модуль `scorpio_pipe.typed_config` + `config.load_typed_config(...)` / `load_typed_config_any(...)` возвращают `(TypedConfig, raw_dict)`.
+- Добавлен обязательный pre-run validation pipeline (engine gate): `schema_validate` + `mode_profile_validate` + `contracts_precheck` выполняются в `pipeline.engine.run_sequence()` *до* запуска стадий.
+- Критические enum-ошибки (например `project.wave_reference=UNKNOWN`) теперь ловятся fail-fast с человеческим сообщением (CLI и GUI).
+
+## [7.10.0] - 2026-02-21
+
+### Changed
+- P0-ARCH-03.3: введена retention policy как часть Workspace: `Workspace.cleanup(policy)` и реализация `FSWorkspace.cleanup(...)` с отчётом `manifest/cleanup_report.json`.
+- Добавлены политики: `all` (не чистить), `canonical` (оставить canonical publish-продукты из ProductCatalog (без коллекций) + qc + provenance), `none` (агрессивная чистка тяжёлых промежуточных по whitelist).
+- CLI: добавлен `scorpio-pipe cleanup` (для любого существующего run_root) и опции `scorpio-pipe run --retain {all,canonical,none}` / `--cleanup` (shortcut на canonical).
+
+
+## [7.9.0] - 2026-02-21
+
+### Changed
+- P0-ARCH-03.2: введена атомарная запись FITS: `scorpio_pipe.io.atomic_fits.atomic_write_fits` (temp в той же директории + `os.replace`).
+- Все записи FITS в `io/mef.py`, стадиях и GUI-инструментах переведены с `fits.writeto(..., overwrite=True)` / `.writeto(..., overwrite=True)` на `atomic_write_fits`, чтобы kill/краш не оставлял полу-FITS и не ломал resume.
+
+## [7.8.0] - 2026-02-21
+
+### Changed
+- P0-ARCH-03.1: введён порт Workspace (:mod:`scorpio_pipe.ports.workspace`) и файловый адаптер FSWorkspace (:mod:`scorpio_pipe.adapters.workspace_fs`).
+- Реализована гарантия "single writer" через `run.lock` в `run_root`: CLI `cmd_run` и GUI runner теперь берут lock перед записью результатов и снимают его в `finally`.
+- Добавлена диагностика lock-файла (pid/host/time/user/argv) и явный CLI override: `scorpio-pipe run --override-lock` (UNSAFE).
+- Исправлена потенциальная циклическая зависимость импорта: `scorpio_pipe.catalog.__init__` теперь использует lazy `__getattr__` и не тянет `products`/`workspace_paths` на старте.
+
+## [7.7.0] - 2026-02-21
+
+### Changed
+- P0-ARCH-02.2: StageCatalog теперь хранит `entrypoint` (строка вида `module:callable`) для каждой pipeline-задачи.
+- Engine больше не содержит обязательные `_task_*`-прослойки: исполнение идёт через lazy-resolve entrypoints (`importlib`) с кешированием.
+- Добавлены lightweight entrypoint-модули для стадий и сервисных задач (manifest/qc_report/navigator) для ускорения старта GUI/CLI и снижения связности.
+
+## [7.6.0] - 2026-02-21
+
+### Changed
+- P0-ARCH-02.1: введены `StageContext` и `StageResult` (:mod:`scorpio_pipe.pipeline.context`).
+- Engine теперь создаёт `StageContext` и передаёт его в задачи (через публичный контракт stage entrypoint `run(ctx) -> StageResult`).
+- Калибровочные стадии, которые ранее игнорировали `out_dir` (`superbias`, `superflat`, `superneon`, `wavesolution`), теперь выполняются в *engine-controlled* `run_root` (больше нет скрытого `work_dir` внутри стадии).
+- `wavesol_dir()` и `ProductCatalog` получили параметр `run_root` для корректного резолва путей при временных workspace и UI/CLI overrides.
+- `build_superbias/build_superflat` поддерживают `allow_legacy_mirrors=False` для строгих границ I/O (без записи в `calibs/` и прочие legacy-локации).
+
+### Tests
+- Добавлен тест на возможность вызвать stage entrypoint с временным workspace (без зависимости от cfg.work_dir).
+
+## [7.5.0] - 2026-02-20
+
+### Changed
+- P0-ARCH-01.2: введён единый источник истины по продуктам: :mod:`scorpio_pipe.catalog.products` (ProductCatalog + ProductSpec).
+- `products.py` переведён в режим deprecated shim и читает продукты из ProductCatalog.
+- `stage_contracts.validate_contracts()` валидирует outputs через ProductCatalog (а не через ad-hoc list_products()).
+- `qc_report` и `export_package` разрешают пути продуктов через ProductCatalog (включая disperser-aware wavesol subdir).
+- Граница стадий: engine валидирует *ровно* список `(stage_key, product_keys)` из StageCatalog через ProductCatalog.
+- StageCatalog расширен ключевыми коллекционными продуктами для строгой валидации (flatfield/cosmics/sky/linearize/stack2d).
+
+### Tests
+- Добавлены тесты ProductCatalog: покрытие ключей + экспорт пакета с wavesol subdir.
+
+## [7.4.0] - 2026-02-20
+
+### Changed
+- P0-ARCH-01.1: введён единый источник истины по стадиям: :mod:`scorpio_pipe.catalog.stages` (StageCatalog).
+- `stage_contracts` теперь полностью генерируется из StageCatalog (включая legacy aliases).
+- Engine `TASKS` расширяется алиасами из StageCatalog (исключает дрейф; добавлен legacy алиас `wavesolution2d`).
+- GUI (ui/pipeline_runner) получает список стадий/спеки напрямую из StageCatalog.
+- CLI валидирует и канонизирует список задач через StageCatalog.
+
+### Fixed
+- CLI: исправлена критическая ошибка отступов в `cmd_run` (autoconfig).
+
+### Tests
+- Добавлен регрессионный тест на `wavesolution2d` алиас (StageCatalog + stage_registry).
+
 ## [7.0.0] - 2026-02-20
 
 ### Added

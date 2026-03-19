@@ -8,6 +8,8 @@ from PySide6 import QtCore, QtGui, QtWidgets
 import numpy as np
 from astropy.io import fits
 
+from scorpio_pipe.ui.slow_action_profiler import profile_ui_action
+
 
 @dataclass(frozen=True)
 class QCItem:
@@ -26,7 +28,10 @@ DEFAULT_QC_ITEMS: list[QCItem] = [
     QCItem("QC report (HTML)", "index.html", "text"),
     QCItem("QC report (HTML, qc/)", "qc/qc_report.html", "text"),
     QCItem("QC summary (JSON)", "qc/qc_report.json", "text"),
-    QCItem("Timings (JSON)", "manifest/timings.json", "text"),
+    QCItem("Observer dashboard (HTML)", "observer_dashboard/observer_dashboard.html", "text"),
+    QCItem("Observer dashboard (JSON)", "observer_dashboard/observer_dashboard.json", "text"),
+    QCItem("Timings (JSONL)", "manifest/timings.jsonl", "text"),
+    QCItem("Timings (legacy JSON)", "manifest/timings.json", "text"),
     QCItem("Linearize QC (JSON)", "qc/linearize_qc.json", "text"),
     QCItem("Superbias (FITS)", "03_bias/superbias.fits", "fits"),
     QCItem("Superflat (FITS)", "04_flat/superflat.fits", "fits"),
@@ -227,25 +232,29 @@ class QCViewer(QtWidgets.QMainWindow):
         self.refresh()
 
     def refresh(self) -> None:
-        self.list_items.clear()
-        self._items: list[tuple[QCItem, Path]] = []
-        # 1) legacy flat layout
-        for it in DEFAULT_QC_ITEMS:
-            p = self._work_dir / it.rel_path
-            if p.exists():
-                self._items.append((it, p))
-                self.list_items.addItem(it.title)
+        with profile_ui_action(
+            "ui.qc_viewer.refresh",
+            work_dir=self._work_dir,
+        ):
+            self.list_items.clear()
+            self._items: list[tuple[QCItem, Path]] = []
+            # 1) legacy flat layout
+            for it in DEFAULT_QC_ITEMS:
+                p = self._work_dir / it.rel_path
+                if p.exists():
+                    self._items.append((it, p))
+                    self.list_items.addItem(it.title)
 
-        # 2) new disperser subfolders
-        for it in _collect_dynamic_items(self._work_dir):
-            p = self._work_dir / it.rel_path
-            if p.exists():
-                self._items.append((it, p))
-                self.list_items.addItem(it.title)
-        if self.list_items.count() == 0:
-            self.list_items.addItem("(No QC artifacts found yet)")
-            self._items = []
-        self.list_items.setCurrentRow(0)
+            # 2) new disperser subfolders
+            for it in _collect_dynamic_items(self._work_dir):
+                p = self._work_dir / it.rel_path
+                if p.exists():
+                    self._items.append((it, p))
+                    self.list_items.addItem(it.title)
+            if self.list_items.count() == 0:
+                self.list_items.addItem("(No QC artifacts found yet)")
+                self._items = []
+            self.list_items.setCurrentRow(0)
 
     def _open_folder(self) -> None:
         folder = self._work_dir
@@ -285,18 +294,27 @@ class QCViewer(QtWidgets.QMainWindow):
         else:
             kind = "text"
 
-        if kind == "text":
-            self.stack.setCurrentWidget(self.text_view)
-            self.text_view.setPlainText(_read_text_file(p))
-        elif kind == "fits":
-            self.stack.setCurrentWidget(self.img_label)
-            pm = _fits_to_qpixmap(p)
-            self.img_label.setPixmap(pm)
-        else:
-            self.stack.setCurrentWidget(self.img_label)
-            pm = QtGui.QPixmap(str(p))
-            self.img_label.setPixmap(
-                pm.scaled(
-                    1200, 650, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation
+        with profile_ui_action(
+            "ui.qc_viewer.show_item",
+            work_dir=self._work_dir,
+            path_hint=p,
+            extra={"title": it.title, "kind": kind, "path": str(p)},
+        ):
+            if kind == "text":
+                self.stack.setCurrentWidget(self.text_view)
+                self.text_view.setPlainText(_read_text_file(p))
+            elif kind == "fits":
+                self.stack.setCurrentWidget(self.img_label)
+                pm = _fits_to_qpixmap(p)
+                self.img_label.setPixmap(pm)
+            else:
+                self.stack.setCurrentWidget(self.img_label)
+                pm = QtGui.QPixmap(str(p))
+                self.img_label.setPixmap(
+                    pm.scaled(
+                        1200,
+                        650,
+                        QtCore.Qt.KeepAspectRatio,
+                        QtCore.Qt.SmoothTransformation,
+                    )
                 )
-            )

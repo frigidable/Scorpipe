@@ -7,6 +7,8 @@ import numpy as np
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from scorpio_pipe.ui.mpl_render import RenderThrottle
+
 
 def _read_pairs(path: Path) -> list[tuple[float, float, bool, bool]]:
     if not path.exists():
@@ -94,6 +96,7 @@ class PairRejectorDialog(QtWidgets.QDialog):
 
         self.pairs_path = Path(pairs_path)
         self.poly_deg = int(poly_deg)
+        self._recalc_throttle = RenderThrottle(self, self.recalculate, max_fps=10.0, debounce_ms=180)
 
         pairs_full = _read_pairs(self.pairs_path)
         # Keep the data model simple: store pairs and a separate active mask.
@@ -188,11 +191,11 @@ class PairRejectorDialog(QtWidgets.QDialog):
         self.btn_cancel.clicked.connect(self.reject)
         self.btn_save_clean.clicked.connect(self._save_as)
         self.btn_overwrite.clicked.connect(self._overwrite)
-        self.spin_deg.valueChanged.connect(lambda *_: self.recalculate())
+        self.spin_deg.valueChanged.connect(lambda *_: self._schedule_recalculate(debounce=True))
         self.table.cellChanged.connect(self._on_cell_changed)
 
         self._populate_table()
-        self.recalculate()
+        self._schedule_recalculate()
 
     # -------------- table / state --------------
 
@@ -227,6 +230,12 @@ class PairRejectorDialog(QtWidgets.QDialog):
         self.table.resizeColumnsToContents()
         self.table.blockSignals(False)
 
+    def _schedule_recalculate(self, *, debounce: bool = False) -> None:
+        if debounce:
+            self._recalc_throttle.request()
+        else:
+            self._recalc_throttle.request_immediate()
+
     def _on_cell_changed(self, row: int, col: int) -> None:
         if col != 0:
             return
@@ -234,12 +243,12 @@ class PairRejectorDialog(QtWidgets.QDialog):
         if it is None:
             return
         self._active[row] = it.checkState() == QtCore.Qt.Checked
-        self.recalculate()
+        self._schedule_recalculate(debounce=True)
 
     def _restore_all(self) -> None:
         self._active = [True] * len(self._pairs)
         self._populate_table()
-        self.recalculate()
+        self._schedule_recalculate()
 
     # -------------- fit / plotting --------------
 
@@ -274,7 +283,7 @@ class PairRejectorDialog(QtWidgets.QDialog):
 
         if x_all.size == 0:
             self.lbl_stats.setText("No pairs loaded")
-            self.canvas.draw()
+            self.canvas.draw_idle()
             return
 
         x_use = x_all[active]
@@ -284,11 +293,11 @@ class PairRejectorDialog(QtWidgets.QDialog):
             )
             # still show which points are active
             ax.scatter(x_use, np.zeros_like(x_use), s=28)
-            self.canvas.draw()
+            self.canvas.draw_idle()
             return
 
         # Robust 1D fit (sigma-clipped) like the main wavesolution stage.
-        from scorpio_pipe.stages.wavesolution import robust_polyfit_1d
+        from scorpio_pipe.pipeline.public_api import robust_polyfit_1d
 
         blend_all = np.array([bool(p[2]) for p in self._pairs], bool)
         x_act = x_all[active]
@@ -357,7 +366,7 @@ class PairRejectorDialog(QtWidgets.QDialog):
             )
         ax.legend(frameon=False, loc="best")
         self.fig.tight_layout()
-        self.canvas.draw()
+        self.canvas.draw_idle()
 
     def _auto_reject_3sigma(self) -> None:
         # Auto sigma-clip using the same robust fitter as wavesolution.
@@ -371,7 +380,7 @@ class PairRejectorDialog(QtWidgets.QDialog):
         if int(active.sum()) < deg + 1:
             return
 
-        from scorpio_pipe.stages.wavesolution import robust_polyfit_1d
+        from scorpio_pipe.pipeline.public_api import robust_polyfit_1d
 
         x_act = x_all[active]
         lam_act = lam_all[active]
@@ -393,8 +402,7 @@ class PairRejectorDialog(QtWidgets.QDialog):
         new_active[active] = np.asarray(used_local, bool)
         self._active = new_active.tolist()
         self._populate_table()
-        self.recalculate()
-        self.recalculate()
+        self._schedule_recalculate()
 
     # -------------- save --------------
 

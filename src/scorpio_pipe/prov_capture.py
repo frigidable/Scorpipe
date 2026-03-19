@@ -30,6 +30,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable
 
+from scorpio_pipe.perf.profiles import compact_performance_profile_summary
+
 
 def sha256_file(path: str | Path) -> str:
     p = Path(path)
@@ -376,12 +378,15 @@ def ensure_run_provenance(
                 return sha256_file(pth)
             except Exception:
                 return None
+        perf_summary = compact_performance_profile_summary(cfg)
         sig = {
             "created_utc": datetime.now(timezone.utc).isoformat(),
             "effective_config_sha256": _sha(cfg_path),
             "raw_hashes_sha256": _sha(raw_p),
             "environment_sha256": _sha(env_p),
             "config_path": str(config_path) if config_path else None,
+            "performance_mode": perf_summary.get("performance_mode"),
+            "performance_profile": perf_summary,
         }
         atomic_write_json(sig_p, sig)
         out_p["run_signature"] = sig_p

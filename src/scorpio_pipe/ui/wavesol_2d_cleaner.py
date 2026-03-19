@@ -7,6 +7,8 @@ import numpy as np
 
 from PySide6 import QtCore, QtWidgets
 
+from scorpio_pipe.ui.mpl_render import RenderThrottle
+
 
 @dataclass
 class Wave2DCleanConfig:
@@ -55,6 +57,7 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
 
         self._cfg = cfg or Wave2DCleanConfig()
         self._rejected0 = sorted(set(float(x) for x in (rejected_lines_A or [])))
+        self._render_throttle = RenderThrottle(self, self._recompute_and_plot, max_fps=10.0, debounce_ms=180)
 
         self._x, self._y, self._lam, self._score = self._load_points(control_points_csv)
         if self._x.size == 0:
@@ -141,7 +144,7 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
         self.btn_all.clicked.connect(self._select_all)
         self.btn_none.clicked.connect(self._select_none)
         self.list_lines.itemChanged.connect(self._on_item_changed)
-        self.chk_hide_rejected.toggled.connect(lambda *_: self._recompute_and_redraw())
+        self.chk_hide_rejected.toggled.connect(lambda *_: self._schedule_recompute_and_redraw())
         self.canvas.mpl_connect("button_press_event", self._on_plot_click)
 
         # cache for click-to-toggle in plot coordinates
@@ -150,7 +153,7 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
         self._click_lam: np.ndarray | None = None
 
         self._populate_list()
-        self._recompute_and_redraw()
+        self._schedule_recompute_and_redraw()
 
     @staticmethod
     def _load_points(p: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -221,8 +224,14 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
         return saved
 
     # Keep backwards compatibility: older code used a private helper with this name.
+    def _schedule_recompute_and_redraw(self, *, debounce: bool = False) -> None:
+        if debounce:
+            self._render_throttle.request()
+        else:
+            self._render_throttle.request_immediate()
+
     def _recompute_and_plot(self) -> None:
-        self._recompute_and_redraw()
+        self._recompute_and_redraw_now()
 
     def rejected_lines(self) -> list[float]:
         return sorted([float(l0) for l0, on in self._active.items() if not on])
@@ -246,18 +255,18 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
         for l0 in self._unique_lines:
             self._active[float(l0)] = True
         self._populate_list()
-        self._recompute_and_redraw()
+        self._schedule_recompute_and_redraw()
 
     def _select_none(self) -> None:
         for l0 in self._unique_lines:
             self._active[float(l0)] = False
         self._populate_list()
-        self._recompute_and_redraw()
+        self._schedule_recompute_and_redraw()
 
     def _on_item_changed(self, item: QtWidgets.QListWidgetItem) -> None:
         l0 = float(item.data(QtCore.Qt.UserRole))
         self._active[l0] = item.checkState() == QtCore.Qt.Checked
-        self._recompute_and_redraw()
+        self._schedule_recompute_and_redraw(debounce=True)
 
     def _on_plot_click(self, event) -> None:
         # Toggle the nearest displayed point's line (simple & practical)
@@ -286,15 +295,15 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
         l0 = float(self._click_lam[idx])
         self._active[l0] = not self._active.get(l0, True)
         self._populate_list()
-        self._recompute_and_redraw()
+        self._schedule_recompute_and_redraw(debounce=True)
 
     def _points_mask(self) -> np.ndarray:
         # mask points by active lines
         on = np.vectorize(lambda v: self._active.get(float(v), True), otypes=[bool])
         return on(self._lam)
 
-    def _recompute_and_redraw(self) -> None:
-        from scorpio_pipe.stages.wavesolution import (
+    def _recompute_and_redraw_now(self) -> None:
+        from scorpio_pipe.pipeline.public_api import (
             robust_polyfit_2d_cheb,
             robust_polyfit_2d_power,
             polyval2d_cheb,
@@ -496,7 +505,6 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
                     zorder=0,
                 )
 
-            self.fig.canvas.draw()
             trans = mtransforms.blended_transform_factory(ax.transAxes, ax.transData)
             y_top = ax.get_ylim()[1]
             x_col1 = 1.02
@@ -551,7 +559,7 @@ class Wave2DLineCleanerDialog(QtWidgets.QDialog):
         self._click_y = _np.asarray(click_y, float)
         self._click_lam = _np.asarray(click_l, float)
 
-        self.canvas.draw()
+        self.canvas.draw_idle()
 
         n_fit_total = int(_np.count_nonzero(mask_fit))
         n_used_total = int(_np.count_nonzero(used_all & _np.isfinite(dlam_all)))

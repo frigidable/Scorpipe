@@ -1,315 +1,258 @@
-"""UI session persistence.
+"""Backward-compatible re-export for GUI session persistence.
 
-Contract (P1-G / UI-020)
------------------------
-We store GUI session state in:
+P0-ARCH-12
+----------
+UI code must not import pipeline internals directly.
+The frozen boundary is :mod:`scorpio_pipe.pipeline.public_api`.
 
-    <run_root>/ui/session.json
-
-and keep lightweight history snapshots in:
-
-    <run_root>/ui/history/session_<timestamp>__<reason>.json
-
-This is intentionally independent from the pipeline hash/state machine.
-It is meant for *user experience* (restore UI state after restart and
-provide a 'Previous state' rollback).
+This module remains as a stable import path for already-shipped UI code.
 """
 
 from __future__ import annotations
 
+from scorpio_pipe.pipeline.public_api import (  # noqa: F401
+    load_session,
+    save_session,
+    session_path,
+    snapshot,
+    update_stage,
+)
+
+__all__ = [
+    "load_session",
+    "save_session",
+    "session_path",
+    "snapshot",
+    "update_stage",
+]
+
+
+# -----------------------------------------------------------------------------
+# PERF-10.4: UI caches for "late stages" (plan/status) to avoid redoing expensive
+# work on every click. Best-effort, invalidated by manifest mtimes.
+# -----------------------------------------------------------------------------
+
 import json
-import re
-import time
+import os
+import hashlib
+from dataclasses import dataclass, field
+from collections import OrderedDict
 from pathlib import Path
-from typing import Any
-
-from scorpio_pipe.io.atomic import atomic_write_json, atomic_write_text
+from typing import Any, Iterable, Mapping
 
 
-def _now_utc() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-
-def session_path(run_root: Path) -> Path:
-    return Path(run_root) / "ui" / "session.json"
-
-
-_STAGE_KEY_MAP: dict[str, str] = {
-    # Canonical keys used by the UI session contract (P1-G / UI-020)
-    "wavesolution": "wavesol",
-    "wavesol": "wavesol",
-    "sky": "sky_subtraction",
-    "sky_sub": "sky_subtraction",
-    "sky_subtraction": "sky_subtraction",
-    "linearize": "linearization",
-    "linearization": "linearization",
-    "stack": "frame_stacking",
-    "stack2d": "frame_stacking",
-    "frame_stacking": "frame_stacking",
-    "extract": "object_extraction",
-    "extract1d": "object_extraction",
-    "object_extraction": "object_extraction",
-}
-
-
-def _canon_stage_key(k: str) -> str:
-    kk = str(k or "").strip().lower()
-    return _STAGE_KEY_MAP.get(kk, kk or "unknown")
-
-
-def _ensure_contract(payload: dict[str, Any], run_root: Path) -> dict[str, Any]:
-    """Ensure both the historical UI schema and the P1-G contract keys exist.
-
-    We keep backward compatibility for already-shipped keys:
-      - schema_version / stages / history
-
-    and also maintain the P1-G contract keys:
-      - schema / workspace_root / active_run_dir / stage_state
-    """
-
-    payload = dict(payload or {})
-
-    # --- legacy schema keys ---
-    if payload.get("schema_version") != 1:
-        payload["schema_version"] = 1
-    payload.setdefault("created_at", _now_utc())
-    payload.setdefault("updated_at", payload.get("created_at"))
-    payload.setdefault("stages", {})
-    payload.setdefault("history", [])
-
-    # --- contract schema keys ---
-    if payload.get("schema") != 1:
-        payload["schema"] = 1
-    # A conservative default: assume workspace_root is the parent of the night folder.
-    payload.setdefault("workspace_root", "")
-    # Store run_root as a relative hint when possible.
-    payload.setdefault("active_run_dir", str(Path(run_root).name))
-    payload.setdefault("stage_state", {})
-
-    # Migrate from legacy "stages" into contract "stage_state" when missing.
-    if isinstance(payload.get("stages"), dict) and isinstance(payload.get("stage_state"), dict):
-        stage_state = payload["stage_state"]
-        for k, v in payload["stages"].items():
-            if not isinstance(v, dict):
-                continue
-            ck = _canon_stage_key(k)
-            if ck in stage_state:
-                continue
-            stage_state[ck] = {
-                "method": None,
-                "cleanup_mode": None,
-                "roi": None,
-                "params": dict(v.get("params") or {}) if isinstance(v.get("params"), dict) else {},
-                "last_done_path": v.get("last_done"),
-                "last_status": v.get("status"),
-            }
-
-    return payload
-
-
-def _read_json(p: Path) -> dict[str, Any] | None:
+def _file_sig_ns(p: Path) -> tuple[int, int]:
+    """(mtime_ns, size) or (0,0) if missing."""
     try:
-        if not p.exists():
-            return None
-        obj = json.loads(p.read_text(encoding="utf-8", errors="replace"))
-        return obj if isinstance(obj, dict) else None
+        st = p.stat()
+        return (int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))), int(st.st_size))
     except Exception:
-        return None
+        return (0, 0)
 
 
-def load_session(run_root: Path) -> dict[str, Any]:
-    run_root = Path(run_root)
-    p = session_path(run_root)
-    payload = _read_json(p) or {}
-    return _ensure_contract(payload, run_root)
+def _norm_status(s: Any) -> str:
+    x = str(s or "").strip().lower()
+    return {
+        "failed": "fail",
+        "failure": "fail",
+        "skip": "skipped",
+        "skipped": "skipped",
+        "canceled": "cancelled",
+        "cancelled": "cancelled",
+    }.get(x, x or "unknown")
 
 
-def save_session(run_root: Path, payload: dict[str, Any]) -> None:
-    run_root = Path(run_root)
-    p = session_path(run_root)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    payload = _ensure_contract(dict(payload or {}), run_root)
-    payload["schema_version"] = 1
-    payload["schema"] = 1
-    payload.setdefault("created_at", _now_utc())
-    payload["updated_at"] = _now_utc()
-    # Atomic write: protects against partially-written JSON on crash/power loss.
-    atomic_write_json(p, payload, indent=2, ensure_ascii=False)
+def _stable_cfg_hash(cfg: Mapping[str, Any]) -> str:
+    """Hash a config mapping for cache keys (best-effort, must never raise)."""
+    try:
+        payload = json.dumps(cfg, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+        return hashlib.sha1(payload).hexdigest()
+    except Exception:
+        return "cfg-unknown"
 
 
-def update_stage(
-    run_root: Path,
-    stage: str,
-    *,
-    cfg_section: dict[str, Any] | None = None,
-    done_json_rel: str | None = None,
-    status: str | None = None,
-    message: str | None = None,
-) -> dict[str, Any]:
-    """Update a single stage entry in the session."""
+@dataclass
+class UiRunCache:
+    """Per-workdir UI cache (plan + manifest-derived statuses)."""
 
-    payload = load_session(run_root)
-    stages = payload.get("stages") if isinstance(payload.get("stages"), dict) else {}
-    payload["stages"] = stages
+    work_dir: Path
+    _manifest_sig: tuple[tuple[int, int], tuple[int, int]] = field(default_factory=lambda: ((0, 0), (0, 0)))
+    _plan_cache: dict[tuple, Any] = field(default_factory=dict)
+    _status_cache: dict[str, Any] | None = None
 
-    st = stages.get(stage) if isinstance(stages.get(stage), dict) else {}
-    st = dict(st)
-    if cfg_section is not None:
-        st["params"] = cfg_section
-    if done_json_rel is not None:
-        st["last_done"] = str(done_json_rel)
-    if status is not None:
-        st["status"] = str(status)
-    if message is not None:
-        st["message"] = str(message)
-    st["updated_at"] = _now_utc()
-    stages[stage] = st
+    def _current_manifest_sig(self) -> tuple[tuple[int, int], tuple[int, int]]:
+        st = self.work_dir / "manifest" / "stage_state.json"
+        mt = self.work_dir / "manifest" / "metrics.json"
+        return (_file_sig_ns(st), _file_sig_ns(mt))
 
-    # Contract stage_state mirror
-    stage_state = payload.get("stage_state") if isinstance(payload.get("stage_state"), dict) else {}
-    payload["stage_state"] = stage_state
-    ck = _canon_stage_key(stage)
-    ss = stage_state.get(ck) if isinstance(stage_state.get(ck), dict) else {}
-    ss = dict(ss)
-    ss.setdefault("method", None)
-    ss.setdefault("cleanup_mode", None)
-    ss.setdefault("roi", None)
-    if cfg_section is not None:
-        ss["params"] = dict(cfg_section)
-        # Best-effort: store common method fields.
-        if ck == "sky_subtraction":
+    def invalidate_if_needed(self) -> None:
+        sig = self._current_manifest_sig()
+        if sig != self._manifest_sig:
+            self._manifest_sig = sig
+            self._plan_cache.clear()
+            self._status_cache = None
+
+    def get_stage_statuses(self) -> dict[str, Any]:
+        """Return a snapshot mapping stage->info (best-effort).
+
+        Uses only small manifest files (metrics.json + stage_state.json), and falls
+        back to per-task done.json if a task is missing from those summaries.
+        """
+        self.invalidate_if_needed()
+        if self._status_cache is not None:
+            return dict(self._status_cache)
+
+        out: dict[str, Any] = {}
+
+        # 1) metrics.json is the preferred, UI-friendly summary (contains status+artifacts+metrics).
+        mp = self.work_dir / "manifest" / "metrics.json"
+        if mp.exists():
             try:
-                ss["method"] = str((cfg_section or {}).get("method") or ss.get("method") or "") or None
+                js = json.loads(mp.read_text(encoding="utf-8"))
+                stages = (js or {}).get("stages") or {}
+                if isinstance(stages, dict):
+                    for k, v in stages.items():
+                        if not isinstance(v, dict):
+                            continue
+                        out[str(k)] = {
+                            "status": _norm_status(v.get("status")),
+                            "hash": v.get("hash"),
+                            "updated_at": v.get("updated_at"),
+                            "metrics": v.get("metrics") if isinstance(v.get("metrics"), dict) else None,
+                        }
             except Exception:
                 pass
-        if ck == "linearization":
+
+        # 2) stage_state.json is a lightweight runner state (status/hash/message/trace).
+        sp = self.work_dir / "manifest" / "stage_state.json"
+        if sp.exists():
             try:
-                ss["cleanup_mode"] = str(((cfg_section or {}).get("cleanup") or {}).get("mode") or ss.get("cleanup_mode") or "") or None
+                js = json.loads(sp.read_text(encoding="utf-8"))
+                stages = (js or {}).get("stages") or {}
+                if isinstance(stages, dict):
+                    for k, v in stages.items():
+                        if not isinstance(v, dict):
+                            continue
+                        kk = str(k)
+                        if kk not in out:
+                            out[kk] = {}
+                        out[kk].setdefault("status", _norm_status(v.get("status")))
+                        out[kk].setdefault("hash", v.get("hash"))
+                        out[kk].setdefault("updated_at", v.get("updated_at"))
+                        out[kk].setdefault("message", v.get("message"))
             except Exception:
                 pass
-    if done_json_rel is not None:
-        ss["last_done_path"] = str(done_json_rel)
-    if status is not None:
-        ss["last_status"] = str(status)
-    stage_state[ck] = ss
 
-    save_session(run_root, payload)
-    return payload
+        # 3) done.json fallback for tasks not covered by manifest summaries (best-effort).
+        try:
+            from scorpio_pipe.catalog.stages import CATALOG as _CAT  # noqa: PLC0415
+            from scorpio_pipe.workspace_paths import stage_dir as _stage_dir  # noqa: PLC0415
+        except Exception:
+            _CAT = None
+            _stage_dir = None  # type: ignore
+
+        if _CAT is not None:
+            try:
+                for ti in _CAT.task_infos():
+                    key = str(getattr(ti, "key", "") or "")
+                    if not key or key in out:
+                        continue
+                    pol = str(getattr(ti, "done_dir_policy", "") or "").strip().lower()
+                    d: Path | None = None
+                    if pol == "manifest":
+                        d = self.work_dir / "manifest"
+                    elif pol == "qc":
+                        d = self.work_dir / "qc"
+                    elif pol == "ui":
+                        d = self.work_dir / "ui"
+                    elif pol == "stage" and _stage_dir is not None:
+                        sk = str(getattr(ti, "stage_key", "") or key)
+                        try:
+                            d = Path(_stage_dir(self.work_dir, sk))
+                        except Exception:
+                            d = None
+                    if d is None:
+                        continue
+                    p = d / "done.json"
+                    if not p.exists():
+                        continue
+                    try:
+                        js = json.loads(p.read_text(encoding="utf-8"))
+                        if isinstance(js, dict):
+                            out[key] = {
+                                "status": _norm_status(js.get("status")),
+                                "updated_at": js.get("updated_at"),
+                                "message": js.get("error_message") or js.get("message"),
+                            }
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+        self._status_cache = dict(out)
+        return dict(out)
+
+def plan_sequence_cached(
+        self,
+        cfg: Mapping[str, Any],
+        tasks: Iterable[str],
+        *,
+        resume: bool = True,
+        force: bool = False,
+        config_path: Path | None = None,
+    ):
+        """Cached wrapper for pipeline.plan_sequence() (can be expensive).
+
+        Cache key includes:
+        - manifest signature (stage_state/metrics mtimes) via invalidate_if_needed()
+        - task list + flags
+        - config signature: config_path (mtime,size) if available, else cfg hash
+        """
+        self.invalidate_if_needed()
+
+        tasks_t = tuple([str(t) for t in tasks])
+        cfg_sig: tuple[str, Any]
+        if config_path is not None:
+            cfg_sig = ("path", str(Path(config_path).expanduser().resolve()), _file_sig_ns(Path(config_path)))
+        else:
+            cfg_sig = ("hash", _stable_cfg_hash(cfg))
+
+        key = (tasks_t, bool(resume), bool(force), cfg_sig)
+        if key in self._plan_cache:
+            return self._plan_cache[key]
+
+        # Import lazily: plan_sequence pulls in the engine + reference context.
+        from scorpio_pipe.pipeline.public_api import plan_sequence as _plan_sequence  # noqa: PLC0415
+
+        plan = _plan_sequence(dict(cfg), tasks_t, resume=resume, force=force, config_path=config_path)
+        self._plan_cache[key] = plan
+        return plan
 
 
-def _slug_reason(reason: str) -> str:
-    r = (reason or "snapshot").strip().lower()
-    r = re.sub(r"\s+", "_", r)
-    r = re.sub(r"[^0-9a-zA-Z_\-]+", "", r)
-    return (r or "snapshot")[:48]
+_UI_RUN_CACHES: "OrderedDict[str, UiRunCache]" = OrderedDict()
+_UI_RUN_CACHES_MAX = 8
 
 
-def snapshot(
-    run_root: Path,
-    *,
-    reason: str,
-    cfg_path: Path | None = None,
-    keep_last: int = 30,
-) -> Path:
-    """Write a snapshot file and register it in session history."""
-
-    run_root = Path(run_root)
-    ts = _now_utc().replace(":", "").replace("-", "")
-    rslug = _slug_reason(reason)
-    hist_dir = run_root / "ui" / "history"
-    hist_dir.mkdir(parents=True, exist_ok=True)
-    snap_p = hist_dir / f"session_{ts}__{rslug}.json"
-
-    sess = load_session(run_root)
-    cfg_text: str | None = None
-    if cfg_path is None:
-        cfg_path = run_root / "config.yaml"
+def get_ui_run_cache(work_dir: str | Path) -> UiRunCache:
+    """Get (or create) UI cache for a work_dir. Keeps a small LRU to avoid leaks."""
+    wd = Path(work_dir).expanduser().resolve()
+    key = str(wd)
+    c = _UI_RUN_CACHES.get(key)
+    if c is not None:
+        # LRU bump
+        try:
+            _UI_RUN_CACHES.move_to_end(key)
+        except Exception:
+            pass
+        return c
+    c = UiRunCache(work_dir=wd)
+    _UI_RUN_CACHES[key] = c
     try:
-        if cfg_path.exists():
-            cfg_text = cfg_path.read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        cfg_text = None
-
-    snap_payload = {
-        "schema_version": 1,
-        "schema": 1,
-        "timestamp": _now_utc(),
-        "reason": reason,
-        "config_yaml": cfg_text,
-        "session": sess,
-    }
-    # Atomic write: history snapshots should also never be partially written.
-    atomic_write_json(snap_p, snap_payload, indent=2, ensure_ascii=False)
-
-    # Register into history (latest-first)
-    hist = sess.get("history") if isinstance(sess.get("history"), list) else []
-    hist = [x for x in hist if isinstance(x, dict)]
-    # P1-G contract requires history entries to contain stage_state snapshots.
-    stage_state_snapshot = sess.get("stage_state") if isinstance(sess.get("stage_state"), dict) else {}
-    hist.insert(
-        0,
-        {
-            "timestamp": snap_payload["timestamp"],
-            "reason": reason,
-            "path": str(snap_p.relative_to(run_root)),
-            "stage_state_snapshot": stage_state_snapshot,
-        },
-    )
-    # Deduplicate by path
-    seen: set[str] = set()
-    dedup: list[dict[str, Any]] = []
-    for x in hist:
-        p = str(x.get("path", ""))
-        if not p or p in seen:
-            continue
-        seen.add(p)
-        dedup.append(x)
-    sess["history"] = dedup[: max(0, int(keep_last))]
-    save_session(run_root, sess)
-
-    # Prune files on disk
-    try:
-        keep_paths = {str((run_root / str(h.get("path"))).resolve()) for h in sess["history"]}
-        for p in hist_dir.glob("session_*.json"):
-            if str(p.resolve()) not in keep_paths:
-                try:
-                    p.unlink()
-                except Exception:
-                    pass
-    except Exception:
-        pass
-
-    return snap_p
-
-
-def list_snapshots(run_root: Path, *, limit: int = 10) -> list[dict[str, Any]]:
-    sess = load_session(run_root)
-    hist = sess.get("history") if isinstance(sess.get("history"), list) else []
-    out = [x for x in hist if isinstance(x, dict)]
-    return out[: max(0, int(limit))]
-
-
-def restore_snapshot(run_root: Path, snapshot_rel: str) -> bool:
-    """Restore config.yaml + session.json from a history snapshot."""
-
-    run_root = Path(run_root)
-    snap_p = run_root / str(snapshot_rel)
-    data = _read_json(snap_p)
-    if not data:
-        return False
-    cfg_text = data.get("config_yaml") if isinstance(data.get("config_yaml"), str) else None
-    session_obj = data.get("session") if isinstance(data.get("session"), dict) else None
-    ok = False
-    try:
-        if cfg_text is not None:
-            atomic_write_text(run_root / "config.yaml", cfg_text, encoding="utf-8")
-            ok = True
+        while len(_UI_RUN_CACHES) > int(_UI_RUN_CACHES_MAX):
+            _UI_RUN_CACHES.popitem(last=False)
     except Exception:
         pass
-    try:
-        if session_obj is not None:
-            save_session(run_root, session_obj)
-            ok = True
-    except Exception:
-        pass
-    return ok
+    return c
+
+
+__all__ = list(__all__) + ["UiRunCache", "get_ui_run_cache"]

@@ -1,9 +1,9 @@
-cff-version: 1.2.0
+cff-version: "7.20.0"
 message: "If you use Scorpio Pipe (Scorpipe) in your research, please cite it."
 title: "Scorpio Pipe (Scorpipe)"
 type: software
 license: BSD-3-Clause
-version: "5.40.34"
+version: "7.20.0"
 authors:
   - name: "Scorpio Pipe contributors"
 abstract: >

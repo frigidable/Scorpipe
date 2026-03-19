@@ -1,0 +1,57 @@
+# Architecture import rules
+#
+# Enforced by tests/test_arch_no_forbidden_imports.py via the "grimp" import graph.
+# Notes:
+# - Rules are about DIRECT imports only (not transitive chains).
+# - Add exceptions sparingly; prefer introducing a public API boundary.
+
+rules:
+  - id: UI_NO_STAGES
+    description: "UI must not import stages directly; use pipeline public API"
+    from: "scorpio_pipe.ui"
+    forbid:
+      - "scorpio_pipe.stages"
+
+  - id: UI_PIPELINE_PUBLIC_API_ONLY
+    description: "UI must not import pipeline internals (engine/session_store); use pipeline.public_api"
+    from: "scorpio_pipe.ui"
+    forbid:
+      - "scorpio_pipe.pipeline.engine"
+      - "scorpio_pipe.pipeline.session_store"
+      - "scorpio_pipe.pipeline.entry_manifest"
+      - "scorpio_pipe.pipeline.entry_qc_report"
+      - "scorpio_pipe.pipeline.entry_navigator"
+
+  - id: UI_NO_CATALOG_STAGES
+    description: "UI must not import StageCatalog directly; use pipeline.public_api"
+    from: "scorpio_pipe.ui"
+    forbid:
+      - "scorpio_pipe.catalog.stages"
+      - "scorpio_pipe.stage_registry"
+      - "scorpio_pipe.stage_contracts"
+
+  - id: CLI_PIPELINE_PUBLIC_API_ONLY
+    description: "CLI must not import pipeline internals directly; use pipeline.public_api"
+    from: "scorpio_pipe.cli"
+    forbid:
+      - "scorpio_pipe.pipeline.engine"
+      - "scorpio_pipe.pipeline.session_store"
+      - "scorpio_pipe.catalog.stages"
+
+  - id: PIPELINE_NO_UI
+    description: "pipeline must not depend on ui"
+    from: "scorpio_pipe.pipeline"
+    forbid:
+      - "scorpio_pipe.ui"
+
+  - id: PORTS_NO_ASTROPY
+    description: "ports layer must stay pure (no astropy.io)"
+    from: "scorpio_pipe.ports"
+    forbid:
+      - "astropy.io"
+
+  - id: CATALOG_NO_ASTROPY
+    description: "catalog layer must stay pure (no astropy.io)"
+    from: "scorpio_pipe.catalog"
+    forbid:
+      - "astropy.io"

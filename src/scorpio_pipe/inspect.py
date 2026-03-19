@@ -3,16 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import re
-from typing import Iterable
+from typing import Callable, Iterable
 
 import pandas as pd
-from astropy.io import fits
-
-from scorpio_pipe.fits_utils import open_fits_smart
+from scorpio_pipe.metadata.fits_cache import get_header_and_frame_meta, get_header_fields
 
 from scorpio_pipe.nightlog import find_nightlog, parse_nightlog
 from scorpio_pipe.instrument_db import guess_instrument_from_header
-from scorpio_pipe.instruments import HeaderContractError, parse_frame_meta
+from scorpio_pipe.instruments import HeaderContractError
 
 EXPECTED_COLUMNS = [
     "path",
@@ -162,6 +160,36 @@ def classify_frame(header) -> str:
     return "obj"
 
 
+
+
+@dataclass(frozen=True)
+class InspectProgress:
+    n_found: int
+    n_opened: int
+    current_path: str | None = None
+
+
+class InspectCancelled(RuntimeError):
+    """Raised when dataset inspection is cancelled cooperatively."""
+
+
+def _emit_progress(
+    cb: Callable[[InspectProgress], None] | None,
+    *,
+    n_found: int,
+    n_opened: int,
+    current_path: str | None,
+    force: bool = False,
+) -> None:
+    if cb is None:
+        return
+    # Throttle intermediate progress to avoid flooding the GUI event queue on
+    # very large nights, but still update exactly at the start and the end.
+    if not force and n_found > 0 and n_found > 16 and (n_found % 16) != 0:
+        return
+    cb(InspectProgress(n_found=n_found, n_opened=n_opened, current_path=current_path))
+
+
 @dataclass(frozen=True)
 class InspectResult:
     table: pd.DataFrame
@@ -193,59 +221,67 @@ def _fid_from_path(p: Path) -> str:
     return p.stem.lower()
 
 
-def _open_fits_header_safe(fp: Path) -> fits.Header:
+def _open_fits_header_safe(fp: Path) -> dict[str, object]:
     """Open a FITS header in the most resilient way.
 
     Важно: для `inspect` нам НЕ нужно читать данные (это медленно). Форму
-    кадра берём из NAXIS* в заголовке.
+    кадра берём из NAXIS* в заголовке. Повторные вызовы используют общий
+    FITS header/meta cache и не открывают файл заново.
     """
-    try:
-        with open_fits_smart(fp, prefer_memmap=True) as hdul:
-            return hdul[0].header
-    except Exception:
-        # часто помогает для "подуставших" .fts
-        with fits.open(
-            fp, memmap=False, ignore_missing_end=True, ignore_missing_simple=True
-        ) as hdul:
-            return hdul[0].header
+
+    return dict(get_header_fields(fp))
 
 
-def inspect_dataset(data_dir: Path, max_files: int | None = None) -> InspectResult:
+def inspect_dataset(
+    data_dir: Path,
+    max_files: int | None = None,
+    *,
+    progress: Callable[[InspectProgress], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> InspectResult:
     rows = []
     n_found = 0
     n_opened = 0
     open_errors: list[str] = []
 
+    _emit_progress(progress, n_found=0, n_opened=0, current_path=None, force=True)
+
     log_path = find_nightlog(data_dir)
     log_meta = parse_nightlog(log_path) if log_path else {}
 
     for i, fp in enumerate(iter_fits_files(data_dir)):
+        if should_cancel is not None and should_cancel():
+            raise InspectCancelled("Inspection cancelled by user")
         if max_files is not None and i >= max_files:
             break
 
         n_found += 1
+        _emit_progress(progress, n_found=n_found, n_opened=n_opened, current_path=str(fp))
 
+        meta = None
         try:
-            hdr = _open_fits_header_safe(fp)
+            hdr, meta = get_header_and_frame_meta(fp, strict=False)
+        except HeaderContractError as e:
+            if len(open_errors) < 5:
+                open_errors.append(f"{fp} -> HeaderContractError: {e}")
+            try:
+                hdr = _open_fits_header_safe(fp)
+            except Exception as e2:
+                if len(open_errors) < 5:
+                    open_errors.append(f"{fp} -> {type(e2).__name__}: {e2}")
+                _emit_progress(progress, n_found=n_found, n_opened=n_opened, current_path=str(fp), force=True)
+                continue
+            meta = None
         except Exception as e:
             if len(open_errors) < 5:
                 open_errors.append(f"{fp} -> {type(e).__name__}: {e}")
+            _emit_progress(progress, n_found=n_found, n_opened=n_opened, current_path=str(fp), force=True)
             continue
 
         n_opened += 1
+        _emit_progress(progress, n_found=n_found, n_opened=n_opened, current_path=str(fp))
 
         fid = _fid_from_path(fp)
-
-        # Header Contract (best-effort for `inspect`): prefer normalized meta,
-        # but do not crash the browser when headers are incomplete.
-        meta = None
-        try:
-            meta = parse_frame_meta(hdr, strict=False)
-        except HeaderContractError as e:
-            # record first few contract violations for diagnostics
-            if len(open_errors) < 5:
-                open_errors.append(f"{fp} -> HeaderContractError: {e}")
-            meta = None
 
         obj = str(_safe_get(hdr, "OBJECT", "OBJNAME", default="") or "")
         kind = classify_frame(hdr)
@@ -323,6 +359,7 @@ def inspect_dataset(data_dir: Path, max_files: int | None = None) -> InspectResu
         rows.append(row)
 
     df = pd.DataFrame(rows, columns=EXPECTED_COLUMNS)
+    _emit_progress(progress, n_found=n_found, n_opened=n_opened, current_path=None, force=True)
     return InspectResult(
         df,
         n_found=n_found,

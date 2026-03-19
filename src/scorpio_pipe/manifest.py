@@ -198,6 +198,67 @@ def write_manifest(
 ) -> Path:
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+
     m = build_manifest(cfg=cfg, cfg_path=cfg_path)
-    out_path.write_text(m.to_json(), encoding="utf-8")
+    payload: dict = dict(m.payload)
+
+    # P0-ARCH-10: dependency lock + full dependency snapshot.
+    try:
+        from scorpio_pipe.deps_snapshot import (
+            sha256_file,
+            write_deps_snapshot_json,
+            write_requirements_lock,
+        )
+
+        created = datetime.now(timezone.utc).isoformat()
+        manifest_dir = out_path.parent
+
+        # Full snapshot (importlib.metadata distributions).
+        snap_path = manifest_dir / "deps_snapshot.json"
+        snap_payload = write_deps_snapshot_json(snap_path)
+        snap_sha = sha256_file(snap_path)
+
+        # Deterministic lock for reproducible rebuilds.
+        lock_path = manifest_dir / "requirements.lock"
+        # Write lock based on the snapshot packages (stable order).
+        lock_sha = write_requirements_lock(
+            lock_path,
+            packages=(snap_payload or {}).get("packages"),
+            header={
+                "created_utc": created,
+                "python": str(payload.get("platform", {}).get("python", "")),
+                "platform": str(payload.get("platform", {}).get("platform", "")),
+                "pipeline_version": str(payload.get("pipeline", {}).get("pipeline_version", "")),
+            },
+        )
+
+        # Prefer a relative path within work_dir when possible.
+        rel_lock = str(lock_path)
+        rel_snap = str(snap_path)
+        try:
+            wd = Path(str(payload.get("paths", {}).get("work_dir", ""))).expanduser().resolve()
+            if wd.exists():
+                rel_lock = str(lock_path.resolve().relative_to(wd))
+                rel_snap = str(snap_path.resolve().relative_to(wd))
+        except Exception:
+            pass
+
+        payload["dependency_lock"] = {
+            "path": rel_lock,
+            "sha256": str(lock_sha),
+            "tool": "requirements.lock (metadata-freeze)",
+            "created_utc": created,
+        }
+        payload["deps_snapshot"] = {
+            "path": rel_snap,
+            "sha256": str(snap_sha),
+            "tool": "importlib.metadata",
+            "created_utc": str((snap_payload or {}).get("created_utc") or created),
+            "n": int(len((snap_payload or {}).get("packages") or [])),
+        }
+    except Exception:
+        # keep this best-effort: provenance must never break a run
+        pass
+
+    out_path.write_text(Manifest(payload=payload).to_json(), encoding="utf-8")
     return out_path

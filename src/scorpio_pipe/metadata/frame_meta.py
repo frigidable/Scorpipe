@@ -19,7 +19,7 @@ large-scale churn, and append new contract fields with safe defaults.
 """
 
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import math
 import re
 from typing import Any, Mapping
@@ -99,6 +99,17 @@ class FrameMeta:
     slitmask: str = ""
     sperange: str | None = None
 
+    # Calibration-grade metadata (P0.2)
+    airmass: float | None = None
+    zenith_distance_deg: float | None = None
+    parallactic_angle_deg: float | None = None
+    ra_deg: float | None = None
+    dec_deg: float | None = None
+    utc_mid_exposure: datetime | None = None
+    observatory: str = ""
+    site_name: str = ""
+    seeing_fwhm_arcsec: float | None = None
+
     # Provenance and policy outcomes
     meta_provenance: dict[str, str] = field(default_factory=dict)
     meta_missing_optional: tuple[str, ...] = ()
@@ -144,6 +155,46 @@ class FrameMeta:
 
     def with_frame_id(self, frame_id: str) -> "FrameMeta":
         return replace(self, frame_id=str(frame_id))
+
+    def provenance_for(self, field: str) -> str:
+        return str((self.meta_provenance or {}).get(str(field), "missing"))
+
+    def provenance_class(self, field: str) -> str:
+        prov = self.provenance_for(field)
+        if prov.startswith("header:"):
+            return "header"
+        if prov.startswith("derived:"):
+            return "derived"
+        if prov.startswith("fallback:"):
+            return "fallback"
+        val = getattr(self, str(field), None)
+        if val not in (None, ""):
+            return "untracked"
+        return "missing"
+
+    def metadata_is_degraded(self, field: str) -> bool:
+        return self.provenance_class(field) in {"fallback", "missing"}
+
+    def calibration_metadata_summary(self) -> dict[str, Any]:
+        keys = (
+            "airmass",
+            "zenith_distance_deg",
+            "parallactic_angle_deg",
+            "ra_deg",
+            "dec_deg",
+            "utc_mid_exposure",
+            "observatory",
+            "site_name",
+            "seeing_fwhm_arcsec",
+        )
+        return {
+            str(k): {
+                "value": getattr(self, k),
+                "provenance": self.provenance_for(k),
+                "quality": self.provenance_class(k),
+            }
+            for k in keys
+        }
 
     @classmethod
     def from_header(
@@ -245,6 +296,147 @@ def parse_hms(hms: str) -> tuple[int, int, float]:
     mm = int(parts[1])
     ss = float(parts[2])
     return hh, mm, ss
+
+
+def _parse_angle_like(value: Any, *, is_ra: bool = False) -> float | None:
+    raw = norm_str(value)
+    if not raw:
+        return None
+    try:
+        fv = float(raw)
+        return fv * 15.0 if is_ra and abs(fv) <= 24.0 else fv
+    except Exception:
+        pass
+
+    s = raw.lower().replace('h', ':').replace('d', ':').replace('m', ':').replace('s', '')
+    s = re.sub(r'\s+', ':', s)
+    parts = [p for p in s.split(':') if p]
+    if len(parts) < 3:
+        return None
+    sign = -1.0 if str(parts[0]).strip().startswith('-') else 1.0
+    vals = [abs(float(parts[0])), float(parts[1]), float(parts[2])]
+    deg = vals[0] + vals[1] / 60.0 + vals[2] / 3600.0
+    if is_ra:
+        return deg * 15.0
+    return sign * deg
+
+
+def _parse_ra_deg(h: Mapping[str, Any]) -> tuple[float | None, str]:
+    for k in ("RA_DEG", "OBJRA_DEG"):
+        if k in h and norm_str(h.get(k)):
+            try:
+                return float(h.get(k)), f"header:{k}"
+            except Exception:
+                pass
+    for k in ("RA", "OBJRA", "OBJ_RA"):
+        if k in h and norm_str(h.get(k)):
+            v = _parse_angle_like(h.get(k), is_ra=True)
+            if v is not None:
+                return float(v), f"header:{k}"
+    return None, "missing"
+
+
+def _parse_dec_deg(h: Mapping[str, Any]) -> tuple[float | None, str]:
+    for k in ("DEC_DEG", "OBJDEC_DEG"):
+        if k in h and norm_str(h.get(k)):
+            try:
+                return float(h.get(k)), f"header:{k}"
+            except Exception:
+                pass
+    for k in ("DEC", "OBJDEC", "OBJ_DEC"):
+        if k in h and norm_str(h.get(k)):
+            v = _parse_angle_like(h.get(k), is_ra=False)
+            if v is not None:
+                return float(v), f"header:{k}"
+    return None, "missing"
+
+
+def _derive_zenith_distance_deg(airmass: float | None) -> tuple[float | None, str]:
+    if airmass is None:
+        return None, "missing"
+    try:
+        am = float(airmass)
+    except Exception:
+        return None, "missing"
+    if not math.isfinite(am) or am < 1.0:
+        return None, "missing"
+    try:
+        secz = max(1.0, am)
+        zd = math.degrees(math.acos(1.0 / secz))
+        return float(zd), "derived:airmass"
+    except Exception:
+        return None, "missing"
+
+
+def _derive_mid_exposure_utc(dt_utc: datetime, exptime: float | None) -> tuple[datetime | None, str]:
+    if exptime is None:
+        return None, "missing"
+    try:
+        exp = float(exptime)
+    except Exception:
+        return None, "missing"
+    if not math.isfinite(exp) or exp < 0:
+        return None, "missing"
+    return dt_utc + timedelta(seconds=0.5 * exp), "derived:date_time_utc+exptime"
+
+
+def _extract_calibration_metadata(b: "_MetaBuilder", dt_utc: datetime, exptime: float | None) -> dict[str, Any]:
+    airmass = b.get_float("airmass", ["AIRMASS", "AIRMAS"], default=None)
+    zd = b.get_float("zenith_distance_deg", ["ZDIST", "ZD", "ZENITHD", "ZENITH"], default=None)
+    parang = b.get_float("parallactic_angle_deg", ["PARANGLE", "PARANG", "PARALLAC"], default=None)
+    seeing = b.get_float("seeing_fwhm_arcsec", ["SEEING", "SEEING1", "FWHM"], default=None)
+    observatory = b.get_str("observatory", ["OBSERVAT", "OBSERVATORY", "TELESCOP"], default="")
+    site_name = b.get_str("site_name", ["SITENAME", "SITE", "OBSERVAT", "OBSERVATORY"], default="")
+
+    ra_deg, ra_src = _parse_ra_deg(b.h)
+    dec_deg, dec_src = _parse_dec_deg(b.h)
+    utc_mid, utc_mid_src = _derive_mid_exposure_utc(dt_utc, exptime)
+
+    if zd is None:
+        zd, zd_src = _derive_zenith_distance_deg(airmass)
+    else:
+        zd_src = b.prov.get("zenith_distance_deg", "missing")
+
+    b.prov.setdefault("ra_deg", ra_src)
+    b.prov.setdefault("dec_deg", dec_src)
+    b.prov.setdefault("utc_mid_exposure", utc_mid_src)
+    b.prov.setdefault("zenith_distance_deg", zd_src)
+    b.prov.setdefault("airmass", b.prov.get("airmass", "missing"))
+    b.prov.setdefault("parallactic_angle_deg", b.prov.get("parallactic_angle_deg", "missing"))
+    b.prov.setdefault("seeing_fwhm_arcsec", b.prov.get("seeing_fwhm_arcsec", "missing"))
+    b.prov.setdefault("observatory", b.prov.get("observatory", "missing"))
+    b.prov.setdefault("site_name", b.prov.get("site_name", "missing"))
+
+    if airmass is None:
+        b.missing_optional.append("airmass")
+    if zd is None:
+        b.missing_optional.append("zenith_distance_deg")
+    if parang is None:
+        b.missing_optional.append("parallactic_angle_deg")
+    if ra_deg is None:
+        b.missing_optional.append("ra_deg")
+    if dec_deg is None:
+        b.missing_optional.append("dec_deg")
+    if utc_mid is None:
+        b.missing_optional.append("utc_mid_exposure")
+    if not observatory:
+        b.missing_optional.append("observatory")
+    if not site_name:
+        b.missing_optional.append("site_name")
+    if seeing is None:
+        b.missing_optional.append("seeing_fwhm_arcsec")
+
+    return {
+        "airmass": airmass,
+        "zenith_distance_deg": zd,
+        "parallactic_angle_deg": parang,
+        "ra_deg": ra_deg,
+        "dec_deg": dec_deg,
+        "utc_mid_exposure": utc_mid,
+        "observatory": observatory,
+        "site_name": site_name,
+        "seeing_fwhm_arcsec": seeing,
+    }
 
 
 class _MetaBuilder:
@@ -521,6 +713,15 @@ def _finalize_meta(
     detector: str,
     slitmask: str,
     sperange: str | None,
+    airmass: float | None,
+    zenith_distance_deg: float | None,
+    parallactic_angle_deg: float | None,
+    ra_deg: float | None,
+    dec_deg: float | None,
+    utc_mid_exposure: datetime | None,
+    observatory: str,
+    site_name: str,
+    seeing_fwhm_arcsec: float | None,
 ) -> FrameMeta:
     # Lamp contract.
     lamp_raw, lamp_type = infer_lamp_from_header(b.h)
@@ -550,8 +751,17 @@ def _finalize_meta(
         detector=detector,
         slitmask=slitmask,
         sperange=sperange,
+        airmass=airmass,
+        zenith_distance_deg=zenith_distance_deg,
+        parallactic_angle_deg=parallactic_angle_deg,
+        ra_deg=ra_deg,
+        dec_deg=dec_deg,
+        utc_mid_exposure=utc_mid_exposure,
+        observatory=observatory,
+        site_name=site_name,
+        seeing_fwhm_arcsec=seeing_fwhm_arcsec,
         meta_provenance=prov,
-        meta_missing_optional=tuple(b.missing_optional),
+        meta_missing_optional=tuple(dict.fromkeys(b.missing_optional)),
         meta_fallback_used=dict(b.fallback_used),
         lamp_raw=str(lamp_raw or ""),
         lamp_type=str(lamp_type or LAMP_UNKNOWN),
@@ -613,6 +823,8 @@ def _parse_scorpio2(h: Mapping[str, Any], *, policy: MetadataPolicy, strict: boo
     if sperange is not None:
         b.prov.setdefault("sperange", "header:SPERANGE")
 
+    calib_meta = _extract_calibration_metadata(b, dt_utc, exptime)
+
     return _finalize_meta(
         b=b,
         instrument="SCORPIO2",
@@ -635,6 +847,15 @@ def _parse_scorpio2(h: Mapping[str, Any], *, policy: MetadataPolicy, strict: boo
         detector=detector,
         slitmask=slitmask,
         sperange=sperange,
+        airmass=calib_meta["airmass"],
+        zenith_distance_deg=calib_meta["zenith_distance_deg"],
+        parallactic_angle_deg=calib_meta["parallactic_angle_deg"],
+        ra_deg=calib_meta["ra_deg"],
+        dec_deg=calib_meta["dec_deg"],
+        utc_mid_exposure=calib_meta["utc_mid_exposure"],
+        observatory=calib_meta["observatory"],
+        site_name=calib_meta["site_name"],
+        seeing_fwhm_arcsec=calib_meta["seeing_fwhm_arcsec"],
     )
 
 
@@ -685,6 +906,8 @@ def _parse_scorpio1(h: Mapping[str, Any], *, policy: MetadataPolicy, strict: boo
     if sperange is not None:
         b.prov.setdefault("sperange", "header:SPERANGE")
 
+    calib_meta = _extract_calibration_metadata(b, dt_utc, exptime)
+
     return _finalize_meta(
         b=b,
         instrument="SCORPIO1",
@@ -707,8 +930,39 @@ def _parse_scorpio1(h: Mapping[str, Any], *, policy: MetadataPolicy, strict: boo
         detector=detector,
         slitmask=slitmask,
         sperange=sperange,
+        airmass=calib_meta["airmass"],
+        zenith_distance_deg=calib_meta["zenith_distance_deg"],
+        parallactic_angle_deg=calib_meta["parallactic_angle_deg"],
+        ra_deg=calib_meta["ra_deg"],
+        dec_deg=calib_meta["dec_deg"],
+        utc_mid_exposure=calib_meta["utc_mid_exposure"],
+        observatory=calib_meta["observatory"],
+        site_name=calib_meta["site_name"],
+        seeing_fwhm_arcsec=calib_meta["seeing_fwhm_arcsec"],
     )
 
+
+
+def parse_scorpio2_header(
+    h: Mapping[str, Any],
+    *,
+    policy: MetadataPolicy,
+    strict: bool = True,
+    fallback: FallbackSources | None = None,
+) -> FrameMeta:
+    """Parse SCORPIO-2 header into FrameMeta (instrument-specific)."""
+    return _parse_scorpio2(h, policy=policy, strict=strict, fallback=fallback)
+
+
+def parse_scorpio1_header(
+    h: Mapping[str, Any],
+    *,
+    policy: MetadataPolicy,
+    strict: bool = True,
+    fallback: FallbackSources | None = None,
+) -> FrameMeta:
+    """Parse SCORPIO (SCORPIO-1) header into FrameMeta (instrument-specific)."""
+    return _parse_scorpio1(h, policy=policy, strict=strict, fallback=fallback)
 
 def parse_frame_meta(
     h: Mapping[str, Any],
@@ -734,17 +988,22 @@ def parse_frame_meta(
 
     pol = policy or default_metadata_policy()
 
-    instr_raw = norm_upper_nospace(_get(h, "INSTRUME", "INSTRUMENT") or "")
-    if "SCORPIO-2" in instr_raw or "SCORPIO2" in instr_raw:
-        return _parse_scorpio2(h, policy=pol, strict=strict, fallback=fallback_sources)
-    if "SCORPIO" in instr_raw:
-        return _parse_scorpio1(h, policy=pol, strict=strict, fallback=fallback_sources)
+    # P0-ARCH-05.1: instrument adapters are resolved via the instrument catalog.
+    # This keeps preflight/autoconfig and the metadata layer free of SCORPIO-specific if/else.
+    from scorpio_pipe.catalog.instruments import resolve_adapter
 
-    raise HeaderContractError(
-        "Unknown instrument (cannot dispatch header parser)",
-        instrument=instr_raw or None,
-        context={"INSTRUME": _get(h, "INSTRUME", "INSTRUMENT")},
-    )
+    try:
+        adapter = resolve_adapter(header=h)
+    except KeyError as e:
+        raise HeaderContractError(
+            "Unknown instrument (cannot resolve adapter)",
+            instrument=norm_upper_nospace(_get(h, "INSTRUME", "INSTRUMENT") or "") or None,
+            context={"INSTRUME": _get(h, "INSTRUME", "INSTRUMENT")},
+        ) from e
+
+    # Adapter may accept policy/fallback (types live in scorpio_pipe.metadata).
+    return adapter.parse_header(h, strict=strict, policy=pol, fallback_sources=fallback_sources)
+
 
 
 __all__ = ["FrameMeta", "ReadoutKey", "HeaderContractError", "parse_frame_meta"]

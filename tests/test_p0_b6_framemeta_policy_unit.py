@@ -66,3 +66,50 @@ def test_framemeta_fallback_records_provenance_and_value():
     assert m.disperser == "VPHG1200@540"
     assert "disperser" in (m.meta_fallback_used or [])
     assert (m.meta_provenance or {}).get("disperser") == "fallback:config"
+
+
+def test_framemeta_calibration_grade_metadata_from_headers_and_derivations():
+    hdr = dict(BASE_SC2_SPECTRA_HEADER)
+    hdr.update({
+        "AIRMASS": 1.20,
+        "RA": "12:30:00",
+        "DEC": "+15:00:00",
+        "PARANG": 23.5,
+        "OBSERVAT": "SAO RAS 6m",
+        "SITENAME": "BTA",
+        "SEEING": 1.4,
+    })
+
+    m = parse_frame_meta(hdr, strict=True)
+
+    assert m.airmass == pytest.approx(1.20)
+    assert m.zenith_distance_deg == pytest.approx(33.5573, rel=1e-4)
+    assert m.parallactic_angle_deg == pytest.approx(23.5)
+    assert m.ra_deg == pytest.approx(187.5)
+    assert m.dec_deg == pytest.approx(15.0)
+    assert m.utc_mid_exposure is not None
+    assert m.utc_mid_exposure.isoformat().startswith("2018-02-15T18:04:34.660000")
+    assert m.observatory == "SAO RAS 6m"
+    assert m.site_name == "BTA"
+    assert m.seeing_fwhm_arcsec == pytest.approx(1.4)
+    assert (m.meta_provenance or {}).get("airmass") == "header:AIRMASS"
+    assert (m.meta_provenance or {}).get("zenith_distance_deg") == "derived:airmass"
+    assert (m.meta_provenance or {}).get("ra_deg") == "header:RA"
+    assert (m.meta_provenance or {}).get("utc_mid_exposure") == "derived:date_time_utc+exptime"
+
+
+def test_framemeta_calibration_grade_missing_values_are_preserved_as_none():
+    hdr = dict(BASE_SC2_SPECTRA_HEADER)
+
+    m = parse_frame_meta(hdr, strict=True)
+
+    assert m.airmass is None
+    assert m.zenith_distance_deg is None
+    assert m.ra_deg is None
+    assert m.dec_deg is None
+    assert m.utc_mid_exposure is not None
+    assert "airmass" in (m.meta_missing_optional or [])
+    assert "ra_deg" in (m.meta_missing_optional or [])
+    assert (m.meta_provenance or {}).get("airmass") == "missing"
+    assert (m.meta_provenance or {}).get("ra_deg") == "missing"
+    assert (m.meta_provenance or {}).get("utc_mid_exposure") == "derived:date_time_utc+exptime"

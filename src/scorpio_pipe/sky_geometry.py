@@ -485,6 +485,7 @@ def compute_sky_geometry(
         "roi_hash": roi.roi_hash if roi is not None else None,
     }
 
+
     return SkyGeometry(
         mask_obj_y=mask_obj_y,
         mask_sky_y=mask_sky_y,
@@ -493,3 +494,93 @@ def compute_sky_geometry(
         roi_used=roi_used,
         metrics=metrics,
     )
+
+def expand_object_protection_mask(
+    D: np.ndarray,
+    base_mask_obj_y: np.ndarray,
+    *,
+    edge_margin_px: int = 16,
+    continuum_sigma: float = 2.5,
+    line_sigma: float = 4.0,
+    asym_low_px: int = 2,
+    asym_high_px: int = 4,
+    max_extra_frac: float = 0.35,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Strengthen a 1D object-protection mask using continuum + line cues.
+
+    This helper is intentionally conservative: it may *expand* the protected
+    object region, but it never shrinks ``base_mask_obj_y``. It is primarily
+    used by the sky-residual refine pass to avoid learning on faint extended
+    object wings or narrow object lines that leak beyond the nominal ROI.
+    """
+
+    D = np.asarray(D, dtype=float)
+    if D.ndim != 2:
+        raise ValueError("D must be 2D")
+    ny, nx = D.shape
+    base = np.asarray(base_mask_obj_y, dtype=bool).reshape(-1)
+    if base.size != ny:
+        raise ValueError("base_mask_obj_y shape mismatch")
+
+    x_edge = int(max(0, edge_margin_px))
+    x_edge = min(x_edge, max(0, (nx - 1) // 2))
+    x0 = int(x_edge)
+    x1 = int(nx - x_edge)
+    if x1 <= x0 + 2:
+        x0, x1 = 0, nx
+
+    core = np.asarray(D[:, x0:x1], dtype=float)
+    row_med = np.nanmedian(core, axis=1)
+    row_peak = np.nanmax(np.abs(core - row_med[:, None]), axis=1)
+
+    med0, sig0 = _robust_median_and_mad(row_med)
+    if not np.isfinite(sig0) or sig0 <= 0:
+        sig0 = max(float(np.nanstd(row_med)), 1e-6)
+    _, sigp = _robust_median_and_mad(row_peak)
+    if not np.isfinite(sigp) or sigp <= 0:
+        sigp = max(float(np.nanstd(row_peak)), 1e-6)
+
+    cont = np.isfinite(row_med) & (row_med > (med0 + float(continuum_sigma) * sig0))
+    line = np.isfinite(row_peak) & (row_peak > (float(line_sigma) * sigp))
+    extra = cont | line
+    extra &= ~base
+
+    # Avoid pathological growth when the slit is mostly structured/noisy.
+    max_extra = int(max(1, round(float(max_extra_frac) * ny)))
+    if int(np.count_nonzero(extra)) > max_extra:
+        # Keep only rows closest to the existing object footprint.
+        if np.any(base):
+            idx_base = np.flatnonzero(base)
+            idx_extra = np.flatnonzero(extra)
+            dist = np.min(np.abs(idx_extra[:, None] - idx_base[None, :]), axis=1)
+            keep = idx_extra[np.argsort(dist)[:max_extra]]
+            extra = np.zeros(ny, dtype=bool)
+            extra[keep] = True
+        else:
+            extra = np.zeros(ny, dtype=bool)
+
+    grown = base | extra
+    # Asymmetric safety margin: usually more conservative on the high-Y side,
+    # which helps extended/tilted targets without over-masking both sides.
+    low = int(max(0, asym_low_px))
+    high = int(max(0, asym_high_px))
+    if low > 0 or high > 0:
+        out = grown.copy()
+        rows = np.flatnonzero(grown)
+        for r in rows:
+            out[max(0, r - low) : min(ny, r + high + 1)] = True
+        grown = out
+
+    info = {
+        "base_rows": int(np.count_nonzero(base)),
+        "expanded_rows": int(np.count_nonzero(grown)),
+        "extra_rows": int(np.count_nonzero(grown & ~base)),
+        "continuum_sigma": float(continuum_sigma),
+        "line_sigma": float(line_sigma),
+        "asym_low_px": int(low),
+        "asym_high_px": int(high),
+        "continuum_rows": int(np.count_nonzero(cont)),
+        "line_rows": int(np.count_nonzero(line)),
+    }
+    return grown.astype(bool), info
+

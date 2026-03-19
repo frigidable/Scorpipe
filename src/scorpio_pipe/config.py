@@ -10,6 +10,9 @@ import logging
 from scorpio_pipe.work_layout import ensure_work_layout
 from scorpio_pipe.project_manifest import apply_project_manifest_to_cfg
 
+# P0-ARCH-04.1: typed config facade (pydantic) + early validations.
+from scorpio_pipe.typed_config import TypedConfig, build_typed_config
+
 
 def _norm_path_str(p: str) -> str:
     """Normalize a path string for cross-platform YAML.
@@ -175,6 +178,18 @@ def load_config(cfg_path: str | Path) -> dict[str, Any]:
     return cfg
 
 
+def load_typed_config(cfg_path: str | Path) -> tuple[TypedConfig, dict[str, Any]]:
+    """Load YAML config and return (typed, raw).
+
+    Backward compatibility: stages still operate on a plain dict.
+    The engine/UI may use the typed model for validation and safer access.
+    """
+
+    raw = load_config(cfg_path)
+    typed = build_typed_config(raw, config_path=raw.get("config_path") or str(cfg_path))
+    return typed, raw
+
+
 def load_config_any(cfg: Any) -> dict[str, Any]:
     """Load config from path/dict/RunContext-like objects.
 
@@ -208,6 +223,27 @@ def load_config_any(cfg: Any) -> dict[str, Any]:
                 )
 
     raise TypeError(f"Unsupported config type: {type(cfg)}")
+
+
+def load_typed_config_any(cfg: Any) -> tuple[TypedConfig, dict[str, Any]]:
+    """Load config from path/dict/RunContext and return (typed, raw)."""
+
+    raw = load_config_any(cfg)
+    cfg_path = None
+    if isinstance(cfg, (str, Path)):
+        cfg_path = str(cfg)
+    else:
+        for attr in ("cfg_path", "config_path"):
+            if hasattr(cfg, attr):
+                try:
+                    v = getattr(cfg, attr)
+                    if isinstance(v, (str, Path)):
+                        cfg_path = str(v)
+                        break
+                except Exception:
+                    pass
+    typed = build_typed_config(raw, config_path=cfg_path or raw.get("config_path"))
+    return typed, raw
 
 
 def _normalize_cfg_paths_for_yaml(obj: Any):

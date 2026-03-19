@@ -40,7 +40,7 @@ def get_selected_disperser(cfg: dict[str, Any]) -> str:
     return ""
 
 
-def wavesol_dir(cfg: dict[str, Any]) -> Path:
+def wavesol_dir(cfg: dict[str, Any], *, run_root: str | Path | None = None) -> Path:
     """Return a disperser-specific wavesolution directory.
 
     New convention (v5.38+):
@@ -50,7 +50,7 @@ def wavesol_dir(cfg: dict[str, Any]) -> Path:
       if work_dir/wavesol exists and the subdir doesn't, we still allow reading
       from the legacy flat layout.
     """
-    wd = resolve_work_dir(cfg)
+    wd = Path(run_root).expanduser().resolve() if run_root is not None else resolve_work_dir(cfg)
     # Canonical stage directory (v5.40+ layout): 08_wavesol/
     base = stage_dir(wd, "wavesol")
     slug = slugify_disperser(get_selected_disperser(cfg))
@@ -81,7 +81,7 @@ def wavesol_dir(cfg: dict[str, Any]) -> Path:
 # Legacy compatibility:
     # - old base: work_dir/wavesol/
     # - old per-disperser: work_dir/wavesol/<slug>/
-    legacy_base = wd / "wavesol"
+    legacy_base = Path(wd) / "wavesol"
     legacy_sub = legacy_base / slug
 
     # Legacy: prefer per-disperser legacy if it contains core artifacts.

@@ -141,3 +141,14 @@ work/<run>/
 ```bash
 python scripts/smoke_check.py --help
 ```
+
+
+## Difficult-night recovery
+
+Use `observer_dashboard/observer_dashboard.md` first. It tells you where the run is weak and which recovery path to try next.
+
+- Poor neon / weak line IDs: inspect `line_id_overview.png`, switch to the curated per-grism preset, then rerun `lineid_prepare,wavesolution`.
+- Weak geometry / edge curvature problems: inspect `geometry_overlay.png`, verify the prior, then rerun `geometry_prior,wavesolution`.
+- Strong skyline residuals: inspect `sky_observer_pack.md` and `sky_residual_windows.json`, fix contamination or mismatch, then rerun `sky_refine,linearize`.
+- Slit mismatch: inspect `slit_sanity.json`, split the dataset if needed, and do not trust LSF-dependent products before rerunning `slit_sanity,wavesolution,lsf_model`.
+- Uncertain extraction: inspect `extraction_qc.json` and `extraction_diagnostics.png`, then choose a more conservative aperture or fixed center before rerunning `extract1d`.

@@ -8,6 +8,6 @@ The implementation currently reuses the instrument-specific parsers in
 
 from __future__ import annotations
 
-from .frame_meta import FrameMeta, HeaderContractError, parse_frame_meta
+from .frame_meta import FrameMeta, HeaderContractError, parse_frame_meta, parse_scorpio1_header, parse_scorpio2_header
 
-__all__ = ["FrameMeta", "HeaderContractError", "parse_frame_meta"]
+__all__ = ["FrameMeta", "HeaderContractError", "parse_frame_meta", "parse_scorpio1_header", "parse_scorpio2_header"]

@@ -1,0 +1,34 @@
+{
+  "case_id": "mini_night_synthetic",
+  "title": "Synthetic mini-night harness sanity check",
+  "category": "ci-fixture",
+  "source_type": "synthetic_fixture",
+  "description": "Tiny public fixture used to validate the LONG comparison harness, markdown report rendering, and CI gating behaviour.",
+  "observer_notes": "This is not a scientific parity claim. It only guarantees that the benchmark/reporting machinery works and that comparison rules stay stable in CI.",
+  "scorpipe_bundle": "../fixtures/mini_night_scorpipe_bundle.json",
+  "long_bundle": "../fixtures/mini_night_long_bundle.json",
+  "metrics": {
+    "wavelength_solution.rms": {
+      "label": "Wave RMS [A]",
+      "prefer": "lower"
+    },
+    "sky_subtraction.sky_rms": {
+      "label": "Sky residual RMS",
+      "prefer": "lower",
+      "tolerance_abs": 0.35
+    },
+    "extraction.snr": {
+      "label": "Extracted S/N",
+      "prefer": "higher"
+    },
+    "response_calibration.smoothness": {
+      "label": "Response smoothness",
+      "prefer": "lower",
+      "tolerance_abs": 0.02
+    },
+    "science_outputs.n_detected_lines": {
+      "label": "Detected science lines",
+      "prefer": "higher"
+    }
+  }
+}

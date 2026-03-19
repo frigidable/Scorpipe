@@ -19,13 +19,13 @@ import json
 import logging
 import time
 import traceback
-from dataclasses import dataclass
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Event
 from typing import Any, Callable, Iterable
 
 from scorpio_pipe.config import load_config_any
+from scorpio_pipe.typed_config import build_typed_config
 from scorpio_pipe.products import task_is_complete
 from scorpio_pipe.stage_state import (
     compute_stage_hash,
@@ -36,8 +36,10 @@ from scorpio_pipe.paths import resolve_work_dir
 from scorpio_pipe.wavesol_paths import wavesol_dir
 from scorpio_pipe.work_layout import ensure_work_layout
 from scorpio_pipe.workspace_paths import stage_dir, per_exp_dir, resolve_input_path
-from scorpio_pipe.stage_registry import REGISTRY
-
+from scorpio_pipe.catalog.stages import CATALOG as STAGE_CATALOG
+from scorpio_pipe.pipeline.context import CancelToken, StageContext, StageResult, PlanItem, StageSpec
+from scorpio_pipe.pipeline.resources import resolve_stage_resources
+from scorpio_pipe.perf.profiles import apply_performance_profile, compact_performance_profile_summary
 # P0 provenance + boundary contract enforcement
 from scorpio_pipe.boundary_contract import (
     ProductContractError,
@@ -52,247 +54,173 @@ from scorpio_pipe.prov_capture import (
     load_hash_cache,
 )
 from scorpio_pipe.run_passport import ensure_run_passport
+from scorpio_pipe.artifact_index import update_after_stage as _artifact_index_update_after_stage
 
 log = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class PlanItem:
-    task: str
-    action: str  # 'run'|'skip'
-    reason: str
+
+# Optional runtime dependency for PERF-00.1 resource metrics.
+try:  # pragma: no cover
+    import psutil  # type: ignore
+except Exception:  # pragma: no cover
+    psutil = None  # type: ignore
 
 
-class CancelToken:
-    """Cooperative cancellation token.
-
-    Current implementation checks cancellation *between* tasks.
-    Stage implementations may optionally accept a ``cancel_token`` parameter for
-    finer-grained cancellation.
-    """
-
-    def __init__(self) -> None:
-        self._ev = Event()
-
-    def cancel(self) -> None:
-        self._ev.set()
-
-    @property
-    def cancelled(self) -> bool:
-        return self._ev.is_set()
+def _mb(x: float | int | None) -> float | None:
+    if x is None:
+        return None
+    try:
+        return float(x) / (1024.0 * 1024.0)
+    except Exception:
+        return None
 
 
-@dataclass(frozen=True)
-class StageSpec:
-    """Lightweight stage/task specification (P0-A5).
+class _StageResourceMonitor:
+    '''Best-effort per-stage process resource monitor.
 
-    This is intentionally *non-invasive*: stage implementations do not depend on it.
-    The engine may use it for deterministic validation/provenance and UI/help text.
+    Uses psutil when available. Never raises.
 
-    ``validate_globs`` serves two roles:
+    Metrics:
+      - rss_mb, rss_peak_mb
+      - io_read_mb, io_write_mb (if available)
+      - cpu_user_s, cpu_system_s, cpu_total_s (if available)
+    '''
 
-    1) **Execution contract**: declares which on-disk artifacts count as this
-       task's outputs (used by tests/docs).
-    2) **Boundary validation**: for strict product kinds (MEF/spec1d/lambda_map)
-       the engine validates every matched file after a successful task.
-    """
+    def __init__(self, *, sample_interval_s: float = 0.10) -> None:
+        self._sample_interval_s = float(sample_interval_s)
+        self._proc = None
+        self._stop = threading.Event()
+        self._thr = None
+        self._started = False
+        self._stopped = False
 
-    key: str
-    title: str
-    contract_kind: str = 'none'  # 'mef'|'spec1d'|'lambda_map'|'none'
-    validate_globs: tuple[str, ...] = ()
-    # Optional list of machine-readable product keys (see scorpio_pipe.products)
-    # that are considered outputs of this task.
-    output_keys: tuple[str, ...] = ()
-    hash_inputs_policy: str = 'default'
+        self._rss_peak = None
+        self._cpu0 = None
+        self._io0 = None
+
+    def start(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        if psutil is None:
+            return
+        try:
+            self._proc = psutil.Process()  # type: ignore[attr-defined]
+            try:
+                mi = self._proc.memory_info()
+                self._rss_peak = getattr(mi, 'rss', None)
+            except Exception:
+                self._rss_peak = None
+            try:
+                self._cpu0 = self._proc.cpu_times()
+            except Exception:
+                self._cpu0 = None
+            try:
+                self._io0 = self._proc.io_counters()
+            except Exception:
+                self._io0 = None
+
+            def _poll() -> None:
+                while not self._stop.is_set():
+                    try:
+                        mi2 = self._proc.memory_info() if self._proc is not None else None
+                        rss = getattr(mi2, 'rss', None) if mi2 is not None else None
+                        if rss is not None:
+                            if self._rss_peak is None or rss > self._rss_peak:
+                                self._rss_peak = rss
+                    except Exception:
+                        pass
+                    self._stop.wait(self._sample_interval_s)
+
+            self._thr = threading.Thread(target=_poll, name='scorpipe_rss_poll', daemon=True)
+            self._thr.start()
+        except Exception:
+            self._proc = None
+
+    def stop(self) -> dict[str, float | None]:
+        if self._stopped:
+            return {}
+        self._stopped = True
+
+        if psutil is None or self._proc is None:
+            return {
+                'rss_mb': None,
+                'rss_peak_mb': None,
+                'io_read_mb': None,
+                'io_write_mb': None,
+                'cpu_user_s': None,
+                'cpu_system_s': None,
+                'cpu_total_s': None,
+            }
+
+        try:
+            self._stop.set()
+            if self._thr is not None:
+                try:
+                    self._thr.join(timeout=1.0)
+                except Exception:
+                    pass
+
+            # RSS now
+            rss_now = None
+            try:
+                mi = self._proc.memory_info()
+                rss_now = getattr(mi, 'rss', None)
+            except Exception:
+                rss_now = None
+
+            # CPU delta
+            cpu_user = cpu_sys = cpu_total = None
+            try:
+                c1 = self._proc.cpu_times()
+                if self._cpu0 is not None and c1 is not None:
+                    cpu_user = float(getattr(c1, 'user', 0.0) - getattr(self._cpu0, 'user', 0.0))
+                    cpu_sys = float(getattr(c1, 'system', 0.0) - getattr(self._cpu0, 'system', 0.0))
+                    cpu_total = float(cpu_user + cpu_sys)
+            except Exception:
+                pass
+
+            # IO delta
+            io_r = io_w = None
+            try:
+                io1 = self._proc.io_counters()
+                if self._io0 is not None and io1 is not None:
+                    io_r = _mb(getattr(io1, 'read_bytes', 0) - getattr(self._io0, 'read_bytes', 0))
+                    io_w = _mb(getattr(io1, 'write_bytes', 0) - getattr(self._io0, 'write_bytes', 0))
+            except Exception:
+                pass
+
+            return {
+                'rss_mb': _mb(rss_now),
+                'rss_peak_mb': _mb(self._rss_peak),
+                'io_read_mb': io_r,
+                'io_write_mb': io_w,
+                'cpu_user_s': cpu_user,
+                'cpu_system_s': cpu_sys,
+                'cpu_total_s': cpu_total,
+            }
+        except Exception:
+            return {}
 
 
-# Canonical task list (single source for CLI/UI/doit naming).
-CANONICAL_TASKS: tuple[str, ...] = (
-    'manifest',
-    'superbias',
-    'superflat',
-    'flatfield',
-    'cosmics',
-    'superneon',
-    'lineid_prepare',
-    'wavesolution',
-    'sky',
-    'linearize',
-    'stack2d',
-    'extract1d',
-    'qc_report',
-    'navigator',
-)
 
+# Canonical task list and task specs are derived from StageCatalog (single source of truth).
+CANONICAL_TASKS: tuple[str, ...] = tuple(STAGE_CATALOG.task_keys())
 
-# Minimal per-task spec table. This is meant to evolve gradually.
 STAGE_SPECS: dict[str, StageSpec] = {
-    # NOTE: validate_globs are declared for *all* canonical tasks (P0-A7), even
-    # if the task is not (yet) covered by strict boundary validation.
-    'manifest': StageSpec(
-        key='manifest',
-        title='Manifest / provenance',
-        contract_kind='none',
-        validate_globs=('manifest/manifest.json',),
-        output_keys=('manifest', 'products_manifest', 'timings'),
-    ),
-    'superbias': StageSpec(
-        key='superbias',
-        title='Superbias / MasterBias',
-        contract_kind='none',
-        validate_globs=(
-            'superbias.fits',
-            'master_bias*.fits',
-            'master_bias_index.json',
-        ),
-        output_keys=(
-            'superbias_fits',
-            'master_bias_fits',
-            'master_bias_var_fits',
-            'master_bias_dq_fits',
-            'master_bias_index',
-        ),
-    ),
-    'superflat': StageSpec(
-        key='superflat',
-        title='Superflat',
-        contract_kind='none',
-        validate_globs=('superflat.fits',),
-        output_keys=('superflat_fits',),
-    ),
-    'flatfield': StageSpec(
-        key='flatfield',
-        title='Flat-Fielding',
-        contract_kind='mef',
-        # Boundary validation: only MEF FITS.
-        validate_globs=('*_flat.fits',),
-        output_keys=('flatfield_done',),
-    ),
-    'cosmics': StageSpec(
-        key='cosmics',
-        title='Cosmics Cleaning',
-        contract_kind='none',
-        validate_globs=(
-            'summary.json',
-            'obj/summary.json',
-            'obj/clean/*_clean.fits',
-            'obj/clean/*_clean_mask.fits',
-            'sky/summary.json',
-            'sky/clean/*_clean.fits',
-            'sky/clean/*_clean_mask.fits',
-        ),
-        output_keys=('cosmics_summary',),
-    ),
-    'superneon': StageSpec(
-        key='superneon',
-        title='Superneon',
-        contract_kind='none',
-        validate_globs=(
-            'superneon.fits',
-            'superneon.png',
-            'peaks_candidates.csv',
-            'superneon_shifts.csv',
-            'superneon_shifts.json',
-            'superneon_qc.json',
-        ),
-        output_keys=(
-            'superneon_fits',
-            'superneon_png',
-            'peaks_candidates_csv',
-            'superneon_shifts_csv',
-            'superneon_shifts_json',
-            'superneon_qc_json',
-        ),
-    ),
-    'lineid_prepare': StageSpec(
-        key='lineid_prepare',
-        title='LineID Preparation',
-        contract_kind='none',
-        validate_globs=(
-            'manual_pairs_template.csv',
-            'manual_pairs_auto.csv',
-            'lineid_report.txt',
-        ),
-        output_keys=('lineid_template_csv', 'lineid_auto_csv', 'lineid_report_txt'),
-    ),
-    'wavesolution': StageSpec(
-        key='wavesolution',
-        title='Wavelength Solution',
-        contract_kind='lambda_map',
-        # Boundary validation: only lambda_map FITS.
-        validate_globs=('lambda_map.fits',),
-        output_keys=(
-            'lambda_map',
-            'rectification_model_json',
-            'wavesolution_1d_json',
-            'wavesolution_2d_json',
-            'wave_done_json',
-        ),
-    ),
-    # Boundary contract product stages
-    'sky': StageSpec(
-        key='sky',
-        title='Sky Subtraction',
-        contract_kind='mef',
-        # NOTE(P0-B7): sky_sub writes a deterministic preview FITS named
-        # "preview.fits" (used by downstream tooling). Validate it explicitly
-        # to prevent silent contract gaps.
-        validate_globs=(
-            '*_skysub_raw.fits',
-            '*_skymodel_raw.fits',
-            'sky_preview*.fits',
-            'preview.fits',
-        ),
-        output_keys=('sky_done',),
-    ),
-    'linearize': StageSpec(
-        key='linearize',
-        title='Linearization',
-        # NOTE(P0-B5 stage 1): boundary validation coverage is intentionally
-        # limited; do NOT enforce the MEF2D contract for linearize yet.
-        contract_kind='none',
-        validate_globs=('*_skysub.fits', '*_skymodel.fits', 'lin_preview*.fits'),
-        output_keys=('linearize_done', 'lin_preview_fits', 'linearize_qc'),
-    ),
-    'stack2d': StageSpec(
-        key='stack2d',
-        title='2D Stacking',
-        contract_kind='mef',
-        validate_globs=('stack2d*.fits', 'stacked2d*.fits'),
-        output_keys=('stacked2d_fits',),
-    ),
-    'extract1d': StageSpec(
-        key='extract1d',
-        title='1D Extraction',
-        contract_kind='spec1d',
-        validate_globs=('spec1d*.fits',),
-        output_keys=('spec1d_fits',),
-    ),
-    'qc_report': StageSpec(
-        key='qc_report',
-        title='QC Report',
-        contract_kind='none',
-        validate_globs=(
-            'qc/qc_report.json',
-            'qc/qc_report.html',
-            'manifest/qc_report.json',
-            'manifest/qc_report.html',
-            'index.html',
-            'manifest/products_manifest.json',
-        ),
-        output_keys=('qc_json', 'qc_html', 'products_manifest'),
-    ),
-    'navigator': StageSpec(
-        key='navigator',
-        title='Navigator',
-        contract_kind='none',
-        validate_globs=('ui/navigator/index.html', 'ui/navigator/data.json'),
-    ),
+    t.key: StageSpec(
+        key=t.key,
+        title=str(t.label),
+        validate_globs=t.validate_globs,
+        contract_kind=t.contract_kind,
+        output_keys=t.product_keys,
+    )
+    for t in STAGE_CATALOG.task_infos()
 }
 
 
-# --- Task registry ---
+# --- Task registry (lazy entrypoints) ---
 
 TaskFn = Callable[..., Any]
 
@@ -327,313 +255,109 @@ def _call_maybe_with_cancel(
     return fn(**kwargs)
 
 
-def _task_manifest(
-    cfg: dict[str, Any],
-    out_dir: Path,
-    *,
-    config_path: Path | None = None,
-    cancel_token: CancelToken | None = None,
-) -> Path:
-    from scorpio_pipe.manifest import write_manifest
-    from scorpio_pipe.preflight import ensure_preflight
+def _parse_entrypoint(entrypoint: str) -> tuple[str, str]:
+    """Parse entrypoint string.
 
-    _ = ensure_work_layout(out_dir)
-
-    # P0-A1/P0-A2: preflight is mandatory and centralized.
-    # If it already ran at the engine entry gate, this is a cheap reuse.
-    pf = ensure_preflight(cfg, out_dir)
-    if str((pf or {}).get("status") or "").upper() == "ERROR":
-        raise RuntimeError(
-            "Preflight gate blocked run (status=ERROR). "
-            f"See: {Path(out_dir) / 'manifest' / 'preflight_report.json'}"
-        )
-
-    # Canonical location (run_root/manifest/manifest.json).
-    p = write_manifest(
-        out_path=Path(out_dir) / "manifest" / "manifest.json",
-        cfg=cfg,
-        cfg_path=config_path,
-    )
-
-    # Legacy mirrors: write only if legacy roots already exist (do not create them).
-    try:
-        qc_legacy = Path(out_dir) / "qc"
-        if qc_legacy.exists():
-            write_manifest(
-                out_path=qc_legacy / "manifest.json",
-                cfg=cfg,
-                cfg_path=config_path,
-            )
-    except Exception:
-        pass
-
-    try:
-        rep_legacy = Path(out_dir) / "report"
-        if rep_legacy.exists():
-            write_manifest(
-                out_path=rep_legacy / "manifest.json",
-                cfg=cfg,
-                cfg_path=config_path,
-            )
-    except Exception:
-        pass
-
-    return p
-
-
-def _task_superbias(
-    cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None
-) -> Path:
-    from scorpio_pipe.stages.calib import build_superbias
-
-    _ = out_dir
-    return build_superbias(cfg)
-
-
-def _task_superflat(
-    cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None
-) -> Path:
-    from scorpio_pipe.stages.calib import build_superflat
-
-    _ = out_dir
-    return build_superflat(cfg)
-
-
-def _task_flatfield(
-    cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None
-) -> Path:
-    from scorpio_pipe.stages.flatfield import run_flatfield
-
-    return run_flatfield(cfg=cfg, out_dir=stage_dir(out_dir, "flatfield"))
-
-
-def _task_cosmics(
-    cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None
-) -> Path:
-    from scorpio_pipe.stages.cosmics import clean_cosmics
-
-    return clean_cosmics(cfg, out_dir=stage_dir(out_dir, "cosmics"))
-
-
-def _task_superneon(
-    cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None
-) -> Path:
-    from scorpio_pipe.stages.superneon import build_superneon
-
-    _ = out_dir
-    res = build_superneon(cfg)
-    return Path(res.superneon_fits)
-
-
-def _task_lineid_prepare(
-    cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None
-) -> dict[str, Path]:
-    from scorpio_pipe.stages.lineid_auto_backup import prepare_lineid
-
-    _ = out_dir
-    _ = cancel_token
-    return prepare_lineid(cfg)
-
-
-def _task_wavesolution(
-    cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None
-) -> dict[str, Any]:
-    # build_wavesolution writes into the work_dir-derived wavesolution directory
-    # (it does not need out_dir, but we keep the signature consistent for the runner).
-    from scorpio_pipe.stages.wavesolution import build_wavesolution
-
-    _ = out_dir
-    _ = cancel_token  # currently unused inside wavesolution
-    res = build_wavesolution(cfg)
-    return res.as_dict()
-
-
-def _task_qc_report(
-    cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None
-) -> Path:
-    from scorpio_pipe.qc_report import build_qc_report
-
-    _ = cancel_token
-    _ = ensure_work_layout(out_dir)
-    # Canonical: manifest/qc_report.json + work_dir/index.html
-    res = build_qc_report(cfg)
-    # build_qc_report historically returned Path; keep compatibility if it returns a dict
-    if isinstance(res, dict):
-        return Path(res.get("qc_html", Path(out_dir) / "index.html"))
-    return Path(res)
-
-
-def _task_navigator(
-    cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None
-) -> Path:
-    """Build static HTML navigator (ui/navigator).
-
-    This is lightweight and safe to run at any time.
+    Supported forms:
+      - ``some.module:callable`` (preferred)
+      - ``some.module.callable`` (fallback)
     """
 
-    _ = cancel_token
-    _ = ensure_work_layout(out_dir)
-    from scorpio_pipe.navigator import build_navigator
-
-    return build_navigator(out_dir)
-
-
-def _task_linearize(
-    cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None
-) -> Path:
-    from scorpio_pipe.stages.linearize import run_linearize
-
-    out_p = stage_dir(out_dir, "linearize")
-    res = run_linearize(cfg, out_dir=out_p, cancel_token=cancel_token)
-    return Path(res.get("products", {}).get("preview_fits", out_p / "lin_preview.fits"))
+    s = str(entrypoint or '').strip()
+    if not s:
+        raise ValueError('Empty entrypoint')
+    if ':' in s:
+        mod, attr = s.split(':', 1)
+        return mod.strip(), attr.strip()
+    if '.' in s:
+        mod, attr = s.rsplit('.', 1)
+        return mod.strip(), attr.strip()
+    raise ValueError(f'Invalid entrypoint format: {entrypoint!r}')
 
 
-def _task_sky(
-    cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None
-) -> Path:
-    from scorpio_pipe.stages.sky_sub import run_sky_sub
-
-    _ = cancel_token
-    out_p = stage_dir(out_dir, "sky")
-    run_sky_sub(cfg, out_dir=out_p)
-    return out_p / "sky_done.json"
-
-
-def _task_stack2d(
-    cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None
-) -> Path:
-    """Stack rectified, sky-subtracted frames.
-
-    Contract (P1-E / v5.40.4)
-    -------------------------
-    Stack2D consumes **only** rectified, sky-subtracted frames produced by
-    Linearization:
-
-      10_linearize/<stem>_skysub.fits
-
-    No hidden fallbacks to other stage folders are allowed.
-    """
-
-    from scorpio_pipe.stages.stack2d import run_stack2d
-    from scorpio_pipe.product_naming import sky_sub_fits_name
-    from scorpio_pipe.workspace_paths import extract_stem_short
-
-    _ = cancel_token
-    wd = resolve_work_dir(cfg)
-
-    lin_stage = stage_dir(wd, "linearize")
-
-    # Prefer an explicit science exposure list from config.
-    frames = cfg.get("frames") if isinstance(cfg.get("frames"), dict) else {}
-    obj_list = frames.get("obj") if isinstance(frames.get("obj"), list) else []
-    stems = [
-        extract_stem_short(x)
-        for x in obj_list
-        if isinstance(x, str) and x.strip()
-    ]
-
-    def _find_rectified_skysub(stem: str) -> Path:
-        # Hard contract: only 10_linearize/<stem>_skysub.fits
-        return lin_stage / sky_sub_fits_name(stem)
-
-    if stems:
-        inputs: list[Path] = []
-        missing: list[str] = []
-        for stem in stems:
-            p = _find_rectified_skysub(stem)
-            if p.exists():
-                inputs.append(p)
-            else:
-                missing.append(stem)
-        if missing:
-            raise FileNotFoundError(
-                "Stack2D: missing rectified sky-subtracted inputs for stems: "
-                + ", ".join(missing)
-                + ". Expected 10_linearize/<stem>_skysub.fits. Run Linearization first."
-            )
-    else:
-        # Scan only the Linearization stage root (non-recursive).
-        inputs = sorted(p for p in lin_stage.glob("*_skysub.fits") if p.is_file())
-
-        if not inputs:
-            raise FileNotFoundError(
-                f"No rectified sky-subtracted frames found in {lin_stage}. Expected 10_linearize/*_skysub.fits. Run Linearization first."
-            )
-
-    out_p = stage_dir(out_dir, "stack2d")
-    res = run_stack2d(cfg, inputs=inputs, out_dir=out_p)
-    # Canonical new name is stack2d.fits; keep legacy stacked2d.fits as well.
-    return Path(res.get("stack2d", res.get("stacked2d", out_p / "stack2d.fits")))
-
-
-def _task_extract1d(
-    cfg: dict[str, Any], out_dir: Path, *, cancel_token: CancelToken | None = None
-) -> Path:
-    from scorpio_pipe.stages.extract1d import run_extract1d
-
-    _ = cancel_token
-    out_p = stage_dir(out_dir, "extract1d")
-    res = run_extract1d(cfg, out_dir=out_p)
-    return Path(res.get("spec1d", out_p / "spec1d.fits"))
-
-
-TASKS: dict[str, TaskFn] = {
-    # canonical names
-    "manifest": _task_manifest,
-    "superbias": _task_superbias,
-    # P0-C1 naming (alias to superbias task)
-    "bias_combine": _task_superbias,
-    "masterbias": _task_superbias,
-    "superflat": _task_superflat,
-    "flatfield": _task_flatfield,
-    "cosmics": _task_cosmics,
-    "superneon": _task_superneon,
-    "lineid_prepare": _task_lineid_prepare,
-    "wavesolution": _task_wavesolution,
-    "linearize": _task_linearize,
-    "sky": _task_sky,
-    "stack2d": _task_stack2d,
-    "extract1d": _task_extract1d,
-    "qc_report": _task_qc_report,
-    "navigator": _task_navigator,
-    # aliases (backward compatibility)
-    "wavesol": _task_wavesolution,
-    "wavesolution2d": _task_wavesolution,
-    "sky_sub": _task_sky,
-    "stack": _task_stack2d,
-    "qc": _task_qc_report,
-    "nav": _task_navigator,
+# Canonical task -> entrypoint string (source of truth lives in StageCatalog).
+TASK_ENTRYPOINTS: dict[str, str] = {
+    t.key: str(t.entrypoint or '').strip()
+    for t in STAGE_CATALOG.task_infos()
 }
 
+# Compatibility mapping: canonical keys + aliases -> entrypoint string.
+# This is used only for membership checks / help text; execution resolves
+# canonical names via StageCatalog first.
+TASKS: dict[str, str] = {}
+for _t in STAGE_CATALOG.task_infos():
+    _ep = str(_t.entrypoint or '').strip()
+    if _ep:
+        TASKS[_t.key] = _ep
+        for _a in (_t.aliases or ()):  # type: ignore[truthy-bool]
+            aa = str(_a).strip()
+            if aa:
+                TASKS[aa] = _ep
+
+
+# Resolver cache (entrypoint string -> callable).
+_ENTRYPOINT_CACHE: dict[str, TaskFn] = {}
+
+
+def resolve_entrypoint(entrypoint: str) -> TaskFn:
+    """Resolve and cache entrypoint callable via importlib."""
+
+    ep = str(entrypoint or '').strip()
+    if not ep:
+        raise ValueError('Empty entrypoint')
+    fn = _ENTRYPOINT_CACHE.get(ep)
+    if fn is not None:
+        return fn
+
+    mod, attr = _parse_entrypoint(ep)
+    from importlib import import_module
+
+    m = import_module(mod)
+    obj = getattr(m, attr)
+    if not callable(obj):
+        raise TypeError(f'Entrypoint is not callable: {ep!r}')
+    _ENTRYPOINT_CACHE[ep] = obj
+    return obj
+
+
+def task_callable(task: str) -> TaskFn:
+    """Return callable for a *canonical* task name (lazy import)."""
+
+    t = canonical_task_name(task)
+    ep = TASK_ENTRYPOINTS.get(t)
+    if not ep:
+        raise KeyError(f'No entrypoint for task: {t!r}')
+    return resolve_entrypoint(ep)
 
 def _done_dir_for_task(run_root: Path, task: str) -> Path:
     """Return directory where task-scoped done.json should live.
 
-    We keep done.json in a task-specific folder to avoid collisions.
-    For tasks that conceptually belong to a stage folder (e.g. superbias -> biascorr),
-    we reuse the stage directory.
+    The policy comes from StageCatalog (single source of truth).
+    Legacy runs are supported by falling back to run_root if the
+    special folder does not exist.
     """
 
-    if task == "manifest":
-        return Path(run_root) / "manifest"
-    if task == "navigator":
-        return Path(run_root) / "ui" / "navigator"
-    if task == "qc_report":
-        return Path(run_root) / "qc"
-    if task == "superbias":
-        return stage_dir(run_root, "biascorr")
-    if task == "superflat":
-        return stage_dir(run_root, "flatfield")
+    t = STAGE_CATALOG.get_task(task)
+    policy = (t.done_dir_policy or "").strip().lower()
 
-    # Most tasks map 1:1 to a stage key (stage registry).
-    try:
-        REGISTRY.get(task)
-        return stage_dir(run_root, task)
-    except Exception:
-        pass
+    if policy == "manifest":
+        d = Path(run_root) / "manifest"
+        return d if d.exists() else Path(run_root)
 
-    # Fallback: a folder named after the task.
-    return Path(run_root) / task
+    if policy == "qc":
+        d = Path(run_root) / "qc"
+        return d if d.exists() else Path(run_root)
+
+    if policy == "ui":
+        d = Path(run_root) / "ui" / "navigator"
+        return d if d.exists() else Path(run_root)
+
+    if policy in ("stage", "ui_only"):
+        stage_key = (t.stage_key or t.key).strip().lower()
+        return stage_dir(run_root, stage_key)
+
+    # Fallback: a folder named after the canonical task.
+    return Path(run_root) / t.key
 
 
 # Public helpers (used by CLI/UI/doit adapters)
@@ -651,6 +375,50 @@ def done_json_path_for_task(run_root: Path, task: str) -> Path:
     """Return the done.json path for a task (canonicalized)."""
 
     return done_dir_for_task(run_root, task) / "done.json"
+
+
+def _make_stage_context(
+    cfg: dict[str, Any],
+    *,
+    run_root: Path,
+    task: str,
+    cancel_token: CancelToken | None,
+) -> StageContext:
+    """Create a StageContext for a task.
+
+    P0-ARCH-02.1: stages must not derive their own work_dir.
+    """
+
+    t = canonical_task_name(task)
+    try:
+        ti = STAGE_CATALOG.get_task(t)
+    except Exception:
+        ti = None
+
+    # Most stages write into their own stage_dir. Some legacy calibration flows
+    # (SuperNeon/LineID/Wavesolution) write into the disperser-aware wavesol dir.
+    if t in ("superneon", "lineid_prepare", "wavesolution"):
+        sd = wavesol_dir(cfg, run_root=Path(run_root))
+    else:
+        stage_key = str((getattr(ti, "stage_key", None) or t)).strip().lower()
+        sd = stage_dir(run_root, stage_key)
+
+    perf_summary = compact_performance_profile_summary(cfg)
+    perf_metrics = {
+        "performance_mode": perf_summary.get("performance_mode"),
+        "performance_profile_overrides": perf_summary.get("n_overrides"),
+    }
+
+    return StageContext(
+        cfg=cfg,
+        run_root=Path(run_root),
+        stage_key=t,
+        stage_dir=Path(sd),
+        workspace=None,
+        resources=resolve_stage_resources(cfg, t),
+        metrics=perf_metrics,
+        cancel_token=cancel_token,
+    )
 
 
 def _collect_output_paths(res: Any) -> list[Path]:
@@ -686,120 +454,86 @@ def _collect_output_paths(res: Any) -> list[Path]:
     return uniq
 
 
-def _validate_task_products(task: str, out_dir: Path) -> None:
+def _validate_task_products(cfg: dict[str, Any], task: str, out_dir: Path) -> None:
     """Validate boundary contract for *this* task outputs (hard-fail).
 
-    Migration policy (P0-B5): we start with high-value products and then expand
-    coverage gradually.
-
-    The engine uses :data:`STAGE_SPECS` to decide what to validate.
+    P0-ARCH-01.2: validation is driven by (stage_key, product_keys) rather than
+    ad-hoc globs scattered across modules.
 
     Parameters
     ----------
+    cfg
+        Pipeline config.
     task
         Canonical task key.
     out_dir
         Directory of the stage outputs (``run_root/NN_slug``).
     """
 
-    # NOTE: ``out_dir`` is already the stage directory; do NOT call stage_dir() here.
-
-    spec = STAGE_SPECS.get(task)
-    if spec is None:
-        return
-
-    kind = str(getattr(spec, 'contract_kind', 'none') or 'none').strip().lower()
-    if kind in ('', 'none'):
-        return
-
-    globs = tuple(getattr(spec, 'validate_globs', ()) or ())
-
-    cands: list[Path] = []
+    # Keep existing gating semantics: only enforce when the stage declares a
+    # non-trivial contract kind.
+    tinfo = None
     try:
-        for g in globs:
-            gg = str(g)
-            # rglob supports recursive patterns without needing '**/'.
-            for p in out_dir.rglob(gg):
-                if p.is_file():
-                    cands.append(p)
+        tinfo = STAGE_CATALOG.get_task(task)
     except Exception:
-        cands = []
-
-    # Fallbacks (legacy compatibility)
-    if not cands:
-        if kind == 'lambda_map':
-            try:
-                cands = [p for p in sorted(out_dir.rglob('lambda_map.fits')) if p.is_file()]
-            except Exception:
-                cands = []
-        elif kind == 'mef':
-            p0 = out_dir / f"{task}.fits"
-            if p0.is_file():
-                cands = [p0]
-
-    if not cands:
+        tinfo = None
+    if tinfo is None:
         return
 
-    # De-duplicate while preserving order.
-    seen: set[str] = set()
-    uniq: list[Path] = []
-    for p in cands:
-        s = str(p)
-        if s in seen:
-            continue
-        seen.add(s)
-        uniq.append(p)
-
-    if kind == 'mef':
-        for p in uniq:
-            validate_mef_product(p, stage=task)
+    kind = str(getattr(tinfo, "contract_kind", "none") or "none").strip().lower()
+    if kind in ("", "none"):
         return
 
-    if kind == 'spec1d':
-        for p in uniq:
-            validate_spec1d_product(p, stage=task)
-        return
+    
 
-    if kind == 'lambda_map':
-        for p in uniq:
-            validate_lambda_map_product(p, stage=task)
-        return
+    # Stage-level contract kinds (cross-product invariants).
+    # These run *in addition* to per-product validation.
+    if kind == "calib_bias_triplet":
+        from scorpio_pipe.contracts.validators import validate_calib_bias_triplet
 
-    return
+        validate_calib_bias_triplet(out_dir, stage=str(tinfo.key))
+    elif kind == "calib_flat":
+        from scorpio_pipe.contracts.validators import validate_calib_flat
+
+        validate_calib_flat(out_dir, stage=str(tinfo.key))
+    elif kind == "calib_neon":
+        from scorpio_pipe.contracts.validators import validate_calib_neon
+
+        validate_calib_neon(out_dir, stage=str(tinfo.key))
+
+# Validate exactly the declared product keys for this stage.
+    try:
+        from scorpio_pipe.catalog.products import CATALOG as PRODUCT_CATALOG
+
+        PRODUCT_CATALOG.validate_products(
+            cfg,
+            stage_key=str(tinfo.key),
+            product_keys=tuple(tinfo.product_keys or ()),
+            run_root=Path(out_dir),
+        )
+    except Exception:
+        # Raise into the engine wrapper (it will wrap non-ProductContractError into ProductContractError)
+        raise
 
 
 
 def canonical_task_name(name: str) -> str:
-    n = (name or "").strip().lower()
-    # tolerate old naming
-    aliases = {
-        # P0-C1 naming
-        "bias_combine": "superbias",
-        "masterbias": "superbias",
-        "wavesol": "wavesolution",
-        "wavesol2d": "wavesolution",
-        "wavelength_solution": "wavesolution",
-        "lineid": "lineid_prepare",
-        "qc": "qc_report",
-        "nav": "navigator",
-        "navigator": "navigator",
-    }
-    return aliases.get(n, n)
+    return STAGE_CATALOG.canonical_task_name(name)
 
 
-def _task_label(task: str) -> str:
+def _stage_label(task: str) -> str:
     """Human-friendly label for logs.
 
-    If the task maps to a stage, returns e.g. ``10 Sky Subtraction [sky]``.
-    Otherwise returns the raw task name.
+    Uses StageCatalog for stage numbering when available.
     """
 
-    t = (task or "").strip().lower()
+    t = canonical_task_name(task)
     try:
-        st = REGISTRY.get(t)
-        return f"{st.title} [{t}]"
+        label = STAGE_CATALOG.task_label(t)
     except Exception:
-        return t
+        label = t
+    return f"{label} [{t}]"
+
 
 
 def _stage_cfg_for_hash(cfg: dict[str, Any], task: str) -> dict[str, Any]:
@@ -868,7 +602,7 @@ def _input_paths_for_hash(cfg: dict[str, Any], task: str, out_dir: Path) -> list
 
     wd = Path(out_dir)
     layout = ensure_work_layout(wd)
-    wsol = wavesol_dir(cfg)
+    wsol = wavesol_dir(cfg, run_root=wd)
 
     def _first_existing(*cands: Path) -> Path:
         for c in cands:
@@ -1028,6 +762,7 @@ def plan_sequence(
         if not isinstance(cfg_or_path, dict)
         else cfg_or_path
     )
+    cfg = apply_performance_profile(cfg)
     work_dir = resolve_work_dir(cfg)
 
     # P0-B3: reference context is part of provenance and affects stage hashing.
@@ -1078,6 +813,9 @@ def run_sequence(
     resume: bool = True,
     force: bool = False,
     qc_override: bool = False,
+    preflight_override: bool = False,
+    preflight_override_reason: str | None = None,
+    preflight_override_source: str | None = None,
     cancel_token: CancelToken | None = None,
     config_path: Path | None = None,
 ) -> dict[str, Any]:
@@ -1098,6 +836,21 @@ def run_sequence(
         load_config_any(cfg_or_path)
         if not isinstance(cfg_or_path, dict)
         else cfg_or_path
+    )
+    cfg = apply_performance_profile(cfg)
+
+    # ------------------------------------------------------------------
+    # P0-ARCH-04.1: fail-fast typed config validation.
+    # Must happen before any heavy computation / stage execution.
+    # ------------------------------------------------------------------
+    _ = build_typed_config(
+        cfg,
+        config_path=str(
+            config_path
+            or cfg.get("config_path")
+            or (str(cfg_or_path) if isinstance(cfg_or_path, (str, Path)) else "")
+        )
+        or None,
     )
 
     work_dir = resolve_work_dir(cfg)
@@ -1134,12 +887,33 @@ def run_sequence(
     try:
         from scorpio_pipe.preflight import ensure_preflight
 
+        def _record_preflight_override(pf_status: str) -> None:
+            """Record explicit preflight override in provenance.
+
+            Must be best-effort only: never block execution.
+            """
+
+            try:
+                from scorpio_pipe.preflight import write_preflight_override
+
+                write_preflight_override(
+                    out_dir,
+                    status=pf_status,
+                    reason=preflight_override_reason,
+                    source=preflight_override_source,
+                )
+            except Exception:
+                pass
+
         pf = ensure_preflight(cfg, out_dir)
         if str((pf or {}).get("status") or "").upper() == "ERROR":
-            raise RuntimeError(
-                "Preflight gate blocked run (status=ERROR). "
-                f"See: {out_dir / 'manifest' / 'preflight_report.json'}"
-            )
+            if bool(preflight_override):
+                _record_preflight_override("ERROR")
+            else:
+                raise RuntimeError(
+                    "Preflight gate blocked run (status=ERROR). "
+                    f"See: {out_dir / 'manifest' / 'preflight_report.json'}"
+                )
     except RuntimeError:
         raise
     except Exception as e:
@@ -1398,6 +1172,18 @@ def run_sequence(
     plan = plan_sequence(
         cfg, task_names, resume=resume, force=force, config_path=config_path
     )
+
+    def _update_artifact_index(task: str, *, stage_products: dict[str, str] | None = None) -> None:
+        """Best-effort: upsert manifest/artifact_index.json after a stage.
+
+        PERF-20.1: engine writes a product-based index to avoid UI os.walk scans.
+        Must never raise.
+        """
+
+        try:
+            _artifact_index_update_after_stage(dict(cfg), work_dir=out_dir, stage=str(task), stage_products=stage_products)
+        except Exception:
+            pass
     def _expected_hash(task: str) -> str:
         return compute_stage_hash(
             stage=task,
@@ -1408,7 +1194,7 @@ def run_sequence(
 
     for it in plan:
         if cancel_token is not None and cancel_token.cancelled:
-            log.warning("Cancelled before %s", _task_label(it.task))
+            log.warning("Cancelled before %s", _stage_label(it.task))
             _upsert_stage_done_json(it.task, status="cancelled", stage_hash=_expected_hash(it.task), reason="Cancelled", started_utc=datetime.now(timezone.utc).isoformat(), finished_utc=datetime.now(timezone.utc).isoformat(), duration_s=0.0)
             record_stage_result(
                 out_dir,
@@ -1418,11 +1204,22 @@ def run_sequence(
                 message="Cancelled",
                 trace=None,
             )
+            _update_artifact_index(it.task)
+            try:
+                from scorpio_pipe.qc.metrics_store import update_after_stage
+                update_after_stage(cfg, stage=it.task, status="cancelled", stage_hash=_expected_hash(it.task))
+            except Exception:
+                pass
+            try:
+                from scorpio_pipe.timings import append_timing
+                append_timing(work_dir=out_dir, stage=it.task, seconds=0.0, ok=False, extra={"cancelled": True})
+            except Exception:
+                pass
             break
 
         t = it.task
         if it.action == "skip":
-            log.info("Skip %s (%s)", _task_label(t), it.reason)
+            log.info("Skip %s (%s)", _stage_label(t), it.reason)
             results[t] = None
             try:
                 from scorpio_pipe.qc.metrics_store import update_after_stage
@@ -1430,12 +1227,16 @@ def run_sequence(
                 update_after_stage(cfg, stage=t, status="skipped", stage_hash=_expected_hash(t))
             except Exception:
                 pass
+            _update_artifact_index(t)
             _upsert_stage_done_json(t, status="skipped", stage_hash=_expected_hash(t), reason=str(it.reason or "skipped"), started_utc=datetime.now(timezone.utc).isoformat(), finished_utc=datetime.now(timezone.utc).isoformat(), duration_s=0.0)
+            try:
+                from scorpio_pipe.timings import append_timing
+                append_timing(work_dir=out_dir, stage=t, seconds=0.0, ok=True, extra={"skipped": True})
+            except Exception:
+                pass
             continue
 
-        fn = TASKS.get(t)
-        if fn is None:
-            raise KeyError(f"Unknown task: {t}")
+        fn = task_callable(t)
 
         # QC gate: block downstream execution if any upstream stage wrote ERROR/FATAL flags.
         try:
@@ -1453,6 +1254,17 @@ def run_sequence(
                 trace=None,
                 meta={"qc_override": bool(qc_override)},
             )
+            _update_artifact_index(t)
+            try:
+                from scorpio_pipe.qc.metrics_store import update_after_stage
+                update_after_stage(cfg, stage=t, status="blocked", stage_hash=_expected_hash(t), stage_metrics={"reason": ge.summary()})
+            except Exception:
+                pass
+            try:
+                from scorpio_pipe.timings import append_timing
+                append_timing(work_dir=out_dir, stage=t, seconds=0.0, ok=False, extra={"blocked": True, "reason": ge.summary()})
+            except Exception:
+                pass
             raise
         except Exception:
             # Never let gating crash the runner; it should only gate when data exists.
@@ -1465,51 +1277,104 @@ def run_sequence(
             reference_context_id=ref_context_id,
         )
 
-        log.info("Run %s...", _task_label(t))
+        log.info("Run %s...", _stage_label(t))
         t_start = time.time()
         started_utc = datetime.now(timezone.utc).isoformat()
+
+        # PERF-00.1: record per-stage resource metrics (CPU/RSS/IO) in timings + metrics.json.
+        timing_extra: dict[str, Any] = {}
+        stage_resources: dict[str, Any] = {}
+        ctx_metrics: dict[str, Any] = {}
+        res: Any = None
+        res_for_json: Any = None
+
         try:
-            res = _call_maybe_with_cancel(
-                fn,
-                cfg=cfg,
-                out_dir=out_dir,
-                config_path=config_path,
-                cancel_token=cancel_token,
-            )
-            results[t] = res
-            # Hard-fail boundary contract enforcement for produced products
-            try:
-                _validate_task_products(t, out_dir)
-            except ProductContractError as ce:
-                raise
-            except Exception as ce:
-                raise ProductContractError(stage=t, path="", code="CONTRACT", message=str(ce)) from ce
+            from scorpio_pipe.timings import timed_stage
+
+            with timed_stage(work_dir=out_dir, stage=t, extra=timing_extra):
+                mon = _StageResourceMonitor()
+                mon.start()
+                try:
+                    ctx = _make_stage_context(cfg, run_root=out_dir, task=t, cancel_token=cancel_token)
+                    if isinstance(getattr(ctx, "metrics", None), dict):
+                        ctx_metrics = dict(ctx.metrics)
+                        if ctx_metrics:
+                            timing_extra.update(ctx_metrics)
+                    res = _call_maybe_with_cancel(
+                        fn,
+                        ctx=ctx,
+                        cfg=cfg,
+                        out_dir=out_dir,
+                        config_path=config_path,
+                        cancel_token=cancel_token,
+                        preflight_override=bool(preflight_override),
+                        preflight_override_reason=preflight_override_reason,
+                        preflight_override_source=preflight_override_source,
+                    )
+                    if isinstance(getattr(ctx, "metrics", None), dict):
+                        ctx_metrics = dict(ctx.metrics)
+                        if ctx_metrics:
+                            timing_extra.update(ctx_metrics)
+                    # Normalize StageResult into a JSON-friendly dict.
+                    res_for_json = res.as_dict() if isinstance(res, StageResult) else res
+                    results[t] = res_for_json
+
+                    # If a stage returns an explicit failure, convert it into an exception.
+                    if isinstance(res, StageResult) and str(res.status) == "fail":
+                        raise RuntimeError(
+                            f"Stage reported failure: {res.error_code or 'FAIL'}: {res.error_message or ''}".strip()
+                        )
+
+                    # Hard-fail boundary contract enforcement for produced products.
+                    try:
+                        _validate_task_products(cfg, t, out_dir)
+                    except ProductContractError as ce:
+                        raise
+                    except Exception as ce:
+                        raise ProductContractError(stage=t, path="", code="CONTRACT", message=str(ce)) from ce
+                finally:
+                    stage_resources = mon.stop() or {}
+                    if stage_resources:
+                        timing_extra.update(stage_resources)
 
             finished_utc = datetime.now(timezone.utc).isoformat()
             duration_s = float(max(0.0, time.time() - t_start))
+            done_status = "ok"
+            if isinstance(res, StageResult) and str(res.status) == "warn":
+                done_status = "warn"
             _upsert_stage_done_json(
                 t,
-                status="ok",
+                status=done_status,
                 stage_hash=stage_hash,
                 started_utc=started_utc,
                 finished_utc=finished_utc,
                 duration_s=duration_s,
-                res_obj=res,
+                res_obj=res_for_json,
             )
 
+            meta = {"qc_override": bool(qc_override)} if qc_override else None
+            if isinstance(res, StageResult) and str(res.status) == "warn":
+                meta = dict(meta or {})
+                meta["warn"] = True
             record_stage_result(
                 out_dir,
                 t,
-                status="ok",
+                status="ok" if done_status in ("ok", "warn") else str(done_status),
                 stage_hash=stage_hash,
                 message=None,
                 trace=None,
-                meta={"qc_override": bool(qc_override)} if qc_override else None,
+                meta=meta,
             )
+            # PERF-20.1: upsert artifact_index.json using stage-reported products when possible.
+            try:
+                stage_prods = res.products if isinstance(res, StageResult) else None
+            except Exception:
+                stage_prods = None
+            _update_artifact_index(t, stage_products=stage_prods)
             try:
                 # UI session + history snapshot (P1-G UI-020).
                 try:
-                    from scorpio_pipe.ui.session_store import snapshot, update_stage
+                    from scorpio_pipe.pipeline.session_store import snapshot, update_stage
                     from scorpio_pipe.workspace_paths import stage_dir
 
                     done_name_map = {
@@ -1540,7 +1405,7 @@ def run_sequence(
                         out_dir,
                         t,
                         cfg_section=stage_cfg_obj,
-                        done_path=str(done_path) if done_path else None,
+                        done_json_rel=str(done_path) if done_path else None,
                         status="ok",
                     )
                     snapshot(out_dir, reason=f"stage_{t}_ok")
@@ -1552,25 +1417,29 @@ def run_sequence(
                     update_after_stage,
                 )
 
-                stage_metrics = None
-                if isinstance(res, dict):
-                    stage_metrics = {}
-                    for k, v in res.items():
+                # Stage metrics: merge stage-returned scalar metrics (if any) with resource metrics.
+                stage_metrics: dict[str, Any] = {}
+                if isinstance(res_for_json, dict):
+                    for k, v in res_for_json.items():
                         # Store numeric scalars (+ a few small categorical values), but skip file paths.
-                        if k.endswith(
-                            ("_fits", "_png", "_csv", "_json", "_txt", "_dir")
-                        ):
+                        if str(k).endswith(("_fits", "_png", "_csv", "_json", "_txt", "_dir")):
                             continue
                         if isinstance(v, (int, float, bool)):
                             stage_metrics[k] = v
                         elif isinstance(v, str) and k in {"model2d_kind"}:
                             stage_metrics[k] = v
+
+                if ctx_metrics:
+                    stage_metrics.update(ctx_metrics)
+                if stage_resources:
+                    stage_metrics.update(stage_resources)
+
                 update_after_stage(
                     cfg,
                     stage=t,
                     status="ok",
                     stage_hash=stage_hash,
-                    stage_metrics=stage_metrics,
+                    stage_metrics=stage_metrics or None,
                 )
                 if t in ("manifest", "qc_report"):
                     mirror_qc_to_products(out_dir)
@@ -1603,10 +1472,16 @@ def run_sequence(
                 trace=tb,
                 meta={"qc_override": bool(qc_override)} if qc_override else None,
             )
+            # Even on failure, index whatever exists on disk (best-effort).
+            try:
+                stage_prods = res.products if isinstance(res, StageResult) else None
+            except Exception:
+                stage_prods = None
+            _update_artifact_index(t, stage_products=stage_prods)
             try:
                 # UI session + history snapshot (P1-G UI-020).
                 try:
-                    from scorpio_pipe.ui.session_store import snapshot, update_stage
+                    from scorpio_pipe.pipeline.session_store import snapshot, update_stage
 
                     update_stage(out_dir, t, status="failed", message=str(e))
                     snapshot(out_dir, reason=f"stage_{t}_failed")
@@ -1615,12 +1490,18 @@ def run_sequence(
 
                 from scorpio_pipe.qc.metrics_store import update_after_stage
 
+                stage_m: dict[str, Any] = {"error": str(e)}
+                if ctx_metrics:
+                    stage_m.update(ctx_metrics)
+                if stage_resources:
+                    stage_m.update(stage_resources)
+
                 update_after_stage(
                     cfg,
                     stage=t,
                     status="failed",
                     stage_hash=stage_hash,
-                    stage_metrics={"error": str(e)},
+                    stage_metrics=stage_m,
                 )
             except Exception:
                 pass

@@ -18,7 +18,7 @@ from typing import Any
 from PySide6 import QtCore, QtWidgets
 
 from scorpio_pipe.products import products_for_task, task_is_complete
-from scorpio_pipe.ui.pipeline_runner import TASKS
+from scorpio_pipe.pipeline.public_api import TASKS
 from scorpio_pipe.ui.outputs_panel import OutputsPanel
 
 

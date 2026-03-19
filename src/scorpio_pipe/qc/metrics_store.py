@@ -24,6 +24,7 @@ from scorpio_pipe.products import list_products, products_by_stage
 from scorpio_pipe.paths import resolve_work_dir
 from scorpio_pipe.version import PIPELINE_VERSION
 from scorpio_pipe.work_layout import ensure_work_layout
+from scorpio_pipe.io.atomic import atomic_write_json
 from scorpio_pipe.workspace_paths import stage_dir
 
 
@@ -72,7 +73,7 @@ def save_metrics(work_dir: str | Path, metrics: Mapping[str, Any]) -> Path:
     out = dict(metrics)
     out["updated_at"] = _utc_now()
     out.setdefault("pipeline_version", PIPELINE_VERSION)
-    p.write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
+    atomic_write_json(p, out)
     return p
 
 

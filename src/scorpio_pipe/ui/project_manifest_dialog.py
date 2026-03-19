@@ -158,6 +158,8 @@ class ProjectManifestDialog(QtWidgets.QDialog):
         self._add_role_tab("OBJECT_FRAMES", "Object")
         self._add_role_tab("SKY_FRAMES", "Sky")
         self._add_role_tab("SUNSKY_FRAMES", "Sunsky")
+        self._add_role_tab("STANDARD_FRAMES", "Standards")
+        self._add_role_tab("TELLURIC_STANDARD_FRAMES", "Telluric standards")
         self._add_role_tab("ARCS", "Arcs (Ne/Ar/He)")
         self._add_role_tab("FLATS", "Flats")
         self._add_role_tab("BIAS", "Bias")
@@ -244,6 +246,8 @@ class ProjectManifestDialog(QtWidgets.QDialog):
             "OBJECT_FRAMES": pm.object_frames,
             "SKY_FRAMES": pm.sky_frames,
             "SUNSKY_FRAMES": pm.sunsky_frames,
+            "STANDARD_FRAMES": pm.standard_frames,
+            "TELLURIC_STANDARD_FRAMES": pm.telluric_standard_frames,
             "ARCS": pm.arcs,
             "FLATS": pm.flats,
             "BIAS": pm.bias,
@@ -290,6 +294,8 @@ class ProjectManifestDialog(QtWidgets.QDialog):
             object_frames=_list_items(self._role_lists["OBJECT_FRAMES"]),
             sky_frames=_list_items(self._role_lists["SKY_FRAMES"]),
             sunsky_frames=_list_items(self._role_lists["SUNSKY_FRAMES"]),
+            standard_frames=_list_items(self._role_lists["STANDARD_FRAMES"]),
+            telluric_standard_frames=_list_items(self._role_lists["TELLURIC_STANDARD_FRAMES"]),
             arcs=_list_items(self._role_lists["ARCS"]),
             flats=_list_items(self._role_lists["FLATS"]),
             bias=_list_items(self._role_lists["BIAS"]),
@@ -439,6 +445,8 @@ class ProjectManifestDialog(QtWidgets.QDialog):
             object_frames=df.loc[df["kind"].astype(str) == "obj", "path"].astype(str).tolist(),
             sky_frames=cur_sky,
             sunsky_frames=df.loc[df["kind"].astype(str) == "sunsky", "path"].astype(str).tolist(),
+            standard_frames=[],
+            telluric_standard_frames=[],
             arcs=df.loc[df["kind"].astype(str) == "neon", "path"].astype(str).tolist(),
             flats=df.loc[df["kind"].astype(str) == "flat", "path"].astype(str).tolist(),
             bias=df.loc[df["kind"].astype(str) == "bias", "path"].astype(str).tolist(),

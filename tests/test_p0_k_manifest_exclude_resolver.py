@@ -13,7 +13,7 @@ def test_p0_k_resolve_global_exclude_expands_files_and_globs(tmp_path: Path):
     (tmp_path / "sub" / "c.fits").write_text("x", encoding="utf-8")
 
     (tmp_path / "project_manifest.yaml").write_text(
-        """schema: scorpio-pipe.project-manifest.v1.1
+        """schema: scorpio-pipe.project-manifest.v1.2
 exclude:
   files: [b.fits]
   globs: [sub/*.fits, missing/*.fits]

@@ -444,7 +444,7 @@ work/
 
 \- `work/qc/index.html`, `work/qc/qc\_report.json` — отчёт
 
-\- `work/qc/timings.json` — тайминги стадий
+\- `work/manifest/timings.jsonl` — тайминги стадий (append-only JSONL)
 
 
 
@@ -1040,7 +1040,7 @@ work/
 
 \- `work/qc/index.html`, `work/qc/qc\_report.json` — отчёт
 
-\- `work/qc/timings.json` — тайминги стадий
+\- `work/manifest/timings.jsonl` — тайминги стадий (append-only JSONL)
 
 
 

@@ -30,12 +30,14 @@ JSON.
 import hashlib
 import json
 import math
+from datetime import datetime, timezone
 from pathlib import Path
 from statistics import median
 from typing import Any, Iterable, Mapping
 
 from scorpio_pipe.exclude_policy import resolve_exclude_set, resolve_data_dir
-from scorpio_pipe.metadata import HeaderContractError, FrameMeta, parse_frame_meta
+from scorpio_pipe.metadata import HeaderContractError, FrameMeta
+from scorpio_pipe.metadata.fits_cache import get_frame_meta, get_header_and_frame_meta, get_header_fields
 from scorpio_pipe.version import PIPELINE_VERSION
 
 
@@ -75,6 +77,46 @@ def _write_json(path: Path, obj: Any) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(_json_dumps(obj), encoding="utf-8")
     return path
+
+
+def write_preflight_override(
+    run_root: Path,
+    *,
+    status: str,
+    reason: str | None = None,
+    source: str | None = None,
+) -> Path:
+    """Write a provenance record for an explicit preflight override.
+
+    This is intentionally stored *separately* from deterministic preflight
+    artifacts, so that ``preflight_report.json`` remains byte-stable for the
+    same inputs.
+    """
+
+    run_root = Path(run_root)
+    p = run_root / "manifest" / "preflight_override.json"
+    payload: dict[str, Any] = {
+        "schema": 1,
+        "status": str(status or "").upper(),
+        "reason": str(reason or "").strip() or None,
+        "source": str(source or "").strip() or None,
+        "ack_utc": datetime.now(timezone.utc).isoformat(),
+        "report_path": "manifest/preflight_report.json",
+        "pipeline_version": PIPELINE_VERSION,
+    }
+
+    # Best-effort embed of the gate summary.
+    try:
+        rep_p = run_root / "manifest" / "preflight_report.json"
+        if rep_p.exists():
+            rep = json.loads(rep_p.read_text(encoding="utf-8", errors="replace"))
+            if isinstance(rep, dict):
+                payload["preflight_status"] = rep.get("status")
+                payload["reasons"] = rep.get("reasons", [])
+    except Exception:
+        pass
+
+    return _write_json(p, payload)
 
 
 def _safe_float(v: Any) -> float | None:
@@ -146,18 +188,20 @@ def _iter_fits_paths(data_dir: Path, *, recursive: bool = True) -> list[Path]:
 
 
 def _read_header(path: Path) -> Mapping[str, Any]:
-    try:
-        from astropy.io import fits  # type: ignore
-    except Exception as e:
-        raise ImportError(
-            "Astropy is required for preflight FITS scanning. Install with: pip install astropy"
-        ) from e
-    return fits.getheader(path, 0, memmap=False)
+    # Primary-header cache keyed by (path, mtime, size): avoids repeated FITS opens
+    # across preflight / inspect / dataset builder sessions.
+    return get_header_fields(path)
 
 
-def _read_frame_meta(hdr: Mapping[str, Any]) -> FrameMeta:
+def _read_frame_meta(path: Path, hdr: Mapping[str, Any] | None = None) -> FrameMeta:
     # Strict required keys: quarantine on violation.
-    return parse_frame_meta(hdr, strict=True)
+    # Use the shared FITS metadata cache so repeated scans do not re-open files.
+    _ = hdr
+    return get_frame_meta(path, strict=True)
+
+
+def _read_header_and_frame_meta(path: Path) -> tuple[Mapping[str, Any], FrameMeta]:
+    return get_header_and_frame_meta(path, strict=True)
 
 
 def _read_frame_signature(hdr: Mapping[str, Any], meta: FrameMeta | None) -> Any:
@@ -257,7 +301,25 @@ def run_preflight(
         sig: Any | None = None
         if not excluded:
             try:
-                hdr = _read_header(p_abs)
+                hdr, meta = _read_header_and_frame_meta(p_abs)
+            except HeaderContractError as e:
+                try:
+                    hdr = _read_header(p_abs)
+                except Exception:
+                    hdr = None
+                ctx: dict[str, Any] = {"path": rel}
+                if getattr(e, "missing_keys", None):
+                    ctx["missing_keys"] = list(getattr(e, "missing_keys"))
+                if getattr(e, "instrument", None):
+                    ctx["instrument"] = str(getattr(e, "instrument"))
+                issues.append(
+                    _issue(
+                        RC_HEADER_CONTRACT_ERROR,
+                        "ERROR",
+                        str(e),
+                        context=ctx,
+                    )
+                )
             except Exception as e:
                 issues.append(
                     _issue(
@@ -267,32 +329,6 @@ def run_preflight(
                         context={"path": rel, "error": str(e)},
                     )
                 )
-            if hdr is not None:
-                try:
-                    meta = _read_frame_meta(hdr)
-                except HeaderContractError as e:
-                    ctx: dict[str, Any] = {"path": rel}
-                    if getattr(e, "missing_keys", None):
-                        ctx["missing_keys"] = list(getattr(e, "missing_keys"))
-                    if getattr(e, "instrument", None):
-                        ctx["instrument"] = str(getattr(e, "instrument"))
-                    issues.append(
-                        _issue(
-                            RC_HEADER_CONTRACT_ERROR,
-                            "ERROR",
-                            str(e),
-                            context=ctx,
-                        )
-                    )
-                except Exception as e:
-                    issues.append(
-                        _issue(
-                            RC_META_PARSE_ERROR,
-                            "ERROR",
-                            "Unexpected error while parsing metadata.",
-                            context={"path": rel, "error": str(e)},
-                        )
-                    )
             if hdr is not None and meta is not None:
                 # Record soft problems as WARN (not quarantining by themselves).
                 if getattr(meta, "meta_missing_optional", None):

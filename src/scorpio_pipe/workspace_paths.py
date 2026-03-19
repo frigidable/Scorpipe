@@ -123,7 +123,10 @@ def stage_dir(run_root: str | Path, stage_key: str) -> Path:
 
     rr = Path(run_root)
     base = _stage_base(rr)
-    canonical = base / REGISTRY.dir_name(stage_key)
+    try:
+        canonical = base / REGISTRY.dir_name(stage_key)
+    except Exception:
+        canonical = base / str(stage_key)
 
     legacy = _find_legacy_stage_dir(rr, stage_key, canonical)
     return legacy or canonical

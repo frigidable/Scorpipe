@@ -21,6 +21,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -51,9 +54,216 @@ from scorpio_pipe.workspace_paths import stage_dir
 from scorpio_pipe.compare_cache import build_stage_diff, snapshot_stage
 from scorpio_pipe.io.atomic import atomic_write_json
 from scorpio_pipe.io.quicklook import quicklook_from_mef
+from scorpio_pipe.adapters.parallel_map import parallel_map
 
 log = get_logger(__name__)
 
+
+@dataclass(frozen=True)
+class _LinearizeRowPlan:
+    finite_idx: np.ndarray
+    src_idx: np.ndarray
+    weights: np.ndarray
+    weights_sq: np.ndarray
+    starts: np.ndarray
+    counts: np.ndarray
+
+
+@dataclass(frozen=True)
+class _LinearizeGridPlan:
+    rows: tuple[_LinearizeRowPlan | None, ...]
+    nout: int
+
+
+_LINEARIZE_GRID_CACHE_LOCK = threading.RLock()
+_LINEARIZE_GRID_CACHE: OrderedDict[tuple[Any, ...], _LinearizeGridPlan] = OrderedDict()
+
+
+def _linearize_grid_cache_enabled() -> bool:
+    raw = str(os.getenv("SCORPIPE_LINEARIZE_GRID_CACHE", "1")).strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _linearize_grid_cache_max_items() -> int:
+    raw = os.getenv("SCORPIPE_LINEARIZE_GRID_CACHE_ITEMS", "2")
+    try:
+        return max(1, int(raw))
+    except Exception:
+        return 2
+
+
+def _reduce_bins(flat: np.ndarray, starts: np.ndarray, counts: np.ndarray, nout: int) -> np.ndarray:
+    out = np.zeros(int(nout), dtype=float)
+    if flat.size == 0 or starts.size == 0 or counts.size == 0:
+        return out
+    nz = counts > 0
+    if not np.any(nz):
+        return out
+    out[nz] = np.add.reduceat(np.asarray(flat, dtype=float), starts[nz])
+    return out
+
+
+def _build_linearize_row_plan(lam_row: np.ndarray, edges_out: np.ndarray) -> _LinearizeRowPlan | None:
+    finite_idx = np.flatnonzero(np.isfinite(lam_row))
+    if finite_idx.size < 8 or edges_out.size < 2:
+        return None
+
+    lam_use = np.asarray(lam_row[finite_idx], dtype=float)
+    lam_m, rev = _monotonicize_lambda_centers(lam_use)
+    if rev:
+        finite_idx = finite_idx[::-1]
+
+    edges_in = _lambda_edges(lam_m)
+    widths = np.diff(edges_in)
+    nb = int(edges_out.size - 1)
+
+    starts = np.zeros(nb, dtype=np.int32)
+    counts = np.zeros(nb, dtype=np.int32)
+    src_idx_list: list[int] = []
+    weights_list: list[float] = []
+
+    i = 0
+    n = int(finite_idx.size)
+    flat_pos = 0
+    for j in range(nb):
+        starts[j] = int(flat_pos)
+        lo = float(edges_out[j])
+        hi = float(edges_out[j + 1])
+        while i < n and float(edges_in[i + 1]) <= lo:
+            i += 1
+        ii = i
+        bin_w = hi - lo
+        if not np.isfinite(bin_w) or bin_w <= 0:
+            continue
+        while ii < n and float(edges_in[ii]) < hi:
+            w_i = float(widths[ii]) if ii < widths.size else 0.0
+            if w_i > 0 and np.isfinite(w_i):
+                a = float(edges_in[ii])
+                b = float(edges_in[ii + 1])
+                overlap = min(hi, b) - max(lo, a)
+                if overlap > 0:
+                    src_idx_list.append(int(ii))
+                    weights_list.append(float(overlap / bin_w))
+                    counts[j] += 1
+                    flat_pos += 1
+            ii += 1
+
+    src_idx = np.asarray(src_idx_list, dtype=np.int32)
+    weights = np.asarray(weights_list, dtype=np.float64)
+    return _LinearizeRowPlan(
+        finite_idx=np.asarray(finite_idx, dtype=np.int32),
+        src_idx=src_idx,
+        weights=weights,
+        weights_sq=np.square(weights, dtype=np.float64),
+        starts=starts,
+        counts=counts,
+    )
+
+
+def _build_linearize_grid_plan(lam_map: np.ndarray, edges_out: np.ndarray) -> _LinearizeGridPlan:
+    rows = tuple(_build_linearize_row_plan(lam_map[yy], edges_out) for yy in range(int(lam_map.shape[0])))
+    return _LinearizeGridPlan(rows=rows, nout=max(int(edges_out.size - 1), 0))
+
+
+def _get_linearize_grid_plan(
+    lam_map: np.ndarray,
+    *,
+    edges_out: np.ndarray,
+    frame_signature_key: str,
+    lambda_map_key: str,
+    wave0: float,
+    dw: float,
+    nlam: int,
+) -> tuple[_LinearizeGridPlan, bool]:
+    cache_key = (
+        str(frame_signature_key),
+        str(lambda_map_key),
+        int(lam_map.shape[0]),
+        int(lam_map.shape[1]),
+        float(wave0),
+        float(dw),
+        int(nlam),
+    )
+    if _linearize_grid_cache_enabled():
+        with _LINEARIZE_GRID_CACHE_LOCK:
+            cached = _LINEARIZE_GRID_CACHE.get(cache_key)
+            if cached is not None:
+                _LINEARIZE_GRID_CACHE.move_to_end(cache_key)
+                return cached, True
+
+    plan = _build_linearize_grid_plan(lam_map, edges_out)
+    if _linearize_grid_cache_enabled():
+        with _LINEARIZE_GRID_CACHE_LOCK:
+            _LINEARIZE_GRID_CACHE[cache_key] = plan
+            _LINEARIZE_GRID_CACHE.move_to_end(cache_key)
+            while len(_LINEARIZE_GRID_CACHE) > _linearize_grid_cache_max_items():
+                _LINEARIZE_GRID_CACHE.popitem(last=False)
+    return plan, False
+
+
+def clear_linearize_grid_cache() -> None:
+    with _LINEARIZE_GRID_CACHE_LOCK:
+        _LINEARIZE_GRID_CACHE.clear()
+
+
+def _apply_linearize_row_plan(
+    values: np.ndarray,
+    row_plan: _LinearizeRowPlan,
+    *,
+    valid_mask: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    vals = np.asarray(values, dtype=float)[row_plan.finite_idx]
+    if valid_mask is None:
+        valid = np.ones(vals.shape, dtype=bool)
+    else:
+        valid = np.asarray(valid_mask, dtype=bool)[row_plan.finite_idx]
+        if valid.shape != vals.shape:
+            raise ValueError('valid_mask must have same shape as values')
+
+    src_idx = row_plan.src_idx
+    src_valid = valid[src_idx] & np.isfinite(vals[src_idx])
+    contrib = np.where(src_valid, vals[src_idx] * row_plan.weights, 0.0)
+    out = _reduce_bins(contrib, row_plan.starts, row_plan.counts, row_plan.counts.size)
+
+    cov_contrib = np.where(valid[src_idx], row_plan.weights, 0.0)
+    cov = _reduce_bins(cov_contrib, row_plan.starts, row_plan.counts, row_plan.counts.size)
+    cov = np.clip(cov, 0.0, 1.0)
+    return out.astype(float), cov.astype(float)
+
+
+def _apply_linearize_row_plan_var(
+    var_in: np.ndarray,
+    row_plan: _LinearizeRowPlan,
+    *,
+    valid_mask: np.ndarray | None = None,
+) -> np.ndarray:
+    vals = np.asarray(var_in, dtype=float)[row_plan.finite_idx]
+    if valid_mask is None:
+        valid = np.ones(vals.shape, dtype=bool)
+    else:
+        valid = np.asarray(valid_mask, dtype=bool)[row_plan.finite_idx]
+        if valid.shape != vals.shape:
+            raise ValueError('valid_mask must have same shape as var_in')
+
+    src_idx = row_plan.src_idx
+    src_valid = valid[src_idx] & np.isfinite(vals[src_idx]) & (vals[src_idx] >= 0)
+    contrib = np.where(src_valid, vals[src_idx] * row_plan.weights_sq, 0.0)
+    out = _reduce_bins(contrib, row_plan.starts, row_plan.counts, row_plan.counts.size)
+    return out.astype(float)
+
+
+def _apply_linearize_row_plan_maskbit(mask_row: np.ndarray, row_plan: _LinearizeRowPlan, bit: int) -> np.ndarray:
+    vals = ((np.asarray(mask_row)[row_plan.finite_idx].astype(np.uint16) & np.uint16(bit)) > 0)
+    src_idx = row_plan.src_idx
+    contrib = np.where(vals[src_idx], row_plan.weights, 0.0)
+    return _reduce_bins(contrib, row_plan.starts, row_plan.counts, row_plan.counts.size) > 0
+
+
+def _apply_linearize_row_plan_bool(mask_row: np.ndarray, row_plan: _LinearizeRowPlan) -> np.ndarray:
+    vals = np.asarray(mask_row, dtype=bool)[row_plan.finite_idx]
+    src_idx = row_plan.src_idx
+    contrib = np.where(vals[src_idx], row_plan.weights, 0.0)
+    return _reduce_bins(contrib, row_plan.starts, row_plan.counts, row_plan.counts.size) > 0
 
 
 def _read_lambda_map_meta(hdr: fits.Header, lam_map: np.ndarray) -> tuple[str, str, str]:
@@ -1369,6 +1579,332 @@ def _robust_stack_sigma_clip(
         _close_rectified_handles(handles)
 
 
+
+
+def _process_linearize_frame(task: Dict[str, Any]) -> Dict[str, Any]:
+    p = Path(str(task["path"]))
+    lam_map = np.asarray(task["lam_map"], dtype=np.float64)
+    linearize_grid_plan: _LinearizeGridPlan = task["linearize_grid_plan"]
+    ny = int(task["ny"])
+    nlam = int(task["nlam"])
+    y0 = int(task["y0"])
+    y1 = int(task["y1"])
+    mask_dir = Path(str(task["mask_dir"]))
+    lcfg = dict(task.get("lcfg") or {})
+    cfg = dict(task.get("cfg") or {})
+    gain_override_f = task.get("gain_override_f")
+    rdnoise_override_f = task.get("rdnoise_override_f")
+    scale_to_bin = bool(task.get("scale_to_bin", False))
+    normalize_exptime = bool(task.get("normalize_exptime", False))
+    wave0 = float(task["wave0"])
+    dw = float(task["dw"])
+    unit = str(task.get("unit", "Angstrom"))
+
+    data, var_in, mask_in, hdr = _open_science_with_optional_var_mask(p)
+    if data.ndim != 2:
+        raise ValueError(f"Science frame must be 2D: {p}")
+    data = data[y0:y1, :]
+    if data.shape != lam_map.shape:
+        raise ValueError(
+            f"Science shape {data.shape} != lambda_map shape {lam_map.shape} for {p.name}"
+        )
+
+    mask = None
+    if mask_in is not None:
+        mask = np.asarray(mask_in, dtype=np.uint16)[y0:y1, :]
+
+    npar = resolve_noise_params(
+        hdr,
+        gain_override=gain_override_f,
+        rdnoise_override=rdnoise_override_f,
+    )
+    hdr.setdefault("GAIN", float(npar.gain_e_per_adu))
+    hdr.setdefault("RDNOISE", float(npar.rdnoise_e))
+    hdr.setdefault("NOISRC", str(npar.source))
+
+    if var_in is not None:
+        var = np.asarray(var_in, dtype=np.float64)[y0:y1, :]
+        var_source = "input"
+    else:
+        var_est, _npar2 = estimate_variance_adu2(
+            data,
+            hdr,
+            cfg=cfg,
+            gain_override=gain_override_f,
+            rdnoise_override=rdnoise_override_f,
+            require_gain=True,
+        )
+        var = np.asarray(var_est, dtype=np.float64)
+        var_source = "estimated"
+
+    data_e, var_e, hdr_e, prov, npar_e = ensure_electron_units(
+        data,
+        var,
+        hdr,
+        cfg=cfg,
+        gain_override=gain_override_f,
+        rdnoise_override=rdnoise_override_f,
+        require_gain=True,
+    )
+    data = np.asarray(data_e, dtype=np.float64)
+    var = np.asarray(var_e, dtype=np.float64)
+    hdr = hdr_e
+
+    bad_var = ~np.isfinite(var) | (var < 0)
+    if np.any(bad_var):
+        var = np.where(bad_var, 0.0, var)
+        if mask is None:
+            mask = np.zeros_like(var, dtype=np.uint16)
+        mask[bad_var] |= BADPIX
+
+    bad_sci = ~np.isfinite(data)
+    if np.any(bad_sci):
+        data = np.where(bad_sci, 0.0, data)
+        var = np.where(bad_sci, 0.0, var)
+        if mask is None:
+            mask = np.zeros_like(var, dtype=np.uint16)
+        mask[bad_sci] |= BADPIX
+
+    noise_meta = {
+        "path": str(p),
+        "var_source": var_source,
+        "gain_e_per_adu": float(npar.gain_e_per_adu),
+        "rdnoise_e": float(npar.rdnoise_e),
+        "noise_source": str(npar.source),
+    }
+
+    mask_saturation = bool(lcfg.get("mask_saturation", True))
+    sat_level = _guess_saturation_level_adu(hdr, lcfg) if mask_saturation else None
+    sat_margin = float(lcfg.get("saturation_margin_adu", 0.0) or 0.0)
+    satmask = None
+    if sat_level is not None and mask_saturation:
+        try:
+            thr = float(sat_level) - float(sat_margin)
+            if np.isfinite(thr):
+                satmask = np.isfinite(data) & (data >= thr)
+        except Exception:
+            satmask = None
+
+    base_for_mask = _raw_stem_from_path(Path(p))
+    mp = mask_dir / f"{base_for_mask}_mask.fits"
+    if mp.exists():
+        try:
+            m, _ = _open_fits_resilient(mp)
+            mm = np.asarray(m)
+            try:
+                mx = int(np.nanmax(mm)) if np.isfinite(mm).any() else 0
+            except Exception:
+                mx = 0
+            if mx <= 1:
+                cm = ((mm.astype(np.uint16) > 0).astype(np.uint16) * COSMIC).astype(np.uint16)
+            else:
+                cm = mm.astype(np.uint16)
+            cm = cm[y0:y1, :]
+            if mask is None:
+                mask = cm
+            else:
+                mask = np.asarray((mask | cm), dtype=np.uint16)
+        except Exception as e:
+            log.warning("Failed to load cosmic mask %s: %s", mp.name, e)
+
+    rect = np.zeros((ny, nlam), dtype=np.float32)
+    rect_var = np.zeros((ny, nlam), dtype=np.float32)
+    rect_mask = np.zeros((ny, nlam), dtype=np.uint16)
+    rect_cov = np.zeros((ny, nlam), dtype=np.float32)
+
+    for yy in range(ny):
+        row_plan = linearize_grid_plan.rows[yy]
+        if row_plan is None:
+            rect_mask[yy, :] |= NO_COVERAGE
+            continue
+        valid = np.isfinite(data[yy]) & np.isfinite(var[yy]) & (var[yy] >= 0)
+        if mask is not None:
+            valid &= ((mask[yy] & BADPIX) == 0)
+
+        v_row, cov = _apply_linearize_row_plan(
+            data[yy],
+            row_plan,
+            valid_mask=valid,
+        )
+        vv_row = _apply_linearize_row_plan_var(
+            var[yy],
+            row_plan,
+            valid_mask=valid,
+        )
+        rect[yy] = v_row
+        rect_var[yy] = np.maximum(vv_row, 0.0)
+        rect_cov[yy] = cov
+        rect_mask[yy, (cov > 0) & (cov < 0.999)] |= EDGE
+        rect_mask[yy, cov <= 0] |= NO_COVERAGE
+        if mask is not None:
+            for bit in (BADPIX, COSMIC, SATURATED, USER, REJECTED):
+                rect_mask[yy, _apply_linearize_row_plan_maskbit(mask[yy], row_plan, bit)] |= bit
+
+        if satmask is not None:
+            rect_mask[yy, _apply_linearize_row_plan_bool(satmask[yy], row_plan)] |= SATURATED
+
+    if scale_to_bin:
+        rect *= float(dw)
+        rect_var *= float(dw) ** 2
+
+    exptime_s = _get_exptime_seconds(hdr)
+    if normalize_exptime:
+        if not (math.isfinite(exptime_s) and exptime_s > 0):
+            log.warning("EXPTIME missing/invalid in %s; using 1.0 s for normalization", p.name)
+            exptime_s = 1.0
+        rect /= float(exptime_s)
+        rect_var /= float(exptime_s) ** 2
+
+    roi_report: Dict[str, Any] = {"roi_source": "none", "roi_valid": False}
+    roi_flags: list[dict[str, Any]] = []
+    mask_sky_y = None
+    mask_obj_y = None
+    try:
+        from scorpio_pipe.sky_geometry import compute_sky_geometry, roi_from_cfg
+
+        roi = roi_from_cfg(cfg)
+        sky_cfg = cfg.get("sky", {}) if isinstance(cfg.get("sky"), dict) else {}
+        if not sky_cfg and isinstance(cfg.get("sky_sub"), dict):
+            sky_cfg = cfg.get("sky_sub") or {}
+        gcfg = sky_cfg.get("geometry") if isinstance(sky_cfg.get("geometry"), dict) else {}
+
+        fatal_bits = int(NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED)
+        geom = compute_sky_geometry(
+            rect,
+            rect_var,
+            rect_mask,
+            roi=roi,
+            roi_policy=str(gcfg.get("roi_policy", "prefer_user")),
+            fatal_bits=fatal_bits,
+            edge_margin_px=int(gcfg.get("edge_margin_px", 16) or 16),
+            profile_x_percentile=float(gcfg.get("profile_x_percentile", 50.0) or 50.0),
+            thresh_sigma=float(gcfg.get("thresh_sigma", 3.0) or 3.0),
+            dilation_px=int(gcfg.get("dilation_px", 3) or 3),
+            min_obj_width_px=int(gcfg.get("min_obj_width_px", 6) or 6),
+            min_sky_width_px=int(gcfg.get("min_sky_width_px", 12) or 12),
+        )
+        mask_sky_y = np.asarray(geom.mask_sky_y, dtype=bool)
+        mask_obj_y = np.asarray(geom.mask_obj_y, dtype=bool)
+        roi_report = dict(geom.roi_used)
+        roi_metrics = dict(geom.metrics)
+        roi_report["sky_contamination_metric"] = roi_metrics.get("sky_contamination_metric")
+        roi_flags = list(roi_metrics.get("flags") or [])
+    except Exception:
+        band = max(8, int(0.15 * rect.shape[0]))
+        mask_sky_y = np.zeros(rect.shape[0], dtype=bool)
+        mask_sky_y[:band] = True
+        mask_sky_y[max(0, rect.shape[0] - band):] = True
+        mid = rect.shape[0] // 2
+        obj_half = max(3, int(0.125 * rect.shape[0]))
+        mask_obj_y = np.zeros(rect.shape[0], dtype=bool)
+        mask_obj_y[max(0, mid - obj_half): min(rect.shape[0], mid + obj_half + 1)] = True
+
+    ccfg = lcfg.get("cleanup") if isinstance(lcfg.get("cleanup"), dict) else {}
+    quiet_sky_percentile = float(ccfg.get("quiet_sky_percentile", 40.0) or 40.0)
+
+    sky_rows = np.where(np.asarray(mask_sky_y, dtype=bool))[0]
+    obj_rows = np.where(np.asarray(mask_obj_y, dtype=bool))[0]
+    fatal = NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED
+    good = (rect_mask & fatal) == 0
+    okv = np.isfinite(rect_var) & (rect_var > 0)
+
+    sky_metric_before = float("nan")
+    obj_metric_before = float("nan")
+    try:
+        sky_norm = rect[sky_rows, :]
+        sky_w = np.sqrt(rect_var[sky_rows, :])
+        m_sky = good[sky_rows, :] & okv[sky_rows, :] & np.isfinite(sky_norm) & np.isfinite(sky_w)
+        sky_metric_before = _robust_sigma_mad(
+            (sky_norm[m_sky] / sky_w[m_sky]) if m_sky.any() else np.array([], dtype=float)
+        )
+
+        quiet_cols = np.ones(rect.shape[1], dtype=bool)
+        try:
+            med_sky_col = np.nanmedian(np.where(m_sky, sky_norm, np.nan), axis=0)
+            a = np.abs(med_sky_col)
+            thr = float(
+                np.nanpercentile(a[np.isfinite(a)], quiet_sky_percentile)
+            ) if np.isfinite(a).sum() else float("nan")
+            if np.isfinite(thr):
+                quiet_cols = a <= thr
+            if quiet_cols.sum() < max(8, int(0.05 * rect.shape[1])):
+                quiet_cols = np.ones(rect.shape[1], dtype=bool)
+        except Exception:
+            quiet_cols = np.ones(rect.shape[1], dtype=bool)
+
+        obj = rect[obj_rows, :]
+        obj_w = np.sqrt(rect_var[obj_rows, :])
+        m_obj = good[obj_rows, :] & okv[obj_rows, :] & np.isfinite(obj) & np.isfinite(obj_w)
+        m_obj = m_obj & quiet_cols[None, :]
+        if m_obj.any():
+            obj_metric_before = float(np.nanmedian(obj[m_obj]))
+    except Exception:
+        pass
+
+    metrics_before = {
+        "sky_residual_metric": float(sky_metric_before) if np.isfinite(sky_metric_before) else None,
+        "object_risk_metric": float(obj_metric_before) if np.isfinite(obj_metric_before) else None,
+    }
+
+    sky_cfg = cfg.get("sky", {}) if isinstance(cfg.get("sky"), dict) else {}
+    if not sky_cfg and isinstance(cfg.get("sky_sub"), dict):
+        sky_cfg = cfg.get("sky_sub") or {}
+    cleanup_raw = lcfg.get(
+        "post_sky_cleanup", lcfg.get("sky_cleanup", sky_cfg.get("post_cleanup", "auto"))
+    )
+    post_cleanup = str(cleanup_raw).strip().lower()
+    if post_cleanup not in {"off", "auto", "on"}:
+        post_cleanup = "auto"
+
+    residual_model = None
+    cleanup_diag: Dict[str, Any] = {
+        "cleanup_requested": post_cleanup,
+        "cleanup_executed": False,
+        "cleanup_applied": False,
+        "cleanup_decision": "off" if post_cleanup == "off" else "auto_rejected",
+        "decision_reason": "off" if post_cleanup == "off" else "not_run",
+        "model_params": {},
+        "roi": roi_report,
+        "metrics_before": metrics_before,
+        "metrics_after": metrics_before,
+    }
+    if post_cleanup in {"on", "auto"}:
+        x = np.arange(rect.shape[1], dtype=np.float64)
+        lam_cent = wave0 + dw * (x + 0.5)
+        lam_cent_A = lam_cent * 10.0 if str(unit).lower() in {"nm", "nanometer", "nanometers"} else lam_cent
+        rect2, model2, diag2 = _post_rectified_sky_cleanup(
+            rect,
+            rect_var,
+            rect_mask,
+            cfg,
+            mode=post_cleanup,
+            lam_centers_A=np.asarray(lam_cent_A, dtype=np.float64),
+        )
+        cleanup_diag = dict(diag2)
+        cleanup_diag.setdefault("roi", roi_report)
+        rect = rect2
+        residual_model = model2
+
+    return {
+        "path": str(p),
+        "base_for_mask": base_for_mask,
+        "hdr": hdr,
+        "rect": rect,
+        "rect_var": rect_var,
+        "rect_mask": rect_mask,
+        "rect_cov": rect_cov,
+        "mask_sky_y": mask_sky_y,
+        "roi_report": roi_report,
+        "roi_flags": roi_flags,
+        "metrics_before": metrics_before,
+        "cleanup_diag": cleanup_diag,
+        "residual_model": residual_model,
+        "noise_meta": noise_meta,
+        "exptime_s": float(exptime_s),
+        "sat_level_adu": float(sat_level) if sat_level is not None else None,
+        "no_coverage_frac": float(np.mean((rect_mask & NO_COVERAGE) != 0)),
+    }
+
 def run_linearize(
     cfg: Dict[str, Any],
     out_dir: Optional[Path] = None,
@@ -1386,15 +1922,13 @@ def run_linearize(
       - 10_linearize/linearize_done.json
       - per-exposure rectified frames under 10_linearize/per_exp/
 
-    Backward compatibility:
-      - mirrors preview to work_dir/lin/obj_sum_lin.fits and work_dir/lin/obj_sum_lin.png
     """
     cfg = dict(cfg)
     work_dir = resolve_work_dir(cfg)
     if out_dir is None:
-        out_dir = stage_dir(work_dir, "linearize")
+        raise ValueError("linearize: out_dir is required (pass ctx.stage_dir)")
     out_dir = Path(out_dir)
-    # Canonical + legacy done markers (written even on failure)
+    # Canonical + legacy done markers
     done_json = out_dir / "done.json"
     done_json_legacy = out_dir / "linearize_done.json"
     payload: dict[str, Any] = {"stage": "linearize", "status": "fail"}
@@ -1655,10 +2189,12 @@ def run_linearize(
         # Validate that the wavelength solution applies to these frames (frame_signature).
         from scorpio_pipe.frame_signature import FrameSignature, format_signature_mismatch
 
+        frame_signature_key = f"shape={int(exp_shape[0])}x{int(exp_shape[1])}, bin=?, roi=?, readout=?"
         if rect_model is not None:
             fs = rect_model.get('frame_signature') if isinstance(rect_model, dict) else None
             if isinstance(fs, dict) and fs:
                 exp_sig = FrameSignature.from_setup(fs)
+                frame_signature_key = exp_sig.describe()
                 got_sig = FrameSignature.from_path(_resolve_input(obj_frames[0]))
                 if not got_sig.is_compatible_with(exp_sig):
                     raise ValueError(format_signature_mismatch(expected=exp_sig, got=got_sig, path=_resolve_input(obj_frames[0])))
@@ -1667,7 +2203,12 @@ def run_linearize(
                     raise ValueError(
                         f"Frame shape {got_sig.shape} does not match lambda_map shape {exp_shape}."
                     )
-
+                frame_signature_key = got_sig.describe()
+        elif obj_frames:
+            try:
+                frame_signature_key = FrameSignature.from_path(_resolve_input(obj_frames[0])).describe()
+            except Exception:
+                pass
 
 
         # Determine whether we are in the new (09_sky -> 10_linearize) layout.
@@ -1678,10 +2219,11 @@ def run_linearize(
         # and do NOT require a prior sky stage. New workspaces (v5.39+) require 09_sky products.
         is_new_layout = (not is_legacy)
         sky_root = stage_dir(work_dir, "sky")
-        if is_new_layout and not (sky_root.exists() and any(sky_root.glob("*_skysub_raw.fits"))):
+        sky_refine_root = stage_dir(work_dir, "sky_refine")
+        if is_new_layout and not ((sky_refine_root.exists() and any(sky_refine_root.glob("*_skysub_refined_raw.fits"))) or (sky_root.exists() and any(sky_root.glob("*_skysub_raw.fits")))):
             raise FileNotFoundError(
                 "Sky outputs not found for v5.39+ layout. "
-                f"Run stage {sky_root.name} first (expected {sky_root.name}/*_skysub_raw.fits)."
+                f"Run stage {sky_root.name} first (expected {sky_root.name}/*_skysub_raw.fits or sky_refine/*_skysub_refined_raw.fits)."
             )
 
         # Strict lambda_map validation (P1-B)
@@ -1698,8 +2240,15 @@ def run_linearize(
         for fp in obj_frames:
             raw_p = _resolve_input(fp)
             stem = raw_p.stem
+            sky_refined_p = sky_refine_root / f"{stem}_skysub_refined_raw.fits"
+            sky_corr_p = sky_refine_root / f"{stem}_skycorr_raw.fits"
             sky_p = sky_root / f"{stem}_skysub_raw.fits"
             sky_model_p = sky_root / f"{stem}_skymodel_raw.fits"
+
+            if sky_refined_p.exists():
+                sci_paths.append(sky_refined_p)
+                model_paths.append(sky_corr_p if sky_corr_p.exists() else (sky_model_p if sky_model_p.exists() else None))
+                continue
 
             if sky_p.exists():
                 sci_paths.append(sky_p)
@@ -1946,6 +2495,17 @@ def run_linearize(
         lam_map = lam_map[y0:y1, :]
         ny = lam_map.shape[0]
 
+        lambda_map_cache_key = str(lambda_map_sha256 or lam_path.resolve())
+        linearize_grid_plan, linearize_grid_cache_hit = _get_linearize_grid_plan(
+            lam_map,
+            edges_out=wave_edges,
+            frame_signature_key=frame_signature_key,
+            lambda_map_key=lambda_map_cache_key,
+            wave0=float(wave0),
+            dw=float(dw),
+            nlam=int(nlam),
+        )
+
         per_exp_dir = out_dir / "per_exp" if save_per_exp else None
         if per_exp_dir is not None:
             per_exp_dir.mkdir(parents=True, exist_ok=True)
@@ -2000,344 +2560,74 @@ def run_linearize(
         )
         noise_meta: list[dict[str, Any]] = []
 
-        for i, p in enumerate(sci_paths, 1):
+        perf_cfg = lcfg.get("perf") if isinstance(lcfg.get("perf"), dict) else {}
+        frame_parallel_backend = str(perf_cfg.get("backend", "thread") or "thread").strip().lower()
+        frame_parallel_n_jobs = perf_cfg.get("n_jobs")
+        frame_tasks: list[dict[str, Any]] = [
+            {
+                "path": str(p),
+                "lam_map": lam_map,
+                "linearize_grid_plan": linearize_grid_plan,
+                "ny": int(ny),
+                "nlam": int(nlam),
+                "y0": int(y0),
+                "y1": int(y1),
+                "mask_dir": str(mask_dir),
+                "lcfg": lcfg,
+                "cfg": cfg,
+                "gain_override_f": gain_override_f,
+                "rdnoise_override_f": rdnoise_override_f,
+                "scale_to_bin": bool(scale_to_bin),
+                "normalize_exptime": bool(normalize_exptime),
+                "wave0": float(wave0),
+                "dw": float(dw),
+                "unit": str(unit),
+            }
+            for p in sci_paths
+        ]
+
+        for i, frame_res in enumerate(
+            parallel_map(
+                frame_tasks,
+                _process_linearize_frame,
+                n_jobs=frame_parallel_n_jobs,
+                backend=frame_parallel_backend,
+                chunksize=1,
+            ),
+            1,
+        ):
             if cancel_token is not None and getattr(cancel_token, "cancelled", False):
                 raise RuntimeError("Cancelled")
+
+            p = Path(str(frame_res["path"]))
+            base_for_mask = str(frame_res["base_for_mask"])
+            stem = base_for_mask
             log.info("Linearize %d/%d: %s", i, len(sci_paths), p.name)
-            data, var_in, mask_in, hdr = _open_science_with_optional_var_mask(p)
-            if data.ndim != 2:
-                raise ValueError(f"Science frame must be 2D: {p}")
-            data = data[y0:y1, :]
-            if data.shape != lam_map.shape:
-                raise ValueError(
-                    f"Science shape {data.shape} != lambda_map shape {lam_map.shape} for {p.name}"
-                )
 
-            mask = None
-            if mask_in is not None:
-                mask = np.asarray(mask_in, dtype=np.uint16)[y0:y1, :]
-            # Resolve (gain, read-noise) in a single, centralized way.
-            npar = resolve_noise_params(
-                hdr,
-                gain_override=gain_override_f,
-                rdnoise_override=rdnoise_override_f,
-            )
-            hdr.setdefault("GAIN", float(npar.gain_e_per_adu))
-            hdr.setdefault("RDNOISE", float(npar.rdnoise_e))
-            hdr.setdefault("NOISRC", str(npar.source))
+            hdr = frame_res["hdr"]
+            rect = np.asarray(frame_res["rect"], dtype=np.float32)
+            rect_var = np.asarray(frame_res["rect_var"], dtype=np.float32)
+            rect_mask = np.asarray(frame_res["rect_mask"], dtype=np.uint16)
+            rect_cov = np.asarray(frame_res["rect_cov"], dtype=np.float32)
+            mask_sky_y = frame_res.get("mask_sky_y")
+            roi_report = dict(frame_res.get("roi_report") or {"roi_source": "none", "roi_valid": False})
+            roi_flags = list(frame_res.get("roi_flags") or [])
+            metrics_before = dict(frame_res.get("metrics_before") or {})
+            cleanup_diag = dict(frame_res.get("cleanup_diag") or {})
+            residual_model = frame_res.get("residual_model")
 
-            if var_in is not None:
-                var = np.asarray(var_in, dtype=np.float64)[y0:y1, :]
-                var_source = "input"
-            else:
-                var_est, _npar2 = estimate_variance_adu2(
-                    data,
-                    hdr,
-                    cfg=cfg,
-                    gain_override=gain_override_f,
-                    rdnoise_override=rdnoise_override_f,
-                    require_gain=True,
-                )
-                var = np.asarray(var_est, dtype=np.float64)
-                var_source = "estimated"
+            if isinstance(frame_res.get("noise_meta"), dict):
+                noise_meta.append(dict(frame_res["noise_meta"]))
 
-            # Enforce internal unit standard: electrons (SCI) and electrons^2 (VAR).
-            data_e, var_e, hdr_e, prov, npar_e = ensure_electron_units(
-                data,
-                var,
-                hdr,
-                cfg=cfg,
-                gain_override=gain_override_f,
-                rdnoise_override=rdnoise_override_f,
-                require_gain=True,
-            )
-            data = np.asarray(data_e, dtype=np.float64)
-            var = np.asarray(var_e, dtype=np.float64)
-            hdr = hdr_e
-
-            # Sanity: variance must be finite and >= 0. Flag bad pixels via mask.
-            bad_var = ~np.isfinite(var) | (var < 0)
-            if np.any(bad_var):
-                var = np.where(bad_var, 0.0, var)
-                if mask is None:
-                    mask = np.zeros_like(var, dtype=np.uint16)
-                mask[bad_var] |= BADPIX
-
-            # Sanity: science must be finite. Non-finite values are treated as BADPIX and excluded from resampling.
-            bad_sci = ~np.isfinite(data)
-            if np.any(bad_sci):
-                data = np.where(bad_sci, 0.0, data)
-                var = np.where(bad_sci, 0.0, var)
-                if mask is None:
-                    mask = np.zeros_like(var, dtype=np.uint16)
-                mask[bad_sci] |= BADPIX
-
-            noise_meta.append(
-                {
-                    "path": str(p),
-                    "var_source": var_source,
-                    "gain_e_per_adu": float(npar.gain_e_per_adu),
-                    "rdnoise_e": float(npar.rdnoise_e),
-                    "noise_source": str(npar.source),
-                }
-            )
-
-            # Saturation masking (optional): flag detector pixels near/above full well
-            mask_saturation = bool(lcfg.get("mask_saturation", True))
-            sat_level = _guess_saturation_level_adu(hdr, lcfg) if mask_saturation else None
+            exptime_s = float(frame_res.get("exptime_s") or 0.0)
+            exp_times_s.append(float(exptime_s))
+            sat_level = frame_res.get("sat_level_adu")
             if sat_level is not None:
                 try:
                     sat_levels_adu.append(float(sat_level))
                 except Exception:
                     pass
-            sat_margin = float(lcfg.get("saturation_margin_adu", 0.0) or 0.0)
-            satmask = None
-            if sat_level is not None and mask_saturation:
-                try:
-                    thr = float(sat_level) - float(sat_margin)
-                    if np.isfinite(thr):
-                        satmask = np.isfinite(data) & (data >= thr)
-                except Exception:
-                    satmask = None
-
-            # Merge legacy cosmics masks (if present) with any input MASK plane.
-            # Important for v5.39+: input may be 09_sky/*_skysub_raw.fits.
-            base_for_mask = _raw_stem_from_path(Path(p))
-            mp = mask_dir / f"{base_for_mask}_mask.fits"
-            if mp.exists():
-                try:
-                    m, _ = _open_fits_resilient(mp)
-                    mm = np.asarray(m)
-                    # Most legacy masks are stored as 0/1. If the file already
-                    # looks like a bitmask (>1), preserve it.
-                    try:
-                        mx = int(np.nanmax(mm)) if np.isfinite(mm).any() else 0
-                    except Exception:
-                        mx = 0
-                    if mx <= 1:
-                        cm = ((mm.astype(np.uint16) > 0).astype(np.uint16) * COSMIC).astype(
-                            np.uint16
-                        )
-                    else:
-                        cm = mm.astype(np.uint16)
-                    cm = cm[y0:y1, :]
-                    if mask is None:
-                        mask = cm
-                    else:
-                        mask = np.asarray((mask | cm), dtype=np.uint16)
-                except Exception as e:
-                    log.warning("Failed to load cosmic mask %s: %s", mp.name, e)
-                    # keep existing mask if any
-
-            rect = np.zeros((ny, nlam), dtype=np.float32)
-            rect_var = np.zeros((ny, nlam), dtype=np.float32)
-            rect_mask = np.zeros((ny, nlam), dtype=np.uint16)
-            rect_cov = np.zeros((ny, nlam), dtype=np.float32)
-
-            for yy in range(ny):
-                lam_row = lam_map[yy]
-                # Bad rows: mark no coverage
-                if not np.any(np.isfinite(lam_row)):
-                    rect_mask[yy, :] |= NO_COVERAGE
-                    continue
-                # Use only finite subset for rebin; if too few finite points, skip
-                finite = np.isfinite(lam_row)
-                if np.sum(finite) < 8:
-                    rect_mask[yy, :] |= NO_COVERAGE
-                    continue
-                # Valid pixels for resampling (exclude known BADPIX; NaN/Inf never contribute).
-                valid = np.isfinite(data[yy, finite]) & np.isfinite(var[yy, finite]) & (var[yy, finite] >= 0)
-                if mask is not None:
-                    valid &= ((mask[yy, finite] & BADPIX) == 0)
-
-                v_row, cov = _rebin_row_cumulative(
-                    data[yy, finite],
-                    lam_row[finite],
-                    wave_edges,
-                    valid_mask=valid,
-                )
-                vv_row = _rebin_row_var_weightsquared(
-                    var[yy, finite],
-                    lam_row[finite],
-                    wave_edges,
-                    valid_mask=valid,
-                )
-                rect[yy] = v_row
-                rect_var[yy] = np.maximum(vv_row, 0.0)
-                rect_cov[yy] = cov
-                # mark incomplete coverage
-                # Coverage is a *fraction* per output bin; mark incomplete bins as EDGE.
-                rect_mask[yy, (cov > 0) & (cov < 0.999)] |= EDGE
-                rect_mask[yy, cov <= 0] |= NO_COVERAGE
-                if mask is not None:
-                    # Bit-preserving mask propagation: propagate each known bit separately.
-                    for bit in (BADPIX, COSMIC, SATURATED, USER, REJECTED):
-                        m_row, _ = _rebin_row_cumulative(
-                            ((mask[yy, finite] & bit) > 0).astype(np.float64),
-                            lam_row[finite],
-                            wave_edges,
-                        )
-                        rect_mask[yy, m_row > 0] |= bit
-
-                if satmask is not None:
-                    # propagate saturation flags through the same rebin operator
-                    sm_row, _ = _rebin_row_cumulative(
-                        satmask[yy, finite].astype(np.float64), lam_row[finite], wave_edges
-                    )
-                    rect_mask[yy, sm_row > 0] |= SATURATED
-            # Optional: express data as *integrated* per-bin counts instead of
-            # per-unit density.
-            if scale_to_bin:
-                rect *= float(dw)
-                rect_var *= float(dw) ** 2
-            # Record exposure time and optionally normalize to ADU/s (or ADU/s/<unit>)
-            exptime_s = _get_exptime_seconds(hdr)
-            exp_times_s.append(float(exptime_s))
-            if normalize_exptime:
-                if not (math.isfinite(exptime_s) and exptime_s > 0):
-                    log.warning("EXPTIME missing/invalid in %s; using 1.0 s for normalization", p.name)
-                    exptime_s = 1.0
-                rect /= float(exptime_s)
-                rect_var /= float(exptime_s) ** 2
-
-            # --- ROI + metrics on the rectified grid (needed for reporting and optional cleanup) ---
-            roi_report: Dict[str, Any] = {"roi_source": "none", "roi_valid": False}
-            roi_flags: list[dict[str, Any]] = []
-            mask_sky_y = None
-            mask_obj_y = None
-            try:
-                from scorpio_pipe.sky_geometry import compute_sky_geometry, roi_from_cfg
-
-                roi = roi_from_cfg(cfg)
-                sky_cfg = cfg.get("sky", {}) if isinstance(cfg.get("sky"), dict) else {}
-                if not sky_cfg and isinstance(cfg.get("sky_sub"), dict):
-                    sky_cfg = cfg.get("sky_sub") or {}
-                gcfg = sky_cfg.get("geometry") if isinstance(sky_cfg.get("geometry"), dict) else {}
-
-                fatal_bits = int(NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED)
-                geom = compute_sky_geometry(
-                    rect,
-                    rect_var,
-                    rect_mask,
-                    roi=roi,
-                    roi_policy=str(gcfg.get("roi_policy", "prefer_user")),
-                    fatal_bits=fatal_bits,
-                    edge_margin_px=int(gcfg.get("edge_margin_px", 16) or 16),
-                    profile_x_percentile=float(gcfg.get("profile_x_percentile", 50.0) or 50.0),
-                    thresh_sigma=float(gcfg.get("thresh_sigma", 3.0) or 3.0),
-                    dilation_px=int(gcfg.get("dilation_px", 3) or 3),
-                    min_obj_width_px=int(gcfg.get("min_obj_width_px", 6) or 6),
-                    min_sky_width_px=int(gcfg.get("min_sky_width_px", 12) or 12),
-                )
-                mask_sky_y = np.asarray(geom.mask_sky_y, dtype=bool)
-                mask_obj_y = np.asarray(geom.mask_obj_y, dtype=bool)
-                roi_report = dict(geom.roi_used)
-                roi_metrics = dict(geom.metrics)
-                roi_report["sky_contamination_metric"] = roi_metrics.get("sky_contamination_metric")
-                roi_flags = list(roi_metrics.get("flags") or [])
-            except Exception:
-                # fallback: top/bottom 15% sky, middle 25% object
-                band = max(8, int(0.15 * rect.shape[0]))
-                mask_sky_y = np.zeros(rect.shape[0], dtype=bool)
-                mask_sky_y[:band] = True
-                mask_sky_y[max(0, rect.shape[0] - band):] = True
-                mid = rect.shape[0] // 2
-                obj_half = max(3, int(0.125 * rect.shape[0]))
-                mask_obj_y = np.zeros(rect.shape[0], dtype=bool)
-                mask_obj_y[max(0, mid - obj_half): min(rect.shape[0], mid + obj_half + 1)] = True
-
-            # Metrics BEFORE (always, even if cleanup is off)
-            ccfg = lcfg.get("cleanup") if isinstance(lcfg.get("cleanup"), dict) else {}
-            quiet_sky_percentile = float(ccfg.get("quiet_sky_percentile", 40.0) or 40.0)
-
-            sky_rows = np.where(np.asarray(mask_sky_y, dtype=bool))[0]
-            obj_rows = np.where(np.asarray(mask_obj_y, dtype=bool))[0]
-            fatal = NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED
-            good = (rect_mask & fatal) == 0
-            okv = np.isfinite(rect_var) & (rect_var > 0)
-
-            sky_metric_before = float("nan")
-            obj_metric_before = float("nan")
-            try:
-                sky_norm = rect[sky_rows, :]
-                sky_w = np.sqrt(rect_var[sky_rows, :])
-                m_sky = good[sky_rows, :] & okv[sky_rows, :] & np.isfinite(sky_norm) & np.isfinite(sky_w)
-                sky_metric_before = _robust_sigma_mad(
-                    (sky_norm[m_sky] / sky_w[m_sky]) if m_sky.any() else np.array([], dtype=float)
-                )
-
-                quiet_cols = np.ones(rect.shape[1], dtype=bool)
-                try:
-                    med_sky_col = np.nanmedian(np.where(m_sky, sky_norm, np.nan), axis=0)
-                    a = np.abs(med_sky_col)
-                    thr = float(
-                        np.nanpercentile(a[np.isfinite(a)], quiet_sky_percentile)
-                    ) if np.isfinite(a).sum() else float("nan")
-                    if np.isfinite(thr):
-                        quiet_cols = a <= thr
-                    if quiet_cols.sum() < max(8, int(0.05 * rect.shape[1])):
-                        quiet_cols = np.ones(rect.shape[1], dtype=bool)
-                except Exception:
-                    quiet_cols = np.ones(rect.shape[1], dtype=bool)
-
-                obj = rect[obj_rows, :]
-                obj_w = np.sqrt(rect_var[obj_rows, :])
-                m_obj = good[obj_rows, :] & okv[obj_rows, :] & np.isfinite(obj) & np.isfinite(obj_w)
-                m_obj = m_obj & quiet_cols[None, :]
-                if m_obj.any():
-                    obj_metric_before = float(np.nanmedian(obj[m_obj]))
-            except Exception:
-                pass
-
-            metrics_before = {
-                "sky_residual_metric": float(sky_metric_before) if np.isfinite(sky_metric_before) else None,
-                "object_risk_metric": float(obj_metric_before) if np.isfinite(obj_metric_before) else None,
-            }
-
-            # --- optional post-rectification residual cleanup (runs here, after resampling) ---
-            sky_cfg = cfg.get("sky", {}) if isinstance(cfg.get("sky"), dict) else {}
-            if not sky_cfg and isinstance(cfg.get("sky_sub"), dict):
-                sky_cfg = cfg.get("sky_sub") or {}
-            # Accept config in two places for backward compatibility:
-            #   - linearize.post_sky_cleanup (preferred)
-            #   - sky.post_cleanup (legacy)
-            cleanup_raw = lcfg.get(
-                "post_sky_cleanup", lcfg.get("sky_cleanup", sky_cfg.get("post_cleanup", "auto"))
-            )
-            post_cleanup = str(cleanup_raw).strip().lower()
-            if post_cleanup not in {"off", "auto", "on"}:
-                post_cleanup = "auto"
-
-            residual_model = None
-            cleanup_diag: Dict[str, Any] = {
-                "cleanup_requested": post_cleanup,
-                "cleanup_executed": False,
-                "cleanup_applied": False,
-                "cleanup_decision": "off" if post_cleanup == "off" else "auto_rejected",
-                "decision_reason": "off" if post_cleanup == "off" else "not_run",
-                "model_params": {},
-                "roi": roi_report,
-                "metrics_before": metrics_before,
-                "metrics_after": metrics_before,
-            }
-            if post_cleanup in {"on", "auto"}:
-                # Wavelength centers in Angstrom for smoothing knots.
-                x = np.arange(rect.shape[1], dtype=np.float64)
-                lam_cent = wave0 + dw * (x + 0.5)
-                lam_cent_A = lam_cent * 10.0 if str(unit).lower() in {"nm", "nanometer", "nanometers"} else lam_cent
-                rect2, model2, diag2 = _post_rectified_sky_cleanup(
-                    rect,
-                    rect_var,
-                    rect_mask,
-                    cfg,
-                    mode=post_cleanup,
-                    lam_centers_A=np.asarray(lam_cent_A, dtype=np.float64),
-                )
-                cleanup_diag = dict(diag2)
-                cleanup_diag.setdefault("roi", roi_report)
-                # If not applied, _post_rectified_sky_cleanup keeps science unchanged and metrics_after==metrics_before.
-                rect = rect2
-                residual_model = model2
+            no_coverage_frac = float(frame_res.get("no_coverage_frac") or 0.0)
 
             # Output header (shared by all outputs for this exposure)
             ohdr = _set_linear_wcs(hdr, wave0, dw, unit=unit)
@@ -2361,19 +2651,17 @@ def run_linearize(
                 except Exception:
                     pass
 
-            if sat_level is not None and mask_saturation:
+            if sat_level is not None and bool(lcfg.get("mask_saturation", True)):
                 try:
                     ohdr["SATLEV"] = (
                         float(sat_level),
                         "Saturation level (ADU) used to flag MASK",
                     )
-                    ohdr["SATMARG"] = (float(sat_margin), "Saturation margin (ADU)")
+                    ohdr["SATMARG"] = (float(lcfg.get("saturation_margin_adu", 0.0) or 0.0), "Saturation margin (ADU)")
                 except Exception:
                     pass
             ohdr = add_provenance(ohdr, cfg, stage="linearize")
 
-            # Canonical v5.39+ per-frame rectified product used downstream:
-            #   10_linearize/<stem>_skysub.fits
             out_skysub = out_dir / f"{base_for_mask}_skysub.fits"
             out_skymodel_path: Path | None = None
             _write_mef(
@@ -2386,17 +2674,12 @@ def run_linearize(
                 wave0=wave0,
                 dw=dw,
                 unit=unit,
-        wave_ref=wave_ref,
+                wave_ref=wave_ref,
             )
             rect_paths.append(out_skysub)
 
-            # Optional model product (written if user requested cleanup or auto ran it)
-            if post_cleanup != "off" and bool(cleanup_diag.get("cleanup_executed")) and residual_model is not None:
-                model_out = (
-                    np.asarray(residual_model, dtype=np.float32)
-                    if residual_model is not None
-                    else np.zeros_like(rect, dtype=np.float32)
-                )
+            if bool(cleanup_diag.get("cleanup_executed")) and residual_model is not None:
+                model_out = np.asarray(residual_model, dtype=np.float32)
                 out_model = out_dir / f"{base_for_mask}_skymodel.fits"
                 out_skymodel_path = out_model
                 _write_mef(
@@ -2411,7 +2694,6 @@ def run_linearize(
                     unit=unit,
                 )
 
-            # Optional debug per-exposure output directory (kept for QC / troubleshooting)
             if per_exp_dir is not None:
                 out_rect = per_exp_dir / f"{base_for_mask}_rectified.fits"
                 _write_mef(
@@ -2426,7 +2708,6 @@ def run_linearize(
                     unit=unit,
                 )
 
-            # Quicklook PNGs (robust stretch, fatal-mask aware)
             skysub_png = out_dir / f"{base_for_mask}_skysub.png"
             skysub_skywin_png = out_dir / f"{base_for_mask}_skysub_skywin.png"
             skymodel_png: Path | None = None
@@ -2437,7 +2718,7 @@ def run_linearize(
                     skysub_skywin_png,
                     method="asinh",
                     k=4.0,
-                    row_mask=mask_sky_y if "mask_sky_y" in locals() else None,
+                    row_mask=(None if mask_sky_y is None else np.asarray(mask_sky_y, dtype=bool)),
                 )
                 if out_skymodel_path is not None:
                     skymodel_png = out_dir / f"{base_for_mask}_skymodel.png"
@@ -2447,10 +2728,6 @@ def run_linearize(
 
             stems_for_compare.append(stem)
 
-            # Per-exposure bookkeeping for linearize_done.json
-            no_coverage_frac = float(np.mean((rect_mask & NO_COVERAGE) != 0))
-
-            # Delta-lambda reporting (stored in Angstrom + in the active wavelength unit)
             delta_u = None
             if delta_lambda_A is not None:
                 try:
@@ -2463,7 +2740,6 @@ def run_linearize(
                 if delta_lambda_applied:
                     delta_policy_report = "shift_grid"
                 else:
-                    # when we have an estimate but choose not to apply (typically UNCERTAIN)
                     delta_policy_report = "not_applied_uncertain" if str(flexure_flag).upper() != "OK" else "missing"
 
             exp_flags: list[dict[str, Any]] = []
@@ -2472,7 +2748,6 @@ def run_linearize(
             except Exception:
                 pass
             if delta_lambda_A is not None and (not delta_lambda_applied) and delta_policy != "off":
-                # Make the reason explicit for downstream tooling / QC dashboards
                 exp_flags.append(
                     {
                         "code": "FLEXURE_SHIFT_NOT_APPLIED",
@@ -2530,7 +2805,6 @@ def run_linearize(
                     "metrics_before": dict(metrics_before),
                     "metrics_after": dict(cleanup_diag.get("metrics_after") or metrics_before),
                     "flags": exp_flags,
-                    # legacy key kept for older tooling
                     "residual_sky_cleanup": cleanup_diag,
                 }
             )
@@ -2540,14 +2814,12 @@ def run_linearize(
             no_coverage_fracs.append(no_coverage_frac)
 
             if not robust_stack:
-                # Stack: inverse-variance weighted mean
                 w = np.zeros_like(rect_var, dtype=np.float64)
                 fatal_bits = NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED
                 good = (rect_var > 0) & ((rect_mask & fatal_bits) == 0)
                 w[good] = 1.0 / rect_var[good]
                 stack_num += rect.astype(np.float64) * w
                 stack_den += w
-                # For the output variance (of the weighted mean): var = 1/sum(w)
                 stack_var_den += w
                 coverage += good.astype(np.int16)
                 mask_sum |= rect_mask
@@ -2704,6 +2976,17 @@ def run_linearize(
                 "mask_policy": "MASK_out = OR_k(MASK_k over fatal bits); NO_COVERAGE if no contributing pixels",
                 "no_coverage_frac_median": float(np.median(no_coverage_fracs)) if no_coverage_fracs else None,
                 "no_coverage_frac_max": float(np.max(no_coverage_fracs)) if no_coverage_fracs else None,
+                "grid_cache": {
+                    "enabled": bool(_linearize_grid_cache_enabled()),
+                    "hit": bool(linearize_grid_cache_hit),
+                    "frame_signature": str(frame_signature_key),
+                    "lambda_map_key": str(lambda_map_cache_key),
+                },
+                "parallel_map": {
+                    "backend": str(frame_parallel_backend),
+                    "n_jobs_requested": frame_parallel_n_jobs,
+                    "n_items": int(len(frame_tasks)),
+                },
             },
 
             # Flexure / delta-lambda
@@ -3128,48 +3411,8 @@ def run_linearize(
         except Exception:
             pass
 
-        # Legacy mirroring (disabled by default).
-        #
-        # v5.38+ keeps legacy paths for *reading* via resolve_input_path(...), but
-        # does not write duplicated outputs unless explicitly requested.
-        try:
-            compat = cfg.get("compat") if isinstance(cfg.get("compat"), dict) else {}
-            if bool(compat.get("write_legacy_outputs", False)):
-                legacy_dir = work_dir / "lin"
-                if legacy_dir.resolve() != out_dir.resolve() and legacy_dir.is_dir():
-                    import shutil
-
-                    shutil.copy2(preview_fits, legacy_dir / "obj_sum_lin.fits")
-                    if preview_png.exists():
-                        shutil.copy2(preview_png, legacy_dir / "obj_sum_lin.png")
-                    shutil.copy2(done_json_legacy, legacy_dir / "linearize_done.json")
-        except Exception:
-            pass
 
         log.info("Linearize done: %s", preview_fits)
         return payload
     except Exception as e:
-        try:
-            import json as _json
-            from scorpio_pipe.qc.flags import make_flag, max_severity
-
-            payload_err = dict(payload) if isinstance(payload, dict) else {"stage": "linearize"}
-            payload_err["stage"] = "linearize"
-            payload_err["status"] = "fail"
-            payload_err["error"] = {"type": type(e).__name__, "message": str(e)}
-            flags = [
-                make_flag(
-                    "STAGE_FAILED",
-                    "ERROR",
-                    f"{type(e).__name__}: {e}",
-                    hint="See traceback/log for the exact failure location.",
-                )
-            ]
-            payload_err["flags"] = flags
-            payload_err["qc"] = {"flags": flags, "max_severity": max_severity(flags)}
-            out_dir.mkdir(parents=True, exist_ok=True)
-            done_json.write_text(_json.dumps(payload_err, indent=2), encoding="utf-8")
-            done_json_legacy.write_text(_json.dumps(payload_err, indent=2), encoding="utf-8")
-        except Exception:
-            pass
         raise

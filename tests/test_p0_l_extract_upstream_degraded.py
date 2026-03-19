@@ -66,6 +66,7 @@ def test_extract1d_raises_qadegrd_from_skymodel_fail(tmp_path: Path) -> None:
         ph = hdul[0].header
         assert int(ph.get("QADEGRD", 0)) == 1
 
+    assert (out_dir / "extraction_qc.json").exists()
     done = json.loads((out_dir / "done.json").read_text(encoding="utf-8"))
     flags = (done.get("qc") or {}).get("flags") or []
     codes = {str(f.get("code")) for f in flags if isinstance(f, dict)}

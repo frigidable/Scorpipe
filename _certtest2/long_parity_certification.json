@@ -1,0 +1,147 @@
+{
+  "schema": "scorpio_pipe.long_parity_certification",
+  "schema_version": 1,
+  "generated_utc": "2026-03-19T08:41:30.056374+00:00",
+  "registry_path": "/tmp/scor_p5fix/benchmarks/long_parity/cases/registry.json",
+  "summary": {
+    "status": "INCOMPLETE",
+    "observatory_ready": false,
+    "allow_long_level_wording": false,
+    "coverage_ok": false,
+    "no_case_failures_ok": true,
+    "golden_ok": false,
+    "observer_signoff_ok": false,
+    "total_registry_entries": 11,
+    "minimum_real_cases_required": 8,
+    "populated_real_cases": 0,
+    "passed_real_cases": 0,
+    "failed_real_cases": 0,
+    "pending_private_cases": 10,
+    "blocking_requirements": [
+      "benchmark coverage 0/8 real cases",
+      "golden weekly/manual evidence is missing or not clean",
+      "observer sign-off missing"
+    ]
+  },
+  "cases": [
+    {
+      "case_id": "mini_night_synthetic",
+      "category": "ci-fixture",
+      "registry_status": "fixture",
+      "manifest_path": "/tmp/scor_p5fix/benchmarks/long_parity/cases/mini_night_synthetic.case.json",
+      "status": "PASS",
+      "summary": {
+        "status": "PASS",
+        "total_metrics": 5,
+        "passed_metrics": 5,
+        "failed_metrics": []
+      },
+      "report_paths": {
+        "json": "/tmp/scor_p5fix/_certtest2/cases/mini_night_synthetic/long_parity_report.json",
+        "markdown": "/tmp/scor_p5fix/_certtest2/cases/mini_night_synthetic/long_parity_report.md"
+      }
+    },
+    {
+      "case_id": "sc1_reference_clean",
+      "category": "reference",
+      "registry_status": "pending-private-data",
+      "manifest_path": null,
+      "status": "pending-private-data",
+      "summary": null,
+      "report_paths": null
+    },
+    {
+      "case_id": "sc2_reference_clean",
+      "category": "reference",
+      "registry_status": "pending-private-data",
+      "manifest_path": null,
+      "status": "pending-private-data",
+      "summary": null,
+      "report_paths": null
+    },
+    {
+      "case_id": "weak_neon_lines",
+      "category": "wavesolution",
+      "registry_status": "pending-private-data",
+      "manifest_path": null,
+      "status": "pending-private-data",
+      "summary": null,
+      "report_paths": null
+    },
+    {
+      "case_id": "skyline_rich_residuals",
+      "category": "sky",
+      "registry_status": "pending-private-data",
+      "manifest_path": null,
+      "status": "pending-private-data",
+      "summary": null,
+      "report_paths": null
+    },
+    {
+      "case_id": "weak_object_extraction",
+      "category": "extraction",
+      "registry_status": "pending-private-data",
+      "manifest_path": null,
+      "status": "pending-private-data",
+      "summary": null,
+      "report_paths": null
+    },
+    {
+      "case_id": "flexure_sensitive_setup",
+      "category": "sky",
+      "registry_status": "pending-private-data",
+      "manifest_path": null,
+      "status": "pending-private-data",
+      "summary": null,
+      "report_paths": null
+    },
+    {
+      "case_id": "curved_slit_geometry",
+      "category": "geometry",
+      "registry_status": "pending-private-data",
+      "manifest_path": null,
+      "status": "pending-private-data",
+      "summary": null,
+      "report_paths": null
+    },
+    {
+      "case_id": "mixed_slit_metadata",
+      "category": "calibration",
+      "registry_status": "pending-private-data",
+      "manifest_path": null,
+      "status": "pending-private-data",
+      "summary": null,
+      "report_paths": null
+    },
+    {
+      "case_id": "extended_object_sky_stress",
+      "category": "sky",
+      "registry_status": "pending-private-data",
+      "manifest_path": null,
+      "status": "pending-private-data",
+      "summary": null,
+      "report_paths": null
+    },
+    {
+      "case_id": "repeatability_multi_exposure",
+      "category": "repeatability",
+      "registry_status": "pending-private-data",
+      "manifest_path": null,
+      "status": "pending-private-data",
+      "summary": null,
+      "report_paths": null
+    }
+  ],
+  "golden": null,
+  "known_limitations": [
+    "Registry still contains 10 pending private/off-repo benchmark slot(s); scientific LONG-level certification is incomplete.",
+    "Only 0 real case(s) are populated; at least 8 are required for observatory-ready wording.",
+    "Golden weekly/manual time-budget evidence was not attached to this certification package.",
+    "Observer sign-off is missing."
+  ],
+  "observer_signoff": {
+    "name": null,
+    "provided": false
+  },
+  "wording_rule": "LONG-level / observatory-ready wording is allowed only when observatory_ready=true. Otherwise the release must be described as partial, scaffold, or not yet certified."
+}

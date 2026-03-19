@@ -48,7 +48,8 @@ from scorpio_pipe.dataset.match import (
     select_best,
     select_flat_set,
 )
-from scorpio_pipe.metadata import HeaderContractError, FrameMeta, parse_frame_meta
+from scorpio_pipe.metadata import HeaderContractError, FrameMeta
+from scorpio_pipe.metadata.fits_cache import get_frame_meta, get_header_and_frame_meta, get_header_fields
 
 
 _FITS_SUFFIXES = (".fits", ".fit", ".fts", ".fz")
@@ -175,20 +176,7 @@ def scan_fits_directory(
             rel_s = p.as_posix()
 
         try:
-            hdr = fits.getheader(p, 0, memmap=False)
-        except Exception as e:
-            warns.append(
-                ManifestWarning(
-                    code="FITS_OPEN_ERROR",
-                    severity="ERROR",
-                    message="Failed to open FITS header.",
-                    context={"path": rel_s, "error": str(e)},
-                )
-            )
-            continue
-
-        try:
-            meta = parse_frame_meta(hdr)
+            hdr, meta = get_header_and_frame_meta(p, strict=True)
             # FrameMeta is the single source of truth; stamp deterministic frame_id here.
             meta = meta.with_frame_id(frame_id)
         except HeaderContractError as e:
@@ -202,6 +190,40 @@ def scan_fits_directory(
             )
             continue
         except Exception as e:
+            # Keep FITS-open/header-load failures explicit; callers use this to
+            # distinguish unreadable files from metadata-contract violations.
+            if isinstance(e, OSError):
+                warns.append(
+                    ManifestWarning(
+                        code="FITS_OPEN_ERROR",
+                        severity="ERROR",
+                        message="Failed to open FITS header.",
+                        context={"path": rel_s, "error": str(e)},
+                    )
+                )
+                continue
+            try:
+                hdr = get_header_fields(p)
+            except Exception as open_err:
+                warns.append(
+                    ManifestWarning(
+                        code="FITS_OPEN_ERROR",
+                        severity="ERROR",
+                        message="Failed to open FITS header.",
+                        context={"path": rel_s, "error": str(open_err)},
+                    )
+                )
+                continue
+            if isinstance(e, HeaderContractError):
+                warns.append(
+                    ManifestWarning(
+                        code="HEADER_CONTRACT_ERROR",
+                        severity="ERROR",
+                        message=str(e),
+                        context={"path": rel_s},
+                    )
+                )
+                continue
             warns.append(
                 ManifestWarning(
                     code="META_PARSE_ERROR",
@@ -211,6 +233,7 @@ def scan_fits_directory(
                 )
             )
             continue
+
 
         # P0-B2 QA: record optional-missing and fallback usage explicitly.
         if getattr(meta, "meta_missing_optional", None):

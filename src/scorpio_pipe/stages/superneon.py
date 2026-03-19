@@ -11,6 +11,7 @@ from typing import Any
 
 import numpy as np
 from astropy.io import fits
+from scorpio_pipe.io.atomic_fits import atomic_write_fits
 
 from scorpio_pipe.frame_signature import FrameSignature
 
@@ -47,7 +48,7 @@ def _load_fits(path: Path) -> tuple[np.ndarray, fits.Header]:
 
 def _save_fits(path: Path, data: np.ndarray, header: fits.Header | None = None) -> None:
     hdu = fits.PrimaryHDU(data=data.astype(np.float32), header=header)
-    hdu.writeto(path, overwrite=True)
+    atomic_write_fits(path, hdu)
 
 def _estimate_saturation_level(hdr: fits.Header) -> float | None:
     """Best-effort estimate of saturation ADU level.
@@ -391,7 +392,7 @@ class SuperNeonResult:
     superneon_png: Path
 
 
-def build_superneon(cfg: dict[str, Any]) -> SuperNeonResult:
+def build_superneon(cfg: dict[str, Any], *, run_root: Path | None = None) -> SuperNeonResult:
     """Build SuperNeon (stacked arc/neon) as a true calibration product.
 
     Guarantees strict physical compatibility (FrameSignature) between:
@@ -402,18 +403,19 @@ def build_superneon(cfg: dict[str, Any]) -> SuperNeonResult:
     - superneon_shifts.csv / superneon_shifts.json: per-frame X shifts + basic QC
     - superneon_qc.json: aggregated QC summary
     """
-    # work_dir: allow absolute, or relative to config_dir/cwd
-    work_dir = Path(str(cfg["work_dir"]))
-    if not work_dir.is_absolute():
-        base = Path(str(cfg.get("config_dir", ".")))
-        work_dir = (base / work_dir).resolve()
-    else:
-        work_dir = work_dir.resolve()
+    # Engine-owned run root (P0-ARCH-02.1): do not let the stage choose its own.
+    from scorpio_pipe.paths import resolve_work_dir
+
+    work_dir = (
+        Path(run_root).expanduser().resolve()
+        if run_root is not None
+        else resolve_work_dir(cfg)
+    )
 
     # disperser-specific layout (so multiple gratings can live in one work_dir)
     from scorpio_pipe.wavesol_paths import wavesol_dir
 
-    outdir = _ensure_dir(wavesol_dir(cfg))
+    outdir = _ensure_dir(wavesol_dir(cfg, run_root=work_dir))
 
     # P0-B4: prefer dataset_manifest-driven associations when available.
     used_manifest = False

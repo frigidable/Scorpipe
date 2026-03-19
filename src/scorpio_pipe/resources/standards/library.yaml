@@ -1,0 +1,8 @@
+version: 2026.03
+standards:
+  bd284211:
+    display_name: "BD+28 4211"
+    table: "standards/bd284211.csv"
+    units: "f_lambda"
+    wavelength_convention: "air"
+    sampling: "tabulated"

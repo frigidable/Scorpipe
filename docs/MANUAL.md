@@ -15,7 +15,7 @@
 
 - Единый **реестр продуктов** (expected outputs) — используется в QC/UI/CLI.
 - **QC report**: `work_dir/report/index.html` + `qc_report.json` с метриками wavesolution/cosmics.
-- **Тайминги** каждого шага: `work_dir/report/timings.json`.
+- **Тайминги** каждого шага: `work_dir/manifest/timings.jsonl` (append-only JSONL).
 - `doit`-задачи корректно поддерживают структуру `wavesol/<disperser>/...`.
 - Добавлены простые pytest‑тесты и CI workflow.
 

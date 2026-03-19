@@ -304,10 +304,11 @@ def run_flatfield(cfg: dict, *, out_dir: Path | None = None) -> Path:
     """
 
     work_dir = resolve_work_dir(cfg)
-    # Canonical v5.40+ layout uses numbered stage directories.
-    # Legacy fallback `work_dir/flatfield` is still *read* by some tools,
-    # but the stage must write to the canonical location by default.
-    out_dir = out_dir or stage_dir(work_dir, "flatfield")
+
+    # P0-ARCH-07: stage must not derive its own stage directory.
+    if out_dir is None:
+        raise ValueError("flatfield: out_dir is required (pass ctx.stage_dir)")
+    out_dir = Path(out_dir)
     ensure_dir(out_dir)
 
     block = cfg.get("flatfield", {}) or {}
@@ -385,8 +386,6 @@ def run_flatfield(cfg: dict, *, out_dir: Path | None = None) -> Path:
     # NOTE: do *not* hard-code work_dir/calibs or work_dir/calib here — GUI/CLI may
     # use the canonical NN_* stage layout.
     from scorpio_pipe.stages.calib import (
-        build_superbias as _build_superbias,
-        build_superflat as _build_superflat,
         _resolve_superbias_path as _resolve_superbias_path,
         _resolve_superflat_path as _resolve_superflat_path,
     )
@@ -406,38 +405,24 @@ def run_flatfield(cfg: dict, *, out_dir: Path | None = None) -> Path:
     if need_global_flat and not flat_paths:
         raise ValueError("No flat frames selected (frames.flat is empty), but global superflat is required")
 
-    # Ensure superbias exists (flatfield may be executed standalone).
+
+    # P0-ARCH-07: flatfield must not build other stages' products.
+    # Require superbias/superflat to be produced by their dedicated stages.
     if not superbias_path.exists():
-        bias_paths = frames.get("bias") or []
-        if bias_paths:
-            try:
-                _build_superbias(cfg, out_path=superbias_path)
-            except Exception as e:
-                raise RuntimeError(
-                    f"FlatFielding requires superbias, and auto-build failed. "
-                    f"Tried to build at: {superbias_path}"
-                ) from e
-        else:
-            raise RuntimeError(
-                f"FlatFielding requires superbias, but it was not found at: {superbias_path}. "
-                "Run the 'superbias' stage first or set calib.superbias_path in config."
-            )
+        raise RuntimeError(
+            f"FlatFielding requires superbias, but it was not found at: {superbias_path}. "
+            "Run the 'superbias' stage first or set calib.superbias_path in config."
+        )
 
     # Build/refresh superflat only if needed and missing or explicitly requested.
     rebuild_superflat = bool(block.get("rebuild_superflat", False))
-    if need_global_flat and (rebuild_superflat or (not superflat_path.exists())):
-        ensure_dir(superflat_path.parent)
-        # Use config-driven builder to avoid diverging behavior between different call paths.
-        superflat_path = _build_superflat(cfg, out_path=superflat_path)
-
-    # After builds, resolve again (builders may mirror into canonical locations).
-    superbias_path = _resolve_superbias_path(cfg, work_dir)
-    superflat_path = _resolve_superflat_path(cfg, work_dir)
+    if rebuild_superflat:
+        stage_flags.append({"code": "REBUILD_SUPERFLAT_DEPRECATED", "severity": "WARN", "message": "flatfield.rebuild_superflat is deprecated; run the 'superflat' stage with --force instead"})
 
     if need_global_flat and (not superflat_path.exists()):
         raise RuntimeError(
             f"FlatFielding requires superflat, but it was not found at: {superflat_path}. "
-            "Run the 'superflat' stage first (or enable flatfield.rebuild_superflat) or set calib.superflat_path in config."
+            "Run the 'superflat' stage first (use --force superflat if you need rebuild), or set calib.superflat_path in config."
         )
 
     # --- P0-E: build per-science-set MasterFlats from dataset_manifest associations ---

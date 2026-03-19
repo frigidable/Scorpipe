@@ -8,6 +8,7 @@ import logging
 import json
 import numpy as np
 from astropy.io import fits
+from scorpio_pipe.io.atomic_fits import atomic_write_fits
 from scorpio_pipe.provenance import add_provenance
 from numpy.polynomial.chebyshev import chebvander2d, chebval2d
 
@@ -21,6 +22,201 @@ def _ensure_dir(p: Path) -> Path:
     p.mkdir(parents=True, exist_ok=True)
     return p
 
+
+
+
+def _load_json_maybe(path: Path) -> dict[str, Any] | None:
+    try:
+        obj = json.loads(path.read_text(encoding='utf-8'))
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None
+
+
+def _load_geometry_prior_for_wavesol(work_dir: Path) -> dict[str, Any] | None:
+    p = Path(work_dir) / '07_geometry' / 'geometry_model.json'
+    return _load_json_maybe(p)
+
+
+def _eval_geometry_prior_xshift(prior: dict[str, Any] | None, y: np.ndarray) -> np.ndarray | None:
+    if not isinstance(prior, dict):
+        return None
+    coeff = np.asarray(prior.get('x_shift_poly_coeffs', []), dtype=float)
+    if coeff.size == 0:
+        return None
+    yy = np.asarray(y, dtype=float)
+    return np.polyval(coeff, yy)
+
+
+def _apply_geometry_prior_to_control_points(
+    *,
+    xs_cp: np.ndarray,
+    ys_cp: np.ndarray,
+    lams_cp: np.ndarray,
+    scores: np.ndarray,
+    x_fit: np.ndarray,
+    lam_fit: np.ndarray,
+    prior: dict[str, Any] | None,
+    sigma_px: float,
+    hard_limit_px: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None, dict[str, Any]]:
+    pred_shift = _eval_geometry_prior_xshift(prior, ys_cp)
+    if pred_shift is None or pred_shift.size != ys_cp.size or xs_cp.size == 0:
+        return xs_cp, ys_cp, lams_cp, scores, None, {}
+
+    x0_by_lam: dict[float, float] = {}
+    for xx, ll in zip(np.asarray(x_fit, float), np.asarray(lam_fit, float)):
+        x0_by_lam[round(float(ll), 6)] = float(xx)
+
+    x_ref = np.array([x0_by_lam.get(round(float(ll), 6), np.nan) for ll in lams_cp], dtype=float)
+    good = np.isfinite(x_ref) & np.isfinite(pred_shift)
+    if not np.any(good):
+        return xs_cp, ys_cp, lams_cp, scores, None, {}
+
+    resid = np.full(xs_cp.shape, np.nan, dtype=float)
+    resid[good] = np.asarray(xs_cp[good], float) - (x_ref[good] + pred_shift[good])
+    sigma = float(max(0.5, sigma_px))
+    penalty = np.ones_like(scores, dtype=float)
+    penalty[good] = np.exp(-0.5 * (resid[good] / sigma) ** 2)
+    scores_new = np.asarray(scores, float) * penalty
+
+    keep = np.ones_like(xs_cp, dtype=bool)
+    keep[good] = np.abs(resid[good]) <= float(max(hard_limit_px, 1.5 * sigma))
+
+    meta = {
+        'n_points_before': int(xs_cp.size),
+        'n_points_after': int(np.sum(keep)),
+        'median_abs_resid_px': float(np.nanmedian(np.abs(resid[good]))) if np.any(good) else None,
+        'p95_abs_resid_px': float(np.nanpercentile(np.abs(resid[good]), 95)) if np.any(good) else None,
+        'sigma_px': float(sigma),
+        'hard_limit_px': float(hard_limit_px),
+    }
+    return xs_cp[keep], ys_cp[keep], lams_cp[keep], scores_new[keep], resid[keep], meta
+
+
+def _compute_wavesol_extra_metrics(
+    *,
+    ys_pix_all: np.ndarray,
+    lams_all: np.ndarray,
+    dlam_all: np.ndarray,
+    used_mask: np.ndarray,
+    scores: np.ndarray,
+    lam_map: np.ndarray,
+    prior_meta: dict[str, Any] | None,
+) -> dict[str, Any]:
+    used = np.asarray(used_mask, bool) & np.isfinite(dlam_all)
+    rr = np.asarray(dlam_all, float)[used]
+    yy = np.asarray(ys_pix_all, float)[used]
+    ll = np.asarray(lams_all, float)[used]
+    out: dict[str, Any] = {}
+    out['wave_rms_global'] = float(np.sqrt(np.mean(rr**2))) if rr.size else None
+    out['wave_resid_p95'] = float(np.percentile(np.abs(rr), 95)) if rr.size else None
+    if rr.size and yy.size:
+        bins = np.linspace(float(np.nanmin(yy)), float(np.nanmax(yy)), 6)
+        by_y = []
+        for a, b in zip(bins[:-1], bins[1:]):
+            m = (yy >= a) & (yy <= b if b == bins[-1] else yy < b)
+            if not np.any(m):
+                continue
+            rv = rr[m]
+            by_y.append({'y_min': float(a), 'y_max': float(b), 'n': int(np.sum(m)), 'rms_A': float(np.sqrt(np.mean(rv**2))) if rv.size else None})
+        out['wave_rms_by_y'] = by_y
+    out['wave_line_density'] = None
+    if ll.size:
+        span = float(np.nanmax(ll) - np.nanmin(ll))
+        nuniq = int(np.unique(np.round(ll, 3)).size)
+        if span > 0:
+            out['wave_line_density'] = float(1000.0 * nuniq / span)
+    try:
+        gy = np.gradient(np.asarray(lam_map, float), axis=0)
+        g2y = np.gradient(gy, axis=0)
+        out['wave_curvature_smoothness'] = float(np.nanmedian(np.abs(g2y)))
+    except Exception:
+        out['wave_curvature_smoothness'] = None
+    trust = 1.0
+    if out.get('wave_resid_p95') is not None:
+        trust *= float(np.exp(-max(0.0, float(out['wave_resid_p95'])) / 1.5))
+    if out.get('wave_line_density') is not None:
+        trust *= float(np.clip(float(out['wave_line_density']) / 2.0, 0.35, 1.0))
+    if prior_meta and prior_meta.get('median_abs_resid_px') is not None:
+        trust *= float(np.exp(-max(0.0, float(prior_meta['median_abs_resid_px'])) / 3.0))
+    out['wave_trust_score'] = float(np.clip(trust, 0.0, 1.0))
+    if prior_meta:
+        out['geometry_prior'] = dict(prior_meta)
+    return out
+
+
+def _plot_line_id_overview(
+    *,
+    img2d: np.ndarray,
+    x_all: np.ndarray,
+    lam_all: np.ndarray,
+    used_mask: np.ndarray,
+    disabled_mask: np.ndarray,
+    outpng: Path,
+) -> None:
+    import matplotlib.pyplot as plt
+    from scorpio_pipe.plot_style import mpl_style
+
+    prof = np.nanmean(np.asarray(img2d, float), axis=0)
+    xx = np.arange(prof.size, dtype=float)
+    with mpl_style():
+        fig, ax = plt.subplots(figsize=(10.5, 4.0))
+        ax.plot(xx, prof, lw=1.1)
+        y0 = float(np.nanmax(prof)) if np.isfinite(np.nanmax(prof)) else 1.0
+        if np.any(used_mask):
+            ax.vlines(x_all[used_mask], ymin=np.nanmin(prof), ymax=y0, linewidth=0.8)
+        clipped = (~used_mask) & (~disabled_mask)
+        if np.any(clipped):
+            ax.vlines(x_all[clipped], ymin=np.nanmin(prof), ymax=y0 * 0.8, linewidth=0.8, linestyles='--')
+        if np.any(disabled_mask):
+            ax.vlines(x_all[disabled_mask], ymin=np.nanmin(prof), ymax=y0 * 0.6, linewidth=0.8, linestyles=':')
+        for xv, lv, um in zip(x_all, lam_all, used_mask):
+            if not um:
+                continue
+            ax.text(float(xv), y0, f'{float(lv):.0f}', rotation=90, fontsize=6, va='bottom', ha='center')
+        ax.set_xlabel('Pixel X')
+        ax.set_ylabel('Mean arc profile')
+        ax.set_title('Arc line identification overview')
+        fig.tight_layout()
+        fig.savefig(outpng, dpi=140)
+        plt.close(fig)
+
+
+def _plot_geometry_overlay(
+    *,
+    img2d: np.ndarray,
+    ys_pix_all: np.ndarray,
+    lams_all: np.ndarray,
+    x_fit: np.ndarray,
+    lam_fit: np.ndarray,
+    prior: dict[str, Any] | None,
+    outpng: Path,
+) -> None:
+    import matplotlib.pyplot as plt
+    from scorpio_pipe.plot_style import mpl_style
+
+    pred_shift = _eval_geometry_prior_xshift(prior, np.arange(img2d.shape[0], dtype=float))
+    if pred_shift is None:
+        pred_shift = np.zeros(img2d.shape[0], dtype=float)
+    x0_by_lam = {round(float(ll), 6): float(xx) for xx, ll in zip(np.asarray(x_fit, float), np.asarray(lam_fit, float))}
+    uniq = np.unique(np.round(lams_all.astype(float), 6))
+    show = uniq[: min(12, uniq.size)]
+    with mpl_style():
+        fig, ax = plt.subplots(figsize=(7.5, 6.5))
+        v = np.nanpercentile(img2d, [5, 99]) if np.isfinite(img2d).any() else [0, 1]
+        ax.imshow(img2d, origin='lower', aspect='auto', cmap='gray', vmin=v[0], vmax=v[1])
+        for lam0 in show:
+            x0 = x0_by_lam.get(round(float(lam0), 6))
+            if x0 is None:
+                continue
+            ax.plot(x0 + pred_shift, np.arange(img2d.shape[0]), linewidth=1.0)
+        ax.set_title('Geometry prior overlay')
+        ax.set_xlabel('Pixel X')
+        ax.set_ylabel('Pixel Y')
+        fig.tight_layout()
+        fig.savefig(outpng, dpi=140)
+        plt.close(fig)
 
 def _read_hand_pairs(
     path: Path,
@@ -1012,7 +1208,7 @@ class WaveSolutionResult:
         }
 
 
-def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
+def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> WaveSolutionResult:
     """Build 1D and 2D dispersion solution from superneon + hand_pairs.
 
     Expected inputs in work_dir/wavesol:
@@ -1021,16 +1217,20 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
     Outputs are also written to work_dir/wavesol.
     """
     wcfg = cfg.get("wavesol", {}) if isinstance(cfg.get("wavesol"), dict) else {}
-    work_dir = Path(str(cfg.get("work_dir", "."))).expanduser()
-    if not work_dir.is_absolute():
-        base = Path(str(cfg.get("config_dir", ".")))
-        work_dir = (base / work_dir).resolve()
-    else:
-        work_dir = work_dir.resolve()
+    # Engine-owned run root (P0-ARCH-02.1): do not let the stage choose its own.
+    from scorpio_pipe.paths import resolve_work_dir
+
+    work_dir = (
+        Path(run_root).expanduser().resolve()
+        if run_root is not None
+        else resolve_work_dir(cfg)
+    )
     # disperser-specific layout (so multiple gratings can live in one work_dir)
     from scorpio_pipe.wavesol_paths import wavesol_dir
 
-    outdir = _ensure_dir(wavesol_dir(cfg))
+    outdir = _ensure_dir(wavesol_dir(cfg, run_root=work_dir))
+    geometry_prior_payload = _load_geometry_prior_for_wavesol(work_dir)
+    slit_sanity_payload = _load_json_maybe(Path(work_dir) / "qc" / "slit_sanity.json")
 
     # --- P0-H: ARC compatibility contract (must-match vs QC-only) ---
     # --- P0-K: re-apply global exclude as safety net (stale dataset_manifest) ---
@@ -1263,6 +1463,7 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
                 )
             )
 
+        line_priors_meta = _load_json_maybe(outdir / "line_priors_used.json")
         lamp_meta = {
             "lamp_type": lamp_res.lamp_type,
             "lamp_source": lamp_res.source,
@@ -1271,6 +1472,7 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
             "linelist_reason": (
                 "config" if str((wcfg or {}).get("linelist_csv") or "").strip() else "lamp_type_default"
             ),
+            "line_priors_used": line_priors_meta,
         }
     except Exception as e:
         # Lamp metadata must never stop the fit; keep a warning.
@@ -1597,6 +1799,26 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
             scores[m_edge],
         )
 
+    geometry_prior_used: dict[str, Any] = {}
+    geometry_prior_resid: np.ndarray | None = None
+    if bool(wcfg.get("use_geometry_prior", True)) and geometry_prior_payload:
+        xs_cp, ys_cp, lams_cp, scores, geometry_prior_resid, geometry_prior_used = _apply_geometry_prior_to_control_points(
+            xs_cp=xs_cp,
+            ys_cp=ys_cp,
+            lams_cp=lams_cp,
+            scores=scores,
+            x_fit=x_fit,
+            lam_fit=lam_fit,
+            prior=geometry_prior_payload,
+            sigma_px=float(wcfg.get("geometry_prior_sigma_px", 3.0)),
+            hard_limit_px=float(wcfg.get("geometry_prior_hard_limit_px", 8.0)),
+        )
+        if geometry_prior_used:
+            try:
+                (outdir / 'geometry_prior_used.json').write_text(json.dumps({**geometry_prior_used, 'source': geometry_prior_payload.get('source'), 'trust_score': (geometry_prior_payload.get('metrics') or {}).get('trust_score')}, indent=2, ensure_ascii=False), encoding='utf-8')
+            except Exception:
+                pass
+
     # Save control points for QC / interactive cleanup (after all basic filtering).
     # This file is the *single source of truth* for the interactive 2D cleaner.
     # Always write it so that the GUI and the final stage outputs stay in lockstep.
@@ -1829,6 +2051,8 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
     resid_vs_y_png = outdir / "residuals_vs_y.png"
     resid_hist_png = outdir / "residuals_hist.png"
     report_txt = outdir / "wavesolution_report.txt"
+    line_id_overview_png = outdir / "line_id_overview.png"
+    geometry_overlay_png = outdir / "geometry_overlay.png"
 
     _plot_residuals_2d(
         ys_pix_all=ys_cp,
@@ -1871,6 +2095,23 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
         outpng=resid_hist_png,
         title="Normalised residuals histogram",
     )
+    _plot_line_id_overview(
+        img2d=img2d,
+        x_all=x_all,
+        lam_all=lam_all,
+        used_mask=used_mask,
+        disabled_mask=is_disabled_all,
+        outpng=line_id_overview_png,
+    )
+    _plot_geometry_overlay(
+        img2d=img2d,
+        ys_pix_all=ys_cp,
+        lams_all=lams_cp,
+        x_fit=x_fit,
+        lam_fit=lam_fit,
+        prior=geometry_prior_payload,
+        outpng=geometry_overlay_png,
+    )
 
     # Update JSON report with metrics, and write a human-readable report.
     try:
@@ -1885,6 +2126,15 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
     for lk in uniq:
         if any(abs(float(lk) - float(r)) <= 0.25 for r in rej):
             n_rejected_lines += 1
+    extra_metrics = _compute_wavesol_extra_metrics(
+        ys_pix_all=ys_cp,
+        lams_all=lams_cp,
+        dlam_all=resid2d,
+        used_mask=used2d,
+        scores=scores,
+        lam_map=lam_map,
+        prior_meta=geometry_prior_used or None,
+    )
     d2.update(
         {
             "qc": {
@@ -1899,6 +2149,7 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
                 "n_active_lines": int(n_lines - n_rejected_lines),
                 "n_points": int(lams_cp.size),
                 "n_used_points": int(np.sum(used_active)),
+                **extra_metrics,
             }
         }
     )
@@ -1920,6 +2171,14 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
         f"  lines: total={n_lines} active={n_lines - n_rejected_lines} rejected={n_rejected_lines}"
     )
     lines.append(f"  points: total={int(lams_cp.size)} used={int(np.sum(used_active))}")
+    if extra_metrics.get("wave_line_density") is not None:
+        lines.append(f"  line density: {float(extra_metrics['wave_line_density']):.3g} lines / 1000 Å")
+    if extra_metrics.get("wave_curvature_smoothness") is not None:
+        lines.append(f"  curvature smoothness: {float(extra_metrics['wave_curvature_smoothness']):.3g}")
+    if extra_metrics.get("wave_trust_score") is not None:
+        lines.append(f"  trust score: {float(extra_metrics['wave_trust_score']):.3f}")
+    if geometry_prior_used:
+        lines.append(f"  geometry prior median |Δx|: {float(geometry_prior_used.get('median_abs_resid_px') or 0.0):.3g} px")
     if rej:
         lines.append("  rejected_lines_A:")
         for r in sorted(rej):
@@ -1990,8 +2249,9 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
 
     lam_hdr = add_provenance(lam_hdr, cfg, stage="wavesolution")
 
-    fits.PrimaryHDU(data=lam_map_out, header=lam_hdr).writeto(
-        lambda_map_fits, overwrite=True
+    atomic_write_fits(
+        lambda_map_fits,
+        fits.PrimaryHDU(data=lam_map_out, header=lam_hdr),
     )
 
     # --- strict contract validation + rectification model (formal artifact for sky/linearization) ---
@@ -2144,7 +2404,7 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
     # --- stage done / QC flags (used by the pipeline gate) ---
     try:
         from scorpio_pipe.qc_thresholds import compute_thresholds
-        from scorpio_pipe.qc.flags import make_flag, max_severity
+        from scorpio_pipe.qc.flags import make_flag, make_operational_flag, max_severity
 
         thr, _thr_meta = compute_thresholds(cfg)
         flags: list[dict[str, Any]] = []
@@ -2244,6 +2504,42 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
                 )
             )
 
+        if geometry_prior_used and geometry_prior_used.get('median_abs_resid_px') is not None and float(geometry_prior_used.get('median_abs_resid_px')) > float(wcfg.get('geometry_prior_warn_px', 3.5)):
+            flags.append(
+                make_flag(
+                    "WAVE_GEOMETRY_PRIOR_MISMATCH",
+                    "WARN",
+                    "Traced control points disagree with the geometry prior.",
+                    median_abs_resid_px=float(geometry_prior_used.get('median_abs_resid_px')),
+                )
+            )
+        if extra_metrics.get('wave_line_density') is not None and float(extra_metrics.get('wave_line_density')) < float(wcfg.get('line_density_warn_per_1000A', 0.8)):
+            flags.append(
+                make_operational_flag(
+                    "WAVE_LINESET_POOR",
+                    severity="WARN",
+                    message="Active line density is low for a stable 2D solution.",
+                    line_density=float(extra_metrics.get('wave_line_density')),
+                )
+            )
+        if extra_metrics.get('wave_trust_score') is not None and float(extra_metrics.get('wave_trust_score')) < float(wcfg.get('wave_trust_warn', 0.45)):
+            flags.append(
+                make_operational_flag(
+                    "WAVE_GEOMETRY_WEAK",
+                    severity="WARN",
+                    message="Combined wavesolution trust score is low.",
+                    trust_score=float(extra_metrics.get('wave_trust_score')),
+                )
+            )
+        if isinstance(slit_sanity_payload, dict):
+            for fl in (slit_sanity_payload.get('flags') or []):
+                try:
+                    code = str((fl or {}).get('code') or '')
+                    if code:
+                        flags.append(fl)
+                except Exception:
+                    pass
+
         sev = max_severity(flags)
 
         # --- quicklook for lambda_map (navigator-friendly) ---
@@ -2276,6 +2572,9 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
                 "report_txt": str(report_txt),
                 "residuals_2d_png": str(resid2d_png),
                 "residuals_hist_png": str(resid_hist_png),
+                "line_id_overview_png": str(line_id_overview_png),
+                "geometry_overlay_png": str(geometry_overlay_png),
+                "geometry_prior_used_json": str(outdir / 'geometry_prior_used.json'),
             },
             "metrics": {
                 "rms1d_A": float(rms1d) if np.isfinite(rms1d) else None,
@@ -2284,6 +2583,9 @@ def build_wavesolution(cfg: dict[str, Any]) -> WaveSolutionResult:
                 "dispersion_A_per_px": float(dlamdx_med) if np.isfinite(dlamdx_med) else None,
                 "n_lines_used": int(n_lines_used),
                 "n_lines_rejected": int(n_lines_rejected),
+                "wave_line_density": extra_metrics.get('wave_line_density'),
+                "wave_curvature_smoothness": extra_metrics.get('wave_curvature_smoothness'),
+                "wave_trust_score": extra_metrics.get('wave_trust_score'),
             },
             "qc": {
                 "flags": flags,

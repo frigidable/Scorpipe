@@ -6,6 +6,8 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
+from scorpio_pipe.operational_presets import apply_setup_preset_defaults
+
 
 def _norm_setup_str(s: str) -> str:
     return (s or "").strip()
@@ -64,6 +66,7 @@ class AutoConfig:
             cosmics={
                 "enabled": True,
                 "method": "auto",
+                "mode_profile": "current",
                 "k": 9.0,
                 "bias_subtract": True,
                 "save_png": True,
@@ -71,6 +74,7 @@ class AutoConfig:
                 "apply_to": ["obj", "sky"],
                 # Common tuning knobs
                 "dilate": 1,
+                "roi": None,
                 # stack_mad tuning
                 "mad_scale": 1.0,
                 "min_mad": 0.0,
@@ -95,6 +99,9 @@ class AutoConfig:
             },
             runtime={
                 "n_jobs": 0,  # 0/None = auto
+                "blas_threads": None,
+                "max_rss_mb": None,
+                "performance_mode": "full",
             },
             wavesol={
                 # y-range for 1D profile extraction from superneon; if None, use central band.
@@ -166,8 +173,16 @@ class AutoConfig:
             superneon={
                 "bias_sub": True,
             },
+            extract1d={
+                "method": "auto",
+                "local_sky_correction": True,
+            },
+            sky_refine={
+                "enabled": True,
+            },
             frames=self.frames,
         )
+        payload = apply_setup_preset_defaults(payload)
         return yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
 
     def to_yaml(self, path: Path) -> None:

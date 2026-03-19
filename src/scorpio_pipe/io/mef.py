@@ -6,6 +6,7 @@ from typing import Any, Iterable
 
 import numpy as np
 from astropy.io import fits
+from scorpio_pipe.io.atomic_fits import atomic_write_fits
 from scorpio_pipe.maskbits import BADPIX, COSMIC, NO_COVERAGE, REJECTED, SATURATED, USER
 
 DEFAULT_FATAL_BITS = int(NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED)
@@ -256,7 +257,7 @@ def write_sci_var_mask(
     if extra_hdus:
         hdus.extend(extra_hdus)
 
-    fits.HDUList(hdus).writeto(path, overwrite=overwrite)
+    atomic_write_fits(path, fits.HDUList(hdus), overwrite=overwrite)
     return path
 
 

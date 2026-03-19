@@ -1,0 +1,32 @@
+{
+  "case_id": "golden_mini_night",
+  "title": "Golden mini-night operational parity baseline",
+  "category": "golden-baseline",
+  "source_type": "synthetic_operational_baseline",
+  "description": "Public synthetic mini-night baseline used to keep wave/sky/extraction observer metrics stable in weekly CI. This is not a scientific LONG-level claim.",
+  "observer_notes": "This case complements the LONG harness: it compares the current golden run against a committed observer-bundle baseline so that operational regressions in wave/sky/extract are visible in CI artifacts.",
+  "scorpipe_bundle": null,
+  "long_bundle": "../fixtures/golden_mini_night_baseline_bundle.json",
+  "metrics": {
+    "wavelength_solution.rms": {
+      "label": "Wave RMS [A]",
+      "prefer": "lower",
+      "tolerance_abs": 0.08
+    },
+    "sky_subtraction.sky_rms": {
+      "label": "Sky residual sigma",
+      "prefer": "lower",
+      "tolerance_abs": 6.0
+    },
+    "extraction.trace_stability_px": {
+      "label": "Trace stability [px]",
+      "prefer": "lower",
+      "tolerance_abs": 0.35
+    },
+    "extraction.contamination_risk": {
+      "label": "Extraction contamination risk",
+      "prefer": "lower",
+      "tolerance_abs": 0.75
+    }
+  }
+}

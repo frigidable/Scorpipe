@@ -1,0 +1,3 @@
+- Pending private benchmark slots remain unfilled.
+- Public CI only proves the harness and the synthetic mini-night operational baseline.
+- Observer sign-off must be added before calling the release LONG-level.

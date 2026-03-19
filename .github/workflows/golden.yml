@@ -1,0 +1,107 @@
+name: Golden (weekly)
+
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly architectural integrity check: "golden mini-night" must still reduce consistently.
+    # Monday 04:00 UTC
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: golden-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  golden:
+    name: golden
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install package + test deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Run golden tests (mini-night E2E)
+        env:
+          SCORPIPE_CI_ARTIFACTS_DIR: golden_artifacts
+        run: pytest -q -m golden
+
+      - name: Check golden per-stage time budget
+        run: |
+          EXTRA="--fail-on-regression"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            EXTRA="--soft-fail"
+          fi
+          python -m scorpio_pipe.perf.golden_time_budget \
+            --baseline-version main \
+            --timings golden_artifacts/manifest/timings.jsonl \
+            --metrics golden_artifacts/manifest/metrics.json \
+            --output golden_artifacts/perf/golden_time_budget_compare.json \
+            ${EXTRA}
+
+      - name: Compare golden observer bundle against public operational baseline
+        if: always()
+        run: |
+          EXTRA="--fail-on-regression"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            EXTRA="--soft-fail"
+          fi
+          if [ -f golden_artifacts/long_parity/scorpipe_observer_bundle.json ]; then
+            scorpio-pipe long-compare \
+              --case benchmarks/long_parity/cases/golden_mini_night.case.json \
+              --scorpipe-bundle golden_artifacts/long_parity/scorpipe_observer_bundle.json \
+              --output golden_artifacts/long_parity/golden_mini_night \
+              ${EXTRA}
+          else
+            echo "::warning title=Golden observer bundle missing::Skipping operational parity comparison because golden_artifacts/long_parity/scorpipe_observer_bundle.json was not produced."
+          fi
+
+      - name: Build public release-qualification package
+        if: always()
+        run: |
+          scorpio-pipe certify-long-parity \
+            --registry benchmarks/long_parity/cases/registry.json \
+            --reports-root golden_artifacts/qualification/cases \
+            --golden-compare golden_artifacts/perf/golden_time_budget_compare.json \
+            --known-limitations benchmarks/long_parity/certification/known_limitations.template.md \
+            --output golden_artifacts/qualification
+
+      - name: Emit advisory warnings for PR golden time regressions
+        if: always() && github.event_name == 'pull_request'
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path('golden_artifacts/perf/golden_time_budget_compare.json')
+          if not p.exists():
+              raise SystemExit(0)
+          data = json.loads(p.read_text(encoding='utf-8'))
+          for stage in data.get('regressions', []):
+              item = data.get('comparisons', {}).get(stage, {})
+              print(f"::warning title=Golden stage time regression::{stage}: {item.get('current_seconds')} s vs baseline {item.get('baseline_seconds')} s (allowed {item.get('allowed_seconds')} s)")
+          for stage in data.get('missing_in_current', []):
+              print(f"::warning title=Golden timings missing::{stage} missing in current timings")
+          PY
+
+      - name: Upload golden artifacts (qc_report + key products)
+        if: always()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: golden-mini-night
+          path: golden_artifacts
+          if-no-files-found: warn
+          retention-days: 30

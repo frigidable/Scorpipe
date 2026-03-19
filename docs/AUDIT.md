@@ -23,7 +23,7 @@
 ### QC / Reproducibility
 - **manifest** → `work/qc/manifest.json` (+ legacy `work/report/manifest.json`)
 - **qc_report** → `work/qc/index.html`, `work/qc/qc_report.json` (+ legacy `work/report/*`)
-- **timings** → `work/qc/timings.json` (+ legacy `work/report/timings.json`)
+- **timings** → `work/manifest/timings.jsonl` (append-only; legacy `work/manifest/timings.json` поддерживается как fallback)
 
 ## Статус «заглушек»
 В v5.17 сознательно делается упор на **инфраструктуру** (единый формат I/O + структура work + QC каркас). Некоторые части остаются намеренно упрощёнными (научная оптимальность будет улучшаться в следующих релизах).

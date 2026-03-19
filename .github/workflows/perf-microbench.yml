@@ -1,0 +1,74 @@
+name: Perf microbench (weekly)
+
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly perf sanity-check on hot kernels.
+    # Wednesday 04:30 UTC
+    - cron: "30 4 * * 3"
+  workflow_dispatch:
+
+concurrency:
+  group: perf-microbench-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  microbench:
+    name: microbench
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install package + test deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Run hot-kernel microbench suite
+        run: |
+          EXTRA="--fail-on-regression"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            EXTRA="--soft-fail"
+          fi
+          python -m scorpio_pipe.perf.microbench \
+            --baseline-version main \
+            --output perf_artifacts/microbench_results.json \
+            --compare-output perf_artifacts/microbench_compare.json \
+            ${EXTRA}
+
+      - name: Emit advisory warnings for PR perf regressions
+        if: always() && github.event_name == 'pull_request'
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path('perf_artifacts/microbench_compare.json')
+          if not p.exists():
+              raise SystemExit(0)
+          data = json.loads(p.read_text(encoding='utf-8'))
+          for name in data.get('regressions', []):
+              item = data.get('comparisons', {}).get(name, {})
+              print(f"::warning title=Microbench regression::{name}: {item.get('current_ms')} ms vs baseline {item.get('baseline_ms')} ms (allowed {item.get('allowed_ms')} ms)")
+          for name in data.get('missing_in_current', []):
+              print(f"::warning title=Microbench baseline missing::{name} missing in current run")
+          PY
+
+      - name: Upload microbench artifacts
+        if: always()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: perf-microbench
+          path: perf_artifacts
+          if-no-files-found: warn
+          retention-days: 30

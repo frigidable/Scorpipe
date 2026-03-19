@@ -1,0 +1,13 @@
+{
+  "schema": "scorpio_pipe.long_parity_registry",
+  "schema_version": 1,
+  "minimum_real_cases_required": 1,
+  "entries": [
+    {
+      "case_id": "demo",
+      "status": "ready",
+      "manifest": "demo.case.json",
+      "category": "reference"
+    }
+  ]
+}

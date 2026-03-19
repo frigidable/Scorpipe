@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "night_date": null,
+  "night_dir": "scorpipe_v7_3_0",
+  "object": null,
+  "disperser": null,
+  "run_id": null,
+  "created_at": "2026-02-20T17:19:20Z",
+  "pipeline_version": "7.3.0",
+  "schema_version": 1
+}

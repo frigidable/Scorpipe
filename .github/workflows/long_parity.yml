@@ -1,0 +1,57 @@
+name: LONG parity
+
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: long-parity-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  long_parity:
+    name: long_parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install package + test deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Validate LONG parity registry and harness
+        run: pytest -q tests/test_p0_long_parity_harness.py tests/test_p0_failure_taxonomy.py
+
+      - name: Run LONG parity fixture comparison
+        run: |
+          EXTRA="--fail-on-regression"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            EXTRA="--soft-fail"
+          fi
+          scorpio-pipe long-compare \
+            --case benchmarks/long_parity/cases/mini_night_synthetic.case.json \
+            --output long_parity_artifacts/mini_night \
+            ${EXTRA}
+
+      - name: Upload LONG parity artifacts
+        if: always()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: long-parity-artifacts
+          path: long_parity_artifacts
+          if-no-files-found: warn
+          retention-days: 30

@@ -252,6 +252,19 @@ def resolve_linelist_csv(cfg: dict[str, Any], *, lamp_type: str) -> str:
             csv_name = wcfg.get("neon_lines_csv")
 
     if not csv_name:
+        # P1.2: prefer curated per-grism presets derived from LONG when available.
+        try:
+            from scorpio_pipe.wavesol_presets import materialize_curated_linelist_csv
+
+            curated_path, _meta = materialize_curated_linelist_csv(
+                cfg,
+                run_root=resolve_work_dir(cfg),
+            )
+            if curated_path is not None and Path(curated_path).exists():
+                return str(Path(curated_path).expanduser())
+        except Exception:
+            pass
+
         csv_name = choose_linelist_name(lamp_type)
 
     rr = resolve_reference(

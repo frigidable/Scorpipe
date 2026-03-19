@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import logging
+import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
 from astropy.io import fits
+from scorpio_pipe.io.atomic_fits import atomic_write_fits
 
 from PySide6 import QtCore, QtWidgets
 
@@ -17,7 +20,9 @@ from matplotlib.widgets import RectangleSelector
 from scorpio_pipe.config import load_config_any
 from scorpio_pipe.fits_utils import read_image_smart
 from scorpio_pipe.plot_style import mpl_style
-from scorpio_pipe.stages.cosmics import _boxcar_mean2d_masked
+from scorpio_pipe.pipeline.public_api import boxcar_mean2d_masked as _boxcar_mean2d_masked
+from scorpio_pipe.ui.async_worker import RunHandle, run_in_thread
+from scorpio_pipe.ui.mpl_render import RenderThrottle
 from scorpio_pipe.workspace_paths import stage_dir
 
 log = logging.getLogger(__name__)
@@ -91,7 +96,7 @@ def _load_mask(path: Path, shape: tuple[int, int]) -> np.ndarray:
 
 def _write_mask(path: Path, mask: np.ndarray) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fits.writeto(path, np.asarray(mask, dtype=np.uint8), overwrite=True)
+    atomic_write_fits(path, np.asarray(mask, dtype=np.uint8), overwrite=True)
 
 
 def _write_clean(
@@ -105,7 +110,7 @@ def _write_clean(
     if history:
         h["HISTORY"] = history
     # float32 for science, avoids scaling keywords
-    fits.writeto(path, np.asarray(data, dtype=np.float32), header=h, overwrite=True)
+    atomic_write_fits(path, np.asarray(data, dtype=np.float32), header=h, overwrite=True)
 
 
 @dataclass
@@ -118,6 +123,135 @@ class _UndoItem:
     x1: int
     prev_mask: np.ndarray
     prev_data: np.ndarray
+
+
+@dataclass
+class _DisplayPayload:
+    image: np.ndarray
+    auto_mask: np.ndarray
+    manual_mask: np.ndarray
+    extent: tuple[float, float, float, float]
+    vmin: float | None
+    vmax: float | None
+    step_x: int
+    step_y: int
+
+
+@dataclass
+class _FramePayload:
+    path: Path
+    key: tuple[object, ...] | None
+    image: np.ndarray
+    header: fits.Header
+    auto_mask: np.ndarray
+    manual_mask: np.ndarray
+    display: _DisplayPayload
+
+
+_LAST_FRAME_CACHE_LOCK = threading.Lock()
+_LAST_FRAME_CACHE_KEY: tuple[object, ...] | None = None
+_LAST_FRAME_CACHE_PAYLOAD: _FramePayload | None = None
+
+
+_MANUAL_VIEW_MAX_DIM = max(512, int(os.environ.get("SCORPIPE_UI_MANUAL_COSMICS_MAX_DIM", "1600")))
+
+
+def _file_cache_key(path: Path) -> tuple[object, ...] | None:
+    try:
+        st = path.stat()
+        mtime_ns = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))
+        return (str(path.resolve()), mtime_ns, int(st.st_size))
+    except Exception:
+        return None
+
+
+def _get_last_frame_cache(key: tuple[object, ...] | None) -> _FramePayload | None:
+    if key is None:
+        return None
+    with _LAST_FRAME_CACHE_LOCK:
+        if _LAST_FRAME_CACHE_KEY != key:
+            return None
+        return _LAST_FRAME_CACHE_PAYLOAD
+
+
+def _put_last_frame_cache(payload: _FramePayload) -> None:
+    with _LAST_FRAME_CACHE_LOCK:
+        global _LAST_FRAME_CACHE_KEY, _LAST_FRAME_CACHE_PAYLOAD
+        _LAST_FRAME_CACHE_KEY = payload.key
+        _LAST_FRAME_CACHE_PAYLOAD = payload
+
+
+def _prepare_display_payload(
+    image: np.ndarray,
+    auto_mask: np.ndarray,
+    manual_mask: np.ndarray,
+    *,
+    max_dim: int = _MANUAL_VIEW_MAX_DIM,
+) -> _DisplayPayload:
+    img = np.asarray(image, dtype=np.float32)
+    ny, nx = int(img.shape[0]), int(img.shape[1])
+    step = max(1, int(np.ceil(max(ny, nx) / float(max(64, int(max_dim))))))
+    img_disp = np.ascontiguousarray(img[::step, ::step], dtype=np.float32)
+    auto_disp = np.ascontiguousarray(np.asarray(auto_mask[::step, ::step], dtype=bool))
+    manual_disp = np.ascontiguousarray(np.asarray(manual_mask[::step, ::step], dtype=bool))
+
+    finite = img_disp[np.isfinite(img_disp)]
+    vmin: float | None = None
+    vmax: float | None = None
+    if finite.size:
+        try:
+            lo, hi = np.nanpercentile(finite, [5.0, 99.0])
+            vmin = float(lo)
+            vmax = float(hi)
+        except Exception:
+            pass
+    if vmin is not None and vmax is not None and not np.isfinite(vmin - vmax):
+        vmin = None
+        vmax = None
+
+    return _DisplayPayload(
+        image=img_disp,
+        auto_mask=auto_disp,
+        manual_mask=manual_disp,
+        extent=(-0.5, float(nx) - 0.5, -0.5, float(ny) - 0.5),
+        vmin=vmin,
+        vmax=vmax,
+        step_x=int(step),
+        step_y=int(step),
+    )
+
+
+def _load_frame_payload_sync(path: Path, *, work_dir: Path, kind: str) -> _FramePayload:
+    p = Path(path)
+    with fits.open(p, memmap=False) as hdul:
+        header = hdul[0].header.copy()
+    image = np.asarray(read_image_smart(p), dtype=np.float32)
+    if image.ndim != 2:
+        raise ValueError(f"Expected 2D image, got shape={tuple(image.shape)}")
+
+    base = p.stem
+    if base.endswith("_clean"):
+        base = base[: -len("_clean")]
+
+    dirs = _cosmics_kind_dirs(work_dir, kind)
+    mpaths = _mask_paths(dirs, base)
+
+    if mpaths["auto"].exists():
+        auto = _load_mask(mpaths["auto"], image.shape)
+    else:
+        auto = _load_mask(mpaths["final"], image.shape)
+
+    manual = _load_mask(mpaths["manual"], image.shape)
+    display = _prepare_display_payload(image, auto, manual)
+    return _FramePayload(
+        path=p,
+        key=_file_cache_key(p),
+        image=image,
+        header=header,
+        auto_mask=auto,
+        manual_mask=manual,
+        display=display,
+    )
 
 
 class CosmicsManualDialog(QtWidgets.QDialog):
@@ -156,9 +290,15 @@ class CosmicsManualDialog(QtWidgets.QDialog):
         self._hdr: Optional[fits.Header] = None
         self._auto_mask: Optional[np.ndarray] = None
         self._manual_mask: Optional[np.ndarray] = None
+        self._display: Optional[_DisplayPayload] = None
+        self._frame_job: Optional[RunHandle[_FramePayload]] = None
+        self._frame_request: tuple[str, int, str] | None = None
+        self._frame_busy: bool = False
 
         self._last_rect: Optional[tuple[int, int, int, int]] = None
         self._undo: list[_UndoItem] = []
+        self._render_overlay_message: str | None = None
+        self._render_throttle = RenderThrottle(self, self._draw_now, max_fps=10.0, debounce_ms=180)
 
         # --- Layout
         root = QtWidgets.QVBoxLayout(self)
@@ -248,6 +388,7 @@ class CosmicsManualDialog(QtWidgets.QDialog):
         self.kind = str(t)
         self.frame_idx = 0
         self._undo.clear()
+        self._cancel_load_frame(mark_only=False)
         self._reload_paths()
         if not self._require_auto_done():
             return
@@ -256,12 +397,57 @@ class CosmicsManualDialog(QtWidgets.QDialog):
     def _on_r_changed(self, v: int) -> None:
         self.replace_r = int(v)
 
+    def _set_busy(self, busy: bool, message: str | None = None) -> None:
+        self._frame_busy = bool(busy)
+        self.combo_kind.setEnabled(not busy)
+        self.btn_prev.setEnabled((not busy) and self.frame_idx > 0)
+        self.btn_next.setEnabled((not busy) and self.frame_idx < max(0, len(self._paths) - 1))
+        self.spin_r.setEnabled(not busy)
+        if message:
+            self.lbl_help.setText(message)
+        elif busy:
+            self.lbl_help.setText("Loading frame…")
+        else:
+            self.lbl_help.setText(
+                "Draw a rectangle around a cosmic spike/cluster. "
+                "Press Enter to apply replacement and write it to disk. "
+                "Press Ctrl+Z to undo the last applied rectangle."
+            )
+        if self._selector is not None:
+            try:
+                self._selector.set_active(not busy)
+            except Exception:
+                pass
+
+    def _cancel_load_frame(self, *, mark_only: bool = False) -> None:
+        job = getattr(self, "_frame_job", None)
+        if job is None:
+            return
+        try:
+            job.mark_stale() if mark_only else job.cancel()
+        except Exception:
+            pass
+        self._frame_job = None
+
     def _step_frame(self, d: int) -> None:
+        if self._frame_busy:
+            return
         if not self._require_auto_done():
             return
         i = int(self.frame_idx) + int(d)
         i = max(0, min(len(self._paths) - 1, i))
         self._load_frame(i)
+
+    def _apply_frame_payload(self, payload: _FramePayload) -> None:
+        self._img = np.asarray(payload.image, dtype=np.float32)
+        self._hdr = payload.header.copy()
+        self._auto_mask = np.asarray(payload.auto_mask, dtype=bool)
+        self._manual_mask = np.asarray(payload.manual_mask, dtype=bool)
+        self._display = payload.display
+        self._last_rect = None
+        self._set_busy(False)
+        self._request_draw()
+        self._update_info()
 
     def _load_frame(self, idx: int) -> None:
         if not self._require_auto_done():
@@ -271,56 +457,64 @@ class CosmicsManualDialog(QtWidgets.QDialog):
         self.frame_idx = idx
         p = self._paths[self.frame_idx]
 
-        # Load image and header
-        try:
-            with fits.open(p, memmap=False) as hdul:
-                self._hdr = hdul[0].header.copy()
-            self._img = np.asarray(read_image_smart(p), dtype=np.float32)
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(
-                self, "Manual Cosmics", f"Failed to read FITS: {p}\n\n{e}"
-            )
-            self._img = None
-            self._hdr = None
+        self._cancel_load_frame(mark_only=False)
+        self._last_rect = None
+        self._img = None
+        self._hdr = None
+        self._auto_mask = None
+        self._manual_mask = None
+        self._display = None
+        self._request_draw(overlay_message=f"Loading frame {p.name}…")
+        self._update_info(extra=f"loading {p.name}")
+
+        key = _file_cache_key(p)
+        cached = _get_last_frame_cache(key)
+        if cached is not None:
+            self._apply_frame_payload(cached)
             return
 
-        if self._img.ndim != 2:
+        self._set_busy(True, f"Loading {p.name} in background…")
+        request_kind = str(self.kind)
+        request_idx = int(self.frame_idx)
+        self._frame_request = (request_kind, request_idx, str(p))
+
+        def _job() -> _FramePayload:
+            return _load_frame_payload_sync(p, work_dir=self.work_dir, kind=request_kind)
+
+        h: RunHandle[_FramePayload] = run_in_thread(
+            _job,
+            name="manual_cosmics_load_frame",
+            dedupe_key=f"manual_cosmics:{p.resolve()}",
+        )
+        self._frame_job = h
+
+        def _on_finished(payload: _FramePayload) -> None:
+            if self._frame_job is not h:
+                return
+            self._frame_job = None
+            if self._frame_request != (request_kind, request_idx, str(p)):
+                return
+            _put_last_frame_cache(payload)
+            self._apply_frame_payload(payload)
+
+        def _on_failed(tb: str) -> None:
+            if self._frame_job is not h:
+                return
+            self._frame_job = None
+            self._set_busy(False, "Failed to load frame")
+            self._request_draw(overlay_message="Failed to load frame")
+            self._update_info(extra="failed")
             QtWidgets.QMessageBox.critical(
                 self,
                 "Manual Cosmics",
-                f"Expected 2D image, got shape={self._img.shape}",
+                f"Failed to read FITS: {p}\n\n{tb.splitlines()[-1] if tb else tb}",
             )
-            self._img = None
-            return
 
-        base = p.stem
-        if base.endswith("_clean"):
-            base = base[: -len("_clean")]
+        h.worker.finished.connect(_on_finished)
+        h.worker.failed.connect(_on_failed)
 
-        dirs = _cosmics_kind_dirs(self.work_dir, self.kind)
-        for k in ("masks", "auto", "manual", "backup"):
-            dirs[k].mkdir(parents=True, exist_ok=True)
-        mpaths = _mask_paths(dirs, base)
-
-        # auto baseline: if auto_mask exists, use it; else snapshot current final mask as auto
-        if mpaths["auto"].exists():
-            auto = _load_mask(mpaths["auto"], self._img.shape)
-        else:
-            auto = _load_mask(mpaths["final"], self._img.shape)
-            # If final mask exists, treat it as auto baseline and snapshot it.
-            if mpaths["final"].exists():
-                _write_mask(mpaths["auto"], auto)
-
-        manual = _load_mask(mpaths["manual"], self._img.shape)
-        self._auto_mask = auto
-        self._manual_mask = manual
-
-        self._last_rect = None
-        self._draw()
-        self._update_info()
-
-    def _update_info(self) -> None:
-        if self._img is None:
+    def _update_info(self, *, extra: str | None = None) -> None:
+        if not self._paths:
             self.lbl_info.setText("—")
             return
         p = self._paths[self.frame_idx]
@@ -336,28 +530,54 @@ class CosmicsManualDialog(QtWidgets.QDialog):
             if (self._auto_mask is not None and self._manual_mask is not None)
             else 0.0
         )
-        self.lbl_info.setText(
+        txt = (
             f"{self.kind} | frame {self.frame_idx + 1}/{len(self._paths)} | {base} | "
             f"auto={auto_frac:.4f}, manual={man_frac:.4f}, final={fin:.4f}"
         )
+        if self._display is not None and (self._display.step_x > 1 or self._display.step_y > 1):
+            txt += f" | preview 1/{self._display.step_x}"
+        if extra:
+            txt += f" | {extra}"
+        self.lbl_info.setText(txt)
 
-    def _draw(self) -> None:
-        if self._img is None:
-            return
+    def _request_draw(self, *, overlay_message: str | None = None, debounce: bool = False) -> None:
+        self._render_overlay_message = overlay_message
+        if debounce:
+            self._render_throttle.request()
+        else:
+            self._render_throttle.request_immediate()
+
+    def _draw_now(self) -> None:
+        overlay_message = self._render_overlay_message
+        self._render_overlay_message = None
         self.ax.clear()
+        if self._display is None:
+            with mpl_style():
+                self.ax.set_title("Manual cosmics: draw rectangle → Enter apply, Ctrl+Z undo")
+                self.ax.set_xlabel("X (pix)")
+                self.ax.set_ylabel("Y (pix)")
+                self.ax.text(
+                    0.5,
+                    0.5,
+                    overlay_message or "Loading frame…",
+                    transform=self.ax.transAxes,
+                    ha="center",
+                    va="center",
+                )
+            self.canvas.draw_idle()
+            return
+
+        disp = self._display
         with mpl_style():
-            finite = self._img[np.isfinite(self._img)]
-            if finite.size:
-                vmin, vmax = np.nanpercentile(finite, [5, 99])
-            else:
-                vmin, vmax = None, None
             self.ax.imshow(
-                self._img,
+                disp.image,
                 origin="lower",
                 aspect="auto",
                 cmap="gray",
-                vmin=vmin,
-                vmax=vmax,
+                vmin=disp.vmin,
+                vmax=disp.vmax,
+                extent=disp.extent,
+                interpolation="nearest",
             )
             self.ax.set_title(
                 "Manual cosmics: draw rectangle → Enter apply, Ctrl+Z undo"
@@ -365,19 +585,46 @@ class CosmicsManualDialog(QtWidgets.QDialog):
             self.ax.set_xlabel("X (pix)")
             self.ax.set_ylabel("Y (pix)")
 
-            # overlay masks
             if self._auto_mask is not None:
-                m = np.ma.masked_where(~self._auto_mask, self._auto_mask)
+                m = np.ma.masked_where(~disp.auto_mask, disp.auto_mask)
                 self.ax.imshow(
-                    m, origin="lower", aspect="auto", cmap="Reds", alpha=0.22
+                    m,
+                    origin="lower",
+                    aspect="auto",
+                    cmap="Reds",
+                    alpha=0.22,
+                    extent=disp.extent,
+                    interpolation="nearest",
                 )
             if self._manual_mask is not None:
-                m = np.ma.masked_where(~self._manual_mask, self._manual_mask)
+                m = np.ma.masked_where(~disp.manual_mask, disp.manual_mask)
                 self.ax.imshow(
-                    m, origin="lower", aspect="auto", cmap="Oranges", alpha=0.30
+                    m,
+                    origin="lower",
+                    aspect="auto",
+                    cmap="Oranges",
+                    alpha=0.30,
+                    extent=disp.extent,
+                    interpolation="nearest",
+                )
+            if overlay_message:
+                self.ax.text(
+                    0.02,
+                    0.98,
+                    overlay_message,
+                    transform=self.ax.transAxes,
+                    ha="left",
+                    va="top",
+                    bbox={"facecolor": "white", "alpha": 0.6, "edgecolor": "none"},
                 )
 
         self.canvas.draw_idle()
+
+    def _refresh_display_from_current(self) -> None:
+        if self._img is None or self._auto_mask is None or self._manual_mask is None:
+            self._display = None
+            return
+        self._display = _prepare_display_payload(self._img, self._auto_mask, self._manual_mask)
 
     def _install_selector(self) -> None:
         if self._selector is not None:
@@ -417,6 +664,8 @@ class CosmicsManualDialog(QtWidgets.QDialog):
             self._undo_last()
 
     def _apply_last_rect(self) -> None:
+        if self._frame_busy:
+            return
         if self._img is None or self._auto_mask is None or self._manual_mask is None:
             return
         if self._last_rect is None:
@@ -462,11 +711,14 @@ class CosmicsManualDialog(QtWidgets.QDialog):
             )
         )
 
+        self._refresh_display_from_current()
         self._persist_current()
-        self._draw()
+        self._request_draw()
         self._update_info()
 
     def _undo_last(self) -> None:
+        if self._frame_busy:
+            return
         if not self._undo:
             return
         u = self._undo.pop()
@@ -482,8 +734,9 @@ class CosmicsManualDialog(QtWidgets.QDialog):
         self._manual_mask[rect] = u.prev_mask
         self._img[rect] = u.prev_data
 
+        self._refresh_display_from_current()
         self._persist_current()
-        self._draw()
+        self._request_draw()
         self._update_info()
 
     def _persist_current(self) -> None:
@@ -531,3 +784,25 @@ class CosmicsManualDialog(QtWidgets.QDialog):
             hdr=h,
             history="scorpio_pipe manual cosmics: replaced pixels in user rectangles",
         )
+        self._refresh_display_from_current()
+        try:
+            _put_last_frame_cache(
+                _FramePayload(
+                    path=p,
+                    key=_file_cache_key(p),
+                    image=np.asarray(self._img, dtype=np.float32),
+                    header=h.copy(),
+                    auto_mask=np.asarray(self._auto_mask, dtype=bool),
+                    manual_mask=np.asarray(self._manual_mask, dtype=bool),
+                    display=self._display if self._display is not None else _prepare_display_payload(self._img, self._auto_mask, self._manual_mask),
+                )
+            )
+        except Exception:
+            pass
+
+    def closeEvent(self, event) -> None:
+        try:
+            self._cancel_load_frame(mark_only=False)
+        except Exception:
+            pass
+        super().closeEvent(event)

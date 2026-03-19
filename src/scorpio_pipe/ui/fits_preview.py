@@ -13,10 +13,16 @@ from __future__ import annotations
 
 
 from dataclasses import dataclass
+from pathlib import Path
+import os
+from collections import OrderedDict
+from threading import Lock
 import numpy as np
 from astropy.io import fits
 
 from PySide6 import QtCore, QtGui, QtWidgets
+
+from scorpio_pipe.ui.async_worker import RunHandle, run_in_thread
 
 
 @dataclass
@@ -27,6 +33,72 @@ class StretchParams:
     gamma: float = 1.0
     scale: str = "linear"  # linear, log, sqrt, asinh
     invert: bool = False
+
+
+# ---------------------------- preview cache ----------------------------
+
+# Cache key: (path, mtime_ns, size_bytes)
+# Value: {"payload": dict, "bytes": int}
+_PREVIEW_CACHE_LOCK = Lock()
+_PREVIEW_CACHE: "OrderedDict[tuple[object, ...], dict[str, object]]" = OrderedDict()
+_PREVIEW_CACHE_BYTES: int = 0
+
+# Tunables (env override). Keep conservative to avoid bloating UI memory.
+_PREVIEW_CACHE_MAX_ITEMS = int(os.environ.get("SCORPIPE_UI_PREVIEW_CACHE_ITEMS", "24"))
+_PREVIEW_CACHE_MAX_MB = int(os.environ.get("SCORPIPE_UI_PREVIEW_CACHE_MB", "256"))
+_PREVIEW_CACHE_MAX_BYTES = max(16, _PREVIEW_CACHE_MAX_MB) * 1024 * 1024
+
+
+def _file_cache_key(path: str) -> tuple[object, ...] | None:
+    try:
+        st = os.stat(path)
+        return (os.path.abspath(path), int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))), int(st.st_size))
+    except Exception:
+        return None
+
+
+def _cache_get(key: tuple[object, ...]) -> dict[str, object] | None:
+    with _PREVIEW_CACHE_LOCK:
+        entry = _PREVIEW_CACHE.get(key)
+        if not entry:
+            return None
+        try:
+            _PREVIEW_CACHE.move_to_end(key)
+        except Exception:
+            pass
+        payload = entry.get("payload")
+        return payload if isinstance(payload, dict) else None
+
+
+def _cache_put(key: tuple[object, ...], payload: dict[str, object], bytes_est: int) -> None:
+    global _PREVIEW_CACHE_BYTES
+    with _PREVIEW_CACHE_LOCK:
+        # Update/insert
+        old = _PREVIEW_CACHE.get(key)
+        if old:
+            try:
+                _PREVIEW_CACHE_BYTES -= int(old.get("bytes", 0))
+            except Exception:
+                pass
+            try:
+                del _PREVIEW_CACHE[key]
+            except Exception:
+                pass
+
+        _PREVIEW_CACHE[key] = {"payload": payload, "bytes": int(max(0, bytes_est))}
+        _PREVIEW_CACHE_BYTES += int(max(0, bytes_est))
+
+        # Evict LRU
+        while (
+            len(_PREVIEW_CACHE) > _PREVIEW_CACHE_MAX_ITEMS
+            or _PREVIEW_CACHE_BYTES > _PREVIEW_CACHE_MAX_BYTES
+        ):
+            try:
+                k, v = _PREVIEW_CACHE.popitem(last=False)
+                _PREVIEW_CACHE_BYTES -= int(v.get("bytes", 0))
+            except Exception:
+                break
+
 
 
 def _as_2d_float(a: np.ndarray | None) -> np.ndarray:
@@ -129,6 +201,141 @@ def _choose_image_hdu(hdul: fits.HDUList) -> tuple[int, np.ndarray]:
         msg = msg + "\n\nHDUList.info():\n" + info
 
     raise ValueError(msg)
+
+
+def _choose_image_hdu_by_header(hdul: fits.HDUList) -> int:
+    """Pick first 2D image-like HDU without forcing full data load."""
+    for i, hdu in enumerate(hdul):
+        try:
+            hdr = getattr(hdu, "header", None)
+            if hdr is None:
+                continue
+            naxis = int(hdr.get("NAXIS", 0) or 0)
+            if naxis < 2:
+                continue
+            naxis1 = hdr.get("NAXIS1")
+            naxis2 = hdr.get("NAXIS2")
+            if naxis1 is None or naxis2 is None:
+                continue
+            nx = int(naxis1)
+            ny = int(naxis2)
+            if nx <= 0 or ny <= 0:
+                continue
+            return i
+        except Exception:
+            continue
+    # fallback (may touch data)
+    i, _ = _choose_image_hdu(hdul)
+    return int(i)
+
+
+def _load_fits_preview_quick(path: str, max_dim: int) -> dict[str, object]:
+    """Load a lightweight preview without reading the full SCI array.
+
+    Strategy:
+      * Read only header + a strided sample (every N-th row/col) via ``HDU.section``.
+      * Apply BSCALE/BZERO/BLANK on the sampled cut only.
+      * Fall back to the robust pipeline loader if the file is exotic.
+    """
+
+    import numpy as np
+
+    # Open FITS with memmap; do NOT auto-scale, we apply scaling on the slice.
+    mode = "section"
+    hdul = fits.open(path, memmap=True, do_not_scale_image_data=True)
+    try:
+        hdu_i = _choose_image_hdu_by_header(hdul)
+        hdu = hdul[hdu_i]
+        hdr = hdu.header
+        nx = int(hdr.get("NAXIS1") or 0)
+        ny = int(hdr.get("NAXIS2") or 0)
+        if nx <= 0 or ny <= 0:
+            raise ValueError("Invalid NAXIS1/NAXIS2")
+
+        step = 1
+        if max(nx, ny) > int(max_dim):
+            step = int(np.ceil(max(nx, ny) / float(max_dim)))
+            step = max(2, step)
+
+        # Read a strided view (best-effort). For some HDUs (compressed images)
+        # .section may not be available.
+        try:
+            sect = getattr(hdu, "section", None)
+            if sect is None:
+                raise AttributeError("no section")
+            raw = np.asarray(sect[::step, ::step])
+        except Exception:
+            # Fallback: this may load more, but still use slicing.
+            raw_full = getattr(hdu, "data", None)
+            if raw_full is None:
+                raise
+            raw = np.asarray(raw_full)[::step, ::step]
+            mode = "slice"
+
+        raw = np.asarray(raw)
+        if raw.ndim > 2:
+            raw = np.squeeze(raw)
+        if raw.ndim != 2:
+            raise ValueError(f"Unsupported FITS image ndim={raw.ndim} (expected 2D)")
+
+        # Apply BLANK mask on integer arrays before scaling.
+        blank = hdr.get("BLANK", None)
+        if blank is not None and np.issubdtype(raw.dtype, np.integer):
+            try:
+                raw = raw.astype(np.float32)
+                raw[raw == float(blank)] = np.nan
+            except Exception:
+                raw = raw.astype(np.float32)
+        else:
+            raw = raw.astype(np.float32)
+
+        bzero = hdr.get("BZERO", None)
+        bscale = hdr.get("BSCALE", None)
+        has_scaling = (bzero is not None) or (bscale is not None)
+        bzero_f = float(bzero) if bzero is not None else 0.0
+        bscale_f = float(bscale) if bscale is not None else 1.0
+        if has_scaling:
+            raw = raw * bscale_f + bzero_f
+
+        data_disp = _as_2d_float(raw)
+
+        finite = data_disp[np.isfinite(data_disp)]
+        if finite.size:
+            p1 = float(np.percentile(finite, 1.0))
+            p50 = float(np.percentile(finite, 50.0))
+            p99 = float(np.percentile(finite, 99.0))
+            vmin = float(np.min(finite))
+            vmax = float(np.max(finite))
+        else:
+            p1 = p50 = p99 = vmin = vmax = float("nan")
+
+        info = {
+            "hdu_index": int(hdu_i),
+            "memmap_used": True,
+            "has_scaling": bool(has_scaling),
+            "bzero": bzero,
+            "bscale": bscale,
+            "dtype_raw": str(raw.dtype),
+            "dtype": "float32",
+            "full_shape": (int(ny), int(nx)),
+            "preview_shape": (int(data_disp.shape[0]), int(data_disp.shape[1])),
+            "preview_step": int(step),
+            "preview_mode": str(mode),
+        }
+
+        return {
+            "data": data_disp,
+            "data_disp": data_disp,
+            "info": info,
+            "stats": {"min": vmin, "p1": p1, "p50": p50, "p99": p99, "max": vmax},
+        }
+
+    finally:
+        try:
+            hdul.close()
+        except Exception:
+            pass
+
 
 
 def _safe_percentiles(x: np.ndarray, p_lo: float, p_hi: float) -> tuple[float, float]:
@@ -341,6 +548,11 @@ class FitsPreviewWidget(QtWidgets.QWidget):
         self._hdu_index: int | None = None
         self._fits_info: dict[str, object] | None = None
 
+        # Async loading state
+        self._load_id: int = 0
+        self._load_job: RunHandle | None = None
+        self._last_cache_key: tuple[object, ...] | None = None
+
         # Controls
         self.cmb_cmap = QtWidgets.QComboBox()
         self.cmb_cmap.addItems(["gray", "viridis", "magma", "plasma", "inferno"])
@@ -456,76 +668,182 @@ class FitsPreviewWidget(QtWidgets.QWidget):
         self.load_fits(str(path))
 
     def load_fits(self, path: str) -> None:
+        """Load and display a FITS file without blocking the UI."""
+
+        # Best-effort: mark previous job stale to avoid queue storms.
+        try:
+            if self._load_job is not None:
+                self._load_job.mark_stale()
+        except Exception:
+            pass
+
+        # Ignore previous jobs by bumping load_id.
+        self._load_id += 1
+        my_id = self._load_id
         self._path = path
         self.lbl_path.setText(path)
         self._hdu_index = None
 
-        try:
-            data = self._read_fits_image(path)
-            self._data = _as_2d_float(data)
-        except Exception as e:
+        # Immediate placeholder.
+        self._data = None
+        self._data_disp = None
+        self._fits_info = None
+        self._view.clear()
+        self.lbl_stats.setText("Loading…")
+        self.lbl_info.setText("—")
+
+        # Cache: switching between files should not re-read huge arrays.
+        cache_key = _file_cache_key(path)
+        self._last_cache_key = cache_key
+
+        def _apply(res_obj: object) -> None:
+            if my_id != self._load_id:
+                return
+            from scorpio_pipe.ui.slow_action_profiler import profile_ui_action
+
+            with profile_ui_action(
+                "ui.fits_preview.apply",
+                path_hint=str(path),
+                extra={"path": str(path), "cache_hit": bool(res_obj is not None and res_obj is _cached_payload)},
+            ):
+                try:
+                    d = res_obj if isinstance(res_obj, dict) else {}
+                    self._data = d.get("data")
+                    self._data_disp = d.get("data_disp")
+                    info = d.get("info")
+                    self._fits_info = info if isinstance(info, dict) else None
+                    try:
+                        self._hdu_index = (
+                            int(self._fits_info.get("hdu_index"))
+                            if self._fits_info and self._fits_info.get("hdu_index") is not None
+                            else None
+                        )
+                    except Exception:
+                        self._hdu_index = None
+
+                    st = d.get("stats") if isinstance(d.get("stats"), dict) else {}
+                    mm = (
+                        (self._fits_info or {}).get("memmap_used", None)
+                        if self._fits_info
+                        else None
+                    )
+                    scale = (
+                        "scaled"
+                        if (self._fits_info or {}).get("has_scaling")
+                        else "unscaled"
+                    )
+                    bzero = (self._fits_info or {}).get("bzero") if self._fits_info else None
+                    bscale = (self._fits_info or {}).get("bscale") if self._fits_info else None
+                    dtype = (self._fits_info or {}).get("dtype") if self._fits_info else None
+                    dtype = dtype or (
+                        str(self._data.dtype) if self._data is not None else "unknown"
+                    )
+
+                    extra = []
+                    if mm is not None:
+                        extra.append(f"memmap={bool(mm)}")
+                    extra.append(scale)
+                    if bzero is not None or bscale is not None:
+                        extra.append(f"BZERO={bzero} BSCALE={bscale}")
+
+                    # Quick preview info
+                    try:
+                        mode = (self._fits_info or {}).get("preview_mode")
+                        step = (self._fits_info or {}).get("preview_step")
+                        if mode:
+                            extra.append(f"preview={mode}")
+                        if step and int(step) > 1:
+                            extra.append(f"step={int(step)}")
+                    except Exception:
+                        pass
+
+                    self.lbl_stats.setText(
+                        f"dtype={dtype}   min={st.get('min', float('nan')):.3g}  p01={st.get('p1', float('nan')):.3g}  "
+                        f"median={st.get('p50', float('nan')):.3g}  p99={st.get('p99', float('nan')):.3g}  "
+                        f"max={st.get('max', float('nan')):.3g}   |   " + "   ".join(extra)
+                    )
+
+                    extra2 = ""
+                    if self._hdu_index is not None:
+                        extra2 += f"  [HDU {self._hdu_index}]"
+
+                    # Prefer full_shape from info (true file shape), fall back to loaded array.
+                    full_shape = None
+                    try:
+                        fs = (self._fits_info or {}).get("full_shape")
+                        if isinstance(fs, (tuple, list)) and len(fs) == 2:
+                            full_shape = (int(fs[0]), int(fs[1]))
+                    except Exception:
+                        full_shape = None
+
+                    if full_shape is not None:
+                        extra2 += f"  shape={full_shape[1]}×{full_shape[0]}"
+                    elif self._data is not None:
+                        extra2 += f"  shape={self._data.shape[1]}×{self._data.shape[0]}"
+
+                    if (
+                        self._data is not None
+                        and self._data_disp is not None
+                        and full_shape is not None
+                        and self._data_disp.shape != full_shape
+                    ):
+                        extra2 += f"  preview={self._data_disp.shape[1]}×{self._data_disp.shape[0]}"
+                    elif (
+                        self._data is not None
+                        and self._data_disp is not None
+                        and self._data_disp.shape != self._data.shape
+                    ):
+                        extra2 += f"  preview={self._data_disp.shape[1]}×{self._data_disp.shape[0]}"
+
+                    self.lbl_path.setText(path + extra2)
+
+                    self._render()
+                except Exception as e:
+                    self._view.clear()
+                    self.lbl_stats.setText("—")
+                    self.lbl_info.setText(f"Render error: {e}")
+                    self.lbl_path.setText(path)
+
+        def _fail(tb: str) -> None:
+            if my_id != self._load_id:
+                return
             self._data = None
             self._data_disp = None
             self._fits_info = None
             self._view.clear()
             self.lbl_path.setText(path)
             self.lbl_stats.setText("—")
-            self.lbl_info.setText(f"Failed to load FITS: {e}")
-            # Put a readable message directly in the view area.
+            self.lbl_info.setText("—")
             sc = self._view.scene()
             sc.clear()
-            item = sc.addText(f"Failed to load FITS:\n{e}")
+            item = sc.addText("Failed to load FITS:\n" + tb.splitlines()[-1])
             item.setDefaultTextColor(QtGui.QColor("#D0D0D0"))
             item.setPos(10, 10)
+
+        # Try cache hit (apply in next tick to keep UI consistent).
+        _cached_payload = _cache_get(cache_key) if cache_key else None
+        if _cached_payload is not None:
+            QtCore.QTimer.singleShot(0, lambda: _apply(_cached_payload))
             return
 
-        # Prepare display array (optional downsample)
-        self._data_disp = self._make_display_array(self._data)
+        def _job() -> object:
+            payload = _load_fits_preview_quick(path, self._MAX_DIM_FOR_RENDER)
+            try:
+                dd = payload.get("data_disp") if isinstance(payload, dict) else None
+                bytes_est = int(getattr(dd, "nbytes", 0)) if dd is not None else 0
+                if cache_key is not None and isinstance(payload, dict):
+                    _cache_put(cache_key, payload, bytes_est)
+            except Exception:
+                pass
+            return payload
 
-        # File-level stats/diagnostics (computed on the display array for speed).
-        try:
-            img = self._data_disp
-            finite = img[np.isfinite(img)]
-            if finite.size:
-                p1 = float(np.percentile(finite, 1.0))
-                p50 = float(np.percentile(finite, 50.0))
-                p99 = float(np.percentile(finite, 99.0))
-                vmin = float(np.min(finite))
-                vmax = float(np.max(finite))
-            else:
-                p1 = p50 = p99 = vmin = vmax = float("nan")
-
-            info = self._fits_info or {}
-            mm = info.get("memmap_used", None)
-            scale = "scaled" if info.get("has_scaling") else "unscaled"
-            bzero = info.get("bzero")
-            bscale = info.get("bscale")
-            dtype = info.get("dtype", str(self._data.dtype))
-
-            extra = []
-            if mm is not None:
-                extra.append(f"memmap={bool(mm)}")
-            extra.append(scale)
-            if bzero is not None or bscale is not None:
-                extra.append(f"BZERO={bzero} BSCALE={bscale}")
-
-            self.lbl_stats.setText(
-                f"dtype={dtype}   min={vmin:.3g}  p01={p1:.3g}  median={p50:.3g}  p99={p99:.3g}  max={vmax:.3g}   |   "
-                + "   ".join(extra)
-            )
-        except Exception:
-            self.lbl_stats.setText("—")
-
-        # Add a little context: HDU index, shape
-        extra = ""
-        if self._hdu_index is not None:
-            extra += f"  [HDU {self._hdu_index}]"
-        extra += f"  shape={self._data.shape[1]}×{self._data.shape[0]}"
-        if self._data_disp is not None and self._data_disp.shape != self._data.shape:
-            extra += f"  preview={self._data_disp.shape[1]}×{self._data_disp.shape[0]}"
-        self.lbl_path.setText(path + extra)
-
-        self._render()
+        self._load_job = run_in_thread(
+            _job,
+            name=f"fits-preview:{Path(path).name}",
+            dedupe_key=f"fits-preview:{os.path.abspath(path)}",
+        )
+        self._load_job.worker.finished.connect(_apply)
+        self._load_job.worker.failed.connect(_fail)
 
     def clear(self) -> None:
         self._path = None
@@ -590,25 +908,36 @@ class FitsPreviewWidget(QtWidgets.QWidget):
         if self._data_disp is None:
             return
 
-        self._params.cmap = self.cmb_cmap.currentText()
-        self._params.scale = self.cmb_scale.currentText()
-        self._params.invert = bool(self.chk_invert.isChecked())
-        self._params.p_lo = float(self.sp_lo.value())
-        self._params.p_hi = float(self.sp_hi.value())
-        self._params.gamma = float(self.sp_gamma.value())
+        from scorpio_pipe.ui.slow_action_profiler import profile_ui_action
 
-        x01 = _apply_stretch(self._data_disp, self._params)
+        with profile_ui_action(
+            "ui.fits_preview.render",
+            path_hint=str(self._path or ""),
+            extra={
+                "path": str(self._path or ""),
+                "cmap": str(self.cmb_cmap.currentText()),
+                "scale": str(self.cmb_scale.currentText()),
+            },
+        ):
+            self._params.cmap = self.cmb_cmap.currentText()
+            self._params.scale = self.cmb_scale.currentText()
+            self._params.invert = bool(self.chk_invert.isChecked())
+            self._params.p_lo = float(self.sp_lo.value())
+            self._params.p_hi = float(self.sp_hi.value())
+            self._params.gamma = float(self.sp_gamma.value())
 
-        try:
-            if self._params.cmap == "gray":
-                qimg = _to_qimage_gray(x01)
-            else:
-                qimg = _to_qimage_cmap(x01, self._params.cmap)
-            pix = QtGui.QPixmap.fromImage(qimg)
-        except Exception as e:
-            self._view.clear()
-            self.lbl_info.setText(f"Render error: {e}")
-            return
+            x01 = _apply_stretch(self._data_disp, self._params)
 
-        # Use the *display* data for cursor readout.
-        self._view.set_image(pix, render_data=self._data_disp)
+            try:
+                if self._params.cmap == "gray":
+                    qimg = _to_qimage_gray(x01)
+                else:
+                    qimg = _to_qimage_cmap(x01, self._params.cmap)
+                pix = QtGui.QPixmap.fromImage(qimg)
+            except Exception as e:
+                self._view.clear()
+                self.lbl_info.setText(f"Render error: {e}")
+                return
+
+            # Use the *display* data for cursor readout.
+            self._view.set_image(pix, render_data=self._data_disp)

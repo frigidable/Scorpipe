@@ -1,0 +1,7 @@
+# Scorpio Pipe workspace configuration
+
+# This file is intentionally minimal at workspace creation time.
+# The GUI will populate it when you create a new config.
+
+work_dir: .
+frames: {}

@@ -23,6 +23,7 @@ import time
 
 import numpy as np
 from astropy.io import fits
+from scorpio_pipe.io.atomic_fits import atomic_write_fits
 import astropy.units as u
 
 from scorpio_pipe.fits_utils import open_fits_smart
@@ -523,6 +524,237 @@ def _iter_slices(ny: int, chunk: int) -> Iterable[slice]:
         yield slice(y0, min(ny, y0 + chunk))
 
 
+
+class _WeightedMeanAccumulator:
+    """Numerically stable incremental weighted mean accumulator.
+
+    This keeps Stack2D memory bounded with respect to the number of exposures:
+    we only hold the current block-sized accumulators in RAM instead of an
+    (nexp, y, x) cube.
+    """
+
+    def __init__(self, shape: tuple[int, int]):
+        self.sum_w = np.zeros(shape, dtype=np.float64)
+        self.mean = np.full(shape, np.nan, dtype=np.float64)
+
+    def update(self, values: np.ndarray, weights: np.ndarray) -> None:
+        if values.shape != self.mean.shape or weights.shape != self.mean.shape:
+            raise ValueError("Accumulator shape mismatch")
+        w = np.asarray(weights, dtype=np.float64)
+        if not np.any(w > 0):
+            return
+        x = np.asarray(values, dtype=np.float64)
+        sw_old = self.sum_w
+        sw_new = sw_old + w
+        good = w > 0
+        if not np.any(good):
+            return
+        first = good & (sw_old <= 0)
+        if np.any(first):
+            self.mean[first] = x[first]
+        upd = good & (sw_old > 0)
+        if np.any(upd):
+            delta = x[upd] - self.mean[upd]
+            self.mean[upd] = self.mean[upd] + (w[upd] / sw_new[upd]) * delta
+        self.sum_w = sw_new
+
+    def finalize(self) -> tuple[np.ndarray, np.ndarray]:
+        mean = self.mean.astype(np.float32, copy=False)
+        var = np.where(self.sum_w > 0, 1.0 / self.sum_w, np.nan).astype(np.float32)
+        return mean, var
+
+
+def _load_shifted_block(
+    hdul: fits.HDUList,
+    *,
+    y0: int,
+    y1: int,
+    shift: float,
+    y_align_enabled: bool,
+    sci_scale: float,
+    var_scale: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Load one shifted/scaled Stack2D block without materializing the full cube."""
+    sci_src = _get_sci_data(hdul)
+    var_src = _get_var_data(hdul)
+    mask_src = _get_mask_data(hdul)
+
+    if y_align_enabled and abs(float(shift)) > 1e-6:
+        block_s, _ = _take_block_yshift_subpix(sci_src, y0, y1, float(shift), fill=float("nan"))
+        block_v, _ = _take_block_yshift_subpix_var(var_src, y0, y1, float(shift), fill=float("nan"))
+        block_m = _take_block_yshift_subpix_mask(mask_src, y0, y1, float(shift))
+    else:
+        ish = int(round(float(shift)))
+        block_s, _ = _take_block_yshift(sci_src, y0, y1, ish, fill=float("nan"))
+        block_v, _ = _take_block_yshift(var_src, y0, y1, ish, fill=float("nan"))
+        block_m = _take_block_yshift_mask(mask_src, y0, y1, ish)
+
+    s = np.asarray(block_s, dtype=np.float32) * float(sci_scale)
+    v = np.asarray(block_v, dtype=np.float32) * float(var_scale)
+    m = np.asarray(block_m, dtype=np.uint16)
+    return s, v, m
+
+
+def _base_weight_block(
+    sci: np.ndarray,
+    var: np.ndarray,
+    mask: np.ndarray,
+    *,
+    fatal_bits: np.uint16,
+    var_floor: float | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    valid = np.isfinite(sci) & np.isfinite(var) & (var > 0) & ((mask & fatal_bits) == 0)
+    if var_floor is not None and var_floor > 0:
+        v_eff = np.maximum(var, float(var_floor)).astype(np.float32, copy=False)
+    else:
+        v_eff = np.asarray(var, dtype=np.float32)
+    w0 = np.where(valid, 1.0 / np.maximum(v_eff, 1e-20), 0.0).astype(np.float32)
+    return v_eff, w0
+
+
+def _compute_initial_mu_chunk(
+    *,
+    hduls: list[fits.HDUList],
+    y0: int,
+    y1: int,
+    y_shifts: list[float],
+    y_align_enabled: bool,
+    sci_scales: list[float],
+    var_scales: list[float],
+    fatal_bits: np.uint16,
+    var_floor: float | None,
+) -> np.ndarray:
+    shape = (int(y1 - y0), int(_get_sci_data(hduls[0]).shape[1]))
+    acc = _WeightedMeanAccumulator(shape)
+    for i, hdul in enumerate(hduls):
+        s, v, m = _load_shifted_block(
+            hdul,
+            y0=y0,
+            y1=y1,
+            shift=float(y_shifts[i]),
+            y_align_enabled=bool(y_align_enabled),
+            sci_scale=float(sci_scales[i]),
+            var_scale=float(var_scales[i]),
+        )
+        _v_eff, w0 = _base_weight_block(s, v, m, fatal_bits=fatal_bits, var_floor=var_floor)
+        acc.update(s, w0)
+    mu, _ = acc.finalize()
+    return mu
+
+
+def _stack_chunk_streaming(
+    *,
+    hduls: list[fits.HDUList],
+    y0: int,
+    y1: int,
+    method: str,
+    robust_iter: int,
+    huber_c: float,
+    clip_sigma: float,
+    y_shifts: list[float],
+    y_align_enabled: bool,
+    sci_scales: list[float],
+    var_scales: list[float],
+    fatal_bits: np.uint16,
+    var_floor: float | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int]:
+    """Streaming Stack2D combine for one Y-chunk.
+
+    Keeps only block-sized accumulators in RAM. This is the default path for
+    mean / inverse-variance / Huber combines.
+    """
+    shape = (int(y1 - y0), int(_get_sci_data(hduls[0]).shape[1]))
+    method0 = str(method or "invvar_huber").strip().lower()
+    need_robust = method0 in {"invvar_huber", "huber", "huber_invvar", "invvar_clip", "sigma_clip", "clip"}
+
+    mu = _compute_initial_mu_chunk(
+        hduls=hduls,
+        y0=y0,
+        y1=y1,
+        y_shifts=y_shifts,
+        y_align_enabled=y_align_enabled,
+        sci_scales=sci_scales,
+        var_scales=var_scales,
+        fatal_bits=fatal_bits,
+        var_floor=var_floor,
+    )
+
+    last_mu = mu
+    if need_robust and int(max(0, robust_iter)) > 0:
+        for _ in range(int(max(0, robust_iter))):
+            acc = _WeightedMeanAccumulator(shape)
+            for i, hdul in enumerate(hduls):
+                s, v, m = _load_shifted_block(
+                    hdul,
+                    y0=y0,
+                    y1=y1,
+                    shift=float(y_shifts[i]),
+                    y_align_enabled=bool(y_align_enabled),
+                    sci_scale=float(sci_scales[i]),
+                    var_scale=float(var_scales[i]),
+                )
+                v_eff, w0 = _base_weight_block(s, v, m, fatal_bits=fatal_bits, var_floor=var_floor)
+                if method0 in {"invvar_huber", "huber", "huber_invvar"}:
+                    r = (s - last_mu) / np.sqrt(np.maximum(v_eff, 1e-20))
+                    ar = np.abs(r)
+                    hub = np.where(ar <= float(huber_c), 1.0, float(huber_c) / np.maximum(ar, 1e-20)).astype(np.float32)
+                    w = w0 * hub
+                elif method0 in {"invvar_clip", "sigma_clip", "clip"}:
+                    r = (s - last_mu) / np.sqrt(np.maximum(v_eff, 1e-20))
+                    keep = np.abs(r) <= float(clip_sigma)
+                    w = np.where(keep, w0, 0.0).astype(np.float32)
+                else:
+                    w = w0
+                acc.update(s, w)
+            new_mu, _ = acc.finalize()
+            if np.allclose(np.nan_to_num(new_mu, nan=0.0), np.nan_to_num(last_mu, nan=0.0), rtol=0.0, atol=1e-6):
+                last_mu = new_mu
+                break
+            last_mu = new_mu
+
+    acc_final = _WeightedMeanAccumulator(shape)
+    cov = np.zeros(shape, dtype=np.int16)
+    m_or = np.zeros(shape, dtype=np.uint16)
+    suppressed = np.zeros(shape, dtype=bool)
+
+    for i, hdul in enumerate(hduls):
+        s, v, m = _load_shifted_block(
+            hdul,
+            y0=y0,
+            y1=y1,
+            shift=float(y_shifts[i]),
+            y_align_enabled=bool(y_align_enabled),
+            sci_scale=float(sci_scales[i]),
+            var_scale=float(var_scales[i]),
+        )
+        v_eff, w0 = _base_weight_block(s, v, m, fatal_bits=fatal_bits, var_floor=var_floor)
+        if method0 in {"invvar_huber", "huber", "huber_invvar"}:
+            r = (s - last_mu) / np.sqrt(np.maximum(v_eff, 1e-20))
+            ar = np.abs(r)
+            hub = np.where(ar <= float(huber_c), 1.0, float(huber_c) / np.maximum(ar, 1e-20)).astype(np.float32)
+            w = w0 * hub
+            suppressed |= np.isfinite(s) & (w0 > 0) & (hub < 1.0)
+        elif method0 in {"invvar_clip", "sigma_clip", "clip"}:
+            r = (s - last_mu) / np.sqrt(np.maximum(v_eff, 1e-20))
+            keep = np.abs(r) <= float(clip_sigma)
+            w = np.where(keep, w0, 0.0).astype(np.float32)
+            suppressed |= np.isfinite(s) & (w0 > 0) & (~keep)
+        else:
+            w = w0
+        accepted = w > 0
+        cov += accepted.astype(np.int16)
+        m_or |= np.where(accepted, m, 0).astype(np.uint16)
+        acc_final.update(s, w)
+
+    mu_final, var_final = acc_final.finalize()
+    m_out = np.asarray(m_or, dtype=np.uint16)
+    m_out = np.where(acc_final.sum_w <= 0, m_out | MASK_NO_COVERAGE, m_out)
+    m_out = np.where(suppressed, m_out | MASK_ROBUST_REJECTED, m_out)
+    suppressed_any = int(np.count_nonzero(suppressed))
+    suppressed_total = int(suppressed.size)
+    return mu_final.astype(np.float32), var_final.astype(np.float32), m_out, cov, suppressed_any, suppressed_total
+
+
 def run_stack2d(
     cfg: dict[str, Any], *, inputs: Iterable[Path], out_dir: Path | None = None
 ) -> dict[str, Any]:
@@ -542,9 +774,7 @@ def run_stack2d(
 
     wd = resolve_work_dir(cfg)
     if out_dir is None:
-        from scorpio_pipe.workspace_paths import stage_dir
-
-        out_dir = stage_dir(wd, "stack2d")
+        raise ValueError("stack2d: out_dir is required (pass ctx.stage_dir)")
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -693,6 +923,7 @@ def run_stack2d(
             "clip_sigma": clip_sigma,
             "normalize_exptime": normalize_exptime,
             "chunk_rows": chunk,
+            "combine_engine": "streaming",
             "y_align_enabled": bool(y_align_enabled),
             "y_align_max_shift_pix": int(y_align_max),
             "reject_if_mask_bits": [str(x) for x in reject_names] if reject_names else [],
@@ -1024,105 +1255,34 @@ def run_stack2d(
         suppressed_any = 0
         suppressed_total = 0
 
-        # Main stacking loop (chunked).
+        # Main stacking loop (chunked, streaming over exposures).
         for ys in _iter_slices(ny, chunk):
             y0 = int(ys.start or 0)
             y1 = int(ys.stop or ny)
 
-            sci_stack: list[np.ndarray] = []
-            var_stack: list[np.ndarray] = []
-            mask_stack: list[np.ndarray] = []
+            mu, var_out, m_out, cov, sup_any, sup_total = _stack_chunk_streaming(
+                hduls=hduls,
+                y0=y0,
+                y1=y1,
+                method=method,
+                robust_iter=robust_iter,
+                huber_c=huber_c,
+                clip_sigma=clip_sigma,
+                y_shifts=[float(y_shifts[i]) if (y_align_enabled and i < len(y_shifts)) else 0.0 for i in range(len(hduls))],
+                y_align_enabled=bool(y_align_enabled),
+                sci_scales=[float(x) for x in sci_scales],
+                var_scales=[float(x) for x in var_scales],
+                fatal_bits=np.uint16(FATAL_BITS),
+                var_floor=float(var_floor) if var_floor is not None else None,
+            )
 
-            for i, h in enumerate(hduls):
-                sh = float(y_shifts[i]) if (y_align_enabled and i < len(y_shifts)) else 0.0
-
-                sci_src = _get_sci_data(h)
-                var_src = _get_var_data(h)
-                mask_src = _get_mask_data(h)
-
-                if y_align_enabled and abs(sh) > 1e-6:
-                    block_s, _ = _take_block_yshift_subpix(sci_src, y0, y1, sh, fill=float("nan"))
-                    block_v, _ = _take_block_yshift_subpix_var(var_src, y0, y1, sh, fill=float("nan"))
-                    block_m = _take_block_yshift_subpix_mask(mask_src, y0, y1, sh)
-                else:
-                    block_s, _ = _take_block_yshift(sci_src, y0, y1, int(round(sh)), fill=float("nan"))
-                    block_v, _ = _take_block_yshift(var_src, y0, y1, int(round(sh)), fill=float("nan"))
-                    block_m = _take_block_yshift_mask(mask_src, y0, y1, int(round(sh)))
-
-                # Apply exposure normalization if requested.
-                s = np.asarray(block_s, dtype=np.float32) * float(sci_scales[i])
-                v = np.asarray(block_v, dtype=np.float32) * float(var_scales[i])
-                m = np.asarray(block_m, dtype=np.uint16)
-
-                sci_stack.append(s)
-                var_stack.append(v)
-                mask_stack.append(m)
-
-            S = np.stack(sci_stack, axis=0)  # (nexp, y, x)
-            V = np.stack(var_stack, axis=0)
-            M = np.stack(mask_stack, axis=0)
-
-            # Valid samples: finite + positive variance + no fatal mask bits.
-            valid = np.isfinite(S) & np.isfinite(V) & (V > 0) & ((M & FATAL_BITS) == 0)
-
-            # Variance floor.
-            if var_floor is not None and var_floor > 0:
-                Veff = np.maximum(V, float(var_floor)).astype(np.float32)
-            else:
-                Veff = V
-
-            W0 = np.where(valid, 1.0 / Veff, 0.0).astype(np.float32)
-            W = W0.copy()
-
-            # Robust iterations.
-            keep = valid.copy()
-            hub = np.ones_like(W, dtype=np.float32)
-            for _ in range(max(0, robust_iter)):
-                wsum = np.sum(W, axis=0)
-                mu = np.where(wsum > 0, np.sum(W * S, axis=0) / wsum, np.nan)
-
-                # Normalized residuals.
-                r = (S - mu[None, :, :]) / np.sqrt(np.maximum(Veff, 1e-20))
-                if method in {"invvar_huber", "huber", "huber_invvar"}:
-                    ar = np.abs(r)
-                    hub = np.where(ar <= huber_c, 1.0, huber_c / np.maximum(ar, 1e-20)).astype(
-                        np.float32
-                    )
-                    W = W0 * hub
-                elif method in {"invvar_clip", "sigma_clip", "clip"}:
-                    keep &= (np.abs(r) <= clip_sigma)
-                    W = np.where(keep, W0, 0.0)
-                else:
-                    # Fallback: plain inverse-variance mean.
-                    W = W0
-
-            wsum = np.sum(W, axis=0)
-            cov = np.sum(W > 0, axis=0).astype(np.int16)
-            mu = np.where(wsum > 0, np.sum(W * S, axis=0) / wsum, np.nan)
-            var_out = np.where(wsum > 0, 1.0 / wsum, np.nan).astype(np.float32)
-
-            # Mask propagation: OR over contributing samples.
-            m_out = np.zeros(mu.shape, dtype=np.uint16)
-            m_out = np.where(wsum <= 0, m_out | MASK_NO_COVERAGE, m_out)
-            m_or = np.bitwise_or.reduce(np.where(W > 0, M, 0), axis=0).astype(np.uint16)
-            m_out |= m_or
-
-            # Mark robustly suppressed/rejected pixels.
-            if method in {"invvar_clip", "sigma_clip", "clip"}:
-                suppressed = np.any(valid & (W == 0) & (W0 > 0), axis=0)
-            elif method in {"invvar_huber", "huber", "huber_invvar"}:
-                suppressed = np.any(valid & (hub < 1.0), axis=0)
-            else:
-                suppressed = np.zeros(mu.shape, dtype=bool)
-            m_out = np.where(suppressed, m_out | MASK_ROBUST_REJECTED, m_out)
-
-            suppressed_any += int(np.count_nonzero(suppressed))
-            suppressed_total += int(suppressed.size)
+            suppressed_any += int(sup_any)
+            suppressed_total += int(sup_total)
 
             out_sci[ys, :] = mu.astype(np.float32)
-            out_var[ys, :] = var_out
-            out_mask[ys, :] = m_out
-            out_cov[ys, :] = cov
+            out_var[ys, :] = var_out.astype(np.float32)
+            out_mask[ys, :] = m_out.astype(np.uint16)
+            out_cov[ys, :] = cov.astype(np.int16)
 
         # Empirical variance scaling eta(lambda) (optional).
         eta_cfg = st_cfg.get("eta") if isinstance(st_cfg.get("eta"), dict) else {}
@@ -1183,8 +1343,9 @@ def run_stack2d(
                     eh["ETAMIN"] = (eta_min, "eta lower bound")
                     eh["ETAMAX"] = (eta_max, "eta upper bound")
                     eh["HISTORY"] = f"Scorpio Pipe {PIPELINE_VERSION}: eta(lambda)"
-                    fits.PrimaryHDU(data=eta_s.astype(np.float32), header=eh).writeto(
-                        eta_fits, overwrite=True
+                    atomic_write_fits(
+                        eta_fits,
+                        fits.PrimaryHDU(data=eta_s.astype(np.float32), header=eh),
                     )
 
                     eta_meta.update(
@@ -1542,27 +1703,30 @@ def run_stack2d(
         raise
 
     finally:
-        # Always write a done report (even on failure), then close HDUs.
+        # Close HDUs no matter what; write reports only when the stage completes.
         report["finished_at_unix"] = float(time.time())
         report["runtime_s"] = float(report["finished_at_unix"] - t0)
-        try:
-            stack_done.write_text(
-                json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
-        except Exception:
-            pass
-        try:
-            stack2d_done.write_text(
-                json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
-        except Exception:
-            pass
-        try:
-            done_json.write_text(
-                json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
-        except Exception:
-            pass
+
+        if not report.get("error"):
+            try:
+                stack_done.write_text(
+                    json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+                )
+            except Exception:
+                pass
+            try:
+                stack2d_done.write_text(
+                    json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+                )
+            except Exception:
+                pass
+            try:
+                done_json.write_text(
+                    json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+                )
+            except Exception:
+                pass
+
         for h in hduls:
             try:
                 h.close()

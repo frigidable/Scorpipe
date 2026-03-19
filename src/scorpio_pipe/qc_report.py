@@ -7,14 +7,17 @@ from typing import Any
 
 import numpy as np
 
-from scorpio_pipe.products import Product, group_by_stage, list_products
+from scorpio_pipe.catalog.products import CATALOG as PRODUCT_CATALOG, Product
+from scorpio_pipe.products import group_by_stage
 from scorpio_pipe.qc_thresholds import build_alerts, compute_thresholds
 from scorpio_pipe.version import PIPELINE_VERSION
+from scorpio_pipe.perf.profiles import apply_performance_profile, compact_performance_profile_summary, get_performance_profile_summary
 from scorpio_pipe.paths import resolve_work_dir
 from scorpio_pipe.workspace_paths import resolve_input_path, stage_dir
 
 from scorpio_pipe.io.atomic import atomic_write_json, atomic_write_text
-from scorpio_pipe.qc.flags import max_severity
+from scorpio_pipe.qc.flags import annotate_operational_flag, infer_operational_failure_code, max_severity
+from scorpio_pipe.recovery import build_recovery_plan
 
 
 class QCReportOutput(dict[str, Path]):
@@ -163,6 +166,7 @@ def _collect_stage_flags(work_dir: Path) -> list[dict[str, Any]]:
                 code = str(row.get("code") or "").strip()
                 if code in code_map:
                     row["code"] = code_map[code]
+                row = annotate_operational_flag(row) or row
                 out.append(row)
         except Exception:
             continue
@@ -466,12 +470,34 @@ def _metrics_cosmics(products: list[Product]) -> dict[str, Any]:
 
 
 def _metrics_timings(work_dir: Path) -> dict[str, Any]:
-    # canonical: manifest/timings.json
-    p = work_dir / "manifest" / "timings.json"
-    if not p.exists():
-        return {}
-    rows = _read_json(p)
-    if not isinstance(rows, list):
+    # canonical (PERF-30.1): manifest/timings.jsonl (append-only)
+    p_jsonl = work_dir / "manifest" / "timings.jsonl"
+    p_json = work_dir / "manifest" / "timings.json"  # legacy
+
+    rows: list[dict[str, Any]] = []
+    if p_jsonl.exists():
+        try:
+            with p_jsonl.open("r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    s = line.strip()
+                    if not s:
+                        continue
+                    try:
+                        r = json.loads(s)
+                    except Exception:
+                        continue
+                    if isinstance(r, dict):
+                        rows.append(r)
+        except Exception:
+            rows = []
+    elif p_json.exists():
+        js = _read_json(p_json)
+        if isinstance(js, list):
+            rows = [r for r in js if isinstance(r, dict)]
+        else:
+            rows = []
+
+    if not rows:
         return {}
 
     by_stage: dict[str, list[float]] = {}
@@ -799,6 +825,7 @@ def build_qc_report(
     if config_dir is not None and not cfg.get("config_dir"):
         cfg = dict(cfg)
         cfg["config_dir"] = str(config_dir)
+    cfg = apply_performance_profile(cfg)
     work_dir = resolve_work_dir(cfg)
     qc_dir = Path(out_dir or (work_dir / "qc")).expanduser().resolve()
     qc_dir.mkdir(parents=True, exist_ok=True)
@@ -816,7 +843,8 @@ def build_qc_report(
     except Exception:
         pass
 
-    products = list_products(cfg)
+    products = PRODUCT_CATALOG.list_products(cfg)
+
     # materialize relative paths for portability
     prod_rows = []
     for p in products:
@@ -866,6 +894,14 @@ def build_qc_report(
     t = _metrics_timings(work_dir)
     if t:
         metrics["timings"] = t
+
+    perf_summary = compact_performance_profile_summary(cfg)
+    perf_profile = get_performance_profile_summary(cfg) or {}
+    if perf_summary:
+        metrics["runtime"] = {
+            **perf_summary,
+            "profile_schema": str(perf_profile.get("schema") or ""),
+        }
 
     s = _metrics_sky(products)
     if s:
@@ -928,11 +964,35 @@ def build_qc_report(
     except Exception:
         pass
 
+    if perf_summary.get("performance_mode") == "fast":
+        alerts.insert(0, {
+            "severity": "info",
+            "code": "QC_FAST_MODE_RUN",
+            "message": "This run used runtime.performance_mode=fast; rerun with full mode for final science-grade products.",
+            "hint": "Fast mode is intended for rapid inspection and intentionally uses coarser/fewer iterations in several heavy stages.",
+        })
+
+    op_failures: list[dict[str, Any]] = []
+    seen_op: set[str] = set()
+    for fl in stage_flags:
+        op_code = infer_operational_failure_code(str((fl or {}).get("operational_code") or (fl or {}).get("code") or ""))
+        if not op_code or op_code in seen_op:
+            continue
+        seen_op.add(op_code)
+        op_failures.append({
+            "code": op_code,
+            "title": fl.get("operational_title") or "",
+            "domain": fl.get("operational_domain") or "",
+            "severity": fl.get("severity") or "",
+            "stage": fl.get("stage") or "",
+        })
+
     qc = {
         "thresholds": thresholds.to_dict(),
         "thresholds_meta": thresholds_meta,
         "alerts": alerts,
         "flags": stage_flags,
+        "operational_failures": op_failures,
         "max_severity": max_severity(stage_flags),
     }
 
@@ -951,8 +1011,17 @@ def build_qc_report(
         "work_dir": str(work_dir),
         "products": prod_rows,
         "metrics": metrics,
+        "runtime": {
+            "performance_mode": perf_summary.get("performance_mode"),
+            "performance_profile": perf_profile,
+        },
         "qc": qc,
     }
+    try:
+        recovery_plan = build_recovery_plan(dict(cfg), qc_payload=payload, run_root=work_dir)
+    except Exception:
+        recovery_plan = {"summary": "recovery plan unavailable", "actions": []}
+    qc["recovery_plan"] = recovery_plan
 
     # P0-B3: surface reference context (manifest/reference_context.json).
     try:
@@ -1079,6 +1148,28 @@ def build_qc_report(
     except Exception:
         ref_ctx_html = ""
 
+    recovery_html = ""
+    try:
+        rec = qc.get("recovery_plan") or {}
+        acts = rec.get("actions") or []
+        if acts:
+            items = []
+            for a in acts:
+                steps = ''.join(f"<li>{_html_escape(str(s))}</li>" for s in (a.get('steps') or []))
+                retry = ', '.join(str(x) for x in (a.get('retry_tasks') or []))
+                items.append(
+                    "<div class='alert warn'>"
+                    f"<div class='acode'>{_html_escape(str(a.get('code') or 'RECOVERY'))}</div>"
+                    f"<div class='amsg'><strong>{_html_escape(str(a.get('title') or 'Recovery action'))}</strong></div>"
+                    f"<div class='muted' style='margin-top:6px'>{_html_escape(str(a.get('why') or ''))}</div>"
+                    f"<ul style='margin:8px 0 0 18px'>{steps}</ul>"
+                    f"<div class='meta' style='margin-top:8px'>Retry: <code>{_html_escape(retry)}</code></div>"
+                    "</div>"
+                )
+            recovery_html = "<div class='box' style='margin-top:14px'><h2>Recovery workflow</h2>" + ''.join(items) + "</div>"
+    except Exception:
+        recovery_html = ""
+
     html = f"""<!doctype html>
 <html lang='en'>
 <head>
@@ -1146,6 +1237,8 @@ def build_qc_report(
         <pre style='white-space:pre-wrap; color:#cfe2ff; margin:10px 0 0'>{_html_escape(json.dumps(qc.get("thresholds", {}), indent=2, ensure_ascii=False))}</pre>
       </details>
     </div>
+
+    {recovery_html}
 
     <div class='row'>
       <div class='box'>

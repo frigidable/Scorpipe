@@ -1,30 +1,10 @@
-"""Stage registry (single source of truth).
+"""Stage registry (deprecated shim).
 
-This module defines the *only* canonical list of GUI/pipeline stages.
+Single source of truth moved to :mod:`scorpio_pipe.catalog.stages`.
 
-Contract (v5.39.1)
-------------------
-- Stage numbering is fixed: 01..12.
-- Canonical stage output directories live directly under the workspace/run root:
-
-    run_root/NN_slug/
-
-- UI-only stages (01..02) are displayed in the GUI but never produce outputs.
-
-Stage order change
-------------------
-v5.39.1 moves **Sky Subtraction** *before* **Linearization**:
-
-    ... 08_wavesol -> 09_sky -> 10_linearize -> 11_stack -> 12_extract
-
-Backward compatibility
-----------------------
-Older runs (v5.38.x) used:
-
-    09_sky -> 10_linearize
-
-We keep stage *keys* stable ("sky", "linearize"), and :func:`scorpio_pipe.workspace_paths.stage_dir`
-is responsible for resolving legacy directories when opening older runs.
+This module is kept for backward compatibility: it re-exports the same public
+API (StageDef/STAGES/ALIASES/StageRegistry/REGISTRY) but reads data from the
+catalog.
 """
 
 from __future__ import annotations
@@ -32,10 +12,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Iterator
 
+from scorpio_pipe.catalog.stages import CATALOG
+
 
 @dataclass(frozen=True)
 class StageDef:
-    """Single stage definition."""
+    """Single GUI stage definition."""
 
     id: int
     key: str
@@ -49,69 +31,18 @@ class StageDef:
 
     @property
     def title(self) -> str:
-        """Human title with numbering: ``NN Label``."""
-
         return f"{int(self.id):02d} {self.label}"
 
 
-# -----------------------------------------------------------------------------
-# Canonical stage table (DO NOT reorder without a migration plan).
-# Labels MUST match GUI strings exactly.
-# -----------------------------------------------------------------------------
-STAGES: tuple[StageDef, ...] = (
-    StageDef(1, "project", "project", "Project", ui_only=True),
-    StageDef(2, "setup", "setup", "Setup", ui_only=True),
-    StageDef(3, "biascorr", "bias", "Bias Correction"),
-    StageDef(4, "flatfield", "flat", "Flat-Fielding"),
-    StageDef(5, "cosmics", "cosmics", "Cosmics Cleaning"),
-    StageDef(6, "superneon", "superneon", "Superneon"),
-    StageDef(7, "arclineid", "arc_line_id", "Arc Line ID"),
-    StageDef(8, "wavesol", "wavesol", "Wavelength Solution"),
-    StageDef(9, "sky", "sky", "Sky Subtraction"),
-    StageDef(10, "linearize", "linearize", "Linearization"),
-    StageDef(11, "stack2d", "stack", "Frame Stacking"),
-    StageDef(12, "extract1d", "extract", "Object Extraction"),
+# Canonical stage table (derived from StageCatalog)
+STAGES: tuple[StageDef, ...] = tuple(
+    StageDef(s.id, s.key, s.slug, s.label, ui_only=bool(s.ui_only))
+    for s in CATALOG.gui_stages()
 )
 
 
-# Compatibility aliases (old keys / task names -> canonical stage keys).
-#
-# Important: this maps *tasks/sections* to stages, not legacy directory names.
-ALIASES: dict[str, str] = {
-    # UI-only placeholders
-    "project": "project",
-    "setup": "setup",
-    # Calibs / flats
-    "superbias": "biascorr",
-    # P0-C1 naming (readout-aware master bias)
-    "bias_combine": "biascorr",
-    "masterbias": "biascorr",
-    "bias": "biascorr",
-    "biascorr": "biascorr",
-    "superflat": "flatfield",
-    "flat": "flatfield",
-    "flatfield": "flatfield",
-    # Others
-    "cosmics": "cosmics",
-    "superneon": "superneon",
-    "lineid": "arclineid",
-    "lineid_prepare": "arclineid",
-    "arclineid": "arclineid",
-    "arc_line_id": "arclineid",
-    "wavesolution": "wavesol",
-    "wavesol": "wavesol",
-    "wave": "wavesol",
-    # Unified sky
-    "sky": "sky",
-    "sky_sub": "sky",
-    # Downstream
-    "lin": "linearize",
-    "linearize": "linearize",
-    "stack": "stack2d",
-    "stack2d": "stack2d",
-    "extract": "extract1d",
-    "extract1d": "extract1d",
-}
+# Compatibility aliases (task names / shorthands -> canonical GUI stage keys).
+ALIASES: dict[str, str] = CATALOG.stage_key_aliases()
 
 
 class StageRegistry:
