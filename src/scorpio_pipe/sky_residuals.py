@@ -187,7 +187,7 @@ def _solve_window_coeffs(
 ) -> tuple[float | None, float | None, float | None]:
     r = np.asarray(residual, dtype=float)
     m = np.asarray(model, dtype=float)
-    g = np.gradient(m, axis=1)
+    g = np.gradient(m, axis=1) if m.ndim >= 2 and m.shape[1] >= 2 else np.zeros_like(m, dtype=float)
     ok = np.isfinite(r) & np.isfinite(m) & np.isfinite(g)
     if variance is not None:
         v = np.asarray(variance, dtype=float)

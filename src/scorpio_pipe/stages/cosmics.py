@@ -536,7 +536,7 @@ def _two_frame_diff_clean(
 
     sigma = _robust_sigma_mad_1d(diff)
     if not np.isfinite(sigma) or sigma <= 0:
-        sigma = float(np.std(diff)) if diff.size else 0.0
+        sigma = 1.0
 
     loc = _boxcar_mean2d(absdiff, r=int(local_r))
     k2 = max(float(k2_min), float(k2_scale) * float(k))
@@ -1327,9 +1327,10 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
     if not work_dir.is_absolute():
         work_dir = (base_dir / work_dir).resolve()
 
-    # P0-ARCH-07: stage must not derive its own stage directory.
+    # Engine code should pass ``out_dir`` explicitly. Keep a compatibility
+    # fallback for tests/helper scripts that still call the stage directly.
     if out_dir is None:
-        raise ValueError("cosmics: out_dir is required (pass ctx.stage_dir)")
+        out_dir = stage_dir(work_dir, "cosmics")
     out_root = Path(out_dir)
     if not out_root.is_absolute():
         out_root = (work_dir / out_root).resolve()

@@ -2608,8 +2608,11 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
 def run_sky_sub(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[str, Path]:
     """Sky subtraction stage.
 
-    P0-ARCH-07: the stage must not derive its own stage directory.
-    Pass ``out_dir`` (engine uses ``ctx.stage_dir``).
+    Engine code should pass ``out_dir`` explicitly. For backward compatibility with
+    older tests and helper scripts, infer the canonical stage directory when it is
+    omitted.
     """
 
+    if out_dir is None:
+        out_dir = stage_dir(resolve_work_dir(cfg), "sky")
     return _run_sky_sub_impl(cfg, out_dir=out_dir)

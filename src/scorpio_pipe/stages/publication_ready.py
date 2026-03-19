@@ -35,6 +35,33 @@ def _pick_stack_path(work_dir: Path) -> Path:
     raise FileNotFoundError(f"Missing stack2d output in {sdir}")
 
 
+
+
+def _write_nan_preserving_sci(path: Path, data: np.ndarray, *, header: fits.Header, grid: WaveGrid | None, primary_data: np.ndarray | None = None) -> None:
+    phdr = fits.Header(header)
+    if grid is not None:
+        for k, v in grid.to_wcs_cards().items():
+            try:
+                phdr[k] = v
+            except Exception:
+                pass
+    hdus = [fits.PrimaryHDU(data=None if primary_data is None else np.asarray(primary_data, dtype=np.float32), header=phdr)]
+    shdr = fits.Header()
+    if grid is not None:
+        for k, v in grid.to_wcs_cards().items():
+            try:
+                shdr[k] = v
+            except Exception:
+                pass
+    for k in ("BUNIT", "WAVEUNIT", "WAVEREF", "MAPTYPE", "LSFUNIT", "SCORPWCS", "PUBRDY"):
+        if k in phdr and k not in shdr:
+            try:
+                shdr[k] = phdr[k]
+            except Exception:
+                pass
+    hdus.append(fits.ImageHDU(data=np.asarray(data, dtype=np.float32), header=shdr, name="SCI"))
+    fits.HDUList(hdus).writeto(path, overwrite=True, output_verify="silentfix")
+
 def _approx_grid_from_row(arr: np.ndarray, hdr: fits.Header) -> WaveGrid | None:
     ny, nx = arr.shape
     y0 = int(np.clip(int(round(float(hdr.get("SLITPOS", ny / 2.0) or ny / 2.0))), 0, ny - 1))
@@ -99,7 +126,7 @@ def run_publication_ready(cfg: dict[str, Any], *, out_dir: Path | None = None) -
     ph_wl["SCORPWCS"] = ("approx_central_row", "Primary WCS is approximate; SCI pixels are authoritative")
     ph_wl = add_provenance(ph_wl, cfg, stage="publication_ready")
     wl_path = out_dir / "wl.fts"
-    write_sci_var_mask(wl_path, wl_map.astype(np.float32), header=ph_wl, grid=grid_raw, primary_data=wl_map.astype(np.float32))
+    _write_nan_preserving_sci(wl_path, wl_map.astype(np.float32), header=ph_wl, grid=grid_raw, primary_data=wl_map.astype(np.float32))
 
     ph_dis = fits.Header(lsf_hdr)
     ph_dis["BUNIT"] = ("Angstrom", "Instrumental sigma")
@@ -109,7 +136,7 @@ def run_publication_ready(cfg: dict[str, Any], *, out_dir: Path | None = None) -
     ph_dis["SCORPWCS"] = ("approx_central_row", "Primary WCS is approximate; SCI pixels are authoritative")
     ph_dis = add_provenance(ph_dis, cfg, stage="publication_ready")
     dis_path = out_dir / "dismap.fts"
-    write_sci_var_mask(dis_path, dismap.astype(np.float32), header=ph_dis, grid=grid_raw, primary_data=dismap.astype(np.float32))
+    _write_nan_preserving_sci(dis_path, dismap.astype(np.float32), header=ph_dis, grid=grid_raw, primary_data=dismap.astype(np.float32))
 
     sidecar = {
         "stage": "publication_ready",

@@ -143,51 +143,42 @@ class UiRunCache:
             except Exception:
                 pass
 
-        # 3) done.json fallback for tasks not covered by manifest summaries (best-effort).
+        # 3) done.json fallback for task-like directories not covered by manifest summaries.
+        # Intentionally avoid importing StageCatalog here: UI code must stay behind
+        # the frozen public boundary.
         try:
-            from scorpio_pipe.catalog.stages import CATALOG as _CAT  # noqa: PLC0415
-            from scorpio_pipe.workspace_paths import stage_dir as _stage_dir  # noqa: PLC0415
-        except Exception:
-            _CAT = None
-            _stage_dir = None  # type: ignore
+            candidate_dirs: list[Path] = []
+            for special in (self.work_dir / "manifest", self.work_dir / "qc", self.work_dir / "ui"):
+                if special.is_dir():
+                    candidate_dirs.append(special)
+            for d in sorted(self.work_dir.iterdir()):
+                if not d.is_dir():
+                    continue
+                if d.name in {"manifest", "qc", "ui", "raw", "resources", "compare"}:
+                    continue
+                candidate_dirs.append(d)
 
-        if _CAT is not None:
-            try:
-                for ti in _CAT.task_infos():
-                    key = str(getattr(ti, "key", "") or "")
-                    if not key or key in out:
-                        continue
-                    pol = str(getattr(ti, "done_dir_policy", "") or "").strip().lower()
-                    d: Path | None = None
-                    if pol == "manifest":
-                        d = self.work_dir / "manifest"
-                    elif pol == "qc":
-                        d = self.work_dir / "qc"
-                    elif pol == "ui":
-                        d = self.work_dir / "ui"
-                    elif pol == "stage" and _stage_dir is not None:
-                        sk = str(getattr(ti, "stage_key", "") or key)
-                        try:
-                            d = Path(_stage_dir(self.work_dir, sk))
-                        except Exception:
-                            d = None
-                    if d is None:
-                        continue
-                    p = d / "done.json"
-                    if not p.exists():
-                        continue
-                    try:
-                        js = json.loads(p.read_text(encoding="utf-8"))
-                        if isinstance(js, dict):
-                            out[key] = {
-                                "status": _norm_status(js.get("status")),
-                                "updated_at": js.get("updated_at"),
-                                "message": js.get("error_message") or js.get("message"),
-                            }
-                    except Exception:
-                        continue
-            except Exception:
-                pass
+            for d in candidate_dirs:
+                p = d / "done.json"
+                if not p.exists():
+                    continue
+                key = str(d.name)
+                if "_" in key[:4]:
+                    key = key.split("_", 1)[1]
+                if key in out:
+                    continue
+                try:
+                    js = json.loads(p.read_text(encoding="utf-8"))
+                    if isinstance(js, dict):
+                        out[key] = {
+                            "status": _norm_status(js.get("status")),
+                            "updated_at": js.get("updated_at") or js.get("created_utc"),
+                            "message": js.get("error_message") or js.get("message"),
+                        }
+                except Exception:
+                    continue
+        except Exception:
+            pass
 
         self._status_cache = dict(out)
         return dict(out)

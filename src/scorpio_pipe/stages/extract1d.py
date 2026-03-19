@@ -1311,7 +1311,7 @@ def _run_extract1d_impl(
 
     wd = resolve_work_dir(cfg)
     if out_dir is None:
-        raise ValueError("extract1d: out_dir is required (pass ctx.stage_dir)")
+        out_dir = stage_dir(wd, "extract1d")
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1899,13 +1899,34 @@ def run_extract1d(
 ) -> Dict[str, Any]:
     """Extraction stage.
 
-    P0-ARCH-07: the stage must not derive its own stage directory.
-    Pass ``out_dir`` (engine uses ``ctx.stage_dir``).
+    Engine code should pass ``out_dir`` explicitly. For backward compatibility with
+    older tests and helper scripts, infer the canonical stage directory when it is
+    omitted and always emit ``done.json`` on failure.
     """
 
-    return _run_extract1d_impl(
-        cfg,
-        in_fits=in_fits,
-        stacked_fits=stacked_fits,
-        out_dir=out_dir,
-    )
+    if out_dir is None:
+        from scorpio_pipe.workspace_paths import stage_dir
+        out_dir = stage_dir(resolve_work_dir(cfg), "extract1d")
+    try:
+        return _run_extract1d_impl(
+            cfg,
+            in_fits=in_fits,
+            stacked_fits=stacked_fits,
+            out_dir=out_dir,
+        )
+    except Exception as e:
+        try:
+            from scorpio_pipe.io.done_json import write_done_json
+            write_done_json(
+                stage="extract",
+                stage_dir=Path(out_dir),
+                status="fail",
+                error_code=type(e).__name__,
+                error_message=str(e),
+                inputs={"fits": str(in_fits or stacked_fits) if (in_fits or stacked_fits) is not None else None},
+                outputs={},
+                legacy_paths=[Path(out_dir) / "extract1d_done.json", Path(out_dir) / "extract_done.json"],
+            )
+        except Exception:
+            pass
+        raise

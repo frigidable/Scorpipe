@@ -6,7 +6,7 @@ import re
 from typing import Callable, Iterable
 
 import pandas as pd
-from scorpio_pipe.metadata.fits_cache import get_header_and_frame_meta, get_header_fields
+from scorpio_pipe.metadata.fits_cache import get_frame_meta, get_header_and_frame_meta, get_header_fields
 
 from scorpio_pipe.nightlog import find_nightlog, parse_nightlog
 from scorpio_pipe.instrument_db import guess_instrument_from_header

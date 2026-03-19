@@ -1,0 +1,65 @@
+{
+  "schema": 1,
+  "generated_at": "2026-03-06T19:40:01Z",
+  "description": "Baseline for hot-kernel microbench suite. Weekly workflow compares current medians against these values with per-benchmark tolerance_pct.",
+  "benchmarks": {
+    "linearize_core": {
+      "title": "Linearize apply core (cached grid)",
+      "median_ms": 58.333721,
+      "tolerance_pct": 35.0,
+      "meta": {
+        "shape": [
+          96,
+          1536
+        ],
+        "nlam": 1700,
+        "grid_cached": true,
+        "valid_fraction": 0.9799397786458334,
+        "sanity": "(119811582.98226644, 364367.2573008062)"
+      }
+    },
+    "sky_fit_core": {
+      "title": "Sky fit core (Kelson linear spline)",
+      "median_ms": 37.677978,
+      "tolerance_pct": 45.0,
+      "meta": {
+        "n_pixels": 28000,
+        "knot_step_A": 8.5,
+        "y_order": 1,
+        "max_iter": 3,
+        "sanity": "(307, 1197.109593295119)"
+      }
+    },
+    "cosmics_core": {
+      "title": "Cosmics detection core",
+      "median_ms": 196.204773,
+      "tolerance_pct": 35.0,
+      "meta": {
+        "shape": [
+          1024,
+          1024
+        ],
+        "n_spikes": 2500,
+        "dilate_r": 1,
+        "local_r": 2,
+        "sanity": "(21909, 0.02089405059814453)"
+      }
+    },
+    "stack_accumulator": {
+      "title": "Stack2D streaming accumulator",
+      "median_ms": 227.861589,
+      "tolerance_pct": 35.0,
+      "meta": {
+        "shape": [
+          192,
+          2048
+        ],
+        "n_exp": 14,
+        "sanity": "(0.00026493336190469563, 0.1258133500814438)"
+      }
+    }
+  },
+  "family": "microbench",
+  "baseline_track": "main",
+  "baseline_version": "8.0.0"
+}

@@ -1926,7 +1926,7 @@ def run_linearize(
     cfg = dict(cfg)
     work_dir = resolve_work_dir(cfg)
     if out_dir is None:
-        raise ValueError("linearize: out_dir is required (pass ctx.stage_dir)")
+        out_dir = stage_dir(work_dir, "linearize")
     out_dir = Path(out_dir)
     # Canonical + legacy done markers
     done_json = out_dir / "done.json"

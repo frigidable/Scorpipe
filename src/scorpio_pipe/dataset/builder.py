@@ -50,6 +50,7 @@ from scorpio_pipe.dataset.match import (
 )
 from scorpio_pipe.metadata import HeaderContractError, FrameMeta
 from scorpio_pipe.metadata.fits_cache import get_frame_meta, get_header_and_frame_meta, get_header_fields
+from scorpio_pipe.version import PIPELINE_VERSION
 
 
 _FITS_SUFFIXES = (".fits", ".fit", ".fts", ".fz")
@@ -1040,7 +1041,7 @@ def build_dataset_manifest(
     arc_allow_readout_diff: bool | None = None,
     night_id: str | None = None,
     exclude_paths: Sequence[str] | None = None,
-    pipeline_version: str,
+    pipeline_version: str = PIPELINE_VERSION,
 ) -> DatasetManifest:
     """Scan a directory of FITS files and build ``dataset_manifest.json``."""
 
