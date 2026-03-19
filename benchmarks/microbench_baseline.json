@@ -61,5 +61,5 @@
   },
   "family": "microbench",
   "baseline_track": "main",
-  "baseline_version": "8.0.2"
+  "baseline_version": "8.0.3"
 }

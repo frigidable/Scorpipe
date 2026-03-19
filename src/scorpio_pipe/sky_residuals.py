@@ -217,12 +217,14 @@ def _solve_window_coeffs(
 
 def _taper(width: int) -> np.ndarray:
     n = int(max(1, width))
-    if n <= 5:
+    if n <= 7:
         return np.ones(n, dtype=float)
     win = np.hanning(n)
     if not np.isfinite(win).all() or np.max(win) <= 0:
         return np.ones(n, dtype=float)
     win = win / np.max(win)
+    # Keep a non-zero floor at the edges so narrow skyline wings are still corrected.
+    win = 0.35 + 0.65 * win
     return win.astype(float)
 
 
@@ -363,6 +365,7 @@ def run_sky_residual_refine(cfg: dict[str, Any], *, out_dir: Path) -> dict[str, 
     detect_sigma = float(rcfg.get("detect_sigma", 2.5) or 2.5)
     detect_snr = float(rcfg.get("detect_snr", 4.0) or 4.0)
     min_width_px = int(rcfg.get("min_width_px", 3) or 3)
+    window_margin_px = int(rcfg.get("window_margin_px", 2) or 2)
     top_n_summary = int(rcfg.get("top_n_summary", 8) or 8)
     alpha_lim = float(rcfg.get("max_abs_alpha", 0.35) or 0.35)
     beta_lim = float(rcfg.get("max_abs_beta", 1.50) or 1.50)
@@ -455,9 +458,12 @@ def run_sky_residual_refine(cfg: dict[str, Any], *, out_dir: Path) -> dict[str, 
             recs = []
             for x0, x1 in regions:
                 sl = slice(x0, x1 + 1)
-                res_win = skysub[sky_rows, sl]
-                mod_win = model[sky_rows, sl]
-                var_win = var[sky_rows, sl] if var is not None else None
+                x0_corr = max(0, int(x0) - window_margin_px)
+                x1_corr = min(skysub.shape[1] - 1, int(x1) + window_margin_px)
+                sl_corr = slice(x0_corr, x1_corr + 1)
+                res_win = skysub[sky_rows, sl_corr]
+                mod_win = model[sky_rows, sl_corr]
+                var_win = var[sky_rows, sl_corr] if var is not None else None
                 alpha, beta, gamma = _solve_window_coeffs(
                     res_win,
                     mod_win,
@@ -486,18 +492,23 @@ def run_sky_residual_refine(cfg: dict[str, Any], *, out_dir: Path) -> dict[str, 
                 taper = _taper(int(x1 - x0 + 1))[None, :]
                 gain_metric = None
                 if action == "apply" and alpha is not None and beta is not None and gamma is not None:
-                    model_sl = model[:, sl].astype(float)
+                    model_sl = model[:, sl_corr].astype(float)
                     grad_full = np.gradient(model_sl, axis=1) if model_sl.ndim >= 2 and model_sl.shape[1] >= 2 else np.zeros_like(model_sl, dtype=float)
-                    local_strength = lsf_strength if classification == "lsf_mismatch" else strength
-                    corr_win = (alpha * model[:, sl] + beta * grad_full + gamma).astype(np.float32)
+                    grad_strength = lsf_strength if classification == "lsf_mismatch" else strength
+                    corr_win = (
+                        (strength * alpha) * model[:, sl_corr]
+                        + (grad_strength * beta) * grad_full
+                        + (strength * gamma)
+                    ).astype(np.float32)
                     # Never correct more than a fixed fraction of the measured residual amplitude in sky rows.
                     ref_amp = np.nanpercentile(np.abs(res_win), 95) if np.isfinite(res_win).any() else 0.0
                     if np.isfinite(ref_amp) and ref_amp > 0:
                         corr_amp = np.nanpercentile(np.abs(corr_win[sky_rows, :]), 95)
                         if np.isfinite(corr_amp) and corr_amp > (max_corr_frac * ref_amp):
                             corr_win *= float((max_corr_frac * ref_amp) / max(corr_amp, 1e-6))
-                    corr[:, sl] += (local_strength * corr_win * taper).astype(np.float32)
-                    after_tmp = res_win - corr[sky_rows, sl]
+                    taper = _taper(int(x1_corr - x0_corr + 1))[None, :]
+                    corr[:, sl_corr] += (corr_win * taper).astype(np.float32)
+                    after_tmp = skysub[sky_rows, sl_corr] - corr[sky_rows, sl_corr]
                     gain_metric = float(_robust_sigma(res_win) - _robust_sigma(after_tmp))
                 lam0 = float(lam_mid[x0]) if np.isfinite(lam_mid[x0]) else None
                 lam1 = float(lam_mid[x1]) if np.isfinite(lam_mid[x1]) else None
