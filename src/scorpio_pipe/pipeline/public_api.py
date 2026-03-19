@@ -116,16 +116,20 @@ class _TaskEntry(str):
         return str.__new__(cls, str(entrypoint))
 
     def __call__(self, cfg: Any, run_root: Any | None = None, **kwargs: Any) -> Any:
+        import inspect
+        from pathlib import Path as _Path
         from scorpio_pipe.pipeline.engine import resolve_entrypoint as _resolve_entrypoint
+        from scorpio_pipe.pipeline.context import StageContext as _StageContext
 
         fn = _resolve_entrypoint(str(self))
-        if run_root is not None and "out_dir" not in kwargs:
+        guessed = None
+        out_dir = kwargs.get("out_dir")
+        if run_root is not None:
             try:
                 from scorpio_pipe.workspace_paths import stage_dir as _stage_dir
 
                 ep = str(self)
                 mod = ep.split(":", 1)[0]
-                guessed = None
                 if mod.endswith("entry_linearize"):
                     guessed = "linearize"
                 elif mod.endswith("entry_extract1d"):
@@ -136,10 +140,27 @@ class _TaskEntry(str):
                     guessed = "sky"
                 elif mod.endswith("entry_cosmics"):
                     guessed = "cosmics"
-                if guessed is not None:
-                    kwargs["out_dir"] = _stage_dir(run_root, guessed)
+                if guessed is not None and out_dir is None:
+                    out_dir = _stage_dir(run_root, guessed)
             except Exception:
                 pass
+        try:
+            params = list(inspect.signature(fn).parameters.values())
+        except Exception:
+            params = []
+        if params and params[0].name in {"ctx", "context"}:
+            stage_key = guessed or str(self).split(":", 1)[0].rsplit("_", 1)[-1]
+            ctx = _StageContext(
+                cfg=cfg,
+                run_root=_Path(run_root if run_root is not None else cfg.get("work_dir") or "."),
+                stage_key=stage_key,
+                stage_dir=_Path(out_dir if out_dir is not None else "."),
+            )
+            kwargs2 = dict(kwargs)
+            kwargs2.pop("out_dir", None)
+            return fn(ctx, **kwargs2)
+        if out_dir is not None and "out_dir" not in kwargs:
+            kwargs["out_dir"] = out_dir
         return fn(cfg, **kwargs)
 
 TASKS: dict[str, _TaskEntry] = {}

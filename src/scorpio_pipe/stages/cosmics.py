@@ -1723,7 +1723,7 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
                 "per_frame_fraction": summary.per_frame_fraction,
                 "outputs": summary.outputs,
                 "mode_profile": mode_profile,
-                "roi": dict(summary.outputs.get("roi") or {}) if isinstance(summary.outputs, dict) and summary.outputs.get("roi") else None,
+                "roi": ({k: int(v) for k, v in dict(summary.outputs.get("roi") or {}).items() if k in {"y0", "y1", "x0", "x1"}} if isinstance(summary.outputs, dict) and summary.outputs.get("roi") else None),
             }
         )
 

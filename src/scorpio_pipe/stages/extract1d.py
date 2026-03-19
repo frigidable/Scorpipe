@@ -125,6 +125,18 @@ def _mad_sigma(x: np.ndarray) -> float:
     return float(1.4826 * np.median(np.abs(x - med)))
 
 
+def _robust_sigma(x: np.ndarray) -> float:
+    x = np.asarray(x, dtype=float)
+    x = x[np.isfinite(x)]
+    if x.size < 8:
+        return float("nan")
+    med = float(np.median(x))
+    mad = float(np.median(np.abs(x - med)))
+    if not (mad > 0):
+        return float("nan")
+    return float(1.4826 * mad)
+
+
 def _clamp_int(v: float, lo: int, hi: int) -> int:
     return int(np.clip(int(round(float(v))), lo, hi))
 
@@ -1672,16 +1684,6 @@ def _run_extract1d_impl(
         x = np.asarray(x)
         return float(np.isfinite(x).sum() / max(1, x.size))
 
-    def _robust_sigma(x: np.ndarray) -> float | None:
-        x = np.asarray(x, dtype=float)
-        x = x[np.isfinite(x)]
-        if x.size < 8:
-            return None
-        med = float(np.median(x))
-        mad = float(np.median(np.abs(x - med)))
-        if not (mad > 0):
-            return None
-        return float(1.4826 * mad)
 
     # Stage-level QC flags (P2 schema)
     from scorpio_pipe.qc.flags import make_flag, max_severity

@@ -217,7 +217,7 @@ def _solve_window_coeffs(
 
 def _taper(width: int) -> np.ndarray:
     n = int(max(1, width))
-    if n <= 2:
+    if n <= 5:
         return np.ones(n, dtype=float)
     win = np.hanning(n)
     if not np.isfinite(win).all() or np.max(win) <= 0:
@@ -362,14 +362,14 @@ def run_sky_residual_refine(cfg: dict[str, Any], *, out_dir: Path) -> dict[str, 
 
     detect_sigma = float(rcfg.get("detect_sigma", 2.5) or 2.5)
     detect_snr = float(rcfg.get("detect_snr", 4.0) or 4.0)
-    min_width_px = int(rcfg.get("min_width_px", 1) or 1)
+    min_width_px = int(rcfg.get("min_width_px", 3) or 3)
     top_n_summary = int(rcfg.get("top_n_summary", 8) or 8)
     alpha_lim = float(rcfg.get("max_abs_alpha", 0.35) or 0.35)
     beta_lim = float(rcfg.get("max_abs_beta", 1.50) or 1.50)
     gamma_lim = float(rcfg.get("max_abs_gamma", 25.0) or 25.0)
     strength = float(rcfg.get("strength", 1.0) or 1.0)
     lsf_strength = float(rcfg.get("lsf_strength", min(strength, 0.7)) or min(strength, 0.7))
-    max_corr_frac = float(rcfg.get("max_correction_frac", 0.85) or 0.85)
+    max_corr_frac = float(rcfg.get("max_correction_frac", 1.0) or 1.0)
 
     protect_cfg = rcfg.get("object_protection") if isinstance(rcfg.get("object_protection"), dict) else {}
     geom_cfg = (cfg.get("sky_sub") or {}).get("geometry") if isinstance((cfg.get("sky_sub") or {}).get("geometry"), dict) else {}
