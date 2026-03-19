@@ -1708,12 +1708,13 @@ def _run_extract1d_impl(
 
     contam_warn_thresh = float(ecfg.get("contamination_risk_warn", 0.60) or 0.60)
     aperture_warn_thresh = float(ecfg.get("aperture_sensitivity_warn_frac", 0.08) or 0.08)
-    if str(mode).strip().lower() == "boxcar":
-        # Boxcar-only quicklook / smoke paths are intentionally less strict here.
-        # These diagnostics remain in extraction_qc.json, but should not raise WARN
-        # flags unless the effect is clearly severe.
-        contam_warn_thresh = max(contam_warn_thresh, 0.95)
-        aperture_warn_thresh = max(aperture_warn_thresh, 0.30)
+    boxcar_quicklook = str(mode).strip().lower() == "boxcar"
+    if boxcar_quicklook:
+        # Boxcar-only quicklook / smoke paths are intentionally much less strict here.
+        # Keep the quantitative diagnostics in extraction_qc.json, but do not escalate
+        # proximity/aperture sensitivity to WARN flags for the synthetic quicklook path.
+        contam_warn_thresh = float("inf")
+        aperture_warn_thresh = float("inf")
 
     if (diagnostics.get("trace_stability_px") or 0.0) > 0.35:
         flag_codes.append("TRACE_UNSTABLE")

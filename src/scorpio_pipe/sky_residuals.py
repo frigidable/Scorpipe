@@ -228,6 +228,16 @@ def _taper(width: int) -> np.ndarray:
     return win.astype(float)
 
 
+def _smooth_profile_1d(x: np.ndarray) -> np.ndarray:
+    arr = np.asarray(x, dtype=float).reshape(-1)
+    if arr.size <= 2:
+        return arr.copy()
+    ker = np.asarray([0.25, 0.5, 0.25], dtype=float)
+    pad = np.pad(arr, 1, mode="edge")
+    out = np.convolve(pad, ker, mode="valid")
+    return out.astype(float, copy=False)
+
+
 def _find_windows(
     residual: np.ndarray,
     lower_rows: np.ndarray,
@@ -495,21 +505,41 @@ def run_sky_residual_refine(cfg: dict[str, Any], *, out_dir: Path) -> dict[str, 
                     model_sl = model[:, sl_corr].astype(float)
                     grad_full = np.gradient(model_sl, axis=1) if model_sl.ndim >= 2 and model_sl.shape[1] >= 2 else np.zeros_like(model_sl, dtype=float)
                     grad_strength = lsf_strength if classification == "lsf_mismatch" else strength
-                    corr_win = (
-                        (strength * alpha) * model[:, sl_corr]
+                    corr_model = (
+                        (strength * alpha) * model_sl
                         + (grad_strength * beta) * grad_full
                         + (strength * gamma)
-                    ).astype(np.float32)
-                    # Never correct more than a fixed fraction of the measured residual amplitude in sky rows.
+                    ).astype(float)
+
+                    # Robust fallback: directly estimate the residual profile from the sky rows.
+                    # This is especially important for synthetic/narrow-window cases where the
+                    # parametric model can be slightly mis-scaled but the median sky residual is clear.
+                    resid_profile = np.nanmedian(res_win, axis=0)
+                    resid_profile = _smooth_profile_1d(resid_profile)
+                    corr_profile = np.repeat(resid_profile[None, :], skysub.shape[0], axis=0)
+
                     ref_amp = np.nanpercentile(np.abs(res_win), 95) if np.isfinite(res_win).any() else 0.0
-                    if np.isfinite(ref_amp) and ref_amp > 0:
-                        corr_amp = np.nanpercentile(np.abs(corr_win[sky_rows, :]), 95)
-                        if np.isfinite(corr_amp) and corr_amp > (max_corr_frac * ref_amp):
-                            corr_win *= float((max_corr_frac * ref_amp) / max(corr_amp, 1e-6))
+                    before_sigma = _robust_sigma(res_win)
+                    row_weight = (~obj_mask).astype(float)[:, None]
                     taper = _taper(int(x1_corr - x0_corr + 1))[None, :]
-                    corr[:, sl_corr] += (corr_win * taper).astype(np.float32)
-                    after_tmp = skysub[sky_rows, sl_corr] - corr[sky_rows, sl_corr]
-                    gain_metric = float(_robust_sigma(res_win) - _robust_sigma(after_tmp))
+
+                    candidates: list[tuple[float, np.ndarray]] = []
+                    for cand in (corr_model, corr_profile):
+                        cand = np.asarray(cand, dtype=float)
+                        if np.isfinite(ref_amp) and ref_amp > 0:
+                            cand_amp = np.nanpercentile(np.abs(cand[sky_rows, :]), 95)
+                            if np.isfinite(cand_amp) and cand_amp > (max_corr_frac * ref_amp):
+                                cand = cand * float((max_corr_frac * ref_amp) / max(cand_amp, 1e-6))
+                        after_sigma = _robust_sigma(res_win - cand[sky_rows, :])
+                        candidates.append((after_sigma, cand))
+
+                    candidates = [c for c in candidates if np.isfinite(c[0])]
+                    if candidates:
+                        best_after, best_cand = min(candidates, key=lambda t: t[0])
+                        if np.isfinite(before_sigma) and best_after < before_sigma:
+                            corr[:, sl_corr] += (best_cand * row_weight * taper).astype(np.float32)
+                            after_tmp = skysub[sky_rows, sl_corr] - corr[sky_rows, sl_corr]
+                            gain_metric = float(_robust_sigma(res_win) - _robust_sigma(after_tmp))
                 lam0 = float(lam_mid[x0]) if np.isfinite(lam_mid[x0]) else None
                 lam1 = float(lam_mid[x1]) if np.isfinite(lam_mid[x1]) else None
                 lamc = float(np.nanmedian(lam_mid[sl])) if np.isfinite(lam_mid[sl]).any() else None
