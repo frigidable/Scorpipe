@@ -568,6 +568,27 @@ def run_sky_residual_refine(cfg: dict[str, Any], *, out_dir: Path) -> dict[str, 
                     )
                 )
             refined = (skysub - corr).astype(np.float32)
+
+            # Final robust pass: estimate the residual profile directly from the surviving sky rows
+            # and remove it outside the protected object zone if it measurably improves the sky scatter.
+            if sky_rows.size >= 4:
+                remain = np.asarray(refined[sky_rows, :], dtype=float)
+                before_global = _robust_sigma(remain)
+                prof = np.nanmedian(remain, axis=0)
+                if np.isfinite(prof).any():
+                    prof = _smooth_profile_1d(prof)
+                    prof2d = np.repeat(prof[None, :], refined.shape[0], axis=0)
+                    row_weight_global = (~obj_mask).astype(float)[:, None]
+                    if np.isfinite(before_global):
+                        prof_amp = np.nanpercentile(np.abs(prof), 95) if np.isfinite(prof).any() else 0.0
+                        rem_amp = np.nanpercentile(np.abs(remain), 95) if np.isfinite(remain).any() else 0.0
+                        if np.isfinite(rem_amp) and rem_amp > 0 and np.isfinite(prof_amp) and prof_amp > (max_corr_frac * rem_amp):
+                            prof2d *= float((max_corr_frac * rem_amp) / max(prof_amp, 1e-6))
+                        trial = refined - (prof2d * row_weight_global).astype(np.float32)
+                        after_global = _robust_sigma(np.asarray(trial[sky_rows, :], dtype=float))
+                        if np.isfinite(after_global) and after_global < before_global:
+                            corr += (prof2d * row_weight_global).astype(np.float32)
+                            refined = trial.astype(np.float32)
             med_low_before = np.nanmedian(skysub[lower_rows, :], axis=0)
             med_high_before = np.nanmedian(skysub[upper_rows, :], axis=0)
             med_low_after = np.nanmedian(refined[lower_rows, :], axis=0)

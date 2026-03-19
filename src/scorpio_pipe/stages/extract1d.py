@@ -1708,7 +1708,11 @@ def _run_extract1d_impl(
 
     contam_warn_thresh = float(ecfg.get("contamination_risk_warn", 0.60) or 0.60)
     aperture_warn_thresh = float(ecfg.get("aperture_sensitivity_warn_frac", 0.08) or 0.08)
-    boxcar_quicklook = str(mode).strip().lower() == "boxcar"
+    # NOTE: `mode` above is the input kind (stack2d/single_frame), not the extraction mode.
+    # For smoke/quicklook boxcar paths we keep diagnostics, but do not escalate these two
+    # heuristics into WARN flags, otherwise the golden smoke signature becomes noisy.
+    extraction_mode = str(ecfg.get("mode", "optimal") or "optimal").strip().lower()
+    boxcar_quicklook = extraction_mode == "boxcar"
     if boxcar_quicklook:
         # Boxcar-only quicklook / smoke paths are intentionally much less strict here.
         # Keep the quantitative diagnostics in extraction_qc.json, but do not escalate

@@ -6,6 +6,6 @@
   "disperser": null,
   "run_id": null,
   "created_at": "2026-02-20T17:19:20Z",
-  "pipeline_version": "7.3.0",
+  "pipeline_version": "8.0.5",
   "schema_version": 1
 }
