@@ -15,7 +15,7 @@ dependencies = [
   "numpy",
   "pandas",
   "pyyaml",
-  "pydantic>=2",
+  "pydantic>=2.12.5",
   "doit",
   "rich",
   "loguru",
