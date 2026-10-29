@@ -1,3 +1,20 @@
+## Unreleased
+
+- fix(airvac): use the VALD Morton (2000) standard-air refractive index and
+  numerically invert that same relation for air-to-vacuum wavelengths. Calibration
+  helpers now delegate to the shared NumPy kernel. Wavelengths are in Angstrom;
+  vacuum wavelengths below 2000 A, corresponding out-of-domain air wavelengths,
+  complex and non-finite inputs are rejected explicitly. Unknown wavelength
+  conventions and failed inversions now raise rather than silently returning data.
+- test(airvac): add independent absolute reference values over 3800--9000 A,
+  precise roundtrips, API equivalence, identity and invalid-input checks.
+- Compatibility: products whose wavelength arrays or reference interpolation used
+  the old cross-medium conversion may be scientifically incompatible with corrected
+  products. `WAVEREF` alone cannot identify that history. Existing FITS files and
+  headers are not migrated or changed, and no automatic medium conversion is added.
+  Review provenance before explicitly regenerating affected calibration products;
+  unchanged stage caches are not proof that old converted products remain valid.
+
 ## 8.0.2
 
 - feat(p0-semantics): froze calibration-stack semantics by synchronizing `contracts/calibration.py`, calibrated-product validators, and spec docs so 1D/2D status claims are explicit and machine-checked. In particular, 2D calibrated products may no longer claim `ABSOLUTE_TRUSTED`.
