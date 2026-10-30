@@ -24,7 +24,7 @@ from scorpio_pipe.contracts.units import var_bunit_from_sci_bunit
 
 
 def _fixture(tmp_path, *, bunit="e-", gain=2.0, dw=1.0,
-             density=False, normalize=False):
+             density=False, normalize=False, exptime=100.0):
     ny, nx = 4, 12
     centers = 5000.0 + 2.0 * np.arange(nx, dtype=float)
     edge_out = 4999.0 + dw * np.arange(int(round(24.0 / dw)) + 1)
@@ -37,7 +37,8 @@ def _fixture(tmp_path, *, bunit="e-", gain=2.0, dw=1.0,
     hdr["BUNIT"] = bunit
     hdr["GAIN"] = gain
     hdr["RDNOISE"] = 3.0
-    hdr["EXPTIME"] = 100.0
+    if exptime is not None:
+        hdr["EXPTIME"] = float(exptime)
     path = tmp_path / ("adu.fits" if in_adu else "electron.fits")
     fits.HDUList([
         fits.PrimaryHDU(header=hdr),
@@ -157,6 +158,11 @@ def test_coverage_uses_output_bin_width_even_when_flux_uses_input_width():
 def test_reject_pre_normalized_input_to_avoid_double_exposure_correction(tmp_path):
     with pytest.raises(ValueError, match="expects integrated detector counts"):
         _fixture(tmp_path, bunit="e-/s", dw=1.0, density=False, normalize=True)
+
+
+def test_missing_exptime_cannot_be_silently_assumed(tmp_path):
+    with pytest.raises(ValueError, match="missing/invalid exposure time"):
+        _fixture(tmp_path, exptime=None, normalize=True)
 
 
 @pytest.mark.parametrize("bunit, expected", [
