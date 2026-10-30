@@ -918,6 +918,21 @@ def _optimal_extract(
                 flux[finite] = flux[finite] - sky_arr[finite] * (corr_num[finite] / denom[finite])
         meta["backend_used"] = "numpy"
 
+    if have_mask:
+        # Keep the provenance of every geometrically sampled aperture pixel,
+        # including flagged contributors excluded from the optimal weights.
+        # NO_COVERAGE is different: it describes the usability of the *output*
+        # wavelength bin and has already been decided by n_tot/good_counts.
+        # OR-ing a single missing input pixel would spuriously discard a valid
+        # partially covered extraction.
+        aperture_bits = np.bitwise_or.reduce(
+            np.where(inside, mm_all, np.uint16(0)), axis=0
+        )
+        out_mask |= np.asarray(
+            aperture_bits & np.uint16(~int(NO_COVERAGE) & 0xFFFF),
+            dtype=np.uint16,
+        )
+
     sky_out = np.asarray(sky_resid, dtype=float) if sky_resid is not None else np.full(nlam, np.nan, dtype=float)
     return flux, out_var, out_mask, sky_out, out_npix, meta
 
