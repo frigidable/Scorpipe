@@ -1403,11 +1403,13 @@ def _compute_output_grid(
 
 
 
-def _get_exptime_seconds(hdr: fits.Header) -> float:
-    """Extract exposure time in seconds from a FITS header.
+def _get_exptime_seconds(
+    hdr: fits.Header, *, require_valid: bool = False,
+) -> float:
+    """Read exposure time; never invent a duration for a rate conversion.
 
-    We accept a variety of common keywords. If none is present, returns 1.0
-    and the caller should warn if normalization is requested.
+    Legacy non-rate previews may use a 1-second fallback for bookkeeping.
+    Rate-normalized science products must have positive explicit exposure time.
     """
     for key in ("EXPTIME", "EXPOSURE", "ITIME", "TEXPTIME", "ELAPTIME"):
         v = hdr.get(key, None)
@@ -1419,6 +1421,8 @@ def _get_exptime_seconds(hdr: fits.Header) -> float:
                 return vv
         except Exception:
             continue
+    if require_valid:
+        raise ValueError("Cannot normalize linearized SCI/VAR by EXPTIME: missing/invalid exposure time")
     return 1.0
 
 
@@ -1776,12 +1780,11 @@ def _process_linearize_frame(task: Dict[str, Any]) -> Dict[str, Any]:
     if input_is_rate:
         raise ValueError(f"Linearize expects integrated detector counts; received rate input {p}: {hdr.get('BUNIT')}")
 
-    exptime_s = _get_exptime_seconds(hdr)
+    try:
+        exptime_s = _get_exptime_seconds(hdr, require_valid=normalize_exptime)
+    except ValueError as exc:
+        raise ValueError(f"{exc}: {p}") from exc
     if normalize_exptime:
-        if not (math.isfinite(exptime_s) and exptime_s > 0):
-            raise ValueError(
-                f"Cannot normalize linearized SCI/VAR by EXPTIME: missing/invalid exposure time for {p}"
-            )
         rect /= float(exptime_s)
         rect_var /= float(exptime_s) ** 2
 
