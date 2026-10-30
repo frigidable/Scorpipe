@@ -1722,9 +1722,9 @@ def _process_linearize_frame(task: Dict[str, Any]) -> Dict[str, Any]:
             continue
         valid = np.isfinite(data[yy]) & np.isfinite(var[yy]) & (var[yy] >= 0)
         if mask is not None:
-            # NO_COVERAGE pixels are not valid data. Their missing flux must
-            # reduce the effective coverage of the output wavelength bin.
-            valid &= ((mask[yy] & (BADPIX | NO_COVERAGE)) == 0)
+            # NO_COVERAGE and INVALID_WAVELENGTH pixels are not valid data.
+            # Their missing flux reduces effective output-bin coverage.
+            valid &= ((mask[yy] & (BADPIX | NO_COVERAGE | INVALID_WAVELENGTH)) == 0)
 
         v_row, cov = _apply_linearize_row_plan(
             data[yy],
