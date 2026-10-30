@@ -38,9 +38,12 @@ from scorpio_pipe.maskbits import (
     BADPIX,
     COSMIC,
     EDGE,
+    INVALID_WAVELENGTH,
     NO_COVERAGE,
+    OUTSIDE_SLIT,
     REJECTED,
     SATURATED,
+    SKYMODEL_FAIL,
     USER,
     summarize as summarize_mask,
 )
@@ -1719,7 +1722,9 @@ def _process_linearize_frame(task: Dict[str, Any]) -> Dict[str, Any]:
             continue
         valid = np.isfinite(data[yy]) & np.isfinite(var[yy]) & (var[yy] >= 0)
         if mask is not None:
-            valid &= ((mask[yy] & BADPIX) == 0)
+            # NO_COVERAGE pixels are not valid data. Their missing flux must
+            # reduce the effective coverage of the output wavelength bin.
+            valid &= ((mask[yy] & (BADPIX | NO_COVERAGE)) == 0)
 
         v_row, cov = _apply_linearize_row_plan(
             data[yy],
@@ -1737,7 +1742,15 @@ def _process_linearize_frame(task: Dict[str, Any]) -> Dict[str, Any]:
         rect_mask[yy, (cov > 0) & (cov < 0.999)] |= EDGE
         rect_mask[yy, cov <= 0] |= NO_COVERAGE
         if mask is not None:
-            for bit in (BADPIX, COSMIC, SATURATED, USER, REJECTED):
+            # Propagate all other canonical quality bits by overlap, even if
+            # they were set upstream by a degraded sky pass-through. Output
+            # NO_COVERAGE is derived from *valid* geometric coverage above:
+            # forwarding it on any overlap would incorrectly discard partial
+            # but otherwise usable bins. EDGE records partial coverage.
+            for bit in (
+                BADPIX, COSMIC, SATURATED, USER, REJECTED, EDGE,
+                OUTSIDE_SLIT, INVALID_WAVELENGTH, SKYMODEL_FAIL,
+            ):
                 rect_mask[yy, _apply_linearize_row_plan_maskbit(mask[yy], row_plan, bit)] |= bit
 
         if satmask is not None:
