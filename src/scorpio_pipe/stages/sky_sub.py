@@ -381,7 +381,9 @@ def _prepare_sky_input_planes(
 
     # Only unprocessed ADU data can be classified here. Processed inputs
     # retain previous DQ bits; saturation is never inferred from sky residuals.
-    mask, hdr = carry_detector_saturation(sci, mask, hdr, cfg)
+    mask, hdr = carry_detector_saturation(
+        sci, mask, hdr, cfg, upstream_mask_present=input_mask is not None
+    )
 
     if input_var is not None:
         from scorpio_pipe.io.mef import validate_sci_var_mask
