@@ -979,6 +979,10 @@ def run_stack2d(
     try:
         # First exposure defines reference shape, WCS/grid, and base unit.
         hdr0 = _get_primary_header(hduls[0]).copy()
+        # COUNT_V1 products must never be averaged with historically
+        # density-normalized products that share the same apparent grid.
+        ref_resampling = str(hdr0.get("REBNORM", "") or "").strip()
+        report["resampling_contract"] = ref_resampling or "LEGACY_UNQUALIFIED"
         sci0 = np.asarray(_get_sci_data(hduls[0]), dtype=np.float32)
         var0 = np.asarray(_get_var_data(hduls[0]), dtype=np.float32)
         mask0 = np.asarray(_get_mask_data(hduls[0]), dtype=np.uint16)
@@ -1051,6 +1055,13 @@ def run_stack2d(
         # Per-input metadata + strict validation.
         for p, h in zip(files, hduls):
             hdr = _get_primary_header(h)
+            this_resampling = str(hdr.get("REBNORM", "") or "").strip()
+            if this_resampling != ref_resampling:
+                raise ValueError(
+                    f"stack2d: mixed resampling contracts are forbidden: "
+                    f"reference={ref_resampling or 'LEGACY_UNQUALIFIED'}, "
+                    f"{p.name}={this_resampling or 'LEGACY_UNQUALIFIED'}"
+                )
             sci = _get_sci_data(h)
             var = _get_var_data(h)
             mask = _get_mask_data(h)
