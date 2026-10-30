@@ -994,6 +994,9 @@ def _write_spec1d_fits(
     # Units.
     ph["BUNIT"] = hdr0.get("BUNIT", "ADU")
     ph["FLUXUNIT"] = hdr0.get("BUNIT", "ADU")
+    for _key in ("SCORPUM", "NORMEXP", "REBNORM"):
+        if _key in hdr0:
+            ph[_key] = hdr0[_key]
     ph["WAVEUNIT"] = hdr0.get("CUNIT1", "Angstrom")
     # Wavelength medium must be declared once wavelength exists.
     _wr = str(hdr0.get("WAVEREF") or (cfg.get("project", {}) or {}).get("wave_reference") or "air").strip().lower()
@@ -1576,7 +1579,10 @@ def _run_extract1d_impl(
 
     # Header: preserve flux units; never apply eta here.
     ohdr = fits.Header()
-    for k in ("CRVAL1", "CDELT1", "CD1_1", "CRPIX1", "CTYPE1", "CUNIT1", "BUNIT"):
+    for k in (
+        "CRVAL1", "CDELT1", "CD1_1", "CRPIX1", "CTYPE1", "CUNIT1",
+        "BUNIT", "SCORPUM", "NORMEXP", "REBNORM",
+    ):
         if k in hdr0:
             ohdr[k] = hdr0[k]
 
