@@ -80,11 +80,11 @@ def test_oracle_nonuniform_dispersion_and_reversed_storage() -> None:
     np.testing.assert_allclose(flux, 3.0, rtol=0, atol=1e-12)
     np.testing.assert_allclose(cov, 1.0, rtol=0, atol=1e-12)
     assert flux.sum() == pytest.approx(counts.sum())
-    # Reversing detector storage changes neither the physical bin boundaries
-    # nor the integrated signal assigned to each output wavelength bin.
+    # Explicitly permuting the physical detector-pixel columns leaves the
+    # output invariant when the corresponding input counts are reordered.
+    matrix = _overlap_operator(edges_in, edges_out)
     np.testing.assert_allclose(
-        _oracle(counts[::-1][::-1], variance, edges_in, edges_out)[0],
-        flux, rtol=0, atol=0,
+        matrix[:, ::-1] @ counts[::-1], flux, rtol=0, atol=1e-12
     )
 
 
