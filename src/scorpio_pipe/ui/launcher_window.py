@@ -610,6 +610,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
         except Exception:
             old = None
 
+        # Replacing the *current* placeholder changes QStackedWidget's current
+        # index: inserting the real page at its original index does not select it.
+        # Keep the user's current page visible, including the initial Project page.
+        was_current = old is not None and self.stack.currentWidget() is old
         try:
             if old is not None:
                 self.stack.removeWidget(old)
@@ -623,6 +627,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 self.stack.addWidget(w)
             except Exception:
                 pass
+
+        if was_current:
+            self.stack.setCurrentWidget(w)
 
         try:
             if old is not None and hasattr(old, "deleteLater"):
