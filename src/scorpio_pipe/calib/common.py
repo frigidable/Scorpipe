@@ -8,8 +8,9 @@ from typing import Any
 
 import numpy as np
 
-from scorpio_pipe.refs.context import ensure_reference_context, load_reference_context
+from scorpio_pipe.airvac import air_to_vac, vac_to_air
 from scorpio_pipe.paths import resolve_work_dir
+from scorpio_pipe.refs.context import ensure_reference_context, load_reference_context
 
 
 def slug(s: str) -> str:
@@ -147,33 +148,37 @@ def find_standard_record(library: dict[str, Any], selected_name: str | None) -> 
 
 
 def air_to_vacuum(lam_air: np.ndarray) -> np.ndarray:
-    lam_air = np.asarray(lam_air, dtype=float)
-    s2 = (1e4 / np.clip(lam_air, 1.0, np.inf)) ** 2
-    n = 1.0 + 1e-6 * (6432.8 + 2949810.0 / (146.0 - s2) + 25540.0 / (41.0 - s2))
-    return lam_air * n
+    """Compatibility entrypoint for the common standard-air kernel (Angstrom)."""
+    return air_to_vac(lam_air)
 
 
 def vacuum_to_air(lam_vac: np.ndarray) -> np.ndarray:
-    lam_vac = np.asarray(lam_vac, dtype=float)
-    s2 = (1e4 / np.clip(lam_vac, 1.0, np.inf)) ** 2
-    n = 1.0 + 1e-6 * (6432.8 + 2949810.0 / (146.0 - s2) + 25540.0 / (41.0 - s2))
-    return lam_vac / n
+    """Compatibility entrypoint for the common standard-air kernel (Angstrom)."""
+    return vac_to_air(lam_vac)
 
 
 def convert_wavelength_convention(wave: np.ndarray, *, from_ref: str, to_ref: str) -> np.ndarray:
-    a = str(from_ref or "air").strip().lower()
-    b = str(to_ref or "air").strip().lower()
+    """Convert only explicitly declared air/vacuum wavelengths, without metadata I/O."""
+    a = str(from_ref).strip().lower()
+    b = str(to_ref).strip().lower()
     if a in {"vac", "vacuum"}:
         a = "vacuum"
     if b in {"vac", "vacuum"}:
         b = "vacuum"
+    if a not in {"air", "vacuum"} or b not in {"air", "vacuum"}:
+        raise ValueError(f"Unknown wavelength convention: {from_ref!r} -> {to_ref!r}")
     if a == b:
-        return np.asarray(wave, dtype=float)
+        # No medium conversion, but do not discard imaginary parts or accept
+        # physically undefined wavelengths. UV identity needs no air model.
+        if np.iscomplexobj(wave):
+            raise ValueError("Wavelengths must be real, finite, positive values")
+        unchanged = np.asarray(wave, dtype=float)
+        if np.any(~np.isfinite(unchanged)) or np.any(unchanged <= 0):
+            raise ValueError("Wavelengths must be real, finite, positive values")
+        return unchanged
     if a == "air" and b == "vacuum":
-        return air_to_vacuum(np.asarray(wave, dtype=float))
-    if a == "vacuum" and b == "air":
-        return vacuum_to_air(np.asarray(wave, dtype=float))
-    return np.asarray(wave, dtype=float)
+        return air_to_vacuum(wave)
+    return vacuum_to_air(wave)
 
 
 def read_spec1d(path: str | Path, *, mode: str = "trace") -> dict[str, Any]:
