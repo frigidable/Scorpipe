@@ -200,6 +200,8 @@ def build_sensfunc(cfg: dict[str, Any], *, standard_spec_path: str | Path, stand
         'flux_unit': 'erg/s/cm2/Angstrom',
         'waveref': str(spec.get('waveref') or 'air'),
         'reference_context_id': str(ctx.get('context_id') or ''),
+        'input_bunit': str(spec.get('bunit') or ''),
+        'input_rebnorm': str(hdr0.get('REBNORM') or ''),
         'fit_meta': fit_meta,
         'airmass_provenance': str(airmass_prov),
         'extinction_applied': bool(extinction_applied),
@@ -218,6 +220,12 @@ def write_sensfunc_products(out_dir: str | Path, payload: dict[str, Any]) -> dic
     ph = fits.Header()
     ph['WAVEREF'] = str(payload.get('waveref') or 'air')
     ph['WAVEUNIT'] = 'Angstrom'
+    # Response is only applicable to observations in the same detector
+    # count/rate and bin/density units as the standard star.
+    if str(payload.get('input_bunit') or '').strip():
+        ph['INBUNIT'] = str(payload['input_bunit']).strip()
+    if str(payload.get('input_rebnorm') or '').strip():
+        ph['INREBNM'] = str(payload['input_rebnorm']).strip()
     ph['REFCTID'] = str(payload.get('reference_context_id') or '')
     ph['RESPUNIT'] = 'count_per_flux'
     table_path = write_bintable_fits(
