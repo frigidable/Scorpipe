@@ -68,6 +68,7 @@ class _LinearizeRowPlan:
     src_idx: np.ndarray
     weights: np.ndarray
     weights_sq: np.ndarray
+    coverage_weights: np.ndarray
     starts: np.ndarray
     counts: np.ndarray
 
@@ -124,6 +125,7 @@ def _build_linearize_row_plan(lam_row: np.ndarray, edges_out: np.ndarray) -> _Li
     counts = np.zeros(nb, dtype=np.int32)
     src_idx_list: list[int] = []
     weights_list: list[float] = []
+    coverage_weights_list: list[float] = []
 
     i = 0
     n = int(finite_idx.size)
@@ -146,18 +148,24 @@ def _build_linearize_row_plan(lam_row: np.ndarray, edges_out: np.ndarray) -> _Li
                 overlap = min(hi, b) - max(lo, a)
                 if overlap > 0:
                     src_idx_list.append(int(ii))
-                    weights_list.append(float(overlap / bin_w))
+                    # SCI and VAR are integrated detector-pixel counts.
+                    # Transfer overlap fraction of the *input* pixel.
+                    weights_list.append(float(overlap / w_i))
+                    # Coverage is instead the fraction of output wavelength.
+                    coverage_weights_list.append(float(overlap / bin_w))
                     counts[j] += 1
                     flat_pos += 1
             ii += 1
 
     src_idx = np.asarray(src_idx_list, dtype=np.int32)
     weights = np.asarray(weights_list, dtype=np.float64)
+    coverage_weights = np.asarray(coverage_weights_list, dtype=np.float64)
     return _LinearizeRowPlan(
         finite_idx=np.asarray(finite_idx, dtype=np.int32),
         src_idx=src_idx,
         weights=weights,
         weights_sq=np.square(weights, dtype=np.float64),
+        coverage_weights=coverage_weights,
         starts=starts,
         counts=counts,
     )
@@ -228,7 +236,7 @@ def _apply_linearize_row_plan(
     contrib = np.where(src_valid, vals[src_idx] * row_plan.weights, 0.0)
     out = _reduce_bins(contrib, row_plan.starts, row_plan.counts, row_plan.counts.size)
 
-    cov_contrib = np.where(valid[src_idx], row_plan.weights, 0.0)
+    cov_contrib = np.where(valid[src_idx], row_plan.coverage_weights, 0.0)
     cov = _reduce_bins(cov_contrib, row_plan.starts, row_plan.counts, row_plan.counts.size)
     cov = np.clip(cov, 0.0, 1.0)
     return out.astype(float), cov.astype(float)
@@ -1165,15 +1173,15 @@ def _rebin_row_var_weightsquared(
 ) -> np.ndarray:
     """Variance propagation matched to :func:`_rebin_row_cumulative`.
 
-    The rebinning operator treats input samples ``x_j`` as *piecewise-constant
-    flux density* over the corresponding wavelength interval. The output is
-    the *bin-averaged* value on ``edges_out``:
+    Input samples are integrated detector-pixel counts and the output is
+    integrated counts in each destination bin, assuming piecewise constant
+    spectral density within each input pixel:
 
-        y_k = (1/Δλ_k) * Σ_j (overlap_{k,j} * x_j)
+        y_k = Σ_j (overlap_{k,j}/Δλ_input,j) * x_j
 
-    assuming independent input pixels:
+    With independent input pixels:
 
-        Var(y_k) = Σ_j (a_{k,j}^2 * Var(x_j)),  a_{k,j} = overlap_{k,j}/Δλ_k.
+        Var(y_k) = Σ_j (a_{k,j}^2 * Var(x_j)),  a_{k,j} = overlap_{k,j}/Δλ_input,j.
 
     We implement an efficient two-pointer sweep over monotonically increasing
     input/output edges (O(N+M)). Invalid input pixels (valid_mask False or
@@ -1229,7 +1237,7 @@ def _rebin_row_var_weightsquared(
                         b = float(edges_in[ii + 1])
                         overlap = min(hi, b) - max(lo, a)
                         if overlap > 0:
-                            w = overlap / bin_w
+                            w = overlap / w_i
                             out[j] += (w * w) * vi
             ii += 1
 
@@ -1243,12 +1251,11 @@ def _rebin_row_cumulative(
     *,
     valid_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Flux-conserving rebin of a 1D row onto a new wavelength grid.
+    """Conserve detector-integrated pixel counts on an output wavelength grid.
 
-    Edge-based cumulative integral approach:
-      - input pixel intervals are estimated from wavelength centers,
-      - flux density is assumed constant within each interval,
-      - the cumulative integral is interpolated to output bin edges.
+    Within each input wavelength interval the electron *density* is taken to
+    be constant and equals integrated pixel counts divided by input width.
+    Cumulative input counts are interpolated at output-bin boundaries.
 
     Coverage definition
     -------------------
@@ -1271,9 +1278,8 @@ def _rebin_row_cumulative(
     Returns
     -------
     out
-        Mean value per output bin (i.e. value density per unit of the
-        coordinate encoded by ``lam_centers``). For a constant input background,
-        this stays approximately constant after resampling.
+        Integrated counts in each output wavelength bin. Divide by the
+        output-bin width separately when spectral density is requested.
     cov
         Coverage fraction per output bin in [0, 1].
     """
@@ -1302,12 +1308,11 @@ def _rebin_row_cumulative(
     edges_in = _lambda_edges(lam_m)
     widths = np.diff(edges_in)
 
-    # Treat ``v`` as a piecewise-constant *density* on input intervals.
-    # Integrate it over λ to resample, then divide by output bin width to get
-    # the mean density in each output bin.
+    # Each sample v_i is already the integrated electron count of its pixel.
+    # The CDF grows by v_i across the corresponding input wavelength width.
     v_use = np.where(valid & np.isfinite(v), v, 0.0)
     c = np.zeros(edges_in.size, dtype=float)
-    c[1:] = np.cumsum(v_use * widths)
+    c[1:] = np.cumsum(v_use)
     c_out = np.interp(edges_out, edges_in, c, left=c[0], right=c[-1])
     integ = np.diff(c_out)
 
@@ -1318,7 +1323,7 @@ def _rebin_row_cumulative(
     cc_out = np.interp(edges_out, edges_in, cc, left=cc[0], right=cc[-1])
     cov_len = np.diff(cc_out)
     bin_w = np.maximum(np.diff(edges_out), 1e-12)
-    out = integ / bin_w
+    out = integ
     cov = cov_len / bin_w
     cov = np.clip(cov, 0.0, 1.0)
 
@@ -1756,9 +1761,20 @@ def _process_linearize_frame(task: Dict[str, Any]) -> Dict[str, Any]:
         if satmask is not None:
             rect_mask[yy, _apply_linearize_row_plan_bool(satmask[yy], row_plan)] |= SATURATED
 
-    if scale_to_bin:
-        rect *= float(dw)
-        rect_var *= float(dw) ** 2
+    # The overlap operator returns integrated electrons per output bin.
+    # Density mode is obtained by dividing by the *output* bin width.
+    if not (math.isfinite(dw) and dw > 0):
+        raise ValueError(f"Invalid output wavelength bin width: {dw}")
+    if not scale_to_bin:
+        rect /= float(dw)
+        rect_var /= float(dw) ** 2
+
+    # Input is detector-pixel integrated counts (never e-/s). A pre-normalized
+    # rate would require a separate explicit conversion contract.
+    from scorpio_pipe.units_model import split_rate_unit
+    _base_in, input_is_rate = split_rate_unit(str(hdr.get("BUNIT", "") or ""))
+    if input_is_rate:
+        raise ValueError(f"Linearize expects integrated detector counts; received rate input {p}: {hdr.get('BUNIT')}")
 
     exptime_s = _get_exptime_seconds(hdr)
     if normalize_exptime:
@@ -1767,6 +1783,15 @@ def _process_linearize_frame(task: Dict[str, Any]) -> Dict[str, Any]:
             exptime_s = 1.0
         rect /= float(exptime_s)
         rect_var /= float(exptime_s) ** 2
+
+    # Keep the same physical unit contract for standard-star direct
+    # rectification (which uses this worker without run_linearize()).
+    out_unit = "e-" if scale_to_bin else f"e-/{unit}"
+    if normalize_exptime:
+        out_unit += "/s"
+    hdr["BUNIT"] = (out_unit, "Linearized SCI unit")
+    hdr["NORMEXP"] = (bool(normalize_exptime), "SCI/VAR normalized by exposure time")
+    hdr["REBNORM"] = ("COUNT_V1", "Pixel-integrated count-conserving resampling")
 
     roi_report: Dict[str, Any] = {"roi_source": "none", "roi_valid": False}
     roi_flags: list[dict[str, Any]] = []
@@ -2485,19 +2510,17 @@ def run_linearize(
 
         wave_edges = wave0 + dw * np.arange(nlam + 1, dtype=np.float64)
 
-        # Output science units. The rebinning primitive returns a *density*
-        # (ADU per coordinate unit). If requested, we convert it back to
-        # integrated ADU per output bin.
-        scale_to_bin = bunit_mode == "adu_bin" and unit != "pix"
+        # Output SCI uses detector-integrated electron counts by default.
+        # The alternate mode converts to density after count-conserving
+        # overlap resampling. The legacy config key bunit_mode is retained.
+        scale_to_bin = bunit_mode == "adu_bin"
         if scale_to_bin and not (math.isfinite(dw) and dw > 0):
             raise ValueError("dw must be positive for bunit_mode=adu_bin")
 
-        if bunit_mode == "adu_per_unit" and unit != "pix":
-            bunit = f"ADU/{unit}"
-        elif bunit_mode == "adu_per_unit" and unit == "pix":
-            bunit = "ADU/pix"
+        if not scale_to_bin:
+            bunit = f"e-/{unit}"
         else:
-            bunit = "ADU/bin"
+            bunit = "e-"
 
         # Crop by Y if requested
         ny, nx = lam_map.shape
@@ -2546,14 +2569,10 @@ def run_linearize(
         out_skymodel_paths: list[str] = []
         no_coverage_fracs: list[float] = []
 
-        # Apply EXPTIME normalization policy to declared output units
+        # Normalize electron counts to rate units, preserving any
+        # wavelength-density factor in the unit string.
         if normalize_exptime:
-            if isinstance(bunit, str) and bunit.startswith("ADU/"):
-                bunit = "ADU/s/" + bunit.split("ADU/", 1)[1]
-            elif bunit == "ADU/bin":
-                bunit = "ADU/s/bin"
-            else:
-                bunit = "ADU/s"
+            bunit = f"{bunit}/s"
 
         # Legacy (non-robust) accumulator is kept for fallback only
         stack_num = np.zeros((ny, nlam), dtype=np.float64)
@@ -2649,7 +2668,7 @@ def run_linearize(
             ohdr["BUNIT"] = (str(bunit), "Data unit")
             ohdr["NORMEXP"] = (
                 bool(normalize_exptime),
-                "Normalize to per-second units (ADU/s)",
+                "Normalize SCI/VAR by exposure time (e-/s)",
             )
             ohdr["TEXPS"] = (float(exptime_s), "Exposure time used for normalization (s)")
             if delta_lambda_A is not None:
@@ -2865,7 +2884,9 @@ def run_linearize(
         hdr0["WAVEUNIT"] = (str(unit), "Wavelength unit (explicit)")
         hdr0["WAVEREF"] = (str(waveref), "Wavelength reference (air/vacuum)")
         hdr0["BUNIT"] = (str(bunit), "Data unit")
-        hdr0["NORMEXP"] = (bool(normalize_exptime), "Normalize stack to per-second units (ADU/s)")
+        hdr0["SCORPUM"] = ("ELECTRON", "SCI detector unit family")
+        hdr0["REBNORM"] = ("COUNT_V1", "Pixel-integrated count-conserving resampling")
+        hdr0["NORMEXP"] = (bool(normalize_exptime), "Normalize stack to per-second electron units")
         hdr0["NEXP"] = (int(len(exp_times_s)), "Number of exposures stacked")
         try:
             hdr0["TEXPTOT"] = (float(np.sum(exp_times_s)), "Total exposure time (s)")
