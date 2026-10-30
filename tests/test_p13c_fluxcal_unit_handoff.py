@@ -157,3 +157,17 @@ def test_fluxcal_rejects_countv1_science_with_unqualified_legacy_response(tmp_pa
     science, response = _flux_cal_inputs(tmp_path, standard_rebnorm=None)
     with pytest.raises(ValueError, match="COUNT_V1 science requires"):
         apply_fluxcal_to_spec1d(science, sensfunc_path=response)
+
+
+def test_fluxcal_rejects_missing_explicit_standard_medium(tmp_path):
+    science, response = _flux_cal_inputs(tmp_path, standard_ref=None)
+    with pytest.raises(ValueError, match="explicit standard/science wavelength medium"):
+        apply_fluxcal_to_spec1d(science, sensfunc_path=response)
+
+
+def test_fluxcal_rejects_incorrect_standard_wavelength_step_metadata(tmp_path):
+    science, response = _flux_cal_inputs(tmp_path, standard_step=1.)
+    with fits.open(response, mode="update") as hdul:
+        hdul[0].header["INSTEP"] = 2.
+    with pytest.raises(ValueError, match="inconsistent wavelength grid/INSTEP"):
+        apply_fluxcal_to_spec1d(science, sensfunc_path=response)
