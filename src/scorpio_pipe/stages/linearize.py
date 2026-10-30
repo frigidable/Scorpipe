@@ -1779,8 +1779,9 @@ def _process_linearize_frame(task: Dict[str, Any]) -> Dict[str, Any]:
     exptime_s = _get_exptime_seconds(hdr)
     if normalize_exptime:
         if not (math.isfinite(exptime_s) and exptime_s > 0):
-            log.warning("EXPTIME missing/invalid in %s; using 1.0 s for normalization", p.name)
-            exptime_s = 1.0
+            raise ValueError(
+                f"Cannot normalize linearized SCI/VAR by EXPTIME: missing/invalid exposure time for {p}"
+            )
         rect /= float(exptime_s)
         rect_var /= float(exptime_s) ** 2
 
