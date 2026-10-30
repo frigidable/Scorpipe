@@ -182,3 +182,29 @@ def test_flatfield_detects_raw_saturation_before_bias_and_flat(tmp_path, monkeyp
     assert mask[1, 3] & SATURATED
     assert header["SATQ"] == "RAW_EVAL"
     assert header["BUNIT"] == "e-"
+
+
+def test_sky_invalidates_copied_raw_assessment_if_mask_plane_was_lost():
+    # A legacy cosmic cleaner can copy RAW_EVAL in PRIMARY while dropping
+    # its DQ plane. Zero-valued synthetic replacement MASK is not evidence.
+    hdr = _header(unit="e-", processed=True)
+    hdr["SATQ"] = "RAW_EVAL"
+    sci_e, var_e, mask, out_hdr = _prepare_sky_input_planes(
+        np.full((3, 12), 40., dtype=float),
+        np.full((3, 12), 9., dtype=float),
+        None, None, hdr, cfg={}, sky_cfg={},
+    )
+    assert out_hdr["SATQ"] == "UNKNOWN"
+    assert not np.any((mask & SATURATED) != 0)
+
+
+def test_trusted_raw_assessment_survives_with_explicit_upstream_mask():
+    hdr = _header(unit="e-", processed=True)
+    hdr["SATQ"] = "RAW_EVAL"
+    mask = np.zeros((3, 12), dtype=np.uint16)
+    data = np.full((3, 12), 50., dtype=float)
+    _sci, _var, out_mask, out_hdr = _prepare_sky_input_planes(
+        data, np.full_like(data, 4.), mask, None, hdr, cfg={}, sky_cfg={},
+    )
+    assert out_hdr["SATQ"] == "RAW_EVAL"
+    assert not np.any(out_mask & SATURATED)
