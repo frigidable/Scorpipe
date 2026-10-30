@@ -292,6 +292,152 @@ def _read_image(path: Path) -> Tuple[np.ndarray, fits.Header]:
     return data, hdr
 
 
+
+def _read_sky_input_planes(
+    path: Path,
+) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None, fits.Header]:
+    """Read unrectified SCI and optional propagated VAR/MASK from raw FITS or MEF.
+
+    Primary-header provenance is authoritative for upstream products. Relevant
+    SCI-extension WCS/unit cards are used only when absent from the primary.
+    """
+    with open_fits_smart(
+        path,
+        memmap="auto",
+        ignore_missing_end=True,
+        ignore_missing_simple=True,
+        do_not_scale_image_data=False,
+    ) as hdul:
+        hdr = fits.Header(hdul[0].header)
+        sci_hdu = next(
+            (
+                h for h in hdul
+                if str(h.header.get("EXTNAME", "")).strip().upper() == "SCI"
+                and getattr(h, "data", None) is not None
+            ),
+            None,
+        )
+        if sci_hdu is None:
+            sci_hdu = next(
+                (
+                    h for h in hdul
+                    if getattr(h, "data", None) is not None
+                    and np.asarray(h.data).ndim >= 2
+                ),
+                None,
+            )
+        if sci_hdu is None:
+            raise ValueError(f"Empty image: {path}")
+        sci = np.asarray(sci_hdu.data, dtype=float)
+        for key in ("BUNIT", "SCIUNIT", "SCORPUM", "CTYPE1", "SCORP_L0", "SCORP_DL"):
+            if key not in hdr and key in sci_hdu.header:
+                hdr[key] = sci_hdu.header[key]
+
+        def _plane(extname: str) -> np.ndarray | None:
+            for hdu in hdul:
+                if (
+                    str(hdu.header.get("EXTNAME", "")).strip().upper() == extname
+                    and getattr(hdu, "data", None) is not None
+                ):
+                    arr = np.asarray(hdu.data)
+                    if arr.shape != sci.shape:
+                        raise ValueError(
+                            f"{extname} shape {arr.shape} != SCI shape {sci.shape} in {path}"
+                        )
+                    return arr
+            return None
+
+        var = _plane("VAR")
+        mask = _plane("MASK")
+
+    return sci, var, mask, hdr
+
+
+def _prepare_sky_input_planes(
+    sci: np.ndarray,
+    input_var: np.ndarray | None,
+    input_mask: np.ndarray | None,
+    cosmic_mask: np.ndarray | None,
+    hdr: fits.Header,
+    *,
+    cfg: dict,
+    sky_cfg: dict,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, fits.Header]:
+    """Preserve upstream detector uncertainty and DQ; estimate VAR only if absent."""
+    sci = np.asarray(sci)
+    mask = np.zeros(sci.shape, dtype=np.uint16)
+    for name, layer in (("MASK", input_mask), ("cosmics MASK", cosmic_mask)):
+        if layer is None:
+            continue
+        arr = np.asarray(layer)
+        if arr.shape != sci.shape:
+            raise ValueError(f"{name} shape {arr.shape} != SCI shape {sci.shape}")
+        if not np.issubdtype(arr.dtype, np.integer):
+            raise ValueError(f"{name} must contain integer mask bits")
+        if np.any(arr < 0) or np.any(arr > np.iinfo(np.uint16).max):
+            raise ValueError(f"{name} contains values outside uint16 bitmask range")
+        mask |= np.asarray(arr, dtype=np.uint16)
+
+    if input_var is not None:
+        from scorpio_pipe.io.mef import validate_sci_var_mask
+
+        issues = validate_sci_var_mask(
+            sci, np.asarray(input_var), mask, fatal_bits=FATAL_BITS
+        )
+        if issues:
+            raise ValueError(f"Invalid incoming SCI/VAR/MASK: {issues}")
+
+    def _opt_float(value: Any, *, allow_zero: bool = False) -> float | None:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(v) or v < 0 or (v == 0 and not allow_zero):
+            return None
+        return v
+
+    gain_override = _opt_float(sky_cfg.get("gain_e_per_adu"))
+    rn_override = _opt_float(sky_cfg.get("read_noise_e"), allow_zero=True)
+    require_gain = bool(sky_cfg.get("require_gain", False))
+    var = input_var
+    if var is None:
+        from scorpio_pipe.noise_model import estimate_variance_auto
+
+        var, _, _ = estimate_variance_auto(
+            sci,
+            hdr,
+            cfg=cfg,
+            gain_override=gain_override,
+            rdnoise_override=rn_override,
+            instrument_hint=str(cfg.get("instrument_hint") or ""),
+            require_gain=require_gain,
+        )
+
+    out_hdr = fits.Header(hdr)
+    out_hdr["SKYIVAR"] = ("INPUT" if input_var is not None else "ESTIM", "Sky input VAR source")
+    sources = int(input_mask is not None) + int(cosmic_mask is not None)
+    out_hdr["SKYIMSK"] = (
+        "BOTH" if sources == 2 else "INPUT" if input_mask is not None
+        else "COSMIC" if cosmic_mask is not None else "NONE",
+        "Sky input MASK sources",
+    )
+    sci_e, var_e, out_hdr, _, _ = ensure_electron_units(
+        sci,
+        var,
+        out_hdr,
+        cfg=cfg,
+        gain_override=gain_override,
+        rdnoise_override=rn_override,
+        instrument_hint=str(cfg.get("instrument_hint") or ""),
+        require_gain=require_gain,
+    )
+    if var_e is None:
+        raise RuntimeError("Sky input variance could not be resolved")
+    return sci_e, var_e, mask, out_hdr
+
+
 def _estimate_var_adu2(sci: np.ndarray, *, read_noise_e: float, gain_e_per_adu: float) -> np.ndarray:
     """Poisson + read-noise variance in ADU^2 (very basic)."""
     g = float(gain_e_per_adu) if gain_e_per_adu else 1.0
@@ -1613,57 +1759,12 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
             sci_passthrough = None
             var_passthrough = None
             try:
-                sci, hdr = _read_image(p)
+                sci, input_var, input_mask, hdr = _read_sky_input_planes(p)
                 _fail_if_rectified(hdr, path=p)
-                mask = _try_load_mask_for_clean(p, masks_fits_dir=obj_mask_dir)
-                if mask is None:
-                    mask = np.zeros_like(sci, dtype=np.uint16)
-
-                # Variance estimate: resolve gain/RN from overrides/header/instrument
-                # and standardize to electrons. (Do NOT silently default to gain=1, RN=5.)
-                from scorpio_pipe.noise_model import estimate_variance_auto
-
-                def _opt_float(v: Any, *, allow_zero: bool = False) -> float | None:
-                    if v is None:
-                        return None
-                    try:
-                        if isinstance(v, str) and not v.strip():
-                            return None
-                        f = float(v)
-                        if not np.isfinite(f):
-                            return None
-                        if allow_zero:
-                            return f if f >= 0.0 else None
-                        return f if f > 0.0 else None
-                    except Exception:
-                        return None
-
-                gain_override = _opt_float(sky_cfg.get("gain_e_per_adu"), allow_zero=False)
-                rn_override = _opt_float(sky_cfg.get("read_noise_e"), allow_zero=True)
-
-                # Gain is desirable but some legacy/synthetic inputs may not
-                # carry CCD metadata. Default to a safe fallback (gain=1) unless
-                # the user explicitly requests strict enforcement.
-                require_gain = bool(sky_cfg.get("require_gain", False))
-
-                var_in, _noise_params0, _model_name = estimate_variance_auto(
-                    sci,
-                    hdr,
-                    cfg=cfg,
-                    gain_override=gain_override,
-                    rdnoise_override=rn_override,
-                    instrument_hint=str(cfg.get("instrument_hint") or ""),
-                    require_gain=require_gain,
-                )
-                sci, var, hdr, _unit_prov, _noise_params = ensure_electron_units(
-                    sci,
-                    var_in,
-                    hdr,
-                    cfg=cfg,
-                    gain_override=gain_override,
-                    rdnoise_override=rn_override,
-                    instrument_hint=str(cfg.get("instrument_hint") or ""),
-                    require_gain=require_gain,
+                cosmic_mask = _try_load_mask_for_clean(p, masks_fits_dir=obj_mask_dir)
+                sci, var, mask, hdr = _prepare_sky_input_planes(
+                    sci, input_var, input_mask, cosmic_mask, hdr,
+                    cfg=cfg, sky_cfg=sky_cfg,
                 )
 
                 # IMPORTANT (P0-J): downstream geometry/fit helpers may modify arrays in-place.
