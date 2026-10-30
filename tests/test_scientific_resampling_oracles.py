@@ -117,6 +117,7 @@ def test_oracle_monte_carlo_recovers_diagonal_and_adjacent_covariance() -> None:
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason="Issue #32: production operator treats integrated e-/pixel as density",
 )
 def test_production_integrated_counts_conserve_flux() -> None:
@@ -136,6 +137,7 @@ def test_production_integrated_counts_conserve_flux() -> None:
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason="Issue #32: production VAR uses density normalization for integrated e-2/pixel",
 )
 def test_production_integrated_counts_propagate_variance() -> None:
