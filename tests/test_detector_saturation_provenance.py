@@ -147,3 +147,38 @@ def test_bad_saturation_margin_refused_on_raw_input(bad_margin):
             np.ones((3, 4)), None, _header(),
             {"detector": {"saturation_adu": 500., "saturation_margin_adu": bad_margin}},
         )
+
+
+def test_flatfield_detects_raw_saturation_before_bias_and_flat(tmp_path, monkeypatch):
+    from scorpio_pipe.stages.flatfield import apply_flat
+    from scorpio_pipe.io.mef import read_sci_var_mask
+    from scorpio_pipe.stages import flatfield
+
+    shape = (4, 12)
+    hdr = _header(unit="ADU", gain=2.0)
+    # Bypass only independent calibration compatibility checks, so this
+    # isolated test exercises real flatfield output arrays and FITS DQ.
+    monkeypatch.setattr(flatfield, "ensure_compatible_calib", lambda *a, **k: None)
+    raw = np.full(shape, 100., dtype="f4")
+    raw[1, 3] = 500.
+    raw_path = tmp_path / "raw.fits"
+    fits.PrimaryHDU(data=raw, header=hdr).writeto(raw_path)
+    flat_path = tmp_path / "flat.fits"
+    fits.PrimaryHDU(data=np.ones(shape, dtype="f4"), header=hdr).writeto(flat_path)
+    outpath = tmp_path / "flat_corr.fits"
+    apply_flat(
+        raw_path, flat_path, outpath,
+        cfg={
+            "work_dir": str(tmp_path),
+            "instrument_hint": "TEST",
+            "detector": {"saturation_adu": 499.},
+            "calib": {}, "flatfield": {},
+        },
+        do_bias_subtract=False,
+    )
+    sci_e, var_e, mask, header = read_sci_var_mask(outpath)
+    assert sci_e[1, 3] == pytest.approx(1000.)
+    assert np.isfinite(var_e[1, 3])
+    assert mask[1, 3] & SATURATED
+    assert header["SATQ"] == "RAW_EVAL"
+    assert header["BUNIT"] == "e-"
