@@ -82,6 +82,14 @@ def var_bunit_from_sci_bunit(bunit_sci: str) -> str:
 
     fam = parse_bunit(bunit_sci)
     base = fam.base
+    # Preserve wavelength-density dimensions in a spectral SCI product.
+    # A VAR of e-/Angstrom has units (e-/Angstrom)^2, not electron2.
+    # Keep legacy compact labels for detector-integrated or pure-rate SCI.
+    us = _norm(bunit_sci)
+    if base in {"electron", "adu"} and any(
+        tok in us for tok in ("/angstrom", "/nanometer", "/nm", "/pix", "/pixel")
+    ):
+        return f"({bunit_sci})^2"
     if base == "electron":
         out = "electron2"
     elif base == "adu":
