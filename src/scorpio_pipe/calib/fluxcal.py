@@ -20,6 +20,8 @@ def _load_sensfunc(path: str | Path) -> dict[str, np.ndarray]:
             'response_abs': np.asarray(tab['RESPONSE_ABS'], dtype=float),
             'response_unc': np.asarray(tab['RESPONSE_UNC'], dtype=float),
             'waveref': str(hdr.get('WAVEREF') or 'air').strip().lower(),
+            'input_bunit': str(hdr.get('INBUNIT') or '').strip(),
+            'input_rebnorm': str(hdr.get('INREBNM') or '').strip(),
         }
 
 
@@ -51,6 +53,23 @@ def apply_fluxcal_to_spec1d(science_spec_path: str | Path, *, sensfunc_path: str
     spec = read_spec1d(science_spec_path, mode='trace')
     wave = spec['wave']
     sens = _load_sensfunc(sensfunc_path)
+    # Sensitivity functions include the physical input count/rate units of
+    # the STANDARD. A response fitted in e-/Angstrom/s cannot calibrate
+    # science e-/bin spectra without an explicit unit conversion.
+    in_unit = str(sens.get('input_bunit') or '').strip()
+    sci_unit = str(spec.get('bunit') or '').strip()
+    if in_unit and in_unit.casefold().replace(' ', '') != sci_unit.casefold().replace(' ', ''):
+        raise ValueError(
+            f"Flux calibration unit mismatch: standard={in_unit!r}, science={sci_unit!r}; "
+            "reprocess with matching count/rate and bin/density conventions."
+        )
+    std_norm = str(sens.get('input_rebnorm') or '').strip()
+    sci_norm = str(spec['header'].get('REBNORM') or '').strip()
+    if std_norm and std_norm != sci_norm:
+        raise ValueError(
+            f"Flux calibration resampling mismatch: standard={std_norm!r}, "
+            f"science={sci_norm or 'LEGACY_UNQUALIFIED'!r}"
+        )
     resp = np.interp(wave, sens['wave'], sens['response_abs'], left=np.nan, right=np.nan)
     resp_unc = np.interp(wave, sens['wave'], sens['response_unc'], left=np.nanmedian(sens['response_unc']), right=np.nanmedian(sens['response_unc']))
     flux = spec['flux'] / np.clip(resp, 1e-30, np.inf)
