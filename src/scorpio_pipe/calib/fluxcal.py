@@ -20,6 +20,7 @@ def _load_sensfunc(path: str | Path) -> dict[str, np.ndarray]:
             'response_abs': np.asarray(tab['RESPONSE_ABS'], dtype=float),
             'response_unc': np.asarray(tab['RESPONSE_UNC'], dtype=float),
             'waveref': str(hdr.get('WAVEREF') or 'air').strip().lower(),
+            'waveref_declared': bool(str(hdr.get('WAVEREF') or '').strip()),
             'input_bunit': str(hdr.get('INBUNIT') or '').strip(),
             'input_rebnorm': str(hdr.get('INREBNM') or '').strip(),
             'input_waveunit': str(hdr.get('INWUNIT') or '').strip(),
@@ -83,7 +84,9 @@ def apply_fluxcal_to_spec1d(science_spec_path: str | Path, *, sensfunc_path: str
         sci_hdr = spec['header']
         sci_ref = str(sci_hdr.get('WAVEREF') or '').strip().lower()
         std_ref = str(sens.get('waveref') or '').strip().lower()
-        if sci_ref not in {'air', 'vacuum'} or std_ref not in {'air', 'vacuum'}:
+        if (sci_ref not in {'air', 'vacuum'}
+                or std_ref not in {'air', 'vacuum'}
+                or not bool(sens.get('waveref_declared'))):
             raise ValueError('Flux calibration requires explicit standard/science wavelength medium')
         if sci_ref != std_ref:
             raise ValueError(
@@ -105,9 +108,12 @@ def apply_fluxcal_to_spec1d(science_spec_path: str | Path, *, sensfunc_path: str
         if std_dw is None or not np.isfinite(float(std_dw)) or float(std_dw) <= 0:
             raise ValueError('COUNT_V1 sensitivity is missing verified standard wavelength-bin width')
         std_dw = float(std_dw)
-        if (not np.isfinite(sens['wave']).all()
-                or (np.diff(sens['wave']) <= 0).any()):
-            raise ValueError('COUNT_V1 sensitivity requires increasing finite wavelengths')
+        std_steps = np.diff(sens['wave'])
+        if (not np.isfinite(sens['wave']).all() or std_steps.size == 0
+                or not np.isfinite(std_steps).all()
+                or (std_steps <= 0).any()
+                or not np.allclose(std_steps, std_dw, rtol=1e-6, atol=1e-9)):
+            raise ValueError('COUNT_V1 sensitivity has inconsistent wavelength grid/INSTEP')
         # Bin-integrated electron response is proportional to bin width.
         # For density outputs e-/wavelength, this extra factor is absent.
         from scorpio_pipe.contracts.units import parse_bunit
@@ -193,6 +199,11 @@ def write_fluxcal_products(cfg: dict[str, Any], out_dir: str | Path, *, spec_pay
     with fits.open(in_spec, memmap=False) as hdul:
         hdr0 = hdul[0].header.copy()
         hdr0['BUNIT'] = spec_payload['flux_unit']
+        # After physical flux calibration, data no longer have detector
+        # electron/ADU units. Preserve the historical gain/noise cards but
+        # remove the detector-only SCI unit-model label.
+        if 'SCORPUM' in hdr0:
+            del hdr0['SCORPUM']
         hdr0['WAVEREF'] = str(hdr0.get('WAVEREF') or 'air').strip().lower()
         stamp_calibration_semantics(
             hdr0,
@@ -258,6 +269,8 @@ def write_fluxcal_products(cfg: dict[str, Any], out_dir: str | Path, *, spec_pay
             sci = sci / np.clip(tr[None, :], 0.25, np.inf)
             var = var / np.clip(tr[None, :], 0.25, np.inf) ** 2
         hdr0['BUNIT'] = spec_payload['flux_unit']
+        if 'SCORPUM' in hdr0:
+            del hdr0['SCORPUM']
         status_2d = coerce_calibration_status(spec_payload['status'], product_kind=CalibrationProductKind.MEF2D)
         stamp_calibration_semantics(
             hdr0,
