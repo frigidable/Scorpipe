@@ -1627,7 +1627,8 @@ def _process_linearize_frame(task: Dict[str, Any]) -> Dict[str, Any]:
 
     # Only the upstream detector DQ plane can establish saturation at this
     # point: sky subtraction has changed SCI and invalidated ADC thresholds.
-    if str(hdr.get("SATQ") or "").strip().upper() != "RAW_EVAL":
+    if (str(hdr.get("SATQ") or "").strip().upper() != "RAW_EVAL"
+            or mask_in is None):
         hdr["SATQ"] = (
             "PROP" if mask is not None and np.any((mask & SATURATED) != 0) else "UNKNOWN",
             "Saturation evidence from upstream, not sky-sub SCI",
