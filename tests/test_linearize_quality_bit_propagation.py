@@ -95,6 +95,12 @@ def test_input_no_coverage_does_not_contribute_flux_or_variance(tmp_path) -> Non
     assert output["rect_cov"][3, 5] == 0
     assert output["rect"][3, 5] == 0
     assert output["rect_var"][3, 5] == 0
+    # INVALID_WAVELENGTH has equally unusable samples, even when SCI is finite.
+    assert mask[2, 4] & INVALID_WAVELENGTH
+    assert mask[2, 4] & NO_COVERAGE
+    assert output["rect_cov"][2, 4] == 0
+    assert output["rect"][2, 4] == 0
+    assert output["rect_var"][2, 4] == 0
     # Other wavelength samples keep their original electron units.
     np.testing.assert_allclose(output["rect"][0, 8], 7.0, rtol=0, atol=1e-6)
     np.testing.assert_allclose(output["rect_var"][0, 8], 4.0, rtol=0, atol=1e-6)
