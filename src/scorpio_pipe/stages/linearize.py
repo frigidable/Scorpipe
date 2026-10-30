@@ -1857,7 +1857,14 @@ def _process_linearize_frame(task: Dict[str, Any]) -> Dict[str, Any]:
         "residual_model": residual_model,
         "noise_meta": noise_meta,
         "exptime_s": float(exptime_s),
-        "sat_level_adu": float(sat_level) if sat_level is not None else None,
+        # Preserve the historical report field, but only if RAW ADC
+        # saturation was evaluated upstream and the associated DQ survived.
+        "sat_level_adu": (
+            float(hdr["SATADU"])
+            if str(hdr.get("SATQ") or "").strip().upper() == "RAW_EVAL"
+            and hdr.get("SATADU") is not None
+            else None
+        ),
         "no_coverage_frac": float(np.mean((rect_mask & NO_COVERAGE) != 0)),
     }
 
