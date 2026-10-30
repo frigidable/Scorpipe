@@ -68,6 +68,23 @@ def rectify_with_lambda_map(
         dw=float(dw),
         nlam=int(nlam),
     )
+    lcfg = (cfg.get("linearize") if isinstance(cfg.get("linearize"), dict) else {}) or {}
+    stcfg = (cfg.get("stack2d") if isinstance(cfg.get("stack2d"), dict) else {}) or {}
+    ecfg = (cfg.get("extract1d") if isinstance(cfg.get("extract1d"), dict) else {}) or {}
+    mode = str(lcfg.get("bunit_mode", lcfg.get("output_bunit_mode", "adu_bin"))).strip().lower()
+    density_aliases = {
+        "adu/angstrom", "adu_per_angstrom", "adu_per_a", "adu/a",
+        "per_angstrom", "density", "adu/nm", "adu_per_nm", "per_nm",
+        "adu_per_unit",
+    }
+    scale_to_bin = mode not in density_aliases
+    science_normalize = bool(lcfg.get("normalize_exptime", True))
+    extract_input_mode = str(ecfg.get("input_mode", "stack2d")).strip().lower()
+    if extract_input_mode in {"stack2d", "stack"}:
+        # The science spectrum is a coadd, potentially normalized by Stack2D
+        # even when Linearize was configured to retain original counts.
+        science_normalize |= bool(stcfg.get("normalize_exptime", True))
+
     return _process_linearize_frame(
         {
             "path": str(Path(in_path)),
@@ -82,8 +99,11 @@ def rectify_with_lambda_map(
             "cfg": dict(cfg),
             "gain_override_f": None,
             "rdnoise_override_f": None,
-            "scale_to_bin": False,
-            "normalize_exptime": False,
+            # Match the science SPEC1D input units before standard-star
+            # sensitivity fitting; mismatched count/rate or bin/density
+            # normalization biases the derived absolute response.
+            "scale_to_bin": bool(scale_to_bin),
+            "normalize_exptime": bool(science_normalize),
             "wave0": float(wave0),
             "dw": float(dw),
             "unit": str(unit),
