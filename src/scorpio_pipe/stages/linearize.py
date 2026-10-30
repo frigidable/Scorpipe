@@ -482,16 +482,25 @@ def _open_science_with_optional_var_mask(
     Supports both plain 2D primary-HDU FITS and pipeline MEF products with
     SCI/VAR/MASK extensions.
     """
-    try:
-        with fits.open(path, memmap=False) as hdul:
-            if "SCI" in hdul:
-                sci, var, mask, hdr = read_sci_var_mask(path)
-                sci64 = np.asarray(sci, dtype=np.float64)
-                var64 = None if var is None else np.asarray(var, dtype=np.float64)
-                return sci64, var64, mask, hdr
-    except Exception:
-        # fall back to primary-only
-        pass
+    # Inspection and contract validation are deliberately separate:
+    # an invalid SCI/VAR/MASK MEF must NEVER turn into a primary-only image.
+    # Preserve relaxed header acceptance for legitimate legacy raw frames.
+    with fits.open(
+        path, memmap=False, ignore_missing_simple=True, ignore_missing_end=True
+    ) as hdul:
+        has_sci = "SCI" in hdul
+    if has_sci:
+        try:
+            sci, var, mask, hdr = read_sci_var_mask(path)
+        except Exception as exc:
+            raise ValueError(
+                f"Invalid SCI/VAR/MASK MEF at {path}; refusing "
+                "primary-HDU fallback or noise re-estimation"
+            ) from exc
+        sci64 = np.asarray(sci, dtype=np.float64)
+        var64 = None if var is None else np.asarray(var, dtype=np.float64)
+        return sci64, var64, mask, hdr
+
     data, hdr = _open_fits_resilient(path)
     return data, None, None, fits.Header(hdr)
 
