@@ -30,3 +30,10 @@ Coverage uses a DIFFERENT coefficient, L_ki/D_k, for valid input pixels. This se
 ## Acceptance tests
 
 The scientific resampling oracles added in PR #33 become hard PASS (no xfail). Additional synthetic tests cover electron versus ADU input, integrated versus density output, 0.5 and 1 Angstrom bins, exposure normalization, reversed/nonuniform dispersion, masked samples, FITS SCI/VAR header dimensions and Stack2D input unit interpretation. GitHub CI and local Windows tests must both pass. This is the necessary software gate, not sufficient real-observation qualification.
+
+## Standard-star calibration and sensitivity transfer
+
+- The shared standard-star rectification facade now follows science bin/density mode and the final science spectrum's exposure normalization (Linearize or Stack2D, depending on extraction input mode).
+- Extract1D preserves REBNORM and NORMEXP in 1D primary headers. Sensfunc FITS stamps INBUNIT and INREBNM from the standard's extracted 1D spectrum, and fluxcal apply rejects explicitly incompatible science units or resampling schemes.
+- Legacy sensfunc FITS without these stamps remain readable for backward compatibility; they cannot be treated as scientifically qualified COUNT_V1 responses without provenance review.
+- Physical flux calibration still requires independently qualified extinction, standard identification, calibration uncertainty, and consistent wavelength medium; unit consistency is necessary but insufficient.
