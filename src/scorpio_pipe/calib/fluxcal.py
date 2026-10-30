@@ -22,6 +22,8 @@ def _load_sensfunc(path: str | Path) -> dict[str, np.ndarray]:
             'waveref': str(hdr.get('WAVEREF') or 'air').strip().lower(),
             'input_bunit': str(hdr.get('INBUNIT') or '').strip(),
             'input_rebnorm': str(hdr.get('INREBNM') or '').strip(),
+            'input_waveunit': str(hdr.get('INWUNIT') or '').strip(),
+            'input_wave_step': hdr.get('INSTEP'),
         }
 
 
@@ -70,6 +72,61 @@ def apply_fluxcal_to_spec1d(science_spec_path: str | Path, *, sensfunc_path: str
             f"Flux calibration resampling mismatch: standard={std_norm!r}, "
             f"science={sci_norm or 'LEGACY_UNQUALIFIED'!r}"
         )
+    if sci_norm == 'COUNT_V1' and std_norm != 'COUNT_V1':
+        raise ValueError(
+            'Flux calibration resampling mismatch: COUNT_V1 science requires '
+            'a sensitivity function with matching COUNT_V1 provenance'
+        )
+    if sci_norm == 'COUNT_V1':
+        # Legacy read_spec1d() may assume air and ADU for missing metadata;
+        # such implicit defaults are forbidden for physical COUNT_V1 fluxing.
+        sci_hdr = spec['header']
+        sci_ref = str(sci_hdr.get('WAVEREF') or '').strip().lower()
+        std_ref = str(sens.get('waveref') or '').strip().lower()
+        if sci_ref not in {'air', 'vacuum'} or std_ref not in {'air', 'vacuum'}:
+            raise ValueError('Flux calibration requires explicit standard/science wavelength medium')
+        if sci_ref != std_ref:
+            raise ValueError(
+                f"Flux calibration wavelength medium mismatch: standard={std_ref!r}, science={sci_ref!r}"
+            )
+        sci_waveunit = str(sci_hdr.get('WAVEUNIT') or sci_hdr.get('CUNIT1') or '').strip()
+        std_waveunit = str(sens.get('input_waveunit') or '').strip()
+        if not sci_waveunit or not std_waveunit:
+            raise ValueError('Flux calibration requires explicit standard/science wavelength units')
+        if sci_waveunit.casefold() != std_waveunit.casefold():
+            raise ValueError(
+                f"Flux calibration wavelength unit mismatch: standard={std_waveunit!r}, science={sci_waveunit!r}"
+            )
+        dw = np.diff(np.asarray(wave, dtype=float))
+        if (dw.size == 0 or not np.isfinite(dw).all() or (dw <= 0).any()
+                or not np.allclose(dw, np.median(dw), rtol=1e-6, atol=1e-9)):
+            raise ValueError('COUNT_V1 science requires strictly increasing, uniform wavelength bins')
+        std_dw = sens.get('input_wave_step')
+        if std_dw is None or not np.isfinite(float(std_dw)) or float(std_dw) <= 0:
+            raise ValueError('COUNT_V1 sensitivity is missing verified standard wavelength-bin width')
+        std_dw = float(std_dw)
+        if (not np.isfinite(sens['wave']).all()
+                or (np.diff(sens['wave']) <= 0).any()):
+            raise ValueError('COUNT_V1 sensitivity requires increasing finite wavelengths')
+        # Bin-integrated electron response is proportional to bin width.
+        # For density outputs e-/wavelength, this extra factor is absent.
+        from scorpio_pipe.contracts.units import parse_bunit
+        science_unit = parse_bunit(sci_unit)
+        is_density = any(
+            token in sci_unit.casefold().replace(' ', '')
+            for token in ('/angstrom', '/nm', '/nanometer', '/pix', '/pixel')
+        )
+        if science_unit.base not in {'electron', 'adu'}:
+            raise ValueError(f"COUNT_V1 sensitivity unsupported SCI unit: {sci_unit!r}")
+        if not is_density and not np.isclose(
+            float(np.median(dw)), std_dw, rtol=1e-6, atol=1e-9
+        ):
+            raise ValueError(
+                f"Flux calibration wavelength-bin width mismatch: "
+                f"standard={std_dw:.9g}, science={float(np.median(dw)):.9g} "
+                f"({sci_waveunit}); use a common count/bin wavelength grid "
+                "or explicitly transform the sensitivity function."
+            )
     resp = np.interp(wave, sens['wave'], sens['response_abs'], left=np.nan, right=np.nan)
     resp_unc = np.interp(wave, sens['wave'], sens['response_unc'], left=np.nanmedian(sens['response_unc']), right=np.nanmedian(sens['response_unc']))
     flux = spec['flux'] / np.clip(resp, 1e-30, np.inf)
@@ -79,6 +136,12 @@ def apply_fluxcal_to_spec1d(science_spec_path: str | Path, *, sensfunc_path: str
     transmission = np.ones_like(wave)
     if telluric_path is not None and Path(telluric_path).exists():
         tel = _load_telluric(telluric_path)
+        if sci_norm == 'COUNT_V1':
+            tel_ref = str(tel.get('waveref') or '').strip().lower()
+            if tel_ref != sci_ref:
+                raise ValueError(
+                    f"Telluric wavelength medium mismatch: model={tel_ref!r}, science={sci_ref!r}"
+                )
         transmission = np.interp(wave, tel['wave'], tel['trans'], left=1.0, right=1.0)
         tell_conf = np.interp(wave, tel['wave'], tel['conf'], left=0.0, right=0.0)
         flux = flux / np.clip(transmission, 0.25, np.inf)
