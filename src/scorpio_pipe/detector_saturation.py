@@ -83,6 +83,7 @@ def _is_identifiably_raw_adu(hdr: fits.Header) -> bool:
 
 def carry_detector_saturation(
     sci: np.ndarray, mask: np.ndarray | None, hdr: fits.Header, cfg: Mapping,
+    *, upstream_mask_present: bool | None = None,
 ) -> tuple[np.ndarray, fits.Header]:
     """OR trustworthy raw-ADU saturation evidence into a uint16 DQ mask.
 
@@ -98,6 +99,11 @@ def carry_detector_saturation(
     if out.shape != arr.shape:
         raise ValueError("Detector saturation MASK shape mismatch")
     h = fits.Header(hdr)
+    # A copied RAW_EVAL header without a corresponding DQ plane is not a
+    # reliable saturation assessment: another stage may have dropped MASK.
+    if upstream_mask_present is None:
+        upstream_mask_present = mask is not None
+    upstream_mask_present = bool(upstream_mask_present)
     det = cfg.get("detector")
     det = det if isinstance(det, Mapping) else {}
     lcfg = cfg.get("linearize")
@@ -112,7 +118,8 @@ def carry_detector_saturation(
             h["SATMARG"] = (float(margin), "Detector threshold margin [ADU]")
             h["SATSRC"] = (str(source)[:68], "Saturation threshold provenance")
             return out, h
-    if str(h.get("SATQ") or "").strip().upper() != "RAW_EVAL":
+    if (str(h.get("SATQ") or "").strip().upper() != "RAW_EVAL"
+            or not upstream_mask_present):
         h["SATQ"] = (
             "PROP" if np.any((out & SATURATED) != 0) else "UNKNOWN",
             "Saturation upstream evidence only, or unqualified",
