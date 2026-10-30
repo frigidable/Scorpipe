@@ -88,7 +88,7 @@ def test_raw_detection_persists_after_electron_conversion_and_sky_subtraction():
     assert second["SATQ"] == "RAW_EVAL"
 
 
-def _linearized(tmp_path, *, with_saturation_bit, level):
+def _linearized(tmp_path, *, with_saturation_bit, level, raw_evaluated=False):
     ny, nx = 4, 12
     wave = 5000. + np.arange(nx, dtype=float)
     lam_map = np.broadcast_to(wave, (ny, nx)).copy()
@@ -100,6 +100,9 @@ def _linearized(tmp_path, *, with_saturation_bit, level):
         mask[0, 3] = SATURATED
     hdr = _header(unit="e-", processed=True)
     hdr["SATURATE"] = 20.  # ADU: invalid after sky subtraction
+    if raw_evaluated:
+        hdr["SATQ"] = "RAW_EVAL"
+        hdr["SATADU"] = 500.
     path = tmp_path / "sky_subtracted_mef.fits"
     fits.HDUList([
         fits.PrimaryHDU(header=hdr),
@@ -127,6 +130,7 @@ def test_linearize_does_not_reclassify_high_sky_residual_as_saturated(tmp_path):
     output = _linearized(tmp_path, with_saturation_bit=False, level=10000.)
     assert not (output["rect_mask"][0, 3] & SATURATED)
     assert output["hdr"]["SATQ"] == "UNKNOWN"
+    assert output["sat_level_adu"] is None
     assert output["rect"][0, 3] == pytest.approx(10000.)
 
 
@@ -138,6 +142,15 @@ def test_linearize_preserves_upstream_saturation_even_for_low_residual(tmp_path)
     assert output["rect_var"][0, 3] == 0.
     assert output["rect_cov"][0, 3] == 0.
     assert output["hdr"]["SATQ"] == "PROP"
+    assert output["sat_level_adu"] is None
+
+
+def test_linearize_reports_only_raw_qualified_saturation_threshold(tmp_path):
+    output = _linearized(
+        tmp_path, with_saturation_bit=True, level=1., raw_evaluated=True
+    )
+    assert output["hdr"]["SATQ"] == "RAW_EVAL"
+    assert output["sat_level_adu"] == pytest.approx(500.)
 
 
 @pytest.mark.parametrize("bad_margin", [-1., float("nan"), 500.])
