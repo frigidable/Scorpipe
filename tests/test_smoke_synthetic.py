@@ -141,7 +141,14 @@ def test_smoke_synthetic_chain_golden():
         img[28:36, :] += line[None, :]
 
         raw = layout.raw / "obj_0001.fits"
-        _write(raw, img)
+        # Science rate products require an actual exposure time; the
+        # synthetic chain must not rely on a fictitious 1-second fallback.
+        raw_hdr = fits.Header()
+        raw_hdr["BUNIT"] = "ADU"
+        raw_hdr["GAIN"] = 1.0
+        raw_hdr["RDNOISE"] = rn
+        raw_hdr["EXPTIME"] = 600.0
+        _write(raw, img, header=raw_hdr)
 
         cfg = {
             "work_dir": str(work_dir),
