@@ -51,6 +51,7 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import lsqr
 
 from scorpio_pipe.io.mef import write_sci_var_mask
+from scorpio_pipe.detector_saturation import carry_detector_saturation
 from scorpio_pipe.maskbits import BADPIX, COSMIC, NO_COVERAGE, REJECTED, SATURATED, USER, SKYMODEL_FAIL
 from scorpio_pipe.paths import resolve_work_dir
 from scorpio_pipe.provenance import add_provenance
@@ -377,6 +378,10 @@ def _prepare_sky_input_planes(
         if np.any(arr < 0) or np.any(arr > np.iinfo(np.uint16).max):
             raise ValueError(f"{name} contains values outside uint16 bitmask range")
         mask |= np.asarray(arr, dtype=np.uint16)
+
+    # Only unprocessed ADU data can be classified here. Processed inputs
+    # retain previous DQ bits; saturation is never inferred from sky residuals.
+    mask, hdr = carry_detector_saturation(sci, mask, hdr, cfg)
 
     if input_var is not None:
         from scorpio_pipe.io.mef import validate_sci_var_mask
