@@ -97,6 +97,11 @@ def build_sensfunc(cfg: dict[str, Any], *, standard_spec_path: str | Path, stand
     var = spec['var']
     mask = np.asarray(spec['mask'])
     hdr0 = spec['header']
+    if str(hdr0.get('REBNORM') or '').strip() == 'COUNT_V1':
+        if str(hdr0.get('WAVEREF') or '').strip().lower() not in {'air', 'vacuum'}:
+            raise ValueError('COUNT_V1 standard requires explicitly declared WAVEREF air/vacuum')
+        if str(hdr0.get('WAVEUNIT') or hdr0.get('CUNIT1') or '').strip() == '':
+            raise ValueError('COUNT_V1 standard requires explicit wavelength-axis units')
     std_name = None
     raw_std_path = None
     if isinstance(standard_qc, dict):
