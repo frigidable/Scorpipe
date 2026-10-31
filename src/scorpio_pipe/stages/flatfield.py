@@ -11,6 +11,7 @@ from scorpio_pipe.calib.compat import ensure_compatible_calib
 from scorpio_pipe.fits_utils import open_fits_smart
 from scorpio_pipe import maskbits
 from scorpio_pipe.io.mef import write_sci_var_mask
+from scorpio_pipe.detector_saturation import carry_detector_saturation
 from scorpio_pipe.noise_model import estimate_variance_adu2, resolve_noise_params
 from scorpio_pipe.paths import resolve_work_dir
 from scorpio_pipe.units_model import ensure_electron_units
@@ -94,6 +95,9 @@ def apply_flat(
     from scorpio_pipe.variance_model import propagate_divide
 
     data, var, mask, hdr = _read_sci_var_mask(data_path)
+    # Capture saturation before subtracting bias or dividing by flat. A raw
+    # ADU threshold cannot be reconstructed from corrected electron counts.
+    mask, hdr = carry_detector_saturation(data, mask, hdr, cfg)
     # Flat can be a legacy PRIMARY-only "superflat" or a MEF MasterFlat
     # (SCI+VAR+MASK). We support both.
     superflat, sf_var, sf_mask, _sf_hdr = _read_sci_var_mask(superflat_path)
