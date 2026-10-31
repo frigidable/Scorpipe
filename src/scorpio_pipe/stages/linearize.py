@@ -490,16 +490,25 @@ def _open_science_with_optional_var_mask(
     Supports both plain 2D primary-HDU FITS and pipeline MEF products with
     SCI/VAR/MASK extensions.
     """
-    try:
-        with fits.open(path, memmap=False) as hdul:
-            if "SCI" in hdul:
-                sci, var, mask, hdr = read_sci_var_mask(path)
-                sci64 = np.asarray(sci, dtype=np.float64)
-                var64 = None if var is None else np.asarray(var, dtype=np.float64)
-                return sci64, var64, mask, hdr
-    except Exception:
-        # fall back to primary-only
-        pass
+    # Inspection and contract validation are deliberately separate:
+    # an invalid SCI/VAR/MASK MEF must NEVER turn into a primary-only image.
+    # Preserve relaxed header acceptance for legitimate legacy raw frames.
+    with fits.open(
+        path, memmap=False, ignore_missing_simple=True, ignore_missing_end=True
+    ) as hdul:
+        has_sci = "SCI" in hdul
+    if has_sci:
+        try:
+            sci, var, mask, hdr = read_sci_var_mask(path)
+        except Exception as exc:
+            raise ValueError(
+                f"Invalid SCI/VAR/MASK MEF at {path}; refusing "
+                "primary-HDU fallback or noise re-estimation"
+            ) from exc
+        sci64 = np.asarray(sci, dtype=np.float64)
+        var64 = None if var is None else np.asarray(var, dtype=np.float64)
+        return sci64, var64, mask, hdr
+
     data, hdr = _open_fits_resilient(path)
     return data, None, None, fits.Header(hdr)
 
@@ -1055,66 +1064,6 @@ def _post_rectified_sky_cleanup(
 
 
 ### Noise / variance helpers live in scorpio_pipe.noise_model
-
-
-def _guess_saturation_level_adu(
-    hdr: fits.Header, lcfg: Dict[str, Any]
-) -> Optional[float]:
-    """Estimate detector saturation level in ADU.
-
-    Order of preference:
-      - config override: linearize.saturation_adu (or saturation_adu, sat_adu)
-      - header keywords: SATURATE, SATLEVEL, SAT_...
-      - common unsigned-16bit convention (BITPIX=16 with BZERO=32768 and BSCALE=1): 65535
-
-    Returns None if nothing sensible can be inferred.
-    """
-
-    # config override
-    for ck in ("saturation_adu", "sat_adu", "saturation_level_adu"):
-        if ck in lcfg and lcfg.get(ck) is not None:
-            try:
-                v = float(lcfg.get(ck))
-                if math.isfinite(v) and v > 0:
-                    return v
-            except Exception:
-                pass
-
-    # header keywords
-    for k in ("SATURATE", "SATLEVEL", "SATUR", "SATLEVEL", "SATURATION"):
-        if k in hdr:
-            try:
-                v = float(hdr[k])
-                if math.isfinite(v) and v > 0:
-                    return v
-            except Exception:
-                pass
-
-    # heuristic: unsigned 16-bit storage
-    try:
-        bitpix = int(hdr.get("BITPIX")) if hdr.get("BITPIX") is not None else None
-    except Exception:
-        bitpix = None
-    if bitpix == 16:
-        try:
-            bscale = float(hdr.get("BSCALE", 1.0))
-            bzero = float(hdr.get("BZERO", 0.0))
-        except Exception:
-            bscale, bzero = 1.0, 0.0
-        if abs(bscale - 1.0) < 1e-9 and (
-            abs(bzero - 32768.0) < 1e-3 or abs(bzero) < 1e-3
-        ):
-            return 65535.0
-
-    # fallback: sometimes DATAMAX is close to saturation
-    try:
-        dmax = float(hdr.get("DATAMAX")) if hdr.get("DATAMAX") is not None else None
-        if dmax is not None and math.isfinite(dmax) and dmax > 60000:
-            return 65535.0
-    except Exception:
-        pass
-
-    return None
 
 
 def _lambda_edges(lam: np.ndarray) -> np.ndarray:
@@ -1685,17 +1634,14 @@ def _process_linearize_frame(task: Dict[str, Any]) -> Dict[str, Any]:
         "noise_source": str(npar.source),
     }
 
-    mask_saturation = bool(lcfg.get("mask_saturation", True))
-    sat_level = _guess_saturation_level_adu(hdr, lcfg) if mask_saturation else None
-    sat_margin = float(lcfg.get("saturation_margin_adu", 0.0) or 0.0)
-    satmask = None
-    if sat_level is not None and mask_saturation:
-        try:
-            thr = float(sat_level) - float(sat_margin)
-            if np.isfinite(thr):
-                satmask = np.isfinite(data) & (data >= thr)
-        except Exception:
-            satmask = None
+    # Only the upstream detector DQ plane can establish saturation at this
+    # point: sky subtraction has changed SCI and invalidated ADC thresholds.
+    if (str(hdr.get("SATQ") or "").strip().upper() != "RAW_EVAL"
+            or mask_in is None):
+        hdr["SATQ"] = (
+            "PROP" if mask is not None and np.any((mask & SATURATED) != 0) else "UNKNOWN",
+            "Saturation evidence from upstream, not sky-sub SCI",
+        )
 
     base_for_mask = _raw_stem_from_path(Path(p))
     mp = mask_dir / f"{base_for_mask}_mask.fits"
@@ -1733,7 +1679,7 @@ def _process_linearize_frame(task: Dict[str, Any]) -> Dict[str, Any]:
         if mask is not None:
             # NO_COVERAGE and INVALID_WAVELENGTH pixels are not valid data.
             # Their missing flux reduces effective output-bin coverage.
-            valid &= ((mask[yy] & (BADPIX | NO_COVERAGE | INVALID_WAVELENGTH)) == 0)
+            valid &= ((mask[yy] & (BADPIX | NO_COVERAGE | INVALID_WAVELENGTH | SATURATED)) == 0)
 
         v_row, cov = _apply_linearize_row_plan(
             data[yy],
@@ -1761,9 +1707,6 @@ def _process_linearize_frame(task: Dict[str, Any]) -> Dict[str, Any]:
                 OUTSIDE_SLIT, INVALID_WAVELENGTH, SKYMODEL_FAIL,
             ):
                 rect_mask[yy, _apply_linearize_row_plan_maskbit(mask[yy], row_plan, bit)] |= bit
-
-        if satmask is not None:
-            rect_mask[yy, _apply_linearize_row_plan_bool(satmask[yy], row_plan)] |= SATURATED
 
     # The overlap operator returns integrated electrons per output bin.
     # Density mode is obtained by dividing by the *output* bin width.
@@ -1943,7 +1886,14 @@ def _process_linearize_frame(task: Dict[str, Any]) -> Dict[str, Any]:
         "residual_model": residual_model,
         "noise_meta": noise_meta,
         "exptime_s": float(exptime_s),
-        "sat_level_adu": float(sat_level) if sat_level is not None else None,
+        # Preserve the historical report field, but only if RAW ADC
+        # saturation was evaluated upstream and the associated DQ survived.
+        "sat_level_adu": (
+            float(hdr["SATADU"])
+            if str(hdr.get("SATQ") or "").strip().upper() == "RAW_EVAL"
+            and hdr.get("SATADU") is not None
+            else None
+        ),
         "no_coverage_frac": float(np.mean((rect_mask & NO_COVERAGE) != 0)),
     }
 
