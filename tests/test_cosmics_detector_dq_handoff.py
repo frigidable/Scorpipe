@@ -226,3 +226,24 @@ def test_optional_legacy_cosmic_mask_disabled_keeps_required_cosmic_dq(tmp_path)
     dq = fits.getdata(out / "obj" / "clean" / "noauto_a_clean_mask.fits")
     assert dq[10, 10] & COSMIC
     assert not (dq[10, 10] & SATURATED)
+    # The mandatory DQ must be used to reconstruct the GUI automatic mask.
+    # Merely checking the existing sidecar would miss a swallowed manual error.
+    auto_snap = out / "obj" / "auto_masks_fits" / "noauto_a_auto_mask.fits"
+    assert auto_snap.exists(), "manual postprocessing must actually complete"
+    assert fits.getdata(auto_snap)[10, 10] == 1
+
+
+def test_qualified_manual_failure_is_not_silently_swallowed(tmp_path, monkeypatch):
+    import scorpio_pipe.stages.cosmics as stage
+
+    paths = [_raw_frame(tmp_path / f"err{i}.fits") for i in range(2)]
+
+    def fail_manual(*args, **kwargs):
+        raise RuntimeError("deliberate manual DQ rewrite failure")
+
+    monkeypatch.setattr(stage, "_apply_manual_masks", fail_manual)
+    with pytest.raises(RuntimeError, match="Qualified cosmics DQ manual processing failed"):
+        clean_cosmics(
+            _cfg(tmp_path, paths, "two_frame_diff"),
+            out_dir=tmp_path / "work" / "05_cosmics",
+        )
