@@ -1081,23 +1081,22 @@ def _apply_manual_masks(
             data = np.asarray(hdul[0].data, dtype=np.float32)
             hdr = hdul[0].header.copy()
 
-        auto_path = masks_fits / f"{base}_mask.fits"
-        if auto_path.exists():
-            with fits.open(auto_path, memmap=False) as h:
-                auto_m = _mask_u8_to_bool(h[0].data)
-        else:
-            # Optional legacy masks may be disabled. The mandatory typed DQ
-            # still contains all automatic COSMIC decisions; never erase them
-            # when the GUI synthesizes its optional binary masks.
-            auto_m = (detector_dq & maskbits.COSMIC) != 0
-
-        # Read authoritative DQ before GUI masks are rewritten; manual
-        # edits must never erase detector saturation or its provenance.
+        # Load authoritative DQ before even considering optional legacy masks.
+        # They may be disabled without losing the automatic COSMIC bit.
         detector_dq = read_clean_dq_sidecar(cf, hdr, data.shape)
         if detector_dq is None:
             detector_dq = np.zeros(data.shape, dtype=np.uint16)
             if str(hdr.get("SATQ") or "").strip().upper() == "RAW_EVAL":
                 hdr["SATQ"] = ("UNKNOWN", "Original detector DQ unavailable")
+
+        auto_path = masks_fits / f"{base}_mask.fits"
+        if auto_path.exists():
+            with fits.open(auto_path, memmap=False) as h:
+                auto_m = _mask_u8_to_bool(h[0].data)
+        else:
+            # Optional legacy masks may be disabled. The typed DQ stores
+            # automatic cosmic detections independently of the GUI bitmap.
+            auto_m = (detector_dq & maskbits.COSMIC) != 0
 
         # snapshot current auto mask for GUI baselining
         atomic_write_fits(
@@ -1720,6 +1719,17 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
                         e,
                         exc_info=True,
                     )
+                    # A qualified DQ_V1 product cannot be reported complete
+                    # after a partial or failed manual rewrite. Legacy runs
+                    # retain their original nonfatal behavior.
+                    if any(
+                        str(fits.getheader(cf).get("SATMSK") or "").strip().upper()
+                        == "DQ_V1"
+                        for cf in (kind_out / "clean").glob("*_clean.fits")
+                    ):
+                        raise RuntimeError(
+                            f"Qualified cosmics DQ manual processing failed for {kind}"
+                        ) from e
         else:
             outputs = {"note": f"method={method} not supported"}
             summary = CosmicsSummary(
