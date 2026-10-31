@@ -24,7 +24,8 @@ Coverage uses a DIFFERENT coefficient, L_ki/D_k, for valid input pixels. This se
 - Input lambda_map has center-based inferred pixel edges. Distortions/nonmonotonicities, NaN gaps, slit boundaries and wavelength-solution uncertainty require a separate physical validation gate.
 - Changing the science operator invalidates previously rectified FITS, later coadds and extracted spectra. They must be regenerated; the same file name and apparent WCS do NOT imply compatible data.
 - The Huber robust stack variance estimator, subpixel y-shift covariance, sky-model fitting uncertainty and local sky subtraction are outside this PR.
-- Issue #34 fail-closed MEF handling should be fixed separately before scientific production.
+- The strict input MEF contract from Issue #34 is integrated into main via PR #37 and preserved in this merge.
+- Detector saturation is evaluated only on qualified raw ADU samples under the PR #39 SATQ contract. Existing upstream SATURATED bits are propagated and excluded from the linearized valid SCI/VAR inputs. A missing mask or SATQ=UNKNOWN is not evidence of an unsaturated detector: cosmic-cleaned routes without proven original detector DQ require separate qualification.
 - Performance and memory should be checked on long BTA spectra (Nlambda about 90000) after correctness tests; no real exposures in this PR.
 
 ## Acceptance tests
