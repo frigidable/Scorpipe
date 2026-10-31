@@ -1086,7 +1086,10 @@ def _apply_manual_masks(
             with fits.open(auto_path, memmap=False) as h:
                 auto_m = _mask_u8_to_bool(h[0].data)
         else:
-            auto_m = np.zeros(data.shape, dtype=bool)
+            # Optional legacy masks may be disabled. The mandatory typed DQ
+            # still contains all automatic COSMIC decisions; never erase them
+            # when the GUI synthesizes its optional binary masks.
+            auto_m = (detector_dq & maskbits.COSMIC) != 0
 
         # Read authoritative DQ before GUI masks are rewritten; manual
         # edits must never erase detector saturation or its provenance.
