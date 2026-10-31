@@ -48,7 +48,7 @@ def test_p2_syn_linearize_white_noise_var_not_optimistic():
     bg = 100.0
     sigma = 5.0
 
-    sci = bg + rng.normal(0.0, sigma, size=(ny, nx)).astype(float)
+    white_noise = rng.normal(0.0, sigma, size=(ny, nx)).astype(float)
     var = np.full((ny, nx), sigma * sigma, dtype=float)
 
     x = np.arange(nx, dtype=float)[None, :]
@@ -56,6 +56,18 @@ def test_p2_syn_linearize_white_noise_var_not_optimistic():
 
     # Monotonic λ(x,y) with mild curvature and gentle tilt in y.
     lam = 5000.0 + 2.0 * x + 0.002 * (x - (nx - 1) / 2.0) ** 2 + 0.4 * (y - (ny - 1) / 2.0) / ny
+
+    # For constant physical spectral density, the expected INTEGRATED
+    # detector-pixel counts are proportional to the local input-pixel width.
+    # Flat 100 counts per pixel on a variable-width dispersion map would
+    # instead represent a strongly wavelength-dependent spectral density,
+    # so testing residuals against a flat baseline would be invalid.
+    pixel_widths = np.empty_like(lam)
+    pixel_widths[:, 1:-1] = 0.5 * (lam[:, 2:] - lam[:, :-2])
+    pixel_widths[:, 0] = lam[:, 1] - lam[:, 0]
+    pixel_widths[:, -1] = lam[:, -1] - lam[:, -2]
+    reference_width = float(np.median(np.diff(lam[ny // 2])))
+    sci = bg * pixel_widths / reference_width + white_noise
 
     # Common output edges: robust intersection over rows.
     lo = float(np.max(np.nanmin(lam, axis=1)))

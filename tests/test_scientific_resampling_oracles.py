@@ -1,8 +1,8 @@
 """Independent analytic oracles for Issue #32: integrated detector-pixel counts.
 
 This suite separates physical requirements from production characterization.
-Strict xfails document *known* discrepancies in the current linearize code:
-their xfail status is NOT evidence that the pipeline is scientifically correct.
+The tests compare production against independent physical calculations.
+Any regression in the count-conservation contract is a hard test failure.
 No observation files or external numerical references are needed.
 """
 
@@ -115,11 +115,6 @@ def test_oracle_monte_carlo_recovers_diagonal_and_adjacent_covariance() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="Issue #32: production operator treats integrated e-/pixel as density",
-)
 def test_production_integrated_counts_conserve_flux() -> None:
     from scorpio_pipe.stages.linearize import (
         _apply_linearize_row_plan, _build_linearize_row_plan,
@@ -128,18 +123,11 @@ def test_production_integrated_counts_conserve_flux() -> None:
     centers, _edges_in, edges_out, counts, _var = _uniform_case()
     plan = _build_linearize_row_plan(centers, edges_out)
     assert plan is not None
-    density, cov = _apply_linearize_row_plan(counts, plan)
-    # Current default integrated-bin path scales the returned density by dw.
-    actual_integrated = density * np.diff(edges_out)
+    actual_integrated, cov = _apply_linearize_row_plan(counts, plan)
     np.testing.assert_allclose(actual_integrated, 10.0, rtol=0, atol=1e-12)
     np.testing.assert_allclose(cov, 1.0, rtol=0, atol=1e-12)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="Issue #32: production VAR uses density normalization for integrated e-2/pixel",
-)
 def test_production_integrated_counts_propagate_variance() -> None:
     from scorpio_pipe.stages.linearize import (
         _apply_linearize_row_plan_var, _build_linearize_row_plan,
@@ -148,6 +136,5 @@ def test_production_integrated_counts_propagate_variance() -> None:
     centers, _edges_in, edges_out, _counts, var = _uniform_case()
     plan = _build_linearize_row_plan(centers, edges_out)
     assert plan is not None
-    density_variance = _apply_linearize_row_plan_var(var, plan)
-    actual_integrated_var = density_variance * np.diff(edges_out) ** 2
+    actual_integrated_var = _apply_linearize_row_plan_var(var, plan)
     np.testing.assert_allclose(actual_integrated_var, 4.0, rtol=0, atol=1e-12)

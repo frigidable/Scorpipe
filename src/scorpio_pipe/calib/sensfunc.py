@@ -97,6 +97,11 @@ def build_sensfunc(cfg: dict[str, Any], *, standard_spec_path: str | Path, stand
     var = spec['var']
     mask = np.asarray(spec['mask'])
     hdr0 = spec['header']
+    if str(hdr0.get('REBNORM') or '').strip() == 'COUNT_V1':
+        if str(hdr0.get('WAVEREF') or '').strip().lower() not in {'air', 'vacuum'}:
+            raise ValueError('COUNT_V1 standard requires explicitly declared WAVEREF air/vacuum')
+        if str(hdr0.get('WAVEUNIT') or hdr0.get('CUNIT1') or '').strip() == '':
+            raise ValueError('COUNT_V1 standard requires explicit wavelength-axis units')
     std_name = None
     raw_std_path = None
     if isinstance(standard_qc, dict):
@@ -200,6 +205,16 @@ def build_sensfunc(cfg: dict[str, Any], *, standard_spec_path: str | Path, stand
         'flux_unit': 'erg/s/cm2/Angstrom',
         'waveref': str(spec.get('waveref') or 'air'),
         'reference_context_id': str(ctx.get('context_id') or ''),
+        'input_bunit': str(spec.get('bunit') or ''),
+        'input_rebnorm': str(hdr0.get('REBNORM') or ''),
+        'input_waveunit': str(hdr0.get('WAVEUNIT') or hdr0.get('CUNIT1') or '').strip(),
+        'input_wave_step': (
+            float(np.median(np.diff(wave)))
+            if wave.size >= 2 and np.isfinite(np.diff(wave)).all()
+            and (np.diff(wave) > 0).all()
+            and np.allclose(np.diff(wave), np.median(np.diff(wave)), rtol=1e-6, atol=1e-9)
+            else None
+        ),
         'fit_meta': fit_meta,
         'airmass_provenance': str(airmass_prov),
         'extinction_applied': bool(extinction_applied),
@@ -218,6 +233,26 @@ def write_sensfunc_products(out_dir: str | Path, payload: dict[str, Any]) -> dic
     ph = fits.Header()
     ph['WAVEREF'] = str(payload.get('waveref') or 'air')
     ph['WAVEUNIT'] = 'Angstrom'
+    # Response is only applicable to observations in the same detector
+    # count/rate and bin/density units as the standard star.
+    if str(payload.get('input_bunit') or '').strip():
+        ph['INBUNIT'] = str(payload['input_bunit']).strip()
+    if str(payload.get('input_rebnorm') or '').strip():
+        ph['INREBNM'] = str(payload['input_rebnorm']).strip()
+    if str(payload.get('input_waveunit') or '').strip():
+        ph['INWUNIT'] = str(payload['input_waveunit']).strip()
+    if payload.get('input_wave_step') is not None:
+        ph['INSTEP'] = float(payload['input_wave_step'])
+    if str(payload.get('input_rebnorm') or '').strip() == 'COUNT_V1':
+        # Count/bin sensitivity scales with the spectral bin width. Do not
+        # publish a modern response without an explicit, uniform grid.
+        if 'INWUNIT' not in ph or 'INSTEP' not in ph:
+            raise ValueError(
+                'COUNT_V1 sensitivity requires explicit wavelength units '
+                'and strictly increasing, uniform spectral bins'
+            )
+        if str(payload.get('waveref') or '').strip().lower() not in {'air', 'vacuum'}:
+            raise ValueError('COUNT_V1 sensitivity requires declared air/vacuum medium')
     ph['REFCTID'] = str(payload.get('reference_context_id') or '')
     ph['RESPUNIT'] = 'count_per_flux'
     table_path = write_bintable_fits(
