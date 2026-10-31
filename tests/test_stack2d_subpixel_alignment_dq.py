@@ -125,7 +125,8 @@ def test_full_stack2d_with_nonzero_subpix_alignment_no_longer_crashes(tmp_path,m
     cfg = {"work_dir":str(work),"stack2d":{
         "enabled":True,"method":"invvar","chunk_rows":3,
         "y_align":{"enabled":True,"max_shift_pix":3},
-        "eta":{"enabled":False},"save_png":False,
+        "eta":{"enabled":False},"var_floor_enabled":False,
+        "save_png":False,
     }}
     res=st.run_stack2d(cfg, inputs=[a,b], out_dir=out)
     with fits.open(res["stack2d_fits"],memmap=False) as hdul:
