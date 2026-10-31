@@ -155,3 +155,59 @@ def test_unqualified_processed_input_never_claims_raw_evaluation(tmp_path):
     assert not np.any(
         fits.getdata(out / "obj" / "clean" / "q0_clean_mask.fits") & SATURATED
     )
+
+
+def test_cosmics_flatfield_sky_saturation_handoff(tmp_path, monkeypatch):
+    from scorpio_pipe.stages import flatfield
+    from scorpio_pipe.stages.flatfield import apply_flat
+    from scorpio_pipe.io.mef import read_sci_var_mask
+
+    paths = [_raw_frame(tmp_path / f"f{i}.fits") for i in range(2)]
+    out = tmp_path / "work" / "05_cosmics"
+    cfg = _cfg(tmp_path, paths, "two_frame_diff")
+    clean_cosmics(cfg, out_dir=out)
+    clean = out / "obj" / "clean" / "f0_clean.fits"
+
+    flat = tmp_path / "superflat.fits"
+    fits.PrimaryHDU(
+        data=np.ones((24, 24), dtype=np.float32),
+        header=fits.Header({"BUNIT": "ADU", "GAIN": 2.0, "RDNOISE": 3.0}),
+    ).writeto(flat)
+    flat_out = tmp_path / "f0_flat.fits"
+    # Compatibility belongs to calibration association and is orthogonal to
+    # this detector DQ test; run the real flatfield science transformation.
+    monkeypatch.setattr(
+        flatfield, "ensure_compatible_calib", lambda *a, **k: None,
+    )
+    apply_flat(clean, flat, flat_out, cfg=cfg, do_bias_subtract=False)
+    sci, var, dq, hdr = read_sci_var_mask(flat_out)
+    assert hdr["BUNIT"] == "e-"
+    assert hdr["SATQ"] == "RAW_EVAL"
+    assert hdr["SATMSK"] == "DQ_V1"
+    assert dq[8, 8] & SATURATED
+    assert var.shape == sci.shape
+
+    sky_sci, sky_var, sky_mask, sky_hdr = _read_sky_input_planes(flat_out)
+    _, _, next_dq, next_hdr = _prepare_sky_input_planes(
+        sky_sci, sky_var, sky_mask, None, sky_hdr,
+        cfg=cfg, sky_cfg={},
+    )
+    assert next_hdr["SATQ"] == "RAW_EVAL"
+    assert next_dq[8, 8] & SATURATED
+
+
+def test_cosmics_detector_mask_is_cropped_with_science(tmp_path):
+    a = _raw_frame(tmp_path / "ca.fits", shape=(24, 24))
+    b = _raw_frame(tmp_path / "cb.fits", shape=(20, 22))
+    out = tmp_path / "crop"
+    _two_frame_diff_clean(
+        [a, b], out_dir=out, superbias=None, bias_subtract=False,
+        k=5.0, save_png=False, save_mask_fits=True,
+        cfg={"detector": {"saturation_adu": 500.0}},
+    )
+    for name in ("ca", "cb"):
+        clean = out / "clean" / f"{name}_clean.fits"
+        dq = fits.getdata(out / "clean" / f"{name}_clean_mask.fits")
+        assert fits.getdata(clean).shape == (20, 22)
+        assert dq.shape == (20, 22)
+        assert dq[8, 8] & SATURATED
