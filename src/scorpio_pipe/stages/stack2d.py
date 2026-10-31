@@ -391,20 +391,27 @@ def _take_block_yshift_subpix(
     i0 = np.floor(y_in).astype(int)
     i1 = i0 + 1
     frac = (y_in - i0).astype(float)
-    valid = (i0 >= 0) & (i1 < ny)
+    # A purely integral shifted sample needs only i0; do not lose the
+    # last row by demanding an unused i1 neighbor.
+    use_second = frac > 1e-12
+    valid = (i0 >= 0) & (i0 < ny) & (~use_second | (i1 < ny))
     i0c = np.clip(i0, 0, ny - 1)
     i1c = np.clip(i1, 0, ny - 1)
 
     out = np.full((y1 - y0, nx), fill, dtype=np.float32)
     filled = np.ones((y1 - y0, nx), dtype=bool)
-    if np.any(valid):
-        a0 = arr[i0c, :]
-        a1 = arr[i1c, :]
-        w1 = frac[:, None]
+    rows = np.flatnonzero(valid)
+    if rows.size:
+        a0 = arr[i0c[rows], :]
+        a1 = arr[i1c[rows], :]
+        w1 = frac[rows, None]
         w0 = 1.0 - w1
-        vv = valid[:, None]
-        out[vv] = w0[vv] * a0[vv] + w1[vv] * a1[vv]
-        filled[vv] = False
+        # Row indexing preserves the wavelength dimension. A Boolean
+        # (nrows,1) mask cannot index an (nrows,nlambda) array.
+        out[rows, :] = np.where(
+            use_second[rows, None], w0 * a0 + w1 * a1, a0
+        )
+        filled[rows, :] = False
     return out, filled
 
 
@@ -428,20 +435,23 @@ def _take_block_yshift_subpix_var(
     i0 = np.floor(y_in).astype(int)
     i1 = i0 + 1
     frac = (y_in - i0).astype(float)
-    valid = (i0 >= 0) & (i1 < ny)
+    use_second = frac > 1e-12
+    valid = (i0 >= 0) & (i0 < ny) & (~use_second | (i1 < ny))
     i0c = np.clip(i0, 0, ny - 1)
     i1c = np.clip(i1, 0, ny - 1)
 
     out = np.full((y1 - y0, nx), fill, dtype=np.float32)
     filled = np.ones((y1 - y0, nx), dtype=bool)
-    if np.any(valid):
-        v0 = var[i0c, :]
-        v1 = var[i1c, :]
-        w1 = frac[:, None]
+    rows = np.flatnonzero(valid)
+    if rows.size:
+        v0 = var[i0c[rows], :]
+        v1 = var[i1c[rows], :]
+        w1 = frac[rows, None]
         w0 = 1.0 - w1
-        vv = valid[:, None]
-        out[vv] = (w0[vv] ** 2) * v0[vv] + (w1[vv] ** 2) * v1[vv]
-        filled[vv] = False
+        out[rows, :] = np.where(
+            use_second[rows, None], (w0 ** 2) * v0 + (w1 ** 2) * v1, v0
+        )
+        filled[rows, :] = False
     return out, filled
 
 
@@ -460,16 +470,20 @@ def _take_block_yshift_subpix_mask(
     y_in = y_out - s
     i0 = np.floor(y_in).astype(int)
     i1 = i0 + 1
-    valid = (i0 >= 0) & (i1 < ny)
+    use_second = frac > 1e-12
+    valid = (i0 >= 0) & (i0 < ny) & (~use_second | (i1 < ny))
     i0c = np.clip(i0, 0, ny - 1)
     i1c = np.clip(i1, 0, ny - 1)
 
     out = np.full((y1 - y0, nx), MASK_NO_COVERAGE, dtype=np.uint16)
-    if np.any(valid):
-        m0 = mask[i0c, :]
-        m1 = mask[i1c, :]
-        vv = valid[:, None]
-        out[vv] = m0[vv] | m1[vv]
+    rows = np.flatnonzero(valid)
+    if rows.size:
+        out[rows, :] = mask[i0c[rows], :]
+        both = rows[use_second[rows]]
+        if both.size:
+            # Mask every *actually contributing* input pixel. For integral
+            # shifts the unused second row must not contaminate the DQ.
+            out[both, :] |= mask[i1c[both], :]
     return out
 
 
