@@ -211,3 +211,18 @@ def test_cosmics_detector_mask_is_cropped_with_science(tmp_path):
         assert fits.getdata(clean).shape == (20, 22)
         assert dq.shape == (20, 22)
         assert dq[8, 8] & SATURATED
+
+
+def test_optional_legacy_cosmic_mask_disabled_keeps_required_cosmic_dq(tmp_path):
+    a = _raw_frame(tmp_path / "noauto_a.fits", saturated=False)
+    b = _raw_frame(tmp_path / "noauto_b.fits", saturated=False)
+    with fits.open(a, mode="update") as hdul:
+        hdul[0].data[10, 10] = 300.0  # isolated transient, below ADU saturation
+    cfg = _cfg(tmp_path, [a, b], "two_frame_diff")
+    cfg["cosmics"]["save_mask_fits"] = False
+    cfg["cosmics"]["k"] = 3.0
+    out = tmp_path / "work" / "05_cosmics"
+    clean_cosmics(cfg, out_dir=out)
+    dq = fits.getdata(out / "obj" / "clean" / "noauto_a_clean_mask.fits")
+    assert dq[10, 10] & COSMIC
+    assert not (dq[10, 10] & SATURATED)
