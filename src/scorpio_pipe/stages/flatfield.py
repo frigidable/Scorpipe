@@ -51,6 +51,15 @@ def _read_sci_var_mask(path: Path) -> tuple[np.ndarray, np.ndarray | None, np.nd
             sci = np.asarray(data0)
 
     sci = np.asarray(sci, dtype=np.float32)
+    if path.stem.endswith("_clean"):
+        from scorpio_pipe.cosmics_dq import read_clean_dq_sidecar
+        sidecar = read_clean_dq_sidecar(path, hdr, sci.shape)
+        if sidecar is not None:
+            # Preserve the detector DQ even when the cleaner writes primary-only
+            # SCI for the legacy GUI and stores MASK as a typed companion.
+            mask = sidecar if mask is None else (
+                np.asarray(mask, dtype=np.uint16) | sidecar
+            )
     if var is not None:
         var = np.asarray(var, dtype=np.float32)
     if mask is not None:

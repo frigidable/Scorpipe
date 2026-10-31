@@ -194,12 +194,23 @@ def _resolve_clean_or_raw(raw_path: Path, *, clean_dir: Path | None) -> Path:
 
 
 def _try_load_mask_for_clean(
-    path: Path, *, masks_fits_dir: Path | None = None
+    path: Path, *, masks_fits_dir: Path | None = None,
+    clean_header: fits.Header | None = None,
 ) -> Optional[np.ndarray]:
     """Try to load per-frame mask written by Cosmics stage.
 
     Cosmics stage stores masks alongside cleaned frames as ``*_mask.fits``.
     """
+    # Strict DQ_V1 is authoritative; legacy companions retain old fallback.
+    if path.stem.endswith("_clean") and clean_header is not None:
+        from scorpio_pipe.cosmics_dq import read_clean_dq_sidecar
+        # The shape is validated later in _prepare_sky_input_planes; here we
+        # read the primary image shape so a bad DQ cannot be silently ignored.
+        with fits.open(path, memmap=False) as hdul:
+            shape = np.asarray(hdul[0].data).shape
+        typed = read_clean_dq_sidecar(path, clean_header, shape)
+        if typed is not None:
+            return typed
     # 1) Preferred: next to the clean frame: <base>_clean_mask.fits
     cand = path.with_name(path.stem + "_mask.fits")
     # 2) Legacy: masks_fits/<base>_mask.fits
@@ -382,7 +393,14 @@ def _prepare_sky_input_planes(
     # Only unprocessed ADU data can be classified here. Processed inputs
     # retain previous DQ bits; saturation is never inferred from sky residuals.
     mask, hdr = carry_detector_saturation(
-        sci, mask, hdr, cfg, upstream_mask_present=input_mask is not None
+        sci, mask, hdr, cfg,
+        upstream_mask_present=(
+            input_mask is not None
+            or (
+                cosmic_mask is not None
+                and str(hdr.get("SATMSK") or "").strip().upper() == "DQ_V1"
+            )
+        )
     )
 
     if input_var is not None:
@@ -1768,7 +1786,9 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
             try:
                 sci, input_var, input_mask, hdr = _read_sky_input_planes(p)
                 _fail_if_rectified(hdr, path=p)
-                cosmic_mask = _try_load_mask_for_clean(p, masks_fits_dir=obj_mask_dir)
+                cosmic_mask = _try_load_mask_for_clean(
+                    p, masks_fits_dir=obj_mask_dir, clean_header=hdr,
+                )
                 sci, var, mask, hdr = _prepare_sky_input_planes(
                     sci, input_var, input_mask, cosmic_mask, hdr,
                     cfg=cfg, sky_cfg=sky_cfg,

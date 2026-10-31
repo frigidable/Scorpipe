@@ -13,6 +13,8 @@ from scorpio_pipe.io.atomic_fits import atomic_write_fits
 from scorpio_pipe.fits_utils import read_image_smart
 from scorpio_pipe.workspace_paths import stage_dir
 from scorpio_pipe import maskbits
+from scorpio_pipe.detector_saturation import carry_detector_saturation
+from scorpio_pipe.cosmics_dq import read_clean_dq_sidecar
 from scorpio_pipe.adapters.parallel_map import parallel_map
 
 log = logging.getLogger(__name__)
@@ -45,30 +47,38 @@ def _default_out_root(work_dir: Path) -> Path:
     return canonical
 
 
-def _write_clean_mask_bitmask(clean_dir: Path, base: str, mask_bool: np.ndarray) -> Path:
-    """Write a pipeline-compatible uint16 COSMIC bitmask next to a clean frame.
+def _write_clean_mask_bitmask(
+    clean_dir: Path, base: str, mask_bool: np.ndarray, *,
+    detector_dq: np.ndarray | None = None,
+    provenance_header: fits.Header | None = None,
+) -> Path:
+    """Persist the complete science DQ, not only cosmic-replacement locations.
 
-    Downstream stages expect ``<base>_clean_mask.fits`` next to
-    ``<base>_clean.fits``.
+    The adjacent primary-HDU clean image stays compatible with legacy GUIs.
+    Its mandatory, typed sidecar carries COSMIC plus original detector bits.
     """
-
     clean_dir.mkdir(parents=True, exist_ok=True)
-    m = (np.asarray(mask_bool, dtype=bool).astype(np.uint16) * maskbits.COSMIC).astype(
-        np.uint16
-    )
+    mask_bool = np.asarray(mask_bool, dtype=bool)
+    m = np.where(mask_bool, maskbits.COSMIC, 0).astype(np.uint16)
+    if detector_dq is not None:
+        dq = np.asarray(detector_dq)
+        if dq.shape != m.shape or not np.issubdtype(dq.dtype, np.integer):
+            raise ValueError("Cosmics detector DQ must be an integer image matching SCI")
+        if np.any(dq < 0) or np.any(dq > np.iinfo(np.uint16).max):
+            raise ValueError("Cosmics detector DQ outside uint16 range")
+        m |= np.asarray(dq, dtype=np.uint16)
     h = fits.Header()
-    # Stamp schema cards so external tools can interpret the mask.
     for k, v in maskbits.header_cards(prefix="SCORP").items():
-        try:
-            h[k] = (str(v), "Mask schema")
-        except Exception:
-            pass
+        h[k] = (str(v), "Mask schema")
     h["BUNIT"] = ("bitmask", "MASK unit (uint16 bitfield)")
+    h["SATMSK"] = ("DQ_V1", "Typed cosmics DQ sidecar contract")
+    if provenance_header is not None:
+        for key in ("SATQ", "SATADU", "SATMARG", "SATSRC"):
+            if key in provenance_header:
+                h[key] = provenance_header[key]
     out = clean_dir / f"{base}_clean_mask.fits"
     atomic_write_fits(out, m, header=h, overwrite=True)
     return out
-
-
 
 
 def _write_cosmics_frame_output(task: dict[str, Any]) -> dict[str, str]:
@@ -87,6 +97,7 @@ def _write_cosmics_frame_output(task: dict[str, Any]) -> dict[str, str]:
     out_f = out_dir / "clean" / f"{name}_clean.fits"
     h = hdr.copy()
     h["COSMCLEA"] = (True, "Cosmics cleaned")
+    h["SATMSK"] = ("DQ_V1", "Typed cosmics DQ sidecar contract")
     h["COSM_K"] = (float(cosm_k), "Threshold control")
     h["COSM_MD"] = (str(cosm_md), "Cosmics method")
     _stamp_roi_header(h, roi)
@@ -100,10 +111,11 @@ def _write_cosmics_frame_output(task: dict[str, Any]) -> dict[str, str]:
         mf = out_dir / "masks_fits" / f"{name}_mask.fits"
         atomic_write_fits(mf, mask.astype(np.uint8), overwrite=True)
 
-    try:
-        _write_clean_mask_bitmask(out_dir / "clean", name, mask)
-    except Exception as e:
-        log.debug("Failed to write clean mask for %s: %s", name, e)
+    # DQ persistence is required for qualified SATQ. Never silently drop it.
+    _write_clean_mask_bitmask(
+        out_dir / "clean", name, mask,
+        detector_dq=task.get("detector_dq"), provenance_header=h,
+    )
 
     return {"name": name, "clean_path": str(out_f)}
 
@@ -458,6 +470,7 @@ def _two_frame_diff_clean(
     bias_subtract: bool,
     save_png: bool,
     save_mask_fits: bool,
+    cfg: dict | None = None,
     dilate: int = 1,
     local_r: int = 2,
     k2_scale: float = 0.8,
@@ -482,10 +495,13 @@ def _two_frame_diff_clean(
 
     datas: list[np.ndarray] = []
     headers: list[fits.Header] = []
+    detector_dqs: list[np.ndarray] = []
     names: list[str] = []
 
     for p in paths:
         data, hdr, _info = read_image_smart(p, memmap="auto", dtype=np.float32)
+        detector_dq, hdr = carry_detector_saturation(data, None, hdr, cfg or {})
+        detector_dqs.append(detector_dq)
         datas.append(data)
         headers.append(hdr)
         names.append(Path(p).stem)
@@ -501,6 +517,7 @@ def _two_frame_diff_clean(
             nx,
         )
         datas = [d[:ny, :nx] for d in datas]
+        detector_dqs = [m[:ny, :nx] for m in detector_dqs]
         for hdr, s in zip(headers, shapes):
             if s != (ny, nx):
                 hdr["CROPY"] = (ny, "Cropped to common height")
@@ -595,6 +612,7 @@ def _two_frame_diff_clean(
             "header": headers[0],
             "image": cleaned0,
             "mask": m0,
+            "detector_dq": detector_dqs[0],
             "save_png": save_png,
             "save_mask_fits": save_mask_fits,
             "roi": (None if roi is None else roi.to_dict()),
@@ -608,6 +626,7 @@ def _two_frame_diff_clean(
             "header": headers[1],
             "image": cleaned1,
             "mask": m1,
+            "detector_dq": detector_dqs[1],
             "save_png": save_png,
             "save_mask_fits": save_mask_fits,
             "roi": (None if roi is None else roi.to_dict()),
@@ -671,6 +690,7 @@ def _single_frame_laplacian_clean(
     bias_subtract: bool,
     save_png: bool,
     save_mask_fits: bool,
+    cfg: dict | None = None,
     dilate: int = 1,
     local_r: int = 2,
     k_scale: float = 0.8,
@@ -696,6 +716,8 @@ def _single_frame_laplacian_clean(
         (out_dir / "masks_fits").mkdir(parents=True, exist_ok=True)
 
     img, hdr, _info = read_image_smart(path, memmap="auto", dtype=np.float32)
+    # Evaluate detector ADC saturation before any bias correction/inpainting.
+    detector_dq, hdr = carry_detector_saturation(img, None, hdr, cfg or {})
 
     if bias_subtract and superbias is not None and superbias.shape == img.shape:
         img = img - superbias
@@ -757,6 +779,7 @@ def _single_frame_laplacian_clean(
     out_f = out_dir / "clean" / f"{name}_clean.fits"
     h = hdr.copy()
     h["COSMCLEA"] = (True, "Cosmics cleaned")
+    h["SATMSK"] = ("DQ_V1", "Typed cosmics DQ sidecar contract")
     h["COSM_MD"] = ("laplacian", "Cosmics method")
     h["COSM_K"] = (float(k), "Base threshold control (sigmas)")
     h["COSM_KS"] = (float(k_scale), "Laplacian k scale")
@@ -784,10 +807,10 @@ def _single_frame_laplacian_clean(
             overwrite=True,
         )
 
-    try:
-        _write_clean_mask_bitmask(out_dir / "clean", name, m)
-    except Exception as e:
-        log.debug("Failed to write clean mask for %s: %s", name, e)
+    _write_clean_mask_bitmask(
+        out_dir / "clean", name, m,
+        detector_dq=detector_dq, provenance_header=h,
+    )
 
     replaced_pixels = int(m.sum())
     replaced_fraction = float(replaced_pixels / float(m.size)) if m.size else 0.0
@@ -838,6 +861,7 @@ def _single_frame_lacosmic_clean(
     bias_subtract: bool,
     save_png: bool,
     save_mask_fits: bool,
+    cfg: dict | None = None,
     niter: int = 4,
     sigclip: float = 4.5,
     sigfrac: float = 0.3,
@@ -860,6 +884,8 @@ def _single_frame_lacosmic_clean(
         (out_dir / "masks_fits").mkdir(parents=True, exist_ok=True)
 
     img, hdr, _info = read_image_smart(path, memmap="auto", dtype=np.float32)
+    # Evaluate detector ADC saturation before any bias correction/inpainting.
+    detector_dq, hdr = carry_detector_saturation(img, None, hdr, cfg or {})
     if bias_subtract and superbias is not None and superbias.shape == img.shape:
         img = img - superbias
         hdr["BIASSUB"] = (True, "Superbias subtracted")
@@ -911,6 +937,7 @@ def _single_frame_lacosmic_clean(
     out_f = out_dir / "clean" / f"{name}_clean.fits"
     h = hdr.copy()
     h["COSMCLEA"] = (True, "Cosmics cleaned")
+    h["SATMSK"] = ("DQ_V1", "Typed cosmics DQ sidecar contract")
     h["COSM_MD"] = ("la_cosmic", "Cosmics method")
     h["COSM_ENG"] = (str(engine), "L.A.Cosmic engine")
     h["COSM_IT"] = (int(max(1, niter)), "L.A.Cosmic iterations")
@@ -934,10 +961,10 @@ def _single_frame_lacosmic_clean(
             overwrite=True,
         )
 
-    try:
-        _write_clean_mask_bitmask(out_dir / "clean", name, m)
-    except Exception as e:
-        log.debug("Failed to write clean mask for %s: %s", name, e)
+    _write_clean_mask_bitmask(
+        out_dir / "clean", name, m,
+        detector_dq=detector_dq, provenance_header=h,
+    )
 
     sum_f = out_dir / "sum_excl_cosmics.fits"
     cov_f = out_dir / "coverage.fits"
@@ -1061,6 +1088,14 @@ def _apply_manual_masks(
         else:
             auto_m = np.zeros(data.shape, dtype=bool)
 
+        # Read authoritative DQ before GUI masks are rewritten; manual
+        # edits must never erase detector saturation or its provenance.
+        detector_dq = read_clean_dq_sidecar(cf, hdr, data.shape)
+        if detector_dq is None:
+            detector_dq = np.zeros(data.shape, dtype=np.uint16)
+            if str(hdr.get("SATQ") or "").strip().upper() == "RAW_EVAL":
+                hdr["SATQ"] = ("UNKNOWN", "Original detector DQ unavailable")
+
         # snapshot current auto mask for GUI baselining
         atomic_write_fits(
             auto_masks / f"{base}_auto_mask.fits",
@@ -1089,15 +1124,19 @@ def _apply_manual_masks(
             hdr["MANCRN"] = (int(man_m.sum()), "Manual masked pixels")
             hdr["HISTORY"] = "scorpio_pipe cosmics: manual inpainting applied"
 
+        hdr["SATMSK"] = ("DQ_V1", "Typed cosmics DQ sidecar contract")
         atomic_write_fits(cf, data.astype(np.float32), header=hdr, overwrite=True)
         atomic_write_fits(
             masks_fits / f"{base}_mask.fits", final_m.astype(np.uint8), overwrite=True
         )
-        # Keep pipeline mask next to the clean frame (uint16 COSMIC bit).
-        try:
-            _write_clean_mask_bitmask(clean_dir, base, final_m)
-        except Exception as e:
-            log.debug("Failed to write clean mask for %s: %s", base, e)
+        # Replace only cosmic bits, ORing the preexisting non-cosmic DQ.
+        # Missing/corrupt qualified sidecars fail above instead of being
+        # silently replaced with an all-zero detector mask.
+        _write_clean_mask_bitmask(
+            clean_dir, base, final_m,
+            detector_dq=(detector_dq & np.uint16(~int(maskbits.COSMIC) & 0xFFFF)),
+            provenance_header=hdr,
+        )
         if save_png:
             _save_png(
                 masks_png / f"{base}_mask.png",
@@ -1147,6 +1186,7 @@ def _stack_mad_clean(
     bias_subtract: bool,
     save_png: bool,
     save_mask_fits: bool,
+    cfg: dict | None = None,
     roi: _RoiSpec | None = None,
     parallel_n_jobs: int | None = None,
     parallel_backend: str = "thread",
@@ -1160,10 +1200,13 @@ def _stack_mad_clean(
 
     datas: list[np.ndarray] = []
     headers: list[fits.Header] = []
+    detector_dqs: list[np.ndarray] = []
     names: list[str] = []
 
     for p in paths:
         data, hdr, _info = read_image_smart(p, memmap="auto", dtype=np.float32)
+        detector_dq, hdr = carry_detector_saturation(data, None, hdr, cfg or {})
+        detector_dqs.append(detector_dq)
         datas.append(data)
         headers.append(hdr)
         names.append(p.stem)
@@ -1179,6 +1222,7 @@ def _stack_mad_clean(
             nx,
         )
         datas = [d[:ny, :nx] for d in datas]
+        detector_dqs = [m[:ny, :nx] for m in detector_dqs]
         for hdr, s in zip(headers, shapes):
             if s != (ny, nx):
                 hdr["CROPY"] = (ny, "Cropped to common height")
@@ -1255,6 +1299,7 @@ def _stack_mad_clean(
             "header": hdr,
             "image": cleaned[i],
             "mask": mask[i],
+            "detector_dq": detector_dqs[i],
             "save_png": save_png,
             "save_mask_fits": save_mask_fits,
             "roi": (None if roi is None else roi.to_dict()),
@@ -1527,6 +1572,7 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
                     bias_subtract=bias_subtract,
                     save_png=save_png,
                     save_mask_fits=save_mask_fits,
+                    cfg=cfg,
                     roi=roi_cfg,
                     parallel_n_jobs=parallel_n_jobs,
                     parallel_backend=parallel_backend,
@@ -1557,6 +1603,7 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
                     bias_subtract=bias_subtract,
                     save_png=save_png,
                     save_mask_fits=save_mask_fits,
+                    cfg=cfg,
                     roi=roi_cfg,
                     parallel_n_jobs=parallel_n_jobs,
                     parallel_backend=parallel_backend,
@@ -1570,6 +1617,7 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
                     bias_subtract=bias_subtract,
                     save_png=save_png,
                     save_mask_fits=save_mask_fits,
+                    cfg=cfg,
                     niter=la_niter,
                     sigclip=la_sigclip,
                     sigfrac=la_sigfrac,
@@ -1597,6 +1645,7 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
                     bias_subtract=bias_subtract,
                     save_png=save_png,
                     save_mask_fits=save_mask_fits,
+                    cfg=cfg,
                     roi=roi_cfg,
                 )
             else:
