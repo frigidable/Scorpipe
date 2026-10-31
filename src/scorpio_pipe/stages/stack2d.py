@@ -470,6 +470,7 @@ def _take_block_yshift_subpix_mask(
     y_in = y_out - s
     i0 = np.floor(y_in).astype(int)
     i1 = i0 + 1
+    frac = (y_in - i0).astype(float)
     use_second = frac > 1e-12
     valid = (i0 >= 0) & (i0 < ny) & (~use_second | (i1 < ny))
     i0c = np.clip(i0, 0, ny - 1)
