@@ -91,6 +91,9 @@ class StackOperatorCapture:
                 raise ValueError("Frozen stack weights do not normalize to one")
         for arr in self.arrays:
             arr.flush()
+        # Release the final loop binding as well as the list; on Windows an
+        # open memmap can prevent the atomic directory rename.
+        del arr
         self.arrays.clear()
         manifest = {
             "schema": SCHEMA,
