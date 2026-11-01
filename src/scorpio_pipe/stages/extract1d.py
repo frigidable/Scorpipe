@@ -704,6 +704,7 @@ def _boxcar_extract(
     min_good_frac: float,
     sky_resid: Optional[np.ndarray],
     apply_local_sky: bool,
+    operator_capture: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Simple aperture sum (TRACE or FIXED)."""
     ny, nlam = sci.shape
@@ -761,6 +762,8 @@ def _boxcar_extract(
         if n_good < int(math.ceil(min_good_frac * n_tot)):
             out_mask[j] |= np.uint16(NO_COVERAGE)
 
+        if operator_capture is not None:
+            operator_capture[y0:y1, j] = good.astype(np.float64)
         f = float(np.sum(sl[good]))
         if apply_local_sky and sky_resid is not None and np.isfinite(sky_resid[j]):
             f = f - float(sky_resid[j]) * float(n_good)
@@ -794,6 +797,7 @@ def _optimal_extract(
     clip_negative_profile: bool = True,
     min_profile_sum: float = 1e-6,
     backend: str = "auto",
+    operator_capture: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
     """Horne-like optimal extraction (weights by spatial profile + honest VAR).
 
@@ -917,6 +921,17 @@ def _optimal_extract(
                 finite = ok_flux & np.isfinite(sky_arr)
                 flux[finite] = flux[finite] - sky_arr[finite] * (corr_num[finite] / denom[finite])
         meta["backend_used"] = "numpy"
+
+    if operator_capture is not None:
+        # Effective frozen coefficients of the exact Horne-style profile used
+        # by either NumPy or Numba. Scatter only genuinely inside aperture rows.
+        safe_v = np.where(good, vv_all, 1.0)
+        denominator = np.sum(np.where(good, P * P / safe_v, 0.0), axis=0)
+        numerators = np.where(good, P / safe_v, 0.0)
+        coeff = np.divide(numerators, denominator[None, :],
+                          out=np.zeros_like(numerators), where=denominator[None, :] > 0)
+        col_ids = np.broadcast_to(cols, rows.shape)
+        operator_capture[rows_clip[inside], col_ids[inside]] = coeff[inside]
 
     if have_mask:
         # Keep the provenance of every geometrically sampled aperture pixel,
@@ -1498,6 +1513,18 @@ def _run_extract1d_impl(
 
     min_good_frac = float(ecfg.get("min_good_frac", 0.6))
 
+    # Frozen extraction weights are diagnostic sidecars, disabled by default.
+    capture_enabled = bool(ecfg.get("capture_frozen_operators", False))
+    E_trace = E_fixed = None
+    if capture_enabled:
+        if apply_local_sky:
+            raise ValueError("Frozen extraction capture cannot encode nonlinear local sky correction")
+        capture_limit = int(ecfg.get("capture_max_bytes", 536_870_912))
+        if 2 * ny * nlam * np.dtype("float64").itemsize > capture_limit:
+            raise ValueError("Frozen extraction operator capture exceeds explicit byte limit")
+        E_trace = np.zeros((ny, nlam), dtype=np.float64)
+        E_fixed = np.zeros((ny, nlam), dtype=np.float64)
+
     opt_meta: dict[str, Any] = {}
     if method == "optimal":
         ocfg = ecfg.get("optimal") if isinstance(ecfg.get("optimal"), dict) else {}
@@ -1519,6 +1546,7 @@ def _run_extract1d_impl(
             clip_negative_profile=clip_neg,
             min_profile_sum=min_ps,
             backend=opt_backend,
+            operator_capture=E_trace,
         )
         flux_fx, var_fx, mask_fx, sky_fx, npix_fx, m_fx = _optimal_extract(
             sci,
@@ -1534,6 +1562,7 @@ def _run_extract1d_impl(
             clip_negative_profile=clip_neg,
             min_profile_sum=min_ps,
             backend=opt_backend,
+            operator_capture=E_fixed,
         )
         opt_meta = {"trace": m_tr, "fixed": m_fx}
     else:
@@ -1547,6 +1576,7 @@ def _run_extract1d_impl(
             min_good_frac=min_good_frac,
             sky_resid=sky_resid,
             apply_local_sky=apply_local_sky,
+            operator_capture=E_trace,
         )
         flux_fx, var_fx, mask_fx, sky_fx, npix_fx = _boxcar_extract(
             sci,
@@ -1558,6 +1588,7 @@ def _run_extract1d_impl(
             min_good_frac=min_good_frac,
             sky_resid=sky_resid,
             apply_local_sky=apply_local_sky,
+            operator_capture=E_fixed,
         )
     if method == "mean":
         # Convert sum → mean (and propagate VAR scaling).
@@ -1567,6 +1598,9 @@ def _run_extract1d_impl(
         flux_fx = flux_fx / n_eff_fx
         var_tr = var_tr / (n_eff_tr**2)
         var_fx = var_fx / (n_eff_fx**2)
+        if capture_enabled:
+            E_trace /= n_eff_tr[None, :]
+            E_fixed /= n_eff_fx[None, :]
 
     # ------------------------------- outputs ------------------------------
     out_fits = out_dir / "spec1d.fits"
@@ -1641,6 +1675,28 @@ def _run_extract1d_impl(
         sky_fixed=sky_fx,
         npix_fixed=npix_fx,
     )
+    covariance_manifest = None
+    if capture_enabled:
+        from scorpio_pipe.covariance_operator_capture import (
+            save_extraction_operators, verify_spatial_operator,
+        )
+        verify_spatial_operator(sci, E_trace, flux_tr)
+        verify_spatial_operator(sci, E_fixed, flux_fx)
+        covariance_manifest = save_extraction_operators(
+            out_dir, input_fits=in_fits, spec_fits=out_fits,
+            E_trace=E_trace, E_fixed=E_fixed,
+            max_bytes=int(ecfg.get("capture_max_bytes", 536_870_912)),
+            metadata={
+                "extraction_method": method,
+                "input_mode": mode,
+                "aperture_half_width": int(trace.aperture_half_width),
+                "fatal_bits": int(fatal_bits),
+                "min_good_frac": float(np.clip(min_good_frac, 0, 1)),
+                "apply_local_sky": False,
+                "eta_applied_to_input_variance": bool(eta_appl),
+                "optimal_config": opt_meta if opt_meta else None,
+            },
+        )
     # trace.json
     # Provide stable, explicit metadata for reproducibility and QC.
     trace_model_meta = trace.meta.get("trace_model", {}) if isinstance(trace.meta, dict) else {}
@@ -1677,6 +1733,8 @@ def _run_extract1d_impl(
         "y_fixed": trace.y_fixed.tolist(),
         "geometry": _safe_json(geo_meta),
     }
+    if covariance_manifest is not None:
+        trace_payload["covariance_operator_manifest"] = str(covariance_manifest)
     trace_json.write_text(json.dumps(trace_payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
     diagnostics = _compute_extraction_diagnostics(
@@ -1834,6 +1892,7 @@ def _run_extract1d_impl(
         outputs={
             "spec1d_fits": str(out_fits),
             "trace_json": str(trace_json),
+            "covariance_operator_manifest": str(covariance_manifest) if covariance_manifest is not None else None,
             "spec1d_png": str(out_png) if bool(ecfg.get("save_png", True)) else None,
             "extraction_qc_json": str(qc_json),
             "extraction_diagnostics_png": str(diag_png) if bool(ecfg.get("save_png", True)) else None,
@@ -1918,6 +1977,7 @@ def _run_extract1d_impl(
         "input": str(in_fits),
         "spec1d_fits": str(out_fits),
         "trace_json": str(trace_json),
+        "covariance_operator_manifest": str(covariance_manifest) if covariance_manifest is not None else None,
         "extract_done": str(done_json),
         "spec1d_png": str(out_png) if out_png.exists() else None,
         "extraction_qc_json": str(qc_json),
