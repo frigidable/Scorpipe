@@ -79,8 +79,6 @@ def test_stack_capture_reproduces_real_streaming_mean(tmp_path, monkeypatch, met
         for info in manifest["inputs"]
     ]
     assert all(w.shape == (9, 32) for w in weights)
-    np.testing.assert_allclose(weights[0] + weights[1], 1.,
-        atol=1e-8, where=None) if False else None
     supported = (weights[0] + weights[1]) > 0
     np.testing.assert_allclose(
         (weights[0] + weights[1])[supported], 1., atol=2e-7
@@ -190,8 +188,8 @@ def test_stack_capture_disk_budget_and_missing_rows_fail_closed(tmp_path):
     assert not cap.pending.exists()
 
 
-def test_capture_rejects_nonlinear_local_sky(tmp_path):
-    # Config-independent conservative gate, prior to writing a diagnostic.
+def test_boxcar_capture_handles_missing_input_variance(tmp_path):
+    # Validate a small independent spatial replay.
     src = np.ones((8, 10))
     E = np.zeros_like(src)
     flux, *_ = ex._boxcar_extract(src, src, None, np.full(10, 4.),
