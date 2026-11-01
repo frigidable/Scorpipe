@@ -701,6 +701,7 @@ def _stack_chunk_streaming(
     var_scales: list[float],
     fatal_bits: np.uint16,
     var_floor: float | None,
+    weight_sink: Any | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int]:
     """Streaming Stack2D combine for one Y-chunk.
 
@@ -793,6 +794,36 @@ def _stack_chunk_streaming(
         acc_final.update(s, w)
 
     mu_final, var_final = acc_final.finalize()
+    if weight_sink is not None:
+        # Freeze exactly the final robust operator, using last_mu (not mu_final).
+        # A second optional disk-backed pass keeps per-exposure RAM bounded.
+        for i, hdul in enumerate(hduls):
+            s, v, m = _load_shifted_block(
+                hdul, y0=y0, y1=y1, shift=float(y_shifts[i]),
+                y_align_enabled=bool(y_align_enabled),
+                sci_scale=float(sci_scales[i]), var_scale=float(var_scales[i]),
+            )
+            v_eff, w0 = _base_weight_block(
+                s, v, m, fatal_bits=fatal_bits, var_floor=var_floor
+            )
+            if method0 in {"invvar_huber", "huber", "huber_invvar"}:
+                r = (s - last_mu) / np.sqrt(np.maximum(v_eff, 1e-20))
+                ar = np.abs(r)
+                hub = np.where(ar <= float(huber_c), 1.0,
+                               float(huber_c) / np.maximum(ar, 1e-20)).astype(np.float32)
+                w = w0 * hub
+            elif method0 in {"invvar_clip", "sigma_clip", "clip"}:
+                r = (s - last_mu) / np.sqrt(np.maximum(v_eff, 1e-20))
+                w = np.where(np.abs(r) <= float(clip_sigma), w0, 0.0).astype(np.float32)
+            else:
+                w = w0
+            w = np.where(np.isfinite(w) & (w > 0), w, 0.0)
+            normalized = np.divide(
+                np.asarray(w, dtype=np.float64), acc_final.sum_w,
+                out=np.zeros(shape, dtype=np.float64),
+                where=acc_final.sum_w > 0,
+            )
+            weight_sink(i, y0, y1, normalized)
     m_out = np.asarray(m_or, dtype=np.uint16)
     m_out = np.where(acc_final.sum_w <= 0, m_out | MASK_NO_COVERAGE, m_out)
     m_out = np.where(suppressed, m_out | MASK_ROBUST_REJECTED, m_out)
@@ -992,6 +1023,7 @@ def run_stack2d(
     done_json = out_dir / "done.json"
 
     # We keep the geometry object (for var_floor/eta) and a JSON-friendly summary.
+    capture = None
     sky_geom = None
     sky_geometry_meta: dict[str, Any] | None = None
 
@@ -1309,6 +1341,14 @@ def run_stack2d(
         report["y_offsets"] = y_offsets
         report["sky_geometry"] = sky_geometry_meta
 
+        # P1.4d2: opt-in, disk-backed provenance capture.
+        if bool(st_cfg.get("capture_frozen_operators", False)):
+            from scorpio_pipe.covariance_operator_capture import StackOperatorCapture
+            capture = StackOperatorCapture(
+                out_dir, files, ny=ny, nlam=nx,
+                max_bytes=int(st_cfg.get("capture_max_bytes", 2_147_483_648)),
+            )
+
         # Accumulators for diagnostics.
         suppressed_any = 0
         suppressed_total = 0
@@ -1332,6 +1372,7 @@ def run_stack2d(
                 var_scales=[float(x) for x in var_scales],
                 fatal_bits=np.uint16(FATAL_BITS),
                 var_floor=float(var_floor) if var_floor is not None else None,
+                weight_sink=capture.write if capture is not None else None,
             )
 
             suppressed_any += int(sup_any)
@@ -1459,6 +1500,27 @@ def run_stack2d(
             hdr["ETAAPPL"] = (False, "eta(lambda) applied to VAR")
 
         _write_mef(out_fits, out_sci, hdr, var=out_var, mask=out_mask, cov=out_cov)
+        if capture is not None:
+            report["covariance_operator_capture"] = {
+                "manifest": str(capture.finalize(
+                    stack_fits=out_fits,
+                    meta={
+                        "method": method, "robust_iter": robust_iter,
+                        "huber_c": huber_c, "clip_sigma": clip_sigma,
+                        "fatal_bits": int(FATAL_BITS),
+                        "var_floor": float(var_floor) if var_floor is not None else None,
+                        "normalize_exptime": normalize_exptime,
+                        "resampling_contract": ref_resampling,
+                        "output_bunit": out_bunit,
+                        "y_align_enabled": bool(y_align_enabled),
+                        "y_shifts": [float(x) for x in y_shifts],
+                        "sci_scales": [float(x) for x in sci_scales],
+                        "var_scales": [float(x) for x in var_scales],
+                        "input_exptime_s": exptimes,
+                    },
+                )),
+                "status": "CONDITIONAL_FROZEN_OPERATOR_ONLY",
+            }
         # Legacy output for older runs/UI.
         try:
             _write_mef(out_fits_legacy, out_sci, hdr, var=out_var, mask=out_mask, cov=out_cov)
@@ -1755,6 +1817,8 @@ def run_stack2d(
             pass
 
     except Exception as e:
+        if capture is not None:
+            capture.abort()
         report["ok"] = False
         report["status"] = "fail"
         report["error"] = str(e)
