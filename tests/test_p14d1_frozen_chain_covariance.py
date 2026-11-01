@@ -215,3 +215,39 @@ def test_wide_spectrum_matrix_free_identity():
     u = np.ones(nlam) / nlam
     got = covariance_of_frozen_chain_functionals([e], E, d, u)
     assert got == pytest.approx(np.dot(d * u, d * u), rel=1e-11)
+
+
+@pytest.mark.parametrize("case", ["no_stack_coverage", "no_extraction_coverage", "no_right_extraction_coverage"])
+def test_missing_measurement_support_is_not_zero_uncertainty(case):
+    e, _Rs, et, ef, d, u, v = _fixtures()
+    e = list(e)
+    et = et.copy()
+    ef = ef.copy()
+    if case == "no_stack_coverage":
+        for j, ex in enumerate(e):
+            weights = ex.stack_weights.copy()
+            weights[:, 0] = 0.0
+            e[j] = FrozenCovarianceExposure(ex.row_plans, ex.input_variance,
+                ex.valid_mask, weights, ex.y_shift, ex.output_scale)
+    elif case == "no_extraction_coverage":
+        et[:, 0] = 0.0
+    else:
+        ef[:, 0] = 0.0
+    with pytest.raises(ValueError, match="without extraction support"):
+        covariance_of_frozen_chain_functionals_pair(e, et, ef, d, u, v)
+
+
+def test_zero_functional_weights_may_omit_unsupported_wavelength_bins():
+    e, _Rs, et, ef, d, u, v = _fixtures()
+    e = list(e)
+    for j, ex in enumerate(e):
+        weights = ex.stack_weights.copy()
+        weights[:, 0] = 0.0
+        e[j] = FrozenCovarianceExposure(ex.row_plans, ex.input_variance,
+            ex.valid_mask, weights, ex.y_shift, ex.output_scale)
+    u = u.copy()
+    v = v.copy()
+    u[0] = 0.0
+    v[0] = 0.0
+    result = covariance_of_frozen_chain_functionals_pair(e, et, ef, d, u, v)
+    assert np.isfinite(result)
