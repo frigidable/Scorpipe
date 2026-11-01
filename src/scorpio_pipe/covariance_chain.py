@@ -146,15 +146,23 @@ def covariance_of_frozen_chain_functionals_pair(
             or not np.isfinite(u).all() or not np.isfinite(v).all()):
         raise ValueError("Functional and calibration vectors must be finite wavelength arrays; calibration > 0")
     validated = [_validate_exposure(e, ny_out=ny_out, nlam=nlam) for e in exposures]
-    # The stack is a weighted mean, with 0 for unavailable output pixels.
+    # The stack is a weighted mean. Missing spectral bins must not be
+    # mistaken for noise-free measurements with a formal variance of zero.
+    # Track support separately for the left and right extraction maps.
+    left_supported = np.zeros(nlam, dtype=bool)
+    right_supported = np.zeros(nlam, dtype=bool)
     # Validate without allocating another full (ny_out,nlam) image.
     for y in range(ny_out):
         wsum = np.zeros(nlam, dtype=np.float64)
         for _var, _valid, w, _s, _scale in validated:
             wsum += w[y]
         present = wsum > 0
+        left_supported |= present & (left_E[y] != 0.0)
+        right_supported |= present & (right_E[y] != 0.0)
         if np.any(~np.isclose(wsum[present], 1.0, rtol=1e-7, atol=1e-9)):
             raise ValueError("Frozen stack coefficients must sum to one on supported pixels")
+    if np.any((u != 0.0) & ~left_supported) or np.any((v != 0.0) & ~right_supported):
+        raise ValueError("Requested functional uses wavelength bins without extraction support")
 
     left_post = transfer * u
     right_post = transfer * v
