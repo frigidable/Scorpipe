@@ -15,6 +15,31 @@
   Review provenance before explicitly regenerating affected calibration products;
   unchanged stage caches are not proof that old converted products remain valid.
 
+## [8.1.0](https://github.com/frigidable/Scorpipe/compare/scorpipe-v8.0.5...scorpipe-v8.1.0) (2026-11-01)
+
+
+### Features
+
+* **science:** add frozen-chain covariance diagnostic P1.4d1 ([#49](https://github.com/frigidable/Scorpipe/issues/49)) ([dee41ed](https://github.com/frigidable/Scorpipe/commit/dee41ed3b661f566090ab2bf7c34481b364a9306))
+* **science:** diagnostic line-flux covariance with fitted continuum ([#44](https://github.com/frigidable/Scorpipe/issues/44)) ([a1c831f](https://github.com/frigidable/Scorpipe/commit/a1c831fcd1bf414d493fa4746d1febf1a6f62e76))
+* **science:** exact on-demand covariance for COUNT_V1 linear functionals ([#43](https://github.com/frigidable/Scorpipe/issues/43)) ([b898d80](https://github.com/frigidable/Scorpipe/commit/b898d806b19348acb71856edd5b9cf709d1e74d1))
+* **sky/linearize:** move sky before linearize; split raw vs rectified skysub contract ([b7ec59e](https://github.com/frigidable/Scorpipe/commit/b7ec59ed77ed4d1c35807bd5b76e2b563aaf8140))
+
+
+### Bug Fixes
+
+* **airvac:** unify Morton conversion and add absolute reference tests ([#26](https://github.com/frigidable/Scorpipe/issues/26)) ([d145f17](https://github.com/frigidable/Scorpipe/commit/d145f171d057ce56516e0ae755a3afe9a9d80c95))
+* **extract1d:** preserve quality masks in optimal extraction ([#31](https://github.com/frigidable/Scorpipe/issues/31)) ([87eaf86](https://github.com/frigidable/Scorpipe/commit/87eaf86668e07b74a38f475fc63c502e6e90ab24))
+* **gui:** preserve lazy page selection and repair Qt stylesheet ([#29](https://github.com/frigidable/Scorpipe/issues/29)) ([6466833](https://github.com/frigidable/Scorpipe/commit/646683352c36f2f3c4e6900891de4a134af9f9e3))
+* **linearize:** preserve sky failure and quality mask bits ([#30](https://github.com/frigidable/Scorpipe/issues/30)) ([ebf55c4](https://github.com/frigidable/Scorpipe/commit/ebf55c48a9818c0a1479bc596efdd7e13dbfb6a1))
+* **linearize:** reject invalid upstream SCI/VAR/MASK MEF ([#37](https://github.com/frigidable/Scorpipe/issues/37)) ([db7a26c](https://github.com/frigidable/Scorpipe/commit/db7a26c36e1cdfab502c086eb297368afcc59b85))
+* **science:** classify saturation only from raw detector ADU ([#39](https://github.com/frigidable/Scorpipe/issues/39)) ([90094b5](https://github.com/frigidable/Scorpipe/commit/90094b52d8d2c9988fc8b1747b318f01ef537ff8))
+* **science:** conserve detector-integrated counts in linearization ([#35](https://github.com/frigidable/Scorpipe/issues/35)) ([58edc39](https://github.com/frigidable/Scorpipe/commit/58edc398b64dc5a66b11f43a161edca0b122a776))
+* **science:** keep TRACE and FIXED spectra independent during flux calibration ([#46](https://github.com/frigidable/Scorpipe/issues/46)) ([7733768](https://github.com/frigidable/Scorpipe/commit/7733768ceb19cb361c165df185ff6baefdfc451f))
+* **science:** preserve detector saturation DQ across cosmics routes ([#41](https://github.com/frigidable/Scorpipe/issues/41)) ([34f01df](https://github.com/frigidable/Scorpipe/commit/34f01df169015c77d31432e9cca59912dccf5330))
+* **science:** repair Stack2D subpixel y-shift and DQ ([#48](https://github.com/frigidable/Scorpipe/issues/48)) ([e2e8c62](https://github.com/frigidable/Scorpipe/commit/e2e8c62a63f3b1fdd4f0091d7b32b8b72f6ddb57))
+* **sky:** preserve input MEF variance and mask bits ([#28](https://github.com/frigidable/Scorpipe/issues/28)) ([ab25978](https://github.com/frigidable/Scorpipe/commit/ab25978807707d6ba83dc009c02d47f92a714abe))
+
 ## 8.0.2
 
 - feat(p0-semantics): froze calibration-stack semantics by synchronizing `contracts/calibration.py`, calibrated-product validators, and spec docs so 1D/2D status claims are explicit and machine-checked. In particular, 2D calibrated products may no longer claim `ABSOLUTE_TRUSTED`.
