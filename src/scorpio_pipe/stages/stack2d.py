@@ -583,6 +583,8 @@ class _WeightedMeanAccumulator:
         if values.shape != self.mean.shape or weights.shape != self.mean.shape:
             raise ValueError("Accumulator shape mismatch")
         w = np.asarray(weights, dtype=np.float64)
+        # Masked Huber residuals may be NaN; 0 * NaN must not poison sum_w.
+        w = np.where(np.isfinite(w) & (w > 0), w, 0.0)
         if not np.any(w > 0):
             return
         x = np.asarray(values, dtype=np.float64)
@@ -747,6 +749,7 @@ def _stack_chunk_streaming(
                     w = np.where(keep, w0, 0.0).astype(np.float32)
                 else:
                     w = w0
+                w = np.where(np.isfinite(w) & (w > 0), w, 0.0)
                 acc.update(s, w)
             new_mu, _ = acc.finalize()
             if np.allclose(np.nan_to_num(new_mu, nan=0.0), np.nan_to_num(last_mu, nan=0.0), rtol=0.0, atol=1e-6):
@@ -783,6 +786,7 @@ def _stack_chunk_streaming(
             suppressed |= np.isfinite(s) & (w0 > 0) & (~keep)
         else:
             w = w0
+        w = np.where(np.isfinite(w) & (w > 0), w, 0.0)
         accepted = w > 0
         cov += accepted.astype(np.int16)
         m_or |= np.where(accepted, m, 0).astype(np.uint16)
