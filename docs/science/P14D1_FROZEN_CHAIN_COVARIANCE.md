@@ -43,6 +43,10 @@ exposure, excluding caller-owned operator/CCD arrays.
   from a real robust stack is scientifically invalid. Nonnegative weights
   must sum to one wherever the output is supported. No weights are permitted
   on geometrically unsupported y rows.
+- A requested functional with nonzero coefficients at a wavelength lacking
+  stacked pixels or nonzero spatial extraction support fails closed. Zero
+  noise variance must never be reported for an unavailable measurement bin.
+  A wavelength may be omitted only if its measurement functional is zero.
 - Actual `Stack2D` also applies fatal-bit selection and potential
   variance-floor, Huber or clipping weights; users must supply coefficients
   **after** those decisions, including zero for rejected samples. This
