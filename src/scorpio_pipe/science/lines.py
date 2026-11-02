@@ -48,11 +48,14 @@ def _robust_median(x: np.ndarray) -> float:
     return float(np.nanmedian(a))
 
 
-def _continuum_model(wave: np.ndarray, flux: np.ndarray, *, left: tuple[float, float], right: tuple[float, float], center: float) -> tuple[np.ndarray, dict[str, float]]:
+def _continuum_model(wave: np.ndarray, flux: np.ndarray, *, left: tuple[float, float], right: tuple[float, float], center: float, valid: np.ndarray | None = None) -> tuple[np.ndarray, dict[str, float]]:
     wave = np.asarray(wave, dtype=float)
     flux = np.asarray(flux, dtype=float)
-    ml = (wave >= center + float(left[0])) & (wave <= center + float(left[1]))
-    mr = (wave >= center + float(right[0])) & (wave <= center + float(right[1]))
+    good = np.isfinite(wave) & np.isfinite(flux)
+    if valid is not None:
+        good &= np.asarray(valid, dtype=bool)
+    ml = (wave >= center + float(left[0])) & (wave <= center + float(left[1])) & good
+    mr = (wave >= center + float(right[0])) & (wave <= center + float(right[1])) & good
     xl = wave[ml]
     yl = flux[ml]
     xr = wave[mr]
@@ -90,6 +93,16 @@ def _rms_relative(values: Iterable[np.ndarray]) -> np.ndarray:
     return np.sqrt(out)
 
 
+# EDGE is informational partial coverage, not an automatic science rejection.
+# All remaining canonical detector/sky-quality bits veto the affected sample.
+from scorpio_pipe.contracts.maskbits import (
+    NO_COVERAGE, BADPIX, COSMIC, SATURATED, USER, REJECTED,
+    OUTSIDE_SLIT, INVALID_WAVELENGTH, SKYMODEL_FAIL,
+)
+_FATAL_LINE_BITS = int(NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER |
+                       REJECTED | OUTSIDE_SLIT | INVALID_WAVELENGTH | SKYMODEL_FAIL)
+
+
 def measure_line(
     wave: np.ndarray,
     flux: np.ndarray,
@@ -100,75 +113,121 @@ def measure_line(
     calsys_abs: np.ndarray | None,
     spec: LineSpec,
     redshift: float = 0.0,
+    mask: np.ndarray | None = None,
+    detection_snr_min: float = 3.0,
 ) -> dict[str, Any]:
+    """Diagnostic integrated line measurement (diagonal-noise approximation).
+
+    This is not a deblender or a full covariance-aware confidence interval.
+    A detection requires positive integrated *net* flux with a finite,
+    strictly positive statistical error and sufficient signed S/N.
+    """
     wave = np.asarray(wave, dtype=float)
     flux = np.asarray(flux, dtype=float)
     var = np.asarray(var, dtype=float)
-    rel = np.zeros_like(wave, dtype=float) if calsys_rel is None else np.asarray(calsys_rel, dtype=float)
-    tel = np.zeros_like(wave, dtype=float) if calsys_tell is None else np.asarray(calsys_tell, dtype=float)
-    absu = np.zeros_like(wave, dtype=float) if calsys_abs is None else np.asarray(calsys_abs, dtype=float)
+    if (wave.ndim != 1 or wave.shape != flux.shape or wave.shape != var.shape
+            or wave.size < 3 or not np.isfinite(wave).all()
+            or not np.all(np.diff(wave) > 0)):
+        raise ValueError("Line measurement requires aligned, increasing finite wavelength coordinates")
+    snr_min = float(detection_snr_min)
+    if not math.isfinite(snr_min) or snr_min <= 0:
+        raise ValueError("detection_snr_min must be positive and finite")
+    if mask is None:
+        quality = np.zeros_like(wave, dtype=np.uint32)
+    else:
+        quality = np.asarray(mask)
+        if quality.shape != wave.shape or not np.issubdtype(quality.dtype, np.integer):
+            raise ValueError("Line mask must be an integer array aligned with wavelength")
+        if np.any(quality < 0):
+            raise ValueError("Line mask contains negative quality flags")
+        quality = quality.astype(np.uint32)
+    good = ((quality & _FATAL_LINE_BITS) == 0) & np.isfinite(flux) & np.isfinite(var) & (var > 0)
+    rel = np.zeros_like(wave) if calsys_rel is None else np.asarray(calsys_rel, dtype=float)
+    tel = np.zeros_like(wave) if calsys_tell is None else np.asarray(calsys_tell, dtype=float)
+    absu = np.zeros_like(wave) if calsys_abs is None else np.asarray(calsys_abs, dtype=float)
     center = float(spec.rest_wavelength) * (1.0 + float(redshift))
-    m = (wave >= center - float(spec.window_half_width)) & (wave <= center + float(spec.window_half_width))
-    if np.count_nonzero(m) < 3:
+    in_line = (wave >= center - float(spec.window_half_width)) & (wave <= center + float(spec.window_half_width))
+    if np.count_nonzero(in_line) < 3:
         return {'name': spec.name, 'detected': False, 'reason': 'insufficient_sampling'}
-    w = wave[m]
-    f = flux[m]
-    v = np.clip(var[m], 0.0, np.inf)
-    cont_full, cont_meta = _continuum_model(wave, flux, left=spec.continuum_left, right=spec.continuum_right, center=center)
-    cont = cont_full[m]
-    net = f - cont
-    dl = np.gradient(w) if w.size > 1 else np.ones_like(w)
-    dl = np.asarray(dl, dtype=float)
-    fin = _finite_mask(w, f, v, cont, dl)
+    in_good_line = in_line & good
+    if np.count_nonzero(in_good_line) < 3:
+        return {'name': spec.name, 'detected': False, 'reason': 'insufficient_unmasked_line_samples'}
+    left = (wave >= center + spec.continuum_left[0]) & (wave <= center + spec.continuum_left[1]) & good
+    right = (wave >= center + spec.continuum_right[0]) & (wave <= center + spec.continuum_right[1]) & good
+    if np.count_nonzero(left) < 2 or np.count_nonzero(right) < 2:
+        return {'name': spec.name, 'detected': False, 'reason': 'insufficient_unmasked_continuum'}
+
+    # Compute widths on the original monotonic grid, *before* removing bad
+    # samples. Otherwise a masked gap inherits spuriously enlarged bin widths.
+    all_dl = np.gradient(wave)
+    w = wave[in_good_line]
+    f = flux[in_good_line]
+    v = var[in_good_line]
+    dl = all_dl[in_good_line]
+    cont_full, cont_meta = _continuum_model(
+        wave, flux, left=spec.continuum_left, right=spec.continuum_right,
+        center=center, valid=good,
+    )
+    cont = cont_full[in_good_line]
+    fin = _finite_mask(w, f, v, cont, dl) & (dl > 0)
     if np.count_nonzero(fin) < 3:
         return {'name': spec.name, 'detected': False, 'reason': 'nonfinite_window'}
-    w = w[fin]; f = f[fin]; v = v[fin]; cont = cont[fin]; net = net[fin]; dl = dl[fin]
+    w, f, v, cont, dl = w[fin], f[fin], v[fin], cont[fin], dl[fin]
+    net = f - cont
     flux_int = float(np.sum(net * dl))
     err_stat = float(np.sqrt(np.sum(v * dl * dl)))
-    cal_frac = _rms_relative([rel[m][fin], tel[m][fin], absu[m][fin]])
-    rel_med = float(np.nanmedian(np.asarray(rel[m][fin], dtype=float))) if np.any(np.isfinite(np.asarray(rel[m][fin], dtype=float))) else 0.0
-    tell_med = float(np.nanmedian(np.asarray(tel[m][fin], dtype=float))) if np.any(np.isfinite(np.asarray(tel[m][fin], dtype=float))) else 0.0
-    abs_med = float(np.nanmedian(np.asarray(absu[m][fin], dtype=float))) if np.any(np.isfinite(np.asarray(absu[m][fin], dtype=float))) else 0.0
+    cal_frac = _rms_relative([rel[in_good_line][fin], tel[in_good_line][fin], absu[in_good_line][fin]])
+    rel_med = float(np.nanmedian(rel[in_good_line][fin]))
+    tell_med = float(np.nanmedian(tel[in_good_line][fin]))
+    abs_med = float(np.nanmedian(absu[in_good_line][fin]))
     err_cal_rel = float(abs(flux_int) * rel_med)
     err_cal_tell = float(abs(flux_int) * tell_med)
     err_cal_abs = float(abs(flux_int) * abs_med)
     err_cal = float(abs(flux_int) * np.nanmedian(cal_frac)) if cal_frac.size else 0.0
-    pos = np.clip(net, 0.0, np.inf)
-    weight_sum = float(np.sum(pos * dl))
-    centroid = float(np.sum(w * pos * dl) / weight_sum) if weight_sum > 0 else float(np.sum(w * np.abs(net) * dl) / max(1e-12, np.sum(np.abs(net) * dl)))
-    sigma = None
-    if weight_sum > 0:
-        sigma_val = float(np.sqrt(max(0.0, np.sum(((w - centroid) ** 2) * pos * dl) / max(weight_sum, 1e-12))))
-        sigma = sigma_val if math.isfinite(sigma_val) else None
+    sn = float(flux_int / err_stat) if err_stat > 0 and np.isfinite(err_stat) else float("nan")
+    detected = bool(flux_int > 0 and np.isfinite(sn) and sn >= snr_min)
+    centroid = sigma = None
+    if detected:
+        pos = np.clip(net, 0.0, np.inf)
+        weight = pos * dl
+        weight_sum = float(np.sum(weight))
+        if weight_sum > 0:
+            centroid = float(np.sum(w * weight) / weight_sum)
+            sigma_val = float(np.sqrt(max(0.0, np.sum((w - centroid) ** 2 * weight) / weight_sum)))
+            sigma = sigma_val if np.isfinite(sigma_val) else None
     fwhm = sigma_to_fwhm(sigma)
     sigma_kms = sigma_to_velocity_dispersion(spec.rest_wavelength, sigma)
-    velocity = velocity_from_centroid(spec.rest_wavelength, centroid)
-    cont_level = float(np.nanmedian(cont)) if np.any(np.isfinite(cont)) else float('nan')
-    ew = float(np.sum((net / np.clip(cont, 1e-12, np.inf)) * dl)) if np.isfinite(cont_level) and abs(cont_level) > 1e-12 else float('nan')
-    sn = abs(flux_int) / max(1e-12, err_stat)
-    return {
+    velocity = velocity_from_centroid(spec.rest_wavelength, centroid) if centroid is not None else None
+    cont_level = float(np.nanmedian(cont))
+    ew = float(np.sum(net / cont * dl)) if np.isfinite(cont_level) and np.all(cont > 0) else float('nan')
+    result = {
         'name': spec.name,
         'rest_wavelength': float(spec.rest_wavelength),
         'expected_wavelength': float(center),
-        'centroid': float(centroid),
+        'centroid': centroid,
         'velocity_kms': velocity,
-        'flux': float(flux_int),
-        'equivalent_width': float(ew),
+        'flux': flux_int,
+        'equivalent_width': ew,
         'sigma': sigma,
         'sigma_kms': sigma_kms,
         'fwhm': fwhm,
         'local_continuum': cont_level,
-        'err_stat': float(err_stat),
-        'err_cal': float(err_cal),
-        'err_cal_rel': float(err_cal_rel),
-        'err_cal_tell': float(err_cal_tell),
-        'err_cal_abs': float(err_cal_abs),
+        'err_stat': err_stat,
+        'err_cal': err_cal,
+        'err_cal_rel': err_cal_rel,
+        'err_cal_tell': err_cal_tell,
+        'err_cal_abs': err_cal_abs,
         'err_total': float(np.hypot(err_stat, err_cal)),
-        'snr_stat': float(sn),
-        'detected': bool(sn >= 2.0 or weight_sum > 0),
+        'snr_stat': sn,
+        'detection_snr_min': snr_min,
+        'detected': detected,
         'n_samples': int(w.size),
+        'n_excluded_window': int(np.count_nonzero(in_line & ~good)),
         **cont_meta,
     }
+    if not detected:
+        result['reason'] = 'below_detection_threshold'
+    return result
 
 
 def measure_lines(
@@ -181,17 +240,15 @@ def measure_lines(
     calsys_abs: np.ndarray | None,
     lines: Iterable[LineSpec] = DEFAULT_LINES,
     redshift: float = 0.0,
+    mask: np.ndarray | None = None,
+    detection_snr_min: float = 3.0,
 ) -> list[dict[str, Any]]:
     return [
         measure_line(
-            wave,
-            flux,
-            var,
-            calsys_rel=calsys_rel,
-            calsys_tell=calsys_tell,
-            calsys_abs=calsys_abs,
-            spec=spec,
-            redshift=redshift,
+            wave, flux, var,
+            calsys_rel=calsys_rel, calsys_tell=calsys_tell, calsys_abs=calsys_abs,
+            spec=spec, redshift=redshift, mask=mask,
+            detection_snr_min=detection_snr_min,
         )
         for spec in lines
     ]
