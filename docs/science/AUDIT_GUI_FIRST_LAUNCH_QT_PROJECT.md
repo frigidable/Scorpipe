@@ -38,3 +38,42 @@ for Linux CI on this exact commit and will be restored to the #66
 parent after qualification. Full Qt GUI behavior still needs a
 Windows offscreen/manual launch check: Linux CI installs `[dev]`, not
 `[gui]`. Do not equate headless CI with on-screen verification.
+
+
+## Second Windows field-test finding: Inspect-before-Setup AttributeError
+
+Reproduction on the actual PR #67 worktree:
+`C:\Users\frigi\Documents\GitHub\Scorpipe-PR67-QA`, the same
+306-frame BTA night `s241206`. Project renders properly (the initial
+permanent Setup placeholder is fixed). Inspect reads all 306 FITS and
+finds the 306-row nightlog, but the completion callback raises
+
+```
+AttributeError: 'LauncherWindow' object has no attribute 'combo_object'
+launcher_window.py, _done -> _populate_objects_from_inspect
+```
+
+The lazy Setup page creates `combo_object` only when the user opens
+Setup. The Inspect completion callback was wrongly accessing those
+controls before they existed. Its outer try/except consequently marked
+a successful Inspect as failed and left the Project overview empty.
+
+The fix records InspectResult in memory, **skips only the Setup-selector
+synchronization** while Setup is not built, and still refreshes the
+Project overview and marks Inspect successful. When Setup is first
+materialized, the previously completed InspectResult is replayed into
+its object, disperser, slit and binning selectors. No automatic
+navigation to Setup is performed. Frames Browser remains usable and
+independent; `s22800606.fts` was correctly classified as `neon`.
+
+Two headless contract tests execute the actual production methods
+against a missing Setup control and a subsequently constructed page.
+An offscreen PySide6 regression uses a synthetic N2146sat science
+frame and a neon frame. Windows manual qualification must verify
+that the Project indicator turns green, counts render and the
+`Inspect dataset` button becomes available again, without
+`AttributeError` in Log; then opening Setup must populate the
+selector without re-scanning the files.
+
+This is a real GUI lifecycle defect discovered by testing, not
+a failure of FITS reading or scientific reduction.
