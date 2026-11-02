@@ -56,8 +56,8 @@ def _spec_and_sens(tmp_path, *, x=1.4):
             fits.Column(name="RESPONSE_UNC", format="D", array=np.zeros_like(wave)),
         ],name="SENSFUNC")
     ]).writeto(sen)
-    curve = {"airmass": x, "provenance": "header", "wavelength_A": np.array([4900.,5100.]),
-             "k_lambda": np.array([-.03,.37])} # => k = .17 at 5000 A
+    curve = {"airmass": x, "provenance": "header", "wavelength_A": np.array([4950.,5100.]),
+             "k_lambda": np.array([.07,.37])} # => k = .17 at 5000 A
     stdqc = {"safe_for":"absolute_candidate"}
     sensqc = {"extinction_applied":True, "airmass_provenance":"header"}
     return src,sen,wave,k,counts,physical,curve,stdqc,sensqc
