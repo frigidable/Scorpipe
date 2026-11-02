@@ -2075,7 +2075,8 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
         final_view=False,
     )
     _plot_residuals_vs_lambda(
-        lams_all=lams_cp,
+        lam_key=np.round(lams_cp.astype(float), 3),
+        lam_all=lams_cp,
         dlam_all=resid2d,
         used_mask=used2d,
         rejected_lines_A=rej,
@@ -2083,7 +2084,7 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
         title="Δλ vs λ (per-line medians)",
     )
     _plot_residuals_vs_y(
-        ys_pix_all=ys_cp,
+        y_all=ys_cp,
         dlam_all=resid2d,
         used_mask=used2d,
         outpng=resid_vs_y_png,
