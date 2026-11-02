@@ -2688,20 +2688,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.edit_work_dir.setText(str(rr))
             self._workdir_user_edited = False
         except Exception as exc:
-            # Incorrect source target/date must not be replaced by a
-            # misleading guessed run folder on a science project.
+            # A guessed folder for an unknown night/target is less safe
+            # than reporting the missing science provenance explicitly.
             self._log_error(f"Run folder suggestion unavailable: {exc}")
-            return
-            # fall back to the older heuristic
-            dmy = self._infer_night_date_parts()
-            if dmy is None:
-                now = datetime.now()
-                dd, mm, yyyy = int(now.day), int(now.month), int(now.year)
-            else:
-                dd, mm, yyyy = dmy
-            night_dir = f"{dd:02d}_{mm:02d}_{yyyy:04d}"
-            base = Path((self.edit_workspace_root.text() or "").strip()).expanduser() / night_dir
-            self.edit_work_dir.setText(str(base))
 
     def _populate_objects_from_inspect(self) -> None:
         # Project and Night Inspector are usable before lazy Setup is built.
