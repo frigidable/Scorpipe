@@ -100,6 +100,23 @@ def test_golden_mini_night_e2e(tmp_path: Path):
 
     cfg = load_config_any(mn.cfg_path)
 
+    # Preview is a visualization-only SCI image. Its physical unit must match
+    # a real sky-subtracted SCI product, not the lambda_map wavelength unit.
+    sky_preview = PRODUCT_CATALOG.best_path(cfg, "sky_preview_fits", run_root=mn.work_dir)
+    sky_products = PRODUCT_CATALOG.find_existing_paths(
+        cfg, "sky_skysub_raw_fits", run_root=mn.work_dir
+    )
+    assert sky_preview.exists() and sky_products
+    with fits.open(sky_preview, memmap=False) as preview_hdul, fits.open(
+        sky_products[0], memmap=False
+    ) as science_hdul:
+        assert preview_hdul[0].header["SCORPPRV"] is True
+        assert "SCI" in preview_hdul and "VAR" not in preview_hdul
+        preview_unit = str(preview_hdul["SCI"].header["BUNIT"])
+        science_unit = str(science_hdul["SCI"].header["BUNIT"])
+        assert preview_unit == science_unit
+        assert "VAR" in science_hdul and "MASK" in science_hdul
+
     # --- read golden expectations ---
     assert GOLDEN.exists(), f"Golden file missing: {GOLDEN}"
     golden = json.loads(GOLDEN.read_text(encoding="utf-8"))
