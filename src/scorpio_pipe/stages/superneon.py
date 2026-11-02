@@ -209,6 +209,7 @@ def _find_peaks_simple(
     min_height: float | None = None,
     prominence: float = 5.0,
     distance: int = 3,
+    max_peaks: int | None = None,
 ) -> np.ndarray:
     """
     Поиск пиков по scipy если есть, иначе — простая эвристика.
@@ -216,6 +217,8 @@ def _find_peaks_simple(
     y = np.asarray(y, float)
     y0 = y - np.nanmedian(y)
     y0[~np.isfinite(y0)] = 0.0
+    if max_peaks is not None and int(max_peaks) < 1:
+        raise ValueError("max_peaks must be positive")
 
     try:
         from scipy.signal import find_peaks  # type: ignore
@@ -224,9 +227,8 @@ def _find_peaks_simple(
         if min_height is not None:
             kwargs["height"] = float(min_height)
         pk, _ = find_peaks(y0, **kwargs)
-        return pk.astype(int)
-    except Exception:
-        # fallback: локальные максимумы
+    except ImportError:
+        # Fallback when SciPy is not installed: local maxima only.
         pk = []
         for i in range(1, len(y0) - 1):
             if y0[i] > y0[i - 1] and y0[i] > y0[i + 1]:
@@ -235,7 +237,14 @@ def _find_peaks_simple(
                 if y0[i] < prominence:
                     continue
                 pk.append(i)
-        return np.array(pk, dtype=int)
+
+    peaks = np.asarray(pk, dtype=int)
+    if max_peaks is not None and peaks.size > int(max_peaks):
+        # Retain strongest candidates, using pixel index for deterministic
+        # tie-breaking; return in wavelength/pixel order for downstream fits.
+        rank = np.lexsort((peaks, -y0[peaks]))
+        peaks = np.sort(peaks[rank[:int(max_peaks)]])
+    return peaks
 
 
 def _robust_sigma(
@@ -683,7 +692,7 @@ def build_superneon(cfg: dict[str, Any], *, run_root: Path | None = None) -> Sup
     baseline = _estimate_baseline_bins(
         prof,
         bin_size=int(noise_cfg.get("baseline_bin_size", 32)),
-        quantile=float(noise_cfg.get("baseline_quantile", 0.25)),
+        q=float(noise_cfg.get("baseline_quantile", 0.25)),
     )
     residual = prof - baseline
 
