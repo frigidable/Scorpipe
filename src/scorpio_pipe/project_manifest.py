@@ -633,6 +633,23 @@ def apply_project_manifest_to_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(roles, dict):
         roles = {}
 
+    # A work layout creates a default manifest containing *all* role
+    # names with empty files/globs. The existence of role keys alone
+    # is not an explicit selection: applying that template as an
+    # override silently deletes valid AutoConfig science/calibrations.
+    # One populated role makes the set an intentionally curated
+    # manifest (including deliberately empty roles); an explicit mode
+    # also supports a deliberate all-empty selection.
+    explicit_role_mode = str(manifest.get("role_policy") or "").strip().lower() == "explicit"
+    has_assigned_roles = any(
+        any(_parse_role_entry(entry))
+        for role, entry in roles.items()
+        if role in ROLE_TO_FRAMES_KEY
+    )
+    apply_role_overrides = bool(
+        explicit_role_mode or has_assigned_roles or active_group
+    )
+
     # data_dir resolution
     data_dir_eff = Path(str(cfg.get("data_dir") or (config_dir or manifest_dir))).expanduser().resolve()
 
@@ -643,7 +660,7 @@ def apply_project_manifest_to_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
     applied_roles: list[str] = []
 
     for role, frames_key in ROLE_TO_FRAMES_KEY.items():
-        if role not in roles:
+        if not apply_role_overrides or role not in roles:
             continue
         files_s, globs_s, excl_s = _parse_role_entry(roles.get(role))
         files = [_resolve_one(x, data_dir=data_dir_eff, manifest_dir=manifest_dir) for x in files_s]
@@ -683,11 +700,17 @@ def apply_project_manifest_to_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
         {
             "has_manifest": True,
             "path": str(manifest_path),
-            "roles_present": sorted(list(roles_present(manifest))),
+            "roles_present": sorted(list(roles_present(manifest))) if apply_role_overrides else [],
+            "role_selection_status": "explicit" if apply_role_overrides else "template_unconfigured",
+            "roles_applied": sorted(applied_roles),
             "exclude": list(excluded_abs) if excluded_abs else [],
             "has_sky_frames": bool(sky_list),
             "n_sky_frames": int(len(sky_list)) if isinstance(sky_list, list) else 0,
-            "frames_source": "manifest",
+            "frames_source": (
+                "manifest" if apply_role_overrides
+                else "config+manifest_exclude" if excluded_abs
+                else "config"
+            ),
         }
     )
 
