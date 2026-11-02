@@ -39,12 +39,16 @@ def run_line_measure(cfg: dict[str, Any], *, run_root: Path, stage_dir_path: Pat
     wave = np.asarray(spec['wave'], dtype=float)
     flux = np.asarray(spec['flux'], dtype=float)
     var = np.asarray(spec['var'], dtype=float)
+    dq = np.asarray(spec['mask'])
     scfg = cfg.get('science') if isinstance(cfg.get('science'), dict) else {}
     redshift = float((scfg or {}).get('redshift', 0.0) or 0.0)
+    detection_snr_min = float((scfg or {}).get('line_detection_snr_min', 3.0))
     rows = measure_lines(
         wave,
         flux,
         var,
+        mask=dq,
+        detection_snr_min=detection_snr_min,
         calsys_rel=calsys['rel'],
         calsys_tell=calsys['tell'],
         calsys_abs=calsys['abs'],
