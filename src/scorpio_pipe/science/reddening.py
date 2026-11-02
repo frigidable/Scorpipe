@@ -26,7 +26,7 @@ def balmer_decrement_summary(lines_by_name: dict[str, dict[str, Any]], *, intrin
         return None
     # Window-integrated Halpha is contaminated by nearby [NII] unless
     # an independent multi-component fit has supplied physical line fluxes.
-    if ha.get('physical_flux_eligible') is False or hb.get('physical_flux_eligible') is False:
+    if ha.get('blend_safe_for_physical_ratios') is False or hb.get('blend_safe_for_physical_ratios') is False:
         return None
     try:
         fha = float(ha.get('flux'))
