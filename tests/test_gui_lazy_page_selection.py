@@ -101,6 +101,53 @@ def test_overview_doubleclick_initializes_setup_before_setting_object() -> None:
         win.close()
 
 
+def test_night_inspect_before_setup_is_deferred_and_populates_on_first_visit() -> None:
+    """Reproduce BTA field case: 306 FITS inspected with only Project built."""
+    from types import SimpleNamespace
+    import pandas as pd
+
+    app = _app()
+    win = LauncherWindow()
+    try:
+        assert 1 not in win._pages_built
+        assert not hasattr(win, "combo_object")
+        win._inspect = SimpleNamespace(
+            objects=["N2146sat"],
+            table=pd.DataFrame([
+                {
+                    "kind": "obj", "object": "N2146sat",
+                    "object_norm": "N2146SAT", "disperser": "VPHG1200B",
+                    "slit": "1.2", "binning": "1x2",
+                    "instrument": "SCORPIO-1", "exptime": 1200.,
+                },
+                {
+                    "kind": "neon", "object": "N2146sat",
+                    "object_norm": "N2146SAT", "disperser": "VPHG1200B",
+                    "slit": "1.2", "binning": "1x2",
+                    "instrument": "SCORPIO-1", "exptime": 60.,
+                },
+            ]),
+        )
+
+        # Previously raised AttributeError: no combo_object, causing the
+        # GUI to mark a successfully finished Inspect job as failed.
+        win._populate_objects_from_inspect()
+        assert 1 not in win._pages_built
+        assert not hasattr(win, "combo_object")
+        assert win.stack.currentWidget() is win.page_project
+
+        # The same InspectResult must become available when Setup is built.
+        win.steps.setCurrentRow(1)
+        app.processEvents()
+        assert win.stack.currentWidget() is win.page_config
+        assert win.combo_object.currentText() == "N2146sat"
+        assert win.combo_disperser.currentText() == "VPHG1200B"
+        assert win.combo_slit.currentText() == "1.2"
+        assert win.combo_binning.currentText() == "1x2"
+    finally:
+        win.close()
+
+
 @pytest.mark.parametrize("mode", ["dark", "light"])
 def test_qss_uses_css_colors_and_not_inline_svg_data_urls(mode: str) -> None:
     app = _app()
