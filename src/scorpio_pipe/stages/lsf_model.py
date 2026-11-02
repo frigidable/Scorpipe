@@ -52,6 +52,30 @@ def _load_lambda_map(path: Path) -> tuple[np.ndarray, fits.Header]:
     return np.asarray(data, dtype=float), hdr
 
 
+def _lambda_map_as_angstrom(lam_map: np.ndarray, hdr: fits.Header) -> tuple[np.ndarray, str, float]:
+    """Normalize wavelength-map coordinates to Å before measuring arc widths.
+
+    Wavelength solution hand pairs and manual LSF priors are in Å. The
+    native wavelength map may nevertheless be exported in nm.
+    """
+    raw = str(hdr.get("WAVEUNIT") or hdr.get("CUNIT1") or "").strip().lower()
+    if raw in {"angstrom", "ang", "a", "aa", "ångström"}:
+        native, scale = "Angstrom", 1.0
+    elif raw in {"nm", "nanometer", "nanometers"}:
+        native, scale = "nm", 10.0
+    else:
+        raise ValueError(
+            f"LSF requires explicit supported lambda_map wavelength unit; got {raw!r}"
+        )
+    arr = np.asarray(lam_map, dtype=float)
+    if arr.ndim != 2:
+        raise ValueError("LSF requires a 2D wavelength map")
+    finite = np.isfinite(arr)
+    if not np.any(finite) or np.any(arr[finite] <= 0):
+        raise ValueError("LSF input wavelength map has no positive physical support")
+    return arr * scale, native, scale
+
+
 def _read_arc_image(path: Path) -> tuple[np.ndarray, fits.Header]:
     with fits.open(path, memmap=False) as hdul:
         data = hdul[0].data
@@ -324,12 +348,17 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
     arc, arc_hdr = _read_arc_image(arc_path)
     if arc.shape != lam_map.shape:
         raise ValueError(f"superneon shape {arc.shape} != lambda_map shape {lam_map.shape}")
+    # Arc line catalogue/priors are always in Å, irrespective of the
+    # native lambda_map FITS WAVEUNIT (Å or nm).
+    lam_map_A, native_waveunit, to_angstrom = _lambda_map_as_angstrom(
+        lam_map, lam_hdr
+    )
 
     lcfg = cfg.get("lsf_model") if isinstance(cfg.get("lsf_model"), dict) else {}
     line_centers = _load_line_centers(wdir)
     measured_map, fit_meta = _build_measured_lsf_map(
         arc,
-        lam_map,
+        lam_map_A,
         line_centers,
         fit_half_window_px=int(lcfg.get("fit_half_window_px", 6) or 6),
         min_snr=float(lcfg.get("min_line_snr", 4.0) or 4.0),
@@ -338,7 +367,7 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
     )
 
     if measured_map is None:
-        lsf_map, source_meta = _manual_fallback_map(lam_map, arc_hdr)
+        lsf_map, source_meta = _manual_fallback_map(lam_map_A, arc_hdr)
         fit_source = "manual_fallback"
     else:
         lsf_map = measured_map
@@ -346,10 +375,17 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
         fit_source = "arc_measured"
 
     lsf_map = np.asarray(lsf_map, dtype=float)
-    lsf_map[~np.isfinite(lam_map)] = np.nan
-    grid = _approx_linear_grid_from_lambda_map(lam_map, lam_hdr)
-
+    lsf_map[~np.isfinite(lam_map_A)] = np.nan
+    # The output is sigma_A on the detector pixel grid. Its *approximate*
+    # spectral WCS must also be in Angstrom, never inherited in nm.
     primary_hdr = fits.Header(lam_hdr)
+    primary_hdr["WAVEUNIT"] = ("Angstrom", "Model LSF wavelength-coordinate unit")
+    primary_hdr["CUNIT1"] = ("Angstrom", "Approximate LSF spectral WCS unit")
+    primary_hdr["LAMUNIT"] = ("Angstrom", "LSF wavelength-coordinate unit")
+    primary_hdr["NATWUNIT"] = (native_waveunit, "Source wavelength-map unit")
+    primary_hdr["LSFGEOM"] = ("DETECTOR", "Arc/LSF map pixel geometry")
+    primary_hdr["LSFQUAL"] = (False, "Not propagated to science 1D")
+    grid = _approx_linear_grid_from_lambda_map(lam_map_A, primary_hdr)
     primary_hdr["BUNIT"] = ("Angstrom", "Instrumental sigma unit")
     primary_hdr["LSFUNIT"] = ("sigma_A", "LSF map quantity")
     primary_hdr["LSFSRC"] = (str(fit_source), "LSF source")
@@ -363,8 +399,8 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
     qpath = out_dir / "lsf_qc.json"
     mpath = out_dir / "lsf_model.json"
     summary_1d: dict[str, Any] = {}
-    if np.isfinite(lam_map).any() and np.isfinite(lsf_map).any():
-        lam1d = np.nanmedian(lam_map, axis=0)
+    if np.isfinite(lam_map_A).any() and np.isfinite(lsf_map).any():
+        lam1d = np.nanmedian(lam_map_A, axis=0)
         sig1d = np.nanmedian(lsf_map, axis=0)
         good = np.isfinite(lam1d) & np.isfinite(sig1d)
         summary_1d = {
@@ -387,7 +423,11 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
             "disperser": str(arc_hdr.get("DISPERSE", "") or ""),
             "slit_arcsec": float(arc_hdr.get("SLITWID", np.nan)) if arc_hdr.get("SLITWID") is not None else None,
             "wave_ref": str(lam_hdr.get("WAVEREF", "unknown") or "unknown"),
-            "wave_unit": str(lam_hdr.get("WAVEUNIT", "Angstrom") or "Angstrom"),
+            "wave_unit": "Angstrom",
+            "native_wave_unit": native_waveunit,
+            "native_to_A_factor": float(to_angstrom),
+            "lsf_geometry": "DETECTOR",
+            "science_1d_lsf_qualified": False,
         },
         "model": source_meta,
         "summary_1d": summary_1d,
@@ -401,6 +441,10 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
     qc_payload = {
         "ok": bool(finite.size > 0),
         "source": fit_source,
+        "native_wave_unit": native_waveunit,
+        "native_to_A_factor": float(to_angstrom),
+        "lsf_geometry": "DETECTOR",
+        "science_1d_lsf_qualified": False,
         "n_finite": int(finite.size),
         "sigma_A_median": float(np.nanmedian(finite)) if finite.size else None,
         "sigma_A_p16": float(np.nanpercentile(finite, 16)) if finite.size else None,
