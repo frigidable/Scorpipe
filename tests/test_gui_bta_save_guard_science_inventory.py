@@ -93,3 +93,15 @@ def test_guard_runs_before_any_filesystem_write():
               and x.name == "_do_save_cfg")
     body = ast.unparse(fn)
     assert body.index("self._validate_science_frames_before_save()") < body.index("self._cfg_path.write_text")
+
+
+def test_regenerate_config_backups_old_yaml_before_overwrite():
+    tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+    cls = next(x for x in tree.body if isinstance(x, ast.ClassDef)
+               and x.name == "LauncherWindow")
+    fn = next(x for x in cls.body if isinstance(x, ast.FunctionDef)
+              and x.name == "_do_make_cfg")
+    src = ast.unparse(fn)
+    assert src.index('if not ac.frames.get(\'obj\')') < src.index('cfg_path.write_text')
+    assert src.index('shutil.copy2(cfg_path, backup)') < src.index('cfg_path.write_text')
+    assert 'config.yaml.bak.' in src
