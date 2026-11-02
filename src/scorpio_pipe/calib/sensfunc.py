@@ -256,7 +256,7 @@ def build_sensfunc(cfg: dict[str, Any], *, standard_spec_path: str | Path, stand
         'reference_context_id': str(ctx.get('context_id') or ''),
         'input_bunit': str(spec.get('bunit') or ''),
         'input_rebnorm': str(hdr0.get('REBNORM') or ''),
-        'input_waveunit': str(hdr0.get('WAVEUNIT') or hdr0.get('CUNIT1') or '').strip(),
+        'input_waveunit': spectral_unit if raw_unit else '',
         'input_wave_step': (
             float(np.median(np.diff(wave)))
             if wave.size >= 2 and np.isfinite(np.diff(wave)).all()
