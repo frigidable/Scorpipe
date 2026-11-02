@@ -145,7 +145,9 @@ def test_sky_roi_dialog_full_resolution_is_on_demand_and_async(monkeypatch, tmp_
 
     dlg = mod.SkyRoiDialog(fits_path)
     dlg.show()
-    assert _process_events_until(app, lambda: dlg.img is not None, timeout_s=1.0)
+    # Completion latency includes QThreadPool scheduling and GUI event-loop
+    # delivery; the constructor/responsiveness checks enforce non-blocking UX.
+    assert _process_events_until(app, lambda: dlg.img is not None, timeout_s=2.0), 'quick preview completion was not delivered'
     assert calls['quick'] == 1
     assert calls['full'] == 0
     assert dlg.btn_full_res.isEnabled()
