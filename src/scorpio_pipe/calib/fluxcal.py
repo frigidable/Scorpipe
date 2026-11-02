@@ -227,7 +227,9 @@ def apply_fluxcal_to_spec1d(science_spec_path: str | Path, *, sensfunc_path: str
     status = _status_from_safe_for(safe_for, telluric_applied=tell_applied)
     if status == CalibrationStatus.ABSOLUTE_TRUSTED.value:
         # Missing/heuristic science airmass is not a valid absolute calibration.
-        if (not sci_atm_applied or not isinstance(sensfunc_qc, dict)
+        if (not sci_atm_applied
+                or str(science_extinction.get("provenance") or "") not in {"header", "derived"}
+                or not isinstance(sensfunc_qc, dict)
                 or not bool(sensfunc_qc.get("extinction_applied"))
                 or str(sensfunc_qc.get("airmass_provenance") or "").startswith("fallback:")
                 or str(sensfunc_qc.get("airmass_provenance") or "") == "missing"):
