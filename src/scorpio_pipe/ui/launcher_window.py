@@ -104,6 +104,10 @@ def _representative_header_from_inspect_df(
         measured = "".join(ch for ch in str(header.get("OBJECT") or "").upper() if ch.isalnum())
         if measured != "".join(ch for ch in selected.upper() if ch.isalnum()):
             raise ValueError("Selected science object does not match FITS OBJECT")
+    # Inspector-derived physical slit selection is allowed as provenance,
+    # not as a change to any on-disk FITS header.
+    if str(slit or "").strip():
+        header["SLIT"] = str(slit).strip()
     return header
 
 
@@ -2690,6 +2694,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         except Exception as exc:
             # A guessed folder for an unknown night/target is less safe
             # than reporting the missing science provenance explicitly.
+            if not getattr(self, "_workdir_user_edited", False):
+                self.edit_work_dir.clear()
             self._log_error(f"Run folder suggestion unavailable: {exc}")
 
     def _populate_objects_from_inspect(self) -> None:
@@ -2706,6 +2712,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         if self.combo_object.count() > 0:
             self.combo_object.setCurrentIndex(0)
         self._update_dispersers_from_inspect()
+        if not getattr(self, "_workdir_user_edited", False):
+            self._suggest_work_dir()
 
     def _update_dispersers_from_inspect(self) -> None:
         self.combo_disperser.blockSignals(True)
