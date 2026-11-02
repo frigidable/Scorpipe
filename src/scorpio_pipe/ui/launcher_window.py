@@ -1572,19 +1572,28 @@ class LauncherWindow(QtWidgets.QMainWindow):
         return msg
 
     def _finish_inspect_ui(self) -> None:
+        # Qt QProgressDialog.closeEvent() emits canceled() even when the
+        # application closes the dialog after successful inspection. Detach
+        # the user-cancellation slot before closing and invalidate its token,
+        # otherwise a completed scan is incorrectly left at "Cancelling…".
+        dlg = self._inspect_progress_dialog
+        self._inspect_progress_dialog = None
+        self._inspect_cancel_event = None
+        self._inspect_job = None
+        if dlg is not None:
+            try:
+                dlg.canceled.disconnect(self._cancel_inspect)
+            except (RuntimeError, TypeError):
+                pass
+            try:
+                dlg.close()
+            except RuntimeError:
+                pass
         try:
             self.btn_inspect.setText("Inspect dataset")
             self.btn_inspect.setEnabled(True)
         except Exception:
             pass
-        try:
-            if self._inspect_progress_dialog is not None:
-                self._inspect_progress_dialog.close()
-        except Exception:
-            pass
-        self._inspect_progress_dialog = None
-        self._inspect_cancel_event = None
-        self._inspect_job = None
         try:
             self._update_enables()
         except Exception:
