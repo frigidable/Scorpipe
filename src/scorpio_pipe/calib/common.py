@@ -207,6 +207,9 @@ def read_spec1d(path: str | Path, *, mode: str = "trace") -> dict[str, Any]:
 
 
 def write_bintable_fits(path: str | Path, *, primary_header: fits.Header | None = None, extname: str, columns: dict[str, Any]) -> Path:
+    # Import before constructing columns: a later local import makes `fits`
+    # a local variable and raises UnboundLocalError at fits.Column.
+    from astropy.io import fits
     cols = []
     for name, arr in columns.items():
         aa = np.asarray(arr)
@@ -219,7 +222,6 @@ def write_bintable_fits(path: str | Path, *, primary_header: fits.Header | None 
             width = max(1, max(len(str(x)) for x in aa))
             fmt = f'{width}A'
         cols.append(fits.Column(name=str(name), format=fmt, array=aa))
-    from astropy.io import fits
     hdul = fits.HDUList([fits.PrimaryHDU(header=(fits.Header() if primary_header is None else primary_header)), fits.BinTableHDU.from_columns(cols, name=str(extname))])
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
