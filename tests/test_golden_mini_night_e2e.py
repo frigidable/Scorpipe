@@ -116,6 +116,9 @@ def test_golden_mini_night_e2e(tmp_path: Path):
         science_unit = str(science_hdul["SCI"].header["BUNIT"])
         assert preview_unit == science_unit
         assert "VAR" in science_hdul and "MASK" in science_hdul
+        # Sky must preserve the explicit source exposure duration; Linearize
+        # uses this for electrons/s and electron^2/s^2, never an assumed 1 s.
+        assert float(science_hdul[0].header["EXPTIME"]) == 300.0
 
     # --- read golden expectations ---
     assert GOLDEN.exists(), f"Golden file missing: {GOLDEN}"
@@ -140,6 +143,7 @@ def test_golden_mini_night_e2e(tmp_path: Path):
     assert lin_prev is not None and Path(lin_prev).exists()
     with fits.open(lin_prev, memmap=False) as hdul:
         m = np.asarray(hdul["MASK"].data, dtype=np.uint16) if "MASK" in hdul else None
+        assert bool(hdul[0].header["NORMEXP"]) is True
     assert m is not None
     mask_nonzero_frac = float(np.count_nonzero(m != 0) / (m.size if m.size else 1.0))
 
