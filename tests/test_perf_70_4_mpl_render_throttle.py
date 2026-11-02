@@ -26,13 +26,14 @@ def test_render_throttle_debounces_bursty_requests() -> None:
     fired: list[float] = []
     throttle = RenderThrottle(app, lambda: fired.append(time.monotonic()), max_fps=10.0, debounce_ms=180)
 
+    # Send a true burst without processing Qt events between requests.
+    # Otherwise a slow Windows event loop can take longer than 180 ms,
+    # legitimately firing the timer before the final request.
     t0 = time.monotonic()
     for _ in range(4):
         throttle.request()
-        app.processEvents(QtCore.QEventLoop.AllEvents, 5)
-        time.sleep(0.02)
 
-    assert not fired, 'debounced burst must not render immediately'
+    assert not fired, 'debounced burst must not render synchronously'
     assert _process_events_until(app, lambda: len(fired) == 1, timeout_s=1.0)
     assert len(fired) == 1
     assert fired[0] - t0 >= 0.14
