@@ -48,17 +48,21 @@ def test_inspect_dataset_supports_progress_and_cancel(monkeypatch, tmp_path: Pat
 
 
 def test_inspect_dataset_final_progress_matches_result(monkeypatch, tmp_path: Path) -> None:
+    # Exercise genuine FITS opening: a four-byte "stub" is not a valid FITS
+    # header and makes this test depend on fragile cross-test monkeypatching.
+    fits = pytest.importorskip("astropy.io.fits")
+    import numpy as np
+
     files = []
     for i in range(5):
         p = tmp_path / f's{i:04d}.fits'
-        p.write_text('stub', encoding='utf-8')
+        hdu = fits.PrimaryHDU(data=np.zeros((2, 4), dtype=np.int16))
+        hdu.header["OBJECT"] = "obj"
+        hdu.header["EXPTIME"] = 1.0
+        hdu.writeto(p)
         files.append(p)
 
     monkeypatch.setattr('scorpio_pipe.inspect.iter_fits_files', lambda _root: iter(files))
-    monkeypatch.setattr(
-        'scorpio_pipe.inspect._open_fits_header_safe',
-        lambda _fp: {'OBJECT': 'obj', 'EXPTIME': 1.0, 'NAXIS1': 4, 'NAXIS2': 2},
-    )
     monkeypatch.setattr('scorpio_pipe.inspect.get_frame_meta', lambda *_a, **_kw: None)
     monkeypatch.setattr('scorpio_pipe.inspect.guess_instrument_from_header', lambda _hdr: 'SCORPIO-2')
     monkeypatch.setattr('scorpio_pipe.inspect.find_nightlog', lambda _root: None)

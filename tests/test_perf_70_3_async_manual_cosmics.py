@@ -81,9 +81,10 @@ def test_manual_cosmics_loads_frames_async_and_keeps_event_loop_alive(monkeypatc
     dlg.show()
 
     assert dt < 0.5, f'CosmicsManualDialog constructor blocked for {dt:.3f}s'
-    assert calls == ['a_clean.fits']
     assert dlg._frame_busy is True
     assert 'Loading' in dlg.lbl_help.text()
+    # A queued QThreadPool job may not begin before the dialog returns.
+    assert _process_events_until(app, lambda: calls == ['a_clean.fits'], timeout_s=1.5), 'first frame worker never started'
 
     fired: list[float] = []
     QtCore.QTimer.singleShot(100, lambda: fired.append(time.monotonic()))
