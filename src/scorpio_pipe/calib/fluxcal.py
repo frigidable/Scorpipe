@@ -52,7 +52,49 @@ def _status_from_safe_for(safe_for: str | None, *, telluric_applied: bool) -> st
     return CalibrationStatus.RELATIVE.value
 
 
-def apply_fluxcal_to_spec1d(science_spec_path: str | Path, *, sensfunc_path: str | Path, telluric_path: str | Path | None = None, standard_qc: dict[str, Any] | None = None, sensfunc_qc: dict[str, Any] | None = None) -> dict[str, Any]:
+def _science_extinction_factor(wave: np.ndarray, hdr: Any,
+                               model: dict[str, Any]) -> np.ndarray:
+    """Above-atmosphere correction for ONE provenance-qualified science airmass.
+
+    k(lambda) is in magnitudes per airmass on an AIR Angstrom grid. Never
+    extrapolate a curve or silently mix air/vacuum and nm/Angstrom.
+    """
+    from scorpio_pipe.calib.common import convert_wavelength_convention
+    x = float(model["airmass"])
+    if not np.isfinite(x) or not (1.0 <= x <= 5.0):
+        raise ValueError("Science airmass must be finite and within [1,5]")
+    medium = str(hdr.get("WAVEREF") or "").strip().lower()
+    unit = str(hdr.get("WAVEUNIT") or hdr.get("CUNIT1") or "").strip().lower()
+    if medium not in {"air", "vacuum"}:
+        raise ValueError("Science extinction requires explicit air/vacuum wavelength medium")
+    if unit in {"angstrom", "a", "aa", "ang", "ångström"}:
+        scale = 1.0
+    elif unit in {"nm", "nanometer", "nanometers"}:
+        scale = 10.0
+    else:
+        raise ValueError("Science extinction requires Angstrom or nm WAVEUNIT")
+    curve_lam = np.asarray(model["wavelength_A"], dtype=float)
+    curve_k = np.asarray(model["k_lambda"], dtype=float)
+    if (curve_lam.ndim != 1 or curve_lam.size < 2 or curve_lam.shape != curve_k.shape
+            or not np.isfinite(curve_lam).all() or not np.isfinite(curve_k).all()
+            or np.any(curve_k < 0) or not np.all(np.diff(curve_lam) > 0)):
+        raise ValueError("Invalid wavelength/attenuation samples in extinction curve")
+    curve_in_medium = convert_wavelength_convention(
+        curve_lam, from_ref="air", to_ref=medium
+    )
+    wave_A = np.asarray(wave, dtype=float) * scale
+    if wave_A.ndim != 1 or not np.isfinite(wave_A).all():
+        raise ValueError("Invalid science extinction wavelengths")
+    k = np.interp(wave_A, curve_in_medium, curve_k, left=np.nan, right=np.nan)
+    if not np.isfinite(k).all():
+        raise ValueError("Extinction curve does not cover entire science wavelength grid")
+    factor = np.power(10.0, 0.4 * k * x)
+    if not np.isfinite(factor).all() or np.any(factor <= 0):
+        raise ValueError("Nonphysical science atmospheric extinction transfer")
+    return factor
+
+
+def apply_fluxcal_to_spec1d(science_spec_path: str | Path, *, sensfunc_path: str | Path, telluric_path: str | Path | None = None, standard_qc: dict[str, Any] | None = None, sensfunc_qc: dict[str, Any] | None = None, science_extinction: dict[str, Any] | None = None) -> dict[str, Any]:
     spec = read_spec1d(science_spec_path, mode='trace')
     # TRACE/FIXED are distinct physical extractions. Historical trace-only
     # inputs remain readable for the numerical calibration API, but may not
@@ -168,12 +210,29 @@ def apply_fluxcal_to_spec1d(science_spec_path: str | Path, *, sensfunc_path: str
         flux = flux / np.clip(transmission, 0.25, np.inf)
         var = var / np.clip(transmission, 0.25, np.inf) ** 2
         tell_applied = True
+    # The standard response was de-extincted in build_sensfunc. The
+    # science counts MUST receive their own atmospheric correction.
+    science_factor = np.ones_like(wave, dtype=float)
+    sci_atm_applied = False
+    if science_extinction is not None:
+        if not isinstance(sensfunc_qc, dict) or not bool(sensfunc_qc.get("extinction_applied")):
+            raise ValueError("Cannot apply science extinction without corrected standard response")
+        science_factor = _science_extinction_factor(wave, spec["header"], science_extinction)
+        flux = flux * science_factor
+        var = var * science_factor**2
+        sci_atm_applied = True
     safe_for = None
     if isinstance(standard_qc, dict):
         safe_for = standard_qc.get('safe_for')
     status = _status_from_safe_for(safe_for, telluric_applied=tell_applied)
-    if status == CalibrationStatus.ABSOLUTE_TRUSTED.value and isinstance(sensfunc_qc, dict):
-        if not bool(sensfunc_qc.get('extinction_applied')) or str(sensfunc_qc.get('airmass_provenance') or '').startswith('fallback:') or str(sensfunc_qc.get('airmass_provenance') or '') == 'missing':
+    if status == CalibrationStatus.ABSOLUTE_TRUSTED.value:
+        # Missing/heuristic science airmass is not a valid absolute calibration.
+        if (not sci_atm_applied
+                or str(science_extinction.get("provenance") or "") not in {"header", "derived"}
+                or not isinstance(sensfunc_qc, dict)
+                or not bool(sensfunc_qc.get("extinction_applied"))
+                or str(sensfunc_qc.get("airmass_provenance") or "").startswith("fallback:")
+                or str(sensfunc_qc.get("airmass_provenance") or "") == "missing"):
             status = CalibrationStatus.ABSOLUTE_APPROX.value
     # The response/transmission are shared deterministic calibrations of
     # two different extracted spectra. Preserve their independent content.
@@ -181,6 +240,7 @@ def apply_fluxcal_to_spec1d(science_spec_path: str | Path, *, sensfunc_path: str
     transfer = 1.0 / np.clip(resp, 1e-30, np.inf)
     if tell_applied:
         transfer = transfer / np.clip(transmission, 0.25, np.inf)
+    transfer = transfer * science_factor
     fixed_payload = None
     if fixed is not None:
         fixed_payload = {
@@ -218,6 +278,15 @@ def apply_fluxcal_to_spec1d(science_spec_path: str | Path, *, sensfunc_path: str
         'calsys_total': calsys_total,
         'flux_unit': 'erg/s/cm2/Angstrom',
         'telluric_applied': tell_applied,
+        'science_extinction_applied': sci_atm_applied,
+        'science_extinction_factor': science_factor,
+        'science_airmass': (
+            float(science_extinction["airmass"]) if sci_atm_applied else None
+        ),
+        'science_airmass_provenance': (
+            str(science_extinction.get("provenance") or "unspecified")
+            if sci_atm_applied else "unavailable"
+        ),
     }
 
 
@@ -230,6 +299,10 @@ def write_fluxcal_products(cfg: dict[str, Any], out_dir: str | Path, *, spec_pay
     with fits.open(in_spec, memmap=False) as hdul:
         hdr0 = hdul[0].header.copy()
         hdr0['BUNIT'] = spec_payload['flux_unit']
+        hdr0['ATMCORR'] = (bool(spec_payload.get('science_extinction_applied', False)),
+                            'Science atmospheric extinction corrected')
+        if spec_payload.get('science_airmass') is not None:
+            hdr0['ATMXSCI'] = (float(spec_payload['science_airmass']), 'Science airmass')
         # After physical flux calibration, data no longer have detector
         # electron/ADU units. Preserve the historical gain/noise cards but
         # remove the detector-only SCI unit-model label.
@@ -348,6 +421,20 @@ def write_fluxcal_products(cfg: dict[str, Any], out_dir: str | Path, *, spec_pay
             tr = np.interp(wave, tel['wave'], tel['trans'], left=1.0, right=1.0)
             sci = sci / np.clip(tr[None, :], 0.25, np.inf)
             var = var / np.clip(tr[None, :], 0.25, np.inf) ** 2
+        if spec_payload.get('science_extinction_applied', False):
+            factor = np.interp(
+                wave, np.asarray(spec_payload['wave'], dtype=float),
+                np.asarray(spec_payload['science_extinction_factor'], dtype=float),
+                left=np.nan, right=np.nan,
+            )
+            if not np.isfinite(factor).all():
+                raise ValueError('2D science wavelengths are not covered by extinction factor')
+            sci = sci * factor[None, :]
+            var = var * factor[None, :]**2
+        hdr0['ATMCORR'] = (bool(spec_payload.get('science_extinction_applied', False)),
+                            'Science atmospheric extinction corrected')
+        if spec_payload.get('science_airmass') is not None:
+            hdr0['ATMXSCI'] = (float(spec_payload['science_airmass']), 'Science airmass')
         hdr0['BUNIT'] = spec_payload['flux_unit']
         if 'SCORPUM' in hdr0:
             del hdr0['SCORPUM']
@@ -394,6 +481,13 @@ def write_fluxcal_products(cfg: dict[str, Any], out_dir: str | Path, *, spec_pay
         'reference_context_id': str(reference_context_id),
         'safe_for': (standard_qc or {}).get('safe_for') if isinstance(standard_qc, dict) else None,
         'telluric_applied': bool(spec_payload['telluric_applied']),
+        'science_extinction_applied': bool(spec_payload.get('science_extinction_applied', False)),
+        'science_airmass': spec_payload.get('science_airmass'),
+        'science_airmass_provenance': spec_payload.get('science_airmass_provenance'),
+        'science_extinction_warning': (
+            None if spec_payload.get('science_extinction_applied', False)
+            else 'Science airmass/extinction not qualified; absolute flux status downgraded'
+        ),
         'systematics': {
             'calsys_rel_median': float(np.nanmedian(spec_payload['calsys_rel'])),
             'calsys_tell_median': float(np.nanmedian(spec_payload['calsys_tell'])),
