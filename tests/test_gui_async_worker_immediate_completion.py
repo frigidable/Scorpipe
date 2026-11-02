@@ -56,3 +56,31 @@ def test_immediate_background_failure_is_delivered() -> None:
     assert _wait_for(app, lambda: bool(failures))
     assert "synthetic-fast-worker-failure" in failures[0]
     assert handle.is_done
+
+
+@pytest.mark.parametrize("raise_in_worker", [False, True])
+def test_worker_survives_deleted_qt_signal_owner(raise_in_worker: bool) -> None:
+    """A cancelled/closing GUI must not crash the background QRunnable."""
+    import threading
+    import shiboken6
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    started = threading.Event()
+    release = threading.Event()
+
+    def job():
+        started.set()
+        if not release.wait(timeout=3.0):
+            raise TimeoutError("test worker was never released")
+        if raise_in_worker:
+            raise ValueError("expected-after-destroy")
+        return "done"
+
+    handle = run_in_thread(job, name="test-deleted-qt-signal-owner")
+    try:
+        assert started.wait(timeout=2.0)
+        shiboken6.delete(handle.worker)
+    finally:
+        release.set()
+    assert handle.wait(timeout_ms=3000)
+    assert handle.is_done
