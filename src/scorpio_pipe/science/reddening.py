@@ -20,6 +20,10 @@ def balmer_decrement_summary(lines_by_name: dict[str, dict[str, Any]], *, intrin
     hb = lines_by_name.get('Hbeta') or lines_by_name.get('Hβ') or lines_by_name.get('Hb')
     if not isinstance(ha, dict) or not isinstance(hb, dict):
         return None
+    # A line with positive numerical flux but no statistically supported
+    # detection must not be used for physical Balmer-decrement inference.
+    if ha.get('detected') is False or hb.get('detected') is False:
+        return None
     try:
         fha = float(ha.get('flux'))
         fhb = float(hb.get('flux'))
