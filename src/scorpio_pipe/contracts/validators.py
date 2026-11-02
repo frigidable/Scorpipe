@@ -327,6 +327,62 @@ def _require_calibration_semantics(stage: str, path: Path, hdr0: Any, *, product
         )
 
 
+def validate_preview2d_product(path: str | Path, *, stage: str) -> None:
+    """Validate a visualization-only SCI image without inventing VAR/MASK.
+
+    A preview is not a science MEF: the median of sky-subtracted frames
+    intentionally has no propagated uncertainty. Require a real 2D SCI,
+    physical SCI units, exposure count and data-model metadata while keeping
+    strict SCI/VAR/MASK validation for actual science products.
+    """
+    p = Path(path)
+    try:
+        from astropy.io import fits
+
+        with fits.open(p, memmap=False) as hdul:
+            hdr = hdul[0].header
+            if "SCI" not in hdul or hdul["SCI"].data is None:
+                raise ProductContractError(
+                    stage=stage, path=str(p), code="PREVIEW_SCI_MISSING",
+                    message="Visualization preview requires a SCI image",
+                )
+            sci = np.asarray(hdul["SCI"].data)
+            sci_hdr = hdul["SCI"].header
+
+            _require_data_model(stage, p, hdr)
+            if sci.ndim != 2 or not sci.size:
+                raise ProductContractError(
+                    stage=stage, path=str(p), code="PREVIEW_SHAPE",
+                    message="Visualization preview SCI must be a nonempty 2D image",
+                )
+            if not np.all(np.isfinite(sci)):
+                raise ProductContractError(
+                    stage=stage, path=str(p), code="PREVIEW_NONFINITE",
+                    message="Visualization preview SCI contains nonfinite values",
+                )
+            bunit = str(sci_hdr.get("BUNIT") or hdr.get("BUNIT") or "").strip()
+            if not is_recognized_sci_bunit(bunit):
+                raise ProductContractError(
+                    stage=stage, path=str(p), code="PREVIEW_BUNIT",
+                    message=f"Unrecognized preview SCI BUNIT: {bunit!r}",
+                )
+            try:
+                nexp = int(hdr.get("NEXP", 0))
+            except (ValueError, TypeError):
+                nexp = 0
+            if nexp < 1:
+                raise ProductContractError(
+                    stage=stage, path=str(p), code="PREVIEW_NEXP",
+                    message="Preview must record NEXP >= 1",
+                )
+    except ProductContractError:
+        raise
+    except Exception as e:
+        raise ProductContractError(
+            stage=stage, path=str(p), code="PREVIEW_CONTRACT", message=str(e),
+        ) from e
+
+
 def validate_mef2d_product(path: str | Path, *, stage: str) -> None:
     """Validate a 2D MEF product: SCI/VAR/MASK."""
 
