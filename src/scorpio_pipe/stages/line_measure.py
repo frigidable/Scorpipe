@@ -36,7 +36,26 @@ def run_line_measure(cfg: dict[str, Any], *, run_root: Path, stage_dir_path: Pat
     fluxcal_qc_path = PRODUCT_CATALOG.best_path(cfg, 'fluxcal_qc_json', run_root=run_root)
     spec = read_spec1d(spec_path, mode='trace')
     calsys = _read_calsys(calsys_path, len(spec['wave']))
-    wave = np.asarray(spec['wave'], dtype=float)
+    # The catalog's rest wavelengths and continuum windows are in AIR Å.
+    # Convert the SCIENCE coordinate grid to Å (without modifying flux density)
+    # and convert the catalog rest wavelengths to the SCIENCE air/vacuum medium.
+    hdr = spec.get('header')
+    norm = str(hdr.get('REBNORM') or '').strip() if hdr is not None else ''
+    medium_declared = str(hdr.get('WAVEREF') or '').strip().lower() if hdr is not None else ''
+    unit_declared = str(hdr.get('WAVEUNIT') or hdr.get('CUNIT1') or '').strip().lower() if hdr is not None else ''
+    if norm == 'COUNT_V1' and (not medium_declared or not unit_declared):
+        raise ValueError('COUNT_V1 line measurements require declared WAVEREF and WAVEUNIT')
+    medium = medium_declared or 'air'
+    if medium not in {'air', 'vacuum'}:
+        raise ValueError(f'Invalid science line-measurement wavelength medium: {medium!r}')
+    unit = unit_declared or 'angstrom'
+    if unit in {'a', 'aa', 'ang', 'angstrom', 'angstroms', 'å', 'ångström'}:
+        unit_to_a = 1.
+    elif unit in {'nm', 'nanometer', 'nanometers'}:
+        unit_to_a = 10.
+    else:
+        raise ValueError(f'Unsupported line-measurement wavelength unit: {unit!r}')
+    wave = np.asarray(spec['wave'], dtype=float) * unit_to_a
     flux = np.asarray(spec['flux'], dtype=float)
     var = np.asarray(spec['var'], dtype=float)
     dq = np.asarray(spec['mask'])
@@ -49,6 +68,7 @@ def run_line_measure(cfg: dict[str, Any], *, run_root: Path, stage_dir_path: Pat
         var,
         mask=dq,
         detection_snr_min=detection_snr_min,
+        wave_ref=medium,
         calsys_rel=calsys['rel'],
         calsys_tell=calsys['tell'],
         calsys_abs=calsys['abs'],
@@ -65,6 +85,10 @@ def run_line_measure(cfg: dict[str, Any], *, run_root: Path, stage_dir_path: Pat
         'lines': rows,
         'reddening': redd,
         'calibration_status': json.loads(fluxcal_qc_path.read_text(encoding='utf-8')).get('status') if fluxcal_qc_path.exists() else None,
+        'wavelength_medium': medium,
+        'wavelength_input_unit': unit,
+        'measurement_wavelength_unit': 'Angstrom',
+        'coordinate_qualification': 'EXPLICIT' if medium_declared and unit_declared else 'LEGACY_ASSUMED_AIR_ANGSTROM',
         'calibration_uncertainty_summary': {
             'median_rel': float(np.nanmedian(calsys['rel'])) if calsys['rel'].size else 0.0,
             'median_tell': float(np.nanmedian(calsys['tell'])) if calsys['tell'].size else 0.0,
