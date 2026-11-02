@@ -24,12 +24,20 @@ def test_initial_lazy_project_page_replaces_selected_placeholder() -> None:
     app = _app()
     win = LauncherWindow()
     try:
-        # The actual application queues this operation on the event loop.
-        win._ensure_page_built(0)
+        # The selected Project page must already be real BEFORE the event
+        # loop starts (the previous queued build could leave Setup visible).
         assert 0 in win._pages_built
         assert win.steps.currentRow() == 0
         assert win.stack.currentWidget() is win.page_project
         assert win.stack.currentWidget() is not win.page_config
+        assert "Loading" not in win.stack.currentWidget().findChild(
+            QtWidgets.QLabel
+        ).text() if win.stack.currentWidget().findChild(QtWidgets.QLabel) else True
+
+        win.show()
+        app.processEvents()
+        assert win.stack.currentWidget() is win.page_project
+        assert win.steps.currentRow() == 0
 
         # Replacing an explicitly selected placeholder must keep that page visible.
         win.steps.setCurrentRow(1)
@@ -40,6 +48,16 @@ def test_initial_lazy_project_page_replaces_selected_placeholder() -> None:
         win.steps.setCurrentRow(0)
         assert win.stack.currentWidget() is win.page_project
         app.processEvents()
+
+        # Test the non-sequential navigation path, including swapped stage
+        # indices (stage "Flat-Fielding" uses page 4 rather than page 3).
+        for row in (3, 2, 4, 0, 1, 0):
+            win.steps.setCurrentRow(row)
+            app.processEvents()
+            page_idx = win._stage_page_index[row]
+            assert win.stack.currentWidget() is win._page_widgets[page_idx]
+            assert page_idx in win._pages_built
+        assert win.stack.currentWidget() is win.page_project
     finally:
         win.close()
 
