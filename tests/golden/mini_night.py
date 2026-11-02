@@ -27,7 +27,9 @@ class MiniNight:
     cfg_path: Path
 
 
-def _sc2_header(*, imagetyp: str, obj: str, ny: int, nx: int) -> "fits.Header":
+def _sc2_header(
+    *, imagetyp: str, obj: str, ny: int, nx: int, exptime_s: float
+) -> "fits.Header":
     # Local import to keep tests import-time light.
     from astropy.io import fits
 
@@ -37,6 +39,10 @@ def _sc2_header(*, imagetyp: str, obj: str, ny: int, nx: int) -> "fits.Header":
     h["INSTRUME"] = "SCORPIO-2"
     h["OBJECT"] = str(obj)
     h["IMAGETYP"] = str(imagetyp)
+    # Explicit frame acquisition duration. Linearize converts SCI to
+    # electrons/second and VAR to electrons^2/second^2; a synthetic science
+    # exposure must carry a physically meaningful positive EXPTIME.
+    h["EXPTIME"] = (float(exptime_s), "Exposure time (s)")
     h["RATE"] = 185.0
     h["GAIN"] = 0.62
     h["NODE"] = "E"
@@ -99,13 +105,13 @@ def make_mini_night(tmp_path: Path) -> MiniNight:
     bias_level = 1000.0
     rn = 3.0
     for i in range(3):
-        h = _sc2_header(imagetyp="bias", obj=f"bias{i+1}", ny=ny, nx=nx)
+        h = _sc2_header(imagetyp="bias", obj=f"bias{i+1}", ny=ny, nx=nx, exptime_s=0.0)
         img = bias_level + rng.normal(0.0, rn, size=(ny, nx))
         _write_fits(data_dir / f"bias_{i+1:02d}.fits", img, h)
 
     # --- flat frames ---
     for i in range(3):
-        h = _sc2_header(imagetyp="flat", obj=f"flat{i+1}", ny=ny, nx=nx)
+        h = _sc2_header(imagetyp="flat", obj=f"flat{i+1}", ny=ny, nx=nx, exptime_s=10.0)
         grad = 1.0 + 0.15 * (x / float(nx - 1))
         img = bias_level + 5000.0 * grad[None, :] + rng.normal(0.0, 10.0, size=(ny, nx))
         _write_fits(data_dir / f"flat_{i+1:02d}.fits", img, h)
@@ -113,7 +119,7 @@ def make_mini_night(tmp_path: Path) -> MiniNight:
     # --- neon (arc) frames ---
     line_x = np.array([14, 28, 44, 60, 78, 96, 112], dtype=float)
     for i in range(2):
-        h = _sc2_header(imagetyp="neon", obj=f"neon{i+1}", ny=ny, nx=nx)
+        h = _sc2_header(imagetyp="neon", obj=f"neon{i+1}", ny=ny, nx=nx, exptime_s=30.0)
         spec = np.zeros(nx, dtype=float)
         for mu in line_x:
             spec += 700.0 * _gauss1d(x, mu, 1.2)
@@ -128,7 +134,7 @@ def make_mini_night(tmp_path: Path) -> MiniNight:
     obj_bump = 25.0 * _gauss1d(x, 64.0, 6.0)
 
     for i in range(2):
-        h = _sc2_header(imagetyp="object", obj=f"obj{i+1}", ny=ny, nx=nx)
+        h = _sc2_header(imagetyp="object", obj=f"obj{i+1}", ny=ny, nx=nx, exptime_s=300.0)
         img = bias_level + 120.0 + sky_spec[None, :] + rng.normal(0.0, 4.0, size=(ny, nx))
         img[28:36, :] += obj_bump[None, :]
         _write_fits(data_dir / f"obj_{i+1:02d}.fits", img, h)
