@@ -477,9 +477,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         self.steps.currentRowChanged.connect(self._on_step_changed)
 
-        # Build the initial Project page after the event loop starts.
-        # This keeps the splash screen time minimal on slow/frozen environments.
-        QtCore.QTimer.singleShot(0, lambda: self._ensure_page_built(0))
+        # Do not defer the initial Project page: a queued placeholder
+        # replacement can leave the selected 01 Project row displaying
+        # "Loading… 02 Setup" until another selection event is delivered.
+        # The Project page is intentionally lightweight and is constructed
+        # before the first window show.
 
         # Dock: log (collapsible)
         self.log_view = QtWidgets.QPlainTextEdit()
@@ -542,7 +544,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._build_statusbar_widgets()
         self._install_shortcuts()
 
-        # Initial state
+        # Initial state: resolve the selected page by widget identity.
+        # QStackedWidget may select its next child when a placeholder is
+        # removed, so never infer displayed page from step-row highlighting.
+        self._ensure_page_built(0)
+        self.stack.setCurrentWidget(self.page_project)
         self._update_enables()
         # refresh derived UI state
         try:
@@ -628,7 +634,15 @@ class LauncherWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
-        if was_current:
+        selected_page = None
+        try:
+            row = int(self.steps.currentRow())
+            page_map = getattr(self, "_stage_page_index", [])
+            if 0 <= row < len(page_map):
+                selected_page = int(page_map[row])
+        except (ValueError, TypeError, RuntimeError):
+            pass
+        if was_current or selected_page == i:
             self.stack.setCurrentWidget(w)
 
         try:
@@ -651,6 +665,15 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._pages_built.add(i)
         except Exception:
             pass
+
+        # A completed Night Inspector can precede the first visit to Setup.
+        # Populate its selectors only when the lazy Setup page actually
+        # exists. Never build Setup as a side effect of inspecting a night.
+        if i == 1 and self._inspect is not None:
+            try:
+                self._populate_objects_from_inspect()
+            except Exception as exc:
+                self._log_exception(exc)
 
         # Update ...
         try:
@@ -1725,6 +1748,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
     def _jump_to_object_from_overview(self, item: QtWidgets.QListWidgetItem) -> None:
         """Select the object in Config page when user double-clicks it in overview."""
         try:
+            # The overview is on Project, so Setup may not exist yet.
+            self._ensure_page_built(1)
             obj = item.data(QtCore.Qt.ItemDataRole.UserRole) or item.text()
             obj = str(obj).split("  (")[0].strip()
             if hasattr(self, "combo_object"):
@@ -1905,8 +1930,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
     def _use_setup_from_frame(self, sel: SelectedFrame) -> None:
         """Fill Config page setup fields from a selected inspected frame."""
         try:
+            # A fresh Project/Frames launch has not built the lazy Setup
+            # page yet. Build it before accessing the target controls;
+            # otherwise the first "Use this setup" click is silently lost.
+            self._ensure_page_built(1)
             if not hasattr(self, "combo_object"):
-                return
+                raise RuntimeError("Setup page controls were not initialized")
             if sel.object:
                 self.combo_object.setCurrentText(sel.object)
 
@@ -2616,6 +2645,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.edit_work_dir.setText(str(base))
 
     def _populate_objects_from_inspect(self) -> None:
+        # Project and Night Inspector are usable before lazy Setup is built.
+        # The result is stored in self._inspect and synchronized when Setup
+        # is materialized by _ensure_page_built(1).
+        if 1 not in self._pages_built:
+            return
         self.combo_object.blockSignals(True)
         self.combo_object.clear()
         if self._inspect is not None:
@@ -8768,11 +8802,18 @@ class LauncherWindow(QtWidgets.QMainWindow):
     def _on_step_changed(self, idx: int) -> None:
         try:
             i = int(idx)
-            page_i = self._stage_page_index[i] if hasattr(self, "_stage_page_index") else i
-            self._ensure_page_built(int(page_i))
-            self.stack.setCurrentIndex(int(page_i))
-        except Exception:
-            pass
+            page_map = getattr(self, "_stage_page_index", [])
+            if not 0 <= i < len(page_map):
+                return
+            page_i = int(page_map[i])
+            self._ensure_page_built(page_i)
+            page = self._page_widgets.get(page_i)
+            if page is not None and self.stack.indexOf(page) >= 0:
+                # Widget identity is stable even if placeholder insertion
+                # has changed the QStackedWidget numerical ordering.
+                self.stack.setCurrentWidget(page)
+        except Exception as exc:
+            self._log_exception(exc)
         self._refresh_statusbar()
         self._sync_outputs_action_state()
         self._update_outputs_tool_context()
