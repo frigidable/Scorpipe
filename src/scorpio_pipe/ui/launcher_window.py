@@ -1739,6 +1739,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
     def _jump_to_object_from_overview(self, item: QtWidgets.QListWidgetItem) -> None:
         """Select the object in Config page when user double-clicks it in overview."""
         try:
+            # The overview is on Project, so Setup may not exist yet.
+            self._ensure_page_built(1)
             obj = item.data(QtCore.Qt.ItemDataRole.UserRole) or item.text()
             obj = str(obj).split("  (")[0].strip()
             if hasattr(self, "combo_object"):
@@ -1919,8 +1921,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
     def _use_setup_from_frame(self, sel: SelectedFrame) -> None:
         """Fill Config page setup fields from a selected inspected frame."""
         try:
+            # A fresh Project/Frames launch has not built the lazy Setup
+            # page yet. Build it before accessing the target controls;
+            # otherwise the first "Use this setup" click is silently lost.
+            self._ensure_page_built(1)
             if not hasattr(self, "combo_object"):
-                return
+                raise RuntimeError("Setup page controls were not initialized")
             if sel.object:
                 self.combo_object.setCurrentText(sel.object)
 
