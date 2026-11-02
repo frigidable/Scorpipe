@@ -505,13 +505,18 @@ def _validate_task_products(cfg: dict[str, Any] | str, task: str | Path, out_dir
     """
 
     if out_dir is None:
+        # Legacy two-argument API: (task_name, stage_output_dir).
         cfg_dict: dict[str, Any] = {}
         task_name = str(cfg)
-        out_dir = Path(task)
+        contract_dir = Path(task)
+        run_root = contract_dir.parent
     else:
+        # Engine API: (cfg, task_name, run_root). The stage entrypoint
+        # writes to its own directory, not to the run root.
         cfg_dict = cfg if isinstance(cfg, dict) else {}
         task_name = str(task)
-
+        run_root = Path(out_dir)
+        contract_dir = None
 
     # Keep existing gating semantics: only enforce when the stage declares a
     # non-trivial contract kind.
@@ -527,37 +532,41 @@ def _validate_task_products(cfg: dict[str, Any] | str, task: str | Path, out_dir
     if kind in ("", "none"):
         return
 
-    
+    if contract_dir is None:
+        if task_name in ("superneon", "lineid_prepare", "wavesolution"):
+            # These stages share the disperser-aware wavesolution directory.
+            contract_dir = wavesol_dir(cfg_dict, run_root=run_root)
+        else:
+            stage_key = str(getattr(tinfo, "stage_key", None) or tinfo.key)
+            contract_dir = stage_dir(run_root, stage_key)
 
     # Stage-level contract kinds (cross-product invariants).
     # These run *in addition* to per-product validation.
     if kind == "calib_bias_triplet":
         from scorpio_pipe.contracts.validators import validate_calib_bias_triplet
 
-        validate_calib_bias_triplet(out_dir, stage=str(tinfo.key))
+        validate_calib_bias_triplet(contract_dir, stage=str(tinfo.key))
     elif kind == "calib_flat":
         from scorpio_pipe.contracts.validators import validate_calib_flat
 
-        validate_calib_flat(out_dir, stage=str(tinfo.key))
+        validate_calib_flat(contract_dir, stage=str(tinfo.key))
     elif kind == "calib_neon":
         from scorpio_pipe.contracts.validators import validate_calib_neon
 
-        validate_calib_neon(out_dir, stage=str(tinfo.key))
+        validate_calib_neon(contract_dir, stage=str(tinfo.key))
 
 # Validate exactly the declared product keys for this stage.
     try:
         from scorpio_pipe.catalog.products import CATALOG as PRODUCT_CATALOG
 
-        validate_root = Path(out_dir)
-        # Product patterns are expressed relative to the run root; callers pass
-        # the task-specific output directory here, so validate against its parent.
-        if validate_root.name:
-            validate_root = validate_root.parent
+        # Catalog patterns (@stage(...), @manifest, @qc) all resolve from
+        # the run root. Never pass its parent, or products may be skipped
+        # because validate_products() treats absent files as optional.
         PRODUCT_CATALOG.validate_products(
             cfg_dict,
             stage_key=str(tinfo.key),
             product_keys=tuple(tinfo.product_keys or ()),
-            run_root=validate_root,
+            run_root=run_root,
         )
     except Exception:
         # Raise into the engine wrapper (it will wrap non-ProductContractError into ProductContractError)
