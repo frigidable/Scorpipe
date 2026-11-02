@@ -1661,6 +1661,9 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
         allow_lam_shape_adjust = True
 
     preview_stack = []
+    # Preview is a visualization-only median of sky-subtracted SCI frames.
+    # All contributing arrays must have compatible physical units.
+    preview_bunits: set[str] = set()
 
     try:
         if lam_map is None:
@@ -2298,6 +2301,7 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                     pass
 
                 preview_stack.append(skysub)
+                preview_bunits.add(str(hdr0.get("BUNIT", "") or "").strip())
 
                 # metrics for qc_report compatibility
                 # pixel scale: convert δλ to pixels using median dλ/dx at center row
@@ -2463,6 +2467,7 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                         )
 
                         preview_stack.append(sci0)
+                        preview_bunits.add(str(hdr0.get("BUNIT", "") or "").strip())
                         per_exp.append(
                             {
                                 "stem": stem,
@@ -2499,9 +2504,17 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
 
         # preview
         if preview_stack:
+            if len(preview_bunits) != 1 or not next(iter(preview_bunits)):
+                raise RuntimeError(
+                    "Cannot combine Sky preview SCI frames with missing or different BUNIT: "
+                    + repr(sorted(preview_bunits))
+                )
             stack = np.nanmedian(np.stack(preview_stack, axis=0), axis=0).astype(np.float32)
             hdr0 = fits.Header()
-            hdr0["BUNIT"] = (str(lam_hdr.get("BUNIT", "ADU")), "Data unit")
+            # Derive BUNIT from the processed sky-subtracted SCI frames, NOT
+            # from lambda_map (whose BUNIT describes wavelengths).
+            hdr0["BUNIT"] = (next(iter(preview_bunits)), "Data unit of sky-subtracted SCI")
+            hdr0["SCORPPRV"] = (True, "Visualization-only preview, not science MEF")
             hdr0["NEXP"] = (int(len(preview_stack)), "Number of exposures (median)")
             hdr0 = add_provenance(hdr0, cfg, stage="sky")
             # `write_sci_var_mask` uses keyword-only args for VAR/MASK.
