@@ -3025,7 +3025,23 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 slit=slit,
                 binning=binning,
             )
-            cfg_path.write_text(ac.to_yaml_text(), encoding="utf-8")
+            candidate_yaml = ac.to_yaml_text()
+            if not ac.frames.get("obj"):
+                raise ValueError(
+                    f"AutoConfig returned 0 SCI frames for {obj} / {disp} / "
+                    f"{slit} / {binning}; refusing to overwrite config.yaml"
+                )
+            if cfg_path.is_file():
+                # Create new config regenerates the entire YAML. Retain the
+                # existing science decisions and manual edits before replacing
+                # it, particularly after a BTA manifest-role recovery.
+                import shutil
+
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                backup = cfg_path.with_name(f"config.yaml.bak.{stamp}")
+                shutil.copy2(cfg_path, backup)
+                self._log_info(f"Preserved prior config: {backup}")
+            cfg_path.write_text(candidate_yaml, encoding="utf-8")
             self._log_info(f"Wrote config: {cfg_path}")
             self.edit_cfg_path.setText(str(cfg_path))
             self._load_config(cfg_path)
@@ -3224,6 +3240,60 @@ class LauncherWindow(QtWidgets.QMainWindow):
         # Keep the detached Outputs tool window in sync.
         self._update_outputs_tool_context()
 
+    def _validate_science_frames_before_save(self) -> bool:
+        """Fail closed when Inspector proves SCI frames exist but GUI YAML has none.
+
+        This guards against persisting manifest-masked frame lists back
+        into config.yaml, as discovered on the real 306-frame BTA night.
+        It does not invent or silently assign science or calibration data.
+        """
+        cfg = self._cfg or {}
+        if not isinstance(cfg, dict):
+            return False
+        inspect = getattr(self, "_inspect", None)
+        if inspect is None or getattr(inspect, "table", None) is None:
+            return True
+        table = inspect.table
+        if getattr(table, "empty", True):
+            return True
+
+        frames = cfg.get("frames") or {}
+        if not isinstance(frames, dict):
+            return True
+        if frames.get("obj"):
+            return True
+
+        obj = str(cfg.get("object") or "").strip()
+        if not obj:
+            return True
+        setup = frames.get("__setup__") or cfg.get("instrument") or {}
+        if not isinstance(setup, dict):
+            setup = {}
+
+        from scorpio_pipe.autocfg import build_autoconfig
+        try:
+            candidates = build_autoconfig(
+                table,
+                Path(str(cfg.get("data_dir") or self.edit_data_dir.text())),
+                obj,
+                Path(str(cfg.get("work_dir") or self.edit_work_dir.text())),
+                disperser=str(setup.get("disperser") or "") or None,
+                slit=str(setup.get("slit") or "") or None,
+                binning=str(setup.get("binning") or "") or None,
+            )
+        except (ValueError, KeyError):
+            return True
+
+        n_sci = len(candidates.frames.get("obj") or [])
+        if n_sci <= 0:
+            return True
+        self._log_error(
+            f"Refusing to save config.yaml with 0 SCI frames: Inspector "
+            f"found {n_sci} for {obj}. Regenerate the config from Setup "
+            "and inspect the frame inventory before saving."
+        )
+        return False
+
     def _do_save_cfg(self) -> None:
         # Resolve target path.
         if not self._cfg_path:
@@ -3273,6 +3343,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
             return
 
         if not self._sync_cfg_from_editor():
+            return
+        if not self._validate_science_frames_before_save():
             return
 
         txt = self.editor_yaml.toPlainText()
