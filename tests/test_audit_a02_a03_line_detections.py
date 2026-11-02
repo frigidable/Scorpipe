@@ -133,3 +133,30 @@ def test_balmer_reddening_never_uses_explicitly_undetected_hbeta():
         "Hbeta": {"flux": 1., "detected": False},
     })
     assert result is None
+
+
+def test_line_measure_stage_passes_dq_and_configured_snr(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from scorpio_pipe.stages import line_measure as stage
+
+    wave, flux, var, mask = _spectrum()
+    flux[(wave >= 4998.) & (wave <= 5002.)] += 10.
+    flux[wave == 5000.] = 10000.
+    mask[wave == 5000.] = COSMIC
+    observed = {"wave": wave, "flux": flux, "var": var, "mask": mask}
+    monkeypatch.setattr(stage, "read_spec1d", lambda *_args, **_kwargs: observed)
+    monkeypatch.setattr(stage, "DEFAULT_LINES", (SPEC,))
+    monkeypatch.setattr(stage, "PRODUCT_CATALOG", SimpleNamespace(
+        best_path=lambda _cfg, key, *, run_root: tmp_path / (key + ".fits")
+    ))
+    out = tmp_path / "line_measure_output"
+    stage.run_line_measure(
+        {"science": {"redshift": 0., "line_detection_snr_min": 3.}},
+        run_root=tmp_path, stage_dir_path=out,
+    )
+    payload = json.loads((out / "science_lines.json").read_text())
+    row = payload["lines"][0]
+    assert row["detected"] is True
+    assert row["n_excluded_window"] == 1
+    assert row["flux"] == pytest.approx(40.)
