@@ -4789,7 +4789,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         # locale for doubles
         self._force_dot_locale(self.spin_cosmics_k)
-        for w in (
+        # Do not shadow the root page widget named 'w'. On PySide6, losing
+        # its last Python reference destroys its child QVBoxLayout mid-build.
+        for spin in (
             self.dspin_cosmics_mad_scale,
             self.dspin_cosmics_min_mad,
             self.dspin_cosmics_max_frac,
@@ -4800,7 +4802,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.dspin_cosmics_lap_k_scale,
             self.dspin_cosmics_lap_k_min,
         ):
-            self._force_dot_locale(w)
+            self._force_dot_locale(spin)
 
         pl.addWidget(self._mk_basic_advanced_tabs(basic, adv))
         pl.addWidget(self._mk_stage_apply_row("cosmics"))
@@ -4826,14 +4828,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
         left_layout.addStretch(1)
 
         # Outputs are shown in a detached tool window (toolbar: Outputs).
-        try:
-            lay.addWidget(left, 1)
-        except RuntimeError:
-            # Defensive: if Qt ownership got confused and the layout was deleted, rebuild it.
-            lay = QtWidgets.QVBoxLayout(w)
-            lay.setSpacing(12)
-            lay.addWidget(left, 1)
-
+        # A deleted layout is a programming error; do not attempt to create
+        # a second layout on a possibly destroyed or unrelated QWidget.
+        lay.addWidget(left, 1)
 
         self.btn_run_cosmics.clicked.connect(self._do_run_cosmics)
         self.btn_qc_cosmics.clicked.connect(self._open_qc_viewer)
