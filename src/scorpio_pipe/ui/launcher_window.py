@@ -477,9 +477,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         self.steps.currentRowChanged.connect(self._on_step_changed)
 
-        # Build the initial Project page after the event loop starts.
-        # This keeps the splash screen time minimal on slow/frozen environments.
-        QtCore.QTimer.singleShot(0, lambda: self._ensure_page_built(0))
+        # Do not defer the initial Project page: a queued placeholder
+        # replacement can leave the selected 01 Project row displaying
+        # "Loading… 02 Setup" until another selection event is delivered.
+        # The Project page is intentionally lightweight and is constructed
+        # before the first window show.
 
         # Dock: log (collapsible)
         self.log_view = QtWidgets.QPlainTextEdit()
@@ -542,7 +544,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._build_statusbar_widgets()
         self._install_shortcuts()
 
-        # Initial state
+        # Initial state: resolve the selected page by widget identity.
+        # QStackedWidget may select its next child when a placeholder is
+        # removed, so never infer displayed page from step-row highlighting.
+        self._ensure_page_built(0)
+        self.stack.setCurrentWidget(self.page_project)
         self._update_enables()
         # refresh derived UI state
         try:
@@ -628,7 +634,15 @@ class LauncherWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
-        if was_current:
+        selected_page = None
+        try:
+            row = int(self.steps.currentRow())
+            page_map = getattr(self, "_stage_page_index", [])
+            if 0 <= row < len(page_map):
+                selected_page = int(page_map[row])
+        except (ValueError, TypeError, RuntimeError):
+            pass
+        if was_current or selected_page == i:
             self.stack.setCurrentWidget(w)
 
         try:
@@ -8768,11 +8782,18 @@ class LauncherWindow(QtWidgets.QMainWindow):
     def _on_step_changed(self, idx: int) -> None:
         try:
             i = int(idx)
-            page_i = self._stage_page_index[i] if hasattr(self, "_stage_page_index") else i
-            self._ensure_page_built(int(page_i))
-            self.stack.setCurrentIndex(int(page_i))
-        except Exception:
-            pass
+            page_map = getattr(self, "_stage_page_index", [])
+            if not 0 <= i < len(page_map):
+                return
+            page_i = int(page_map[i])
+            self._ensure_page_built(page_i)
+            page = self._page_widgets.get(page_i)
+            if page is not None and self.stack.indexOf(page) >= 0:
+                # Widget identity is stable even if placeholder insertion
+                # has changed the QStackedWidget numerical ordering.
+                self.stack.setCurrentWidget(page)
+        except Exception as exc:
+            self._log_exception(exc)
         self._refresh_statusbar()
         self._sync_outputs_action_state()
         self._update_outputs_tool_context()
