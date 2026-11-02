@@ -33,7 +33,22 @@ BALMER_WINDOWS_A = [
 ]
 
 
-def _robust_spline_fit(x: np.ndarray, y: np.ndarray, w: np.ndarray | None = None) -> tuple[np.ndarray, dict[str, Any]]:
+def _robust_spline_fit(
+    x: np.ndarray,
+    y: np.ndarray,
+    w: np.ndarray | None = None,
+    *,
+    eval_x: np.ndarray | None = None,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Fit using accepted pixels, then evaluate on the requested complete grid.
+
+    Training coordinates and evaluation coordinates are distinct. In particular,
+    masked standard-star pixels must be excluded from fitting without removing
+    corresponding wavelength bins from the saved response function.
+    """
+    eval_grid = np.asarray(x if eval_x is None else eval_x, dtype=float)
+    if eval_grid.ndim != 1 or not np.isfinite(eval_grid).all():
+        raise ValueError("Sensitivity evaluation wavelengths must be finite 1D coordinates")
     xx = np.asarray(x, dtype=float)
     yy = np.asarray(y, dtype=float)
     good = np.isfinite(xx) & np.isfinite(yy)
@@ -47,18 +62,18 @@ def _robust_spline_fit(x: np.ndarray, y: np.ndarray, w: np.ndarray | None = None
     if ww is not None:
         ww = ww[good]
     if xx.size < 8:
-        return np.full_like(x, np.nanmedian(yy) if yy.size else 1.0, dtype=float), {"method": "constant"}
+        return np.full_like(eval_grid, np.nanmedian(yy) if yy.size else 1.0, dtype=float), {"method": "constant"}
     order = np.argsort(xx)
     xx = xx[order]; yy = yy[order]; ww = ww[order] if ww is not None else None
     try:
         from scipy.interpolate import UnivariateSpline  # type: ignore
         s = max(1.0, float(xx.size)) * float(np.nanmedian(np.abs(yy - np.nanmedian(yy))) + 1e-6) ** 2
         spl = UnivariateSpline(xx, yy, w=ww, s=s)
-        fit = np.asarray(spl(np.asarray(x, dtype=float)), dtype=float)
+        fit = np.asarray(spl(eval_grid), dtype=float)
         return fit, {"method": "UnivariateSpline", "s": float(s)}
     except Exception:
         co = np.polyfit(xx, yy, deg=min(5, max(1, xx.size - 1)), w=ww)
-        fit = np.polyval(co, np.asarray(x, dtype=float))
+        fit = np.polyval(co, eval_grid)
         return fit, {"method": "polyfit", "degree": int(len(co) - 1)}
 
 
@@ -155,16 +170,25 @@ def build_sensfunc(cfg: dict[str, Any], *, standard_spec_path: str | Path, stand
     snr = np.abs(flux) / np.sqrt(np.clip(var, 1e-12, np.inf))
     low_sn = snr < float((((cfg.get('fluxcal') if isinstance(cfg.get('fluxcal'), dict) else {}) or {}).get('sensfunc_min_snr', 5.0) or 5.0))
     bad_mask = np.asarray(mask) != 0
-    finite = np.isfinite(flux) & np.isfinite(var) & np.isfinite(ref_flux) & (ref_flux > 0) & (flux > 0)
+    finite = np.isfinite(flux) & np.isfinite(var) & (var > 0) & np.isfinite(ref_flux) & (ref_flux > 0) & (flux > 0)
     fit_mask = finite & (~feature_mask) & (~telluric_mask) & (~low_sn) & (~bad_mask)
     raw_ratio = (flux * ext_corr) / ref_flux
     frac_unc = np.sqrt(np.clip(var, 0, np.inf)) / np.clip(np.abs(flux), 1e-12, np.inf)
     yfit = np.log(np.clip(raw_ratio, 1e-30, np.inf))
     weights = 1.0 / np.clip(frac_unc, 1e-4, np.inf)
-    model_log, fit_meta = _robust_spline_fit(wave[fit_mask], yfit[fit_mask], w=weights[fit_mask])
+    n_fit = int(np.count_nonzero(fit_mask))
+    if n_fit < 8:
+        raise ValueError(f"Sensitivity fit has only {n_fit} valid standard-star pixels; need at least 8")
+    model_log, fit_meta = _robust_spline_fit(
+        wave[fit_mask], yfit[fit_mask], w=weights[fit_mask], eval_x=wave
+    )
+    if model_log.shape != wave.shape or not np.isfinite(model_log).all():
+        raise ValueError("Sensitivity model failed to cover the complete finite wavelength grid")
     response_abs = np.exp(model_log)
+    if not np.isfinite(response_abs).all() or np.any(response_abs <= 0):
+        raise ValueError('Sensitivity response is nonfinite or nonpositive')
     clean = fit_mask & np.isfinite(response_abs) & (response_abs > 0)
-    pivot = float(np.nanmedian(response_abs[clean])) if np.any(clean) else 1.0
+    pivot = float(np.nanmedian(response_abs[clean]))
     response_rel = response_abs / max(pivot, 1e-30)
     resid = yfit[fit_mask] - np.interp(wave[fit_mask], wave, model_log)
     sigma_ln = float(np.nanmedian(np.abs(resid - np.nanmedian(resid))) * 1.4826) if resid.size else 0.15
@@ -177,7 +201,10 @@ def build_sensfunc(cfg: dict[str, Any], *, standard_spec_path: str | Path, stand
         'reference_units': str(ref_units),
         'reference_waveref': str(ref_waveref),
         'airmass': (float(airmass) if airmass is not None else None),
-        'fit_points': int(np.count_nonzero(fit_mask)),
+        'fit_points': n_fit,
+        'model_evaluation_points': int(wave.size),
+        'fit_wavelength_min': float(np.min(wave[fit_mask])),
+        'fit_wavelength_max': float(np.max(wave[fit_mask])),
         'airmass_provenance': str(airmass_prov),
         'extinction_applied': bool(extinction_applied),
         'extinction_reference': safe_json(extinction_meta),

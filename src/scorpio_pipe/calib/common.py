@@ -207,19 +207,46 @@ def read_spec1d(path: str | Path, *, mode: str = "trace") -> dict[str, Any]:
 
 
 def write_bintable_fits(path: str | Path, *, primary_header: fits.Header | None = None, extname: str, columns: dict[str, Any]) -> Path:
+    # Import before constructing columns: a later local import makes `fits`
+    # a local variable and raises UnboundLocalError at fits.Column.
+    from astropy.io import fits
     cols = []
     for name, arr in columns.items():
         aa = np.asarray(arr)
-        if aa.dtype.kind in 'if':
-            fmt = 'D' if aa.dtype.kind == 'f' and aa.dtype.itemsize > 4 else 'E'
-            if aa.dtype.kind == 'i':
+        if aa.ndim != 1:
+            raise ValueError(f"FITS table column {name!r} must be 1D")
+        if aa.dtype.kind == 'f':
+            fmt = 'D' if aa.dtype.itemsize > 4 else 'E'
+        elif aa.dtype.kind == 'i':
+            if aa.dtype.itemsize <= 2:
+                aa = aa.astype(np.int16)
+                fmt = 'I'
+            elif aa.dtype.itemsize <= 4:
                 fmt = 'J'
+            else:
+                fmt = 'K'
+        elif aa.dtype.kind == 'u':
+            # P0: u8 FIT_MASK/LOWSN_MASK are numeric flags, never ASCII '0'/'1'.
+            if aa.dtype.itemsize == 1:
+                fmt = 'B'
+            elif aa.dtype.itemsize <= 2:
+                aa = aa.astype(np.int32)
+                fmt = 'J'
+            elif aa.dtype.itemsize <= 4:
+                aa = aa.astype(np.int64)
+                fmt = 'K'
+            else:
+                if aa.size and np.max(aa) > np.iinfo(np.int64).max:
+                    raise ValueError(f"Column {name!r} has uint64 values beyond FITS signed K range")
+                aa = aa.astype(np.int64)
+                fmt = 'K'
+        elif aa.dtype.kind == 'b':
+            fmt = 'L'
         else:
             aa = aa.astype(str)
-            width = max(1, max(len(str(x)) for x in aa))
+            width = max(1, max((len(str(x)) for x in aa), default=1))
             fmt = f'{width}A'
         cols.append(fits.Column(name=str(name), format=fmt, array=aa))
-    from astropy.io import fits
     hdul = fits.HDUList([fits.PrimaryHDU(header=(fits.Header() if primary_header is None else primary_header)), fits.BinTableHDU.from_columns(cols, name=str(extname))])
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
