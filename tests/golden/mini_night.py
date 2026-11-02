@@ -186,6 +186,10 @@ def make_mini_night(tmp_path: Path) -> MiniNight:
             # keep 2D model modest for stability
             "poly_deg_x": 4,
             "poly_deg_y": 2,
+            # The test detector has only 64 spatial rows; the production
+            # trace_min_pts default (120) is geometrically impossible here.
+            # Retain a meaningful >=32-row trace requirement per lamp line.
+            "trace_min_pts": 32,
         },
         "sky": {
             "failure_policy": "strict",
