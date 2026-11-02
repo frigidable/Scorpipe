@@ -157,7 +157,9 @@ def test_sky_roi_dialog_full_resolution_is_on_demand_and_async(monkeypatch, tmp_
     dt = time.monotonic() - t0
 
     assert dt < 0.5, f'Full-resolution request blocked for {dt:.3f}s'
-    assert calls['full'] == 1
+    # QThreadPool submission is asynchronous. The loader is not required to
+    # start before click() returns, particularly after other GUI tests.
+    assert _process_events_until(app, lambda: calls['full'] == 1, timeout_s=1.5), 'full-resolution worker never started'
     assert _process_events_until(app, lambda: bool(fired), timeout_s=0.8), 'event loop stalled while full resolution was loading'
     assert _process_events_until(app, lambda: dlg._render_mode == 'full', timeout_s=2.0), 'full resolution never finished'
     assert not dlg.btn_full_res.isEnabled()
