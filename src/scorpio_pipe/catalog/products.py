@@ -294,6 +294,7 @@ class ProductCatalog:
         from scorpio_pipe.contracts.validators import (
             validate_lambda_map_product,
             validate_mef2d_product,
+            validate_preview2d_product,
             validate_calibrated_mef2d_product,
             validate_calibrated_spec1d_product,
             validate_calibration_systematics_product,
@@ -305,6 +306,9 @@ class ProductCatalog:
 
         if k == "mef":
             validate_mef2d_product(path, stage=stage)
+            return
+        if k == "preview2d":
+            validate_preview2d_product(path, stage=stage)
             return
         if k == "spec1d":
             validate_spec1d_product(path, stage=stage)
@@ -1131,10 +1135,11 @@ S(
             "sky_preview_fits",
             "fits",
             ["@stage(sky)/preview.fits"],
-            "mef",
+            "preview2d",
             dm,
             "science",
             optional=True,
+            description="Visualization-only median SCI image; no propagated VAR/MASK",
         ),
         S(
             "sky_preview_png",
