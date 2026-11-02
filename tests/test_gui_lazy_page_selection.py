@@ -61,6 +61,46 @@ def test_initial_lazy_project_page_replaces_selected_placeholder() -> None:
         win.close()
 
 
+def test_use_setup_from_frame_materializes_setup_without_prior_navigation() -> None:
+    from types import SimpleNamespace
+
+    app = _app()
+    win = LauncherWindow()
+    try:
+        assert 1 not in win._pages_built
+        assert not hasattr(win, "combo_object")
+        win._use_setup_from_frame(SimpleNamespace(
+            object="N2146sat", disperser="VPHG1200B",
+            slit="1.2", binning="1x2",
+        ))
+        app.processEvents()
+        assert 1 in win._pages_built
+        assert win.steps.currentRow() == 1
+        assert win.stack.currentWidget() is win.page_config
+        assert win.combo_object.currentText() == "N2146sat"
+        assert win.combo_disperser.currentText() == "VPHG1200B"
+        assert win.combo_slit.currentText() == "1.2"
+        assert win.combo_binning.currentText() == "1x2"
+    finally:
+        win.close()
+
+
+def test_overview_doubleclick_initializes_setup_before_setting_object() -> None:
+    app = _app()
+    win = LauncherWindow()
+    try:
+        assert 1 not in win._pages_built
+        item = QtWidgets.QListWidgetItem("N2146sat  (11)")
+        item.setData(256, "N2146sat")
+        win._jump_to_object_from_overview(item)
+        app.processEvents()
+        assert win.steps.currentRow() == 1
+        assert win.stack.currentWidget() is win.page_config
+        assert win.combo_object.currentText() == "N2146sat"
+    finally:
+        win.close()
+
+
 @pytest.mark.parametrize("mode", ["dark", "light"])
 def test_qss_uses_css_colors_and_not_inline_svg_data_urls(mode: str) -> None:
     app = _app()
