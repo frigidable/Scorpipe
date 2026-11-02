@@ -244,6 +244,38 @@ def measure_line(
     return result
 
 
+def _window_overlap_partners(
+    spec: LineSpec, catalogue: tuple[LineSpec, ...], *, redshift: float,
+    wave_ref: str,
+) -> list[str]:
+    """Conservative diagnostic of non-disjoint integrated-line windows.
+
+    Overlapping windows are not proof of astrophysical blending, but a
+    window-integrated component cannot be certified as independently
+    measured unless another component has been modeled and subtracted.
+    """
+    from scorpio_pipe.calib.common import convert_wavelength_convention
+    medium = str(wave_ref).strip().lower()
+    if medium not in {"air", "vacuum"}:
+        raise ValueError("Line blending requires declared air/vacuum medium")
+    names = []
+    def center(s: LineSpec) -> float:
+        return float(convert_wavelength_convention(
+            np.array([s.rest_wavelength], dtype=float),
+            from_ref="air", to_ref=medium,
+        )[0]) * (1.0 + float(redshift))
+    focal = center(spec)
+    lo1, hi1 = focal - spec.window_half_width, focal + spec.window_half_width
+    for other in catalogue:
+        if other.name == spec.name:
+            continue
+        oc = center(other)
+        lo2, hi2 = oc - other.window_half_width, oc + other.window_half_width
+        if min(hi1, hi2) > max(lo1, lo2):
+            names.append(other.name)
+    return sorted(set(names))
+
+
 def measure_lines(
     wave: np.ndarray,
     flux: np.ndarray,
@@ -258,16 +290,35 @@ def measure_lines(
     detection_snr_min: float = 3.0,
     wave_ref: str = "air",
 ) -> list[dict[str, Any]]:
-    return [
-        measure_line(
+    requested = tuple(lines)
+    # Even when the caller requests only Halpha, the unmodeled [NII] doublet
+    # must be considered in physical eligibility. Catalogue entries describe
+    # potential confounders, not necessarily actual detections.
+    catalogue = DEFAULT_LINES + tuple(
+        s for s in requested if s.name not in {d.name for d in DEFAULT_LINES}
+    )
+    results: list[dict[str, Any]] = []
+    for spec in requested:
+        row = measure_line(
             wave, flux, var,
-            calsys_rel=calsys_rel, calsys_tell=calsys_tell, calsys_abs=calsys_abs,
-            spec=spec, redshift=redshift, mask=mask,
-            detection_snr_min=detection_snr_min,
+            calsys_rel=calsys_rel, calsys_tell=calsys_tell,
+            calsys_abs=calsys_abs, spec=spec, redshift=redshift,
+            mask=mask, detection_snr_min=detection_snr_min,
             wave_ref=wave_ref,
         )
-        for spec in lines
-    ]
+        partners = _window_overlap_partners(
+            spec, catalogue, redshift=redshift, wave_ref=wave_ref
+        )
+        row["fit_method"] = "continuum_subtracted_window_integral"
+        row["blend_partners"] = partners
+        row["blend_flag"] = bool(partners)
+        row["physical_flux_eligible"] = bool(row.get("detected")) and not partners
+        row["flux_interpretation"] = (
+            "BLENDED_DIAGNOSTIC_ONLY" if partners
+            else "ISOLATED_WINDOW_DIAGNOSTIC"
+        )
+        results.append(row)
+    return results
 
 
 def write_lines_csv(path: str | Path, rows: list[dict[str, Any]]) -> Path:
