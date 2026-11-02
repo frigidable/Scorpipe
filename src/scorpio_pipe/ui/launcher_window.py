@@ -666,6 +666,15 @@ class LauncherWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
+        # A completed Night Inspector can precede the first visit to Setup.
+        # Populate its selectors only when the lazy Setup page actually
+        # exists. Never build Setup as a side effect of inspecting a night.
+        if i == 1 and self._inspect is not None:
+            try:
+                self._populate_objects_from_inspect()
+            except Exception as exc:
+                self._log_exception(exc)
+
         # Update ...
         try:
             self._update_enables()
@@ -2636,6 +2645,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.edit_work_dir.setText(str(base))
 
     def _populate_objects_from_inspect(self) -> None:
+        # Project and Night Inspector are usable before lazy Setup is built.
+        # The result is stored in self._inspect and synchronized when Setup
+        # is materialized by _ensure_page_built(1).
+        if 1 not in self._pages_built:
+            return
         self.combo_object.blockSignals(True)
         self.combo_object.clear()
         if self._inspect is not None:
