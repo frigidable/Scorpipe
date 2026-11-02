@@ -39,8 +39,8 @@ def test_halpha_and_nii_are_flagged_not_component_fluxes():
     assert "[NII]6548" in ha["blend_partners"]
     assert "[NII]6583" in ha["blend_partners"]
     assert ha["flux_interpretation"]=="BLENDED_DIAGNOSTIC_ONLY"
-    assert ha["physical_flux_eligible"] is False
-    assert results["[NII]6548"]["physical_flux_eligible"] is False
+    assert ha["blend_safe_for_physical_ratios"] is False
+    assert results["[NII]6548"]["blend_safe_for_physical_ratios"] is False
 
 
 def test_sii_doublet_is_not_claimed_as_two_independently_measured_fluxes():
@@ -49,7 +49,7 @@ def test_sii_doublet_is_not_claimed_as_two_independently_measured_fluxes():
                           ("[SII]6731","[SII]6716")):
         row=results[name]
         assert partner in row["blend_partners"]
-        assert row["physical_flux_eligible"] is False
+        assert row["blend_safe_for_physical_ratios"] is False
 
 
 def test_isolated_oiii_can_be_reported_as_diagnostic_flux():
@@ -58,7 +58,7 @@ def test_isolated_oiii_can_be_reported_as_diagnostic_flux():
     assert row["detected"]
     assert row["blend_flag"] is False
     assert row["blend_partners"]==[]
-    assert row["physical_flux_eligible"] is True
+    assert row["blend_safe_for_physical_ratios"] is True
 
 
 def test_halpha_alone_still_considers_unrequested_nii_catalog():
@@ -66,7 +66,7 @@ def test_halpha_alone_still_considers_unrequested_nii_catalog():
     result=_measure(select=only)[0]
     assert result["name"]=="Halpha"
     assert set(result["blend_partners"]) >= {"[NII]6548","[NII]6583"}
-    assert result["physical_flux_eligible"] is False
+    assert result["blend_safe_for_physical_ratios"] is False
 
 
 def test_balmer_decrement_rejected_for_blended_halpha():
@@ -79,8 +79,8 @@ def test_balmer_decrement_rejected_for_blended_halpha():
 def test_independently_fitted_fluxes_can_be_used_for_balmer_decrement():
     # Legacy external fitted-line results do not carry a negative eligibility
     # flag; only the new window-integral measurement explicitly vetoes blends.
-    fitted={"Halpha":{"flux":8.58,"detected":True,"physical_flux_eligible":True},
-            "Hbeta":{"flux":3.,"detected":True,"physical_flux_eligible":True}}
+    fitted={"Halpha":{"flux":8.58,"detected":True,"blend_safe_for_physical_ratios":True},
+            "Hbeta":{"flux":3.,"detected":True,"blend_safe_for_physical_ratios":True}}
     summary=balmer_decrement_summary(fitted)
     assert summary is not None
     assert summary["line_ratio_Ha_Hb"] == pytest.approx(2.86)
@@ -92,4 +92,4 @@ def test_blend_status_independent_of_requested_air_vacuum_medium():
     result=measure_lines(w,f,v, calsys_rel=None,calsys_tell=None,calsys_abs=None,
                          lines=select,wave_ref="vacuum")[0]
     assert "[NII]6548" in result["blend_partners"]
-    assert result["physical_flux_eligible"] is False
+    assert result["blend_safe_for_physical_ratios"] is False
