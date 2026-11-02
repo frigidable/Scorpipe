@@ -1,29 +1,32 @@
-# BTA field test — Setup path readability
+# BTA field test — compact, readable Setup filesystem paths
 
-On Windows, Scorpipe 8.0.5's Setup page kept its left panel
-initially 430px wide, then used a QFormLayout with its filesystem
-editors placed only in the narrow second column. In the real
-N2146sat run, this made the current workspace and Run folder
-visually impossible to verify.
+Real Windows test with Scorpipe 8.0.5 and N2146sat showed two independent
+geometry defects. The initial 430px Setup pane clipped the filesystem
+editor; the first PR #69 version improved width but introduced a second
+tiny, low-contrast line duplicating the same path. Users confirmed that
+the fields remain too low in vertical height, even after widening.
 
-This patch gives the two path editors full form-width rows. Each
-has its label above the editor, a browse button, and a word-wrapped,
-mouse-selectable full path readback with a matching tooltip.
-Programmatic changes (Suggest, Open, Initialize) update the readback
-without marking the field as manually edited. The Setup side of the
-QSplitter grows as the window grows (initial ~700px, min 570px)
-without eliminating the editable YAML panel. The action controls for
-Initialize run, Switch and Open also have nontrivial minimum widths.
+The current design retains the full-width editor rows and flexible
+splitter (initial ~700px, minimum 570px), but removes both repeated
+gray path readbacks. Each Qt QLineEdit is **36px tall**, with 36px
+browse buttons aligned to the field. The full exact path remains
+available via keyboard selection (Ctrl+A/C), horizontal scrolling,
+and a tooltip synchronized on every text change. QLineEdit itself
+retains its native filename editing and undo behavior; there is no
+extra second text source that can become stale.
 
-Expected real BTA workspace:
+The buttons Initialize run, Switch and Open have nontrivial minimum
+widths, preserving readability at Windows display scaling.
+
+Real BTA workspace:
 
     C:\Users\frigi\Documents\PhD\ScorpipeWork
 
-Expected generated run:
+Generated run:
 
     C:\Users\frigi\Documents\PhD\ScorpipeWork\06_12_2024\N2146sat_VPHG1200B_01
 
-PySide6 offscreen tests validate true Qt widget widths and readbacks.
-These tests need the GUI extra (Windows), because default Linux
-continuous integration does not install PySide6. No input FITS is
-modified by this work.
+Qt offscreen tests assert path editor widths, exact 36px heights,
+absence of duplicate labels, tooltip synchronization and action
+button widths. Windows screenshot verification still required.
+No raw FITS, saved config, stage math or pipeline science is modified.
