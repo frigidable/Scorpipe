@@ -207,8 +207,8 @@ def measure_line(
             sigma_val = float(np.sqrt(max(0.0, np.sum((w - centroid) ** 2 * weight) / weight_sum)))
             sigma = sigma_val if np.isfinite(sigma_val) else None
     fwhm = sigma_to_fwhm(sigma)
-    sigma_kms = sigma_to_velocity_dispersion(spec.rest_wavelength, sigma)
-    velocity = velocity_from_centroid(spec.rest_wavelength, centroid) if centroid is not None else None
+    sigma_kms = sigma_to_velocity_dispersion(rest_in_grid, sigma)
+    velocity = velocity_from_centroid(rest_in_grid, centroid) if centroid is not None else None
     cont_level = float(np.nanmedian(cont))
     ew = float(np.sum(net / cont * dl)) if np.isfinite(cont_level) and np.all(cont > 0) else float('nan')
     result = {
