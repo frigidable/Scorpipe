@@ -72,7 +72,10 @@ def make_mini_night(tmp_path: Path) -> MiniNight:
 
     from astropy.io import fits  # noqa: F401
 
-    work_dir = tmp_path / "work"
+    # Match the production run-folder/passport contract. The night folder
+    # follows DD_MM_YYYY and the run folder follows <object>_<disperser>_<NN>.
+    # Keep all synthetic products under pytest's isolated tmp_path.
+    work_dir = tmp_path / "16_12_2025" / "mini_night_VPHG1200@540_01"
     data_dir = tmp_path / "data"
     resources_dir = tmp_path / "resources"
     work_dir.mkdir(parents=True, exist_ok=True)
