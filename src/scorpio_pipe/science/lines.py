@@ -115,6 +115,7 @@ def measure_line(
     redshift: float = 0.0,
     mask: np.ndarray | None = None,
     detection_snr_min: float = 3.0,
+    wave_ref: str = "air",
 ) -> dict[str, Any]:
     """Diagnostic integrated line measurement (diagonal-noise approximation).
 
@@ -145,7 +146,17 @@ def measure_line(
     rel = np.zeros_like(wave) if calsys_rel is None else np.asarray(calsys_rel, dtype=float)
     tel = np.zeros_like(wave) if calsys_tell is None else np.asarray(calsys_tell, dtype=float)
     absu = np.zeros_like(wave) if calsys_abs is None else np.asarray(calsys_abs, dtype=float)
-    center = float(spec.rest_wavelength) * (1.0 + float(redshift))
+    # Catalog wavelengths in DEFAULT_LINES and LineSpec are standard AIR
+    # Angstroms; vacuum science grids require a physical conversion BEFORE z.
+    from scorpio_pipe.calib.common import convert_wavelength_convention
+    medium = str(wave_ref).strip().lower()
+    if medium not in {"air", "vacuum"}:
+        raise ValueError(f"Line science wavelength medium is invalid: {wave_ref!r}")
+    rest_in_grid = float(convert_wavelength_convention(
+        np.asarray([spec.rest_wavelength], dtype=float),
+        from_ref="air", to_ref=medium,
+    )[0])
+    center = rest_in_grid * (1.0 + float(redshift))
     in_line = (wave >= center - float(spec.window_half_width)) & (wave <= center + float(spec.window_half_width))
     if np.count_nonzero(in_line) < 3:
         return {'name': spec.name, 'detected': False, 'reason': 'insufficient_sampling'}
@@ -203,6 +214,9 @@ def measure_line(
     result = {
         'name': spec.name,
         'rest_wavelength': float(spec.rest_wavelength),
+        'rest_wavelength_air_A': float(spec.rest_wavelength),
+        'rest_wavelength_in_grid_A': rest_in_grid,
+        'wave_ref': medium,
         'expected_wavelength': float(center),
         'centroid': centroid,
         'velocity_kms': velocity,
@@ -242,6 +256,7 @@ def measure_lines(
     redshift: float = 0.0,
     mask: np.ndarray | None = None,
     detection_snr_min: float = 3.0,
+    wave_ref: str = "air",
 ) -> list[dict[str, Any]]:
     return [
         measure_line(
@@ -249,6 +264,7 @@ def measure_lines(
             calsys_rel=calsys_rel, calsys_tell=calsys_tell, calsys_abs=calsys_abs,
             spec=spec, redshift=redshift, mask=mask,
             detection_snr_min=detection_snr_min,
+            wave_ref=wave_ref,
         )
         for spec in lines
     ]
