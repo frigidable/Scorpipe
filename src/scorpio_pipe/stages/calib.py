@@ -1630,8 +1630,13 @@ def build_superflat(
     sigma_clip = float(calib_cfg.get("flat_sigma_clip", 0.0) or 0.0)
     log.info("Superflat settings: combine=%s, sigma_clip=%g", combine, sigma_clip)
 
-    # P0-C1: choose MasterBias matching the flat readout/geometry.
-    sel = resolve_master_bias(c, fits.Header(h0), sci_shape=d0.shape)
+    # A bias frame from the same CCD geometry but a different RATE/GAIN
+    # must never be silently subtracted from flats. The default resolver
+    # may otherwise fall back to a degraded geometry-only match.
+    sel = resolve_master_bias(
+        c, fits.Header(h0), sci_shape=d0.shape,
+        policy_override="strict",
+    )
     superbias_path = sel.sci_path
     if not superbias_path.exists():
         raise RuntimeError(
@@ -1639,10 +1644,27 @@ def build_superflat(
             "Run the 'superbias' stage first or set calib.superbias_path in config."
         )
 
+    # A legacy superbias file can exist without a master_bias_index.json.
+    # Accept that path only when the actual FITS signature is identical.
+    # In no case allow degraded cross-readout subtraction in SuperFlat.
+    sb_sig = FrameSignature.from_path(superbias_path)
+    diffs_sb = ref_sig.diff(sb_sig)
+    if diffs_sb:
+        raise RuntimeError(
+            "Superflat blocked: flat/master-bias readout mismatch. "
+            "Never subtract a bias taken with another GAIN/RATE, even if "
+            "the pixel dimensions match.\n"
+            + format_signature_mismatch(
+                expected=ref_sig,
+                got=sb_sig,
+                path=superbias_path,
+            )
+        )
+
     superflat, hdr, _stats = _build_superflat_core(
         flat_paths=flat_paths,
         superbias_path=superbias_path,
-        allow_readout_diff=bool(sel.degraded),
+        allow_readout_diff=False,
         combine=combine,
         sigma_clip=sigma_clip,
     )
