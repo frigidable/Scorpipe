@@ -122,7 +122,7 @@ class PreflightGateDialog(QtWidgets.QDialog):
         )
 
     def _compute_counts(self) -> dict[str, int | None]:
-        counts = self._night.get("counts") if isinstance(self._night.get("counts"), dict) else {}
+        counts = self._night.get("summary") if isinstance(self._night.get("summary"), dict) else {}
         total = counts.get("n_total_fits") if isinstance(counts.get("n_total_fits"), int) else None
         q_entries = self._qidx.get("entries") if isinstance(self._qidx.get("entries"), list) else []
         n_error = sum(1 for e in q_entries if str((e or {}).get("severity") or "").upper() == "ERROR")
@@ -151,7 +151,23 @@ class PreflightGateDialog(QtWidgets.QDialog):
         counts = self._compute_counts()
 
         lines: list[str] = []
-        lines.append("What will be processed")
+        selection = self._report.get("selection_summary")
+        if isinstance(selection, dict):
+            lines.append("Selected-frame gate (this run)")
+            lines.append("-")
+            lines.append(f"Status: {selection.get('status', 'UNKNOWN')}")
+            lines.append(f"Assigned: {selection.get('n_assigned', 0)}")
+            lines.append(
+                f"OK: {selection.get('n_ok', 0)}  "
+                f"WARN: {selection.get('n_warn', 0)}  "
+                f"ERROR: {selection.get('n_error', 0)}"
+            )
+            lines.append(
+                f"Night-wide status (audit only): "
+                f"{self._report.get('night_status', 'UNKNOWN')}"
+            )
+            lines.append("")
+        lines.append("Night-wide FITS inventory (not necessarily selected)")
         lines.append("-")
         if counts.get("total") is not None:
             lines.append(f"Total FITS: {counts['total']}")
@@ -227,8 +243,9 @@ class PreflightGateDialog(QtWidgets.QDialog):
             it = it if isinstance(it, dict) else {}
             sev = str(it.get("severity") or "")
             code = str(it.get("code") or "")
-            cnt = str(it.get("count") or "")
-            msg = str(it.get("message") or "")
+            cnt = str(it.get("n") or it.get("count") or "")
+            samples = it.get("sample_paths") or []
+            msg = str(it.get("message") or ", ".join(str(p) for p in samples))
             table.setItem(r, 0, QtWidgets.QTableWidgetItem(sev))
             table.setItem(r, 1, QtWidgets.QTableWidgetItem(code))
             table.setItem(r, 2, QtWidgets.QTableWidgetItem(cnt))
@@ -272,6 +289,10 @@ class PreflightGateDialog(QtWidgets.QDialog):
             table.setItem(r, 3, QtWidgets.QTableWidgetItem(ticket))
 
         lay.addWidget(table, 1)
+        lay.addWidget(QtWidgets.QLabel(
+            "Night-wide quarantine inventory; unassigned-frame errors are audit-only "
+            "when the selected-frame gate is active."
+        ))
 
         if len(items2) > 500:
             lay.addWidget(
