@@ -535,7 +535,12 @@ def build_superneon(cfg: dict[str, Any], *, run_root: Path | None = None) -> Sup
                 "Run the 'superbias' stage first or set calib.superbias_path in config.yaml."
             )
         superbias, superbias_hdr = _load_fits(superbias_path)
-        superbias_sig = FrameSignature.from_fits_primary(superbias_path)
+        # Reuse the already-read primary header. FrameSignature has no
+        # from_fits_primary() API; the same strict header+shape check is used
+        # by Superflat, including node/rate/gain/ROI/binning provenance.
+        superbias_sig = FrameSignature.from_header(
+            superbias_hdr, fallback_shape=superbias.shape
+        )
 
     # --- load all neon frames + strict FrameSignature checks (Block 03) ---
     frames_raw: list[np.ndarray] = []
