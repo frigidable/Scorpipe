@@ -2545,8 +2545,6 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
         # --- quicklook for lambda_map (navigator-friendly) ---
         lambda_map_png = outdir / "lambda_map.png"
         try:
-            from astropy.io import fits
-            import numpy as np
             from scorpio_pipe.io.quicklook import write_quicklook_png
 
             with fits.open(lambda_map_fits, memmap=False) as hdul:
