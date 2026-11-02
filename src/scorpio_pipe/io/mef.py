@@ -194,7 +194,7 @@ def write_sci_var_mask(
         _apply_cards(shdr, grid.to_wcs_cards())
     # Propagate key unit metadata to SCI for self-describing products.
     # (VAR/MASK have different physical units, so we do not copy BUNIT there.)
-    for k in ("BUNIT", "WAVEUNIT", "WAVEREF"):
+    for k in ("BUNIT", "WAVEUNIT", "WAVEREF", "PIXGEOM", "MAPALGN"):
         if k in phdr and k not in shdr:
             try:
                 shdr[k] = phdr[k]
