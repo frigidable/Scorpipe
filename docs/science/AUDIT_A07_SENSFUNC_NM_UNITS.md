@@ -40,3 +40,8 @@ coordinate units should not be promoted to qualified science.
 
 Source: FITS spectral-coordinate representation,
 Greisen et al. (2006) doi:10.1051/0004-6361:20053818.
+
+CI verification note: this stacked branch is tested against the current
+`main` integration snapshot and must be retargeted to its parent feature
+branch before review/merge. The code and associated source provenance
+remain unchanged by this administrative check.
