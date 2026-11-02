@@ -2195,12 +2195,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
             help_text: str,
             editor: QtWidgets.QLineEdit,
             browse: QtWidgets.QToolButton,
-        ) -> QtWidgets.QLabel:
-            """Keep long filesystem paths readable at normal Windows scaling.
+        ) -> None:
+            """Single, comfortably tall path editor spanning the whole form.
 
-            Standard two-column QFormLayout rows leave ~90px for the
-            edit control after the label and browse button. Give a path
-            the entire form width, with a selectable wrapped readback.
+            QLineEdit already supports horizontal scrolling and Ctrl+A/C.
+            Keep the complete current path in a tooltip, without a second
+            small/low-contrast label duplicating the same value.
             """
             host = QtWidgets.QWidget(g_setup)
             host.setSizePolicy(
@@ -2208,8 +2208,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 QtWidgets.QSizePolicy.Preferred,
             )
             column = QtWidgets.QVBoxLayout(host)
-            column.setContentsMargins(0, 4, 0, 4)
-            column.setSpacing(5)
+            column.setContentsMargins(0, 2, 0, 2)
+            column.setSpacing(6)
             column.addWidget(self._param_label(label, help_text))
 
             row = QtWidgets.QHBoxLayout()
@@ -2219,32 +2219,15 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 QtWidgets.QSizePolicy.Fixed,
             )
             editor.setMinimumWidth(0)
-            browse.setFixedWidth(36)
+            editor.setFixedHeight(36)
+            editor.setAccessibleName(label)
+            browse.setFixedSize(36, 36)
+            editor.setToolTip(editor.text())
+            editor.textChanged.connect(editor.setToolTip)
             row.addWidget(editor, 1)
             row.addWidget(browse, 0)
             column.addLayout(row)
-
-            full = QtWidgets.QLabel(host)
-            full.setObjectName(
-                "workspacePathReadback" if label == "Workspace root"
-                else "runFolderPathReadback"
-            )
-            full.setWordWrap(True)
-            full.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-            full.setSizePolicy(
-                QtWidgets.QSizePolicy.Expanding,
-                QtWidgets.QSizePolicy.Preferred,
-            )
-            full.setStyleSheet("color: #A0A0A0; font-size: 11px;")
-            full.setText(editor.text())
-            full.setToolTip(editor.text())
-            editor.setToolTip(editor.text())
-            editor.textChanged.connect(full.setText)
-            editor.textChanged.connect(full.setToolTip)
-            editor.textChanged.connect(editor.setToolTip)
-            column.addWidget(full)
             fl.addRow(host)
-            return full
 
         # Object
         row_obj = QtWidgets.QHBoxLayout()
@@ -2289,7 +2272,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.edit_workspace_root.setText("")
         self.btn_pick_workspace_root = QtWidgets.QToolButton(text="…")
         self.btn_pick_workspace_root.setCursor(QtCore.Qt.PointingHandCursor)
-        self.lbl_workspace_root_full = _add_full_width_path(
+        _add_full_width_path(
             "Workspace root",
             "Верхняя база workspace.\nLayout: <Night>/<Object>_<Disperser>_<Run>/<NN_stage>/.\nЗдесь живут все проекты.",
             self.edit_workspace_root,
@@ -2331,7 +2314,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         )
         self.btn_pick_work_dir = QtWidgets.QToolButton(text="…")
         self.btn_pick_work_dir.setCursor(QtCore.Qt.PointingHandCursor)
-        self.lbl_run_folder_full = _add_full_width_path(
+        _add_full_width_path(
             "Run folder",
             "Текущий run-folder (root для стадий).\nВнутри создаются папки <NN_stage>/.\nМетаданные — в manifest/.",
             self.edit_work_dir,
