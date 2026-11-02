@@ -294,7 +294,7 @@ class RunHandle(Generic[T]):
         return self._done.wait(timeout=float(timeout_ms) / 1000.0)
 
 
-def _emit_worker_signal(signal: QtCore.SignalInstance, value: object) -> bool:
+def _emit_worker_signal(worker: WorkerSignals[T], signal_name: str, value: object) -> bool:
     """Return False if Qt already deleted the signal owner during shutdown.
 
     A background QRunnable may outlive its QApplication/receiver in a failed
@@ -303,7 +303,7 @@ def _emit_worker_signal(signal: QtCore.SignalInstance, value: object) -> bool:
     the same deleted QObject.
     """
     try:
-        signal.emit(value)
+        getattr(worker, signal_name).emit(value)
         return True
     except RuntimeError as exc:
         msg = str(exc)
@@ -342,7 +342,7 @@ class _PoolRunnable(QtCore.QRunnable):
                 outcome = "cancelled"
             elif h.is_stale:
                 outcome = "stale"
-            elif not _emit_worker_signal(h.worker.finished, res):
+            elif not _emit_worker_signal(h.worker, "finished", res):
                 outcome = "stale"
         except Exception:
             tb = traceback.format_exc()
@@ -352,7 +352,7 @@ class _PoolRunnable(QtCore.QRunnable):
                 outcome = "stale"
             else:
                 outcome = "failed"
-                if not _emit_worker_signal(h.worker.failed, tb):
+                if not _emit_worker_signal(h.worker, "failed", tb):
                     outcome = "stale"
         finally:
             _finish_job(h, outcome=outcome)
