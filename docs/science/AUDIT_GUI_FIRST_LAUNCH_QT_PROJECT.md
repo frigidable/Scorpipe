@@ -19,6 +19,9 @@ spurious cancel issue in Draft #66.
   before the window is shown.
 - Navigate between stages via stored QWidget identity, not positional
   widget indices. The existing Flat/Cosmics page swap is covered.
+- Materialize the lazy Setup page before `Use this setup` from the
+  Frames Browser or object double-click from the Project overview.
+  Previously those callbacks could silently fail on the first click.
 - A new Qt offscreen test validates immediate visibility and navigation.
 - Headless tests run the production navigation method using deliberately
   scrambled widget ordering.
