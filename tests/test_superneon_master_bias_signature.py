@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+import numpy as np
 
 fits = pytest.importorskip("astropy.io.fits")
 
@@ -58,3 +59,29 @@ def test_superneon_rejects_different_bias_and_arc_readout(tmp_path: Path) -> Non
         ValueError, match="SuperNeon requires superbias to match neon frames"
     ):
         build_superneon(mn.cfg, run_root=mn.work_dir)
+
+
+def test_superneon_baseline_accepts_configured_quantile() -> None:
+    from scorpio_pipe.stages.superneon import _estimate_baseline_bins
+
+    spectrum = np.tile(np.arange(32, dtype=float), 4)
+    lower = _estimate_baseline_bins(spectrum, bin_size=32, q=0.1, smooth_bins=1)
+    upper = _estimate_baseline_bins(spectrum, bin_size=32, q=0.9, smooth_bins=1)
+
+    assert lower.shape == spectrum.shape
+    assert np.all(np.isfinite(lower))
+    assert np.all(upper > lower)
+
+
+def test_superneon_peak_cap_prefers_strongest_in_pixel_order() -> None:
+    from scorpio_pipe.stages.superneon import _find_peaks_simple
+
+    profile = np.zeros(101, dtype=float)
+    profile[[10, 30, 50, 70, 90]] = [3, 9, 4, 7, 6]
+
+    result = _find_peaks_simple(
+        profile, min_height=1.0, prominence=1.0, distance=5, max_peaks=3
+    )
+    assert result.tolist() == [30, 70, 90]
+    with pytest.raises(ValueError, match="max_peaks"):
+        _find_peaks_simple(profile, max_peaks=0)
