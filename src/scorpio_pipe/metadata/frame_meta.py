@@ -879,7 +879,12 @@ def _parse_scorpio1(h: Mapping[str, Any], *, policy: MetadataPolicy, strict: boo
             context={"MODE": mode, "DISPERSE": _get(h, "DISPERSE", "GRISM", "GRATING")},
         )
 
-    slit_width, slit_src = _parse_slit_width_sc1(h, strict=strict)
+    # Imaging exposures may have no spectral slit (e.g. FILTERS=U/R/I).
+    # Keep the slit width mandatory for spectral exposures, including mask_circ.
+    is_imaging = mode.strip().lower() in {"image", "imaging", "photometry", "photometric"}
+    slit_width, slit_src = _parse_slit_width_sc1(h, strict=strict and not is_imaging)
+    if is_imaging and slit_src == "missing":
+        slit_src = "not_applicable:imaging"
     b.prov["slit_width_arcsec"] = slit_src
 
     slit_pos = b.get_float("slit_pos", ["SLITPOS"], default=None)
