@@ -134,3 +134,30 @@ def test_config_source_without_any_manifest_is_still_unmodified(tmp_path):
     assert len(cfg["frames"]["obj"]) == 7
     assert cfg["_project_manifest"]["has_manifest"] is False
     assert cfg["_project_manifest"]["frames_source"] == "config"
+
+
+def test_full_load_config_does_not_erase_yaml_frames_after_layout_creates_template(tmp_path):
+    from scorpio_pipe.config import load_config
+
+    raw, run, candidate = _fixture(tmp_path)
+    path = run / "config.yaml"
+    # This reproduces the actual GUI-generated on-disk YAML before the
+    # work layout and project manifest are installed.
+    path.write_text(yaml.safe_dump({
+        "data_dir": str(raw),
+        "object": "N2146sat",
+        "work_dir": str(run),
+        "frames": candidate["frames"],
+    }, sort_keys=False), encoding="utf-8")
+    assert not (run / "project_manifest.yaml").exists()
+    effective = load_config(path)
+    assert (run / "project_manifest.yaml").exists()
+    assert len(effective["frames"]["obj"]) == 7
+    assert len(effective["frames"]["neon"]) == 1
+    assert len(effective["frames"]["bias"]) == 1
+    assert len(effective["frames"]["flat"]) == 1
+    assert effective["_project_manifest"]["frames_source"] == "config"
+    # Ensure the raw source and saved YAML were not silently rewritten.
+    saved = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert len(saved["frames"]["obj"]) == 7
+    assert (raw / "s22800607.fts").read_bytes() == b"raw-immutable"
