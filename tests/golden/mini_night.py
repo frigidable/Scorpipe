@@ -161,6 +161,10 @@ def make_mini_night(tmp_path: Path) -> MiniNight:
                 "slit": "1.0",
                 "binning": "1x1",
                 "shape": f"{ny}x{nx}",
+                # FrameSignature.from_setup() requires the same CCD readout
+                # token present in the synthetic SCORPIO-2 FITS headers.
+                # NODE=E, RATE=185.0, GAIN=0.62 (e-/ADU).
+                "readout": "nodeE_rate185.0_gain0.6200",
             },
         },
         "calib": {
