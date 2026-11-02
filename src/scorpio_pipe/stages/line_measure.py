@@ -105,7 +105,7 @@ def run_line_measure(cfg: dict[str, Any], *, run_root: Path, stage_dir_path: Pat
         'n_lines_total': int(len(rows)),
         'n_lines_detected': n_det,
         'n_blended_window_detections': int(sum(bool(r.get('blend_flag')) and bool(r.get('detected')) for r in rows)),
-        'n_blend_safe_for_physical_ratios': int(sum(bool(r.get('blend_safe_for_physical_ratios')) for r in rows)),
+        'n_blend_safe_detections': int(sum(bool(r.get('blend_safe_for_physical_ratios')) for r in rows)),
         'blend_warning': 'Window integrals are not deblended physical fluxes; redshift, LSF and profile model required',
         'strongest_line': (max(detected, key=lambda r: abs(float(r.get('flux') or 0.0)))['name'] if detected else None),
         'reddening': redd,
