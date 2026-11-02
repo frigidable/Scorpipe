@@ -53,7 +53,7 @@ def _write_nan_preserving_sci(path: Path, data: np.ndarray, *, header: fits.Head
                 shdr[k] = v
             except Exception:
                 pass
-    for k in ("BUNIT", "WAVEUNIT", "WAVEREF", "MAPTYPE", "LSFUNIT", "SCORPWCS", "PUBRDY"):
+    for k in ("BUNIT", "WAVEUNIT", "WAVEREF", "MAPTYPE", "LSFUNIT", "SCORPWCS", "PUBRDY", "PIXGEOM", "MAPALGN"):
         if k in phdr and k not in shdr:
             try:
                 shdr[k] = phdr[k]
