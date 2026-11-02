@@ -507,6 +507,8 @@ def run_in_thread(
     name: str | None = None,
     dedupe_key: str | None = None,
     latest_wins: bool | None = None,
+    on_finished: Callable[[T], None] | None = None,
+    on_failed: Callable[[str], None] | None = None,
 ) -> RunHandle[T]:
     """Submit ``fn`` to the global QThreadPool and return a handle.
 
@@ -521,6 +523,9 @@ def run_in_thread(
         Override whether previous jobs with the same ``dedupe_key`` should be
         cancelled before queuing the new one. Defaults to ``True`` when a
         ``dedupe_key`` is provided.
+    on_finished, on_failed:
+        Optional signal callbacks connected BEFORE the runnable is submitted,
+        preventing lost results when a fast worker finishes immediately.
 
     Notes
     -----
@@ -547,6 +552,13 @@ def run_in_thread(
         dedupe_key=(str(dedupe_key) if dedupe_key else None),
     )
     _bump_stat("submitted_total")
+
+    # Connect before _POOL.start: workers may complete and emit a signal
+    # before callers can connect to h.worker after run_in_thread returns.
+    if on_finished is not None:
+        sig.finished.connect(on_finished)
+    if on_failed is not None:
+        sig.failed.connect(on_failed)
 
     try:
         with _ACTIVE_JOBS_LOCK:
