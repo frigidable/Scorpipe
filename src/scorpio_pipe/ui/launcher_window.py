@@ -2184,9 +2184,51 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         # --- setup (left) ---
         g_setup = _box("Target & setup")
-        g_setup.setMinimumWidth(430)
+        g_setup.setMinimumWidth(570)
         splitter.addWidget(g_setup)
         fl = QtWidgets.QFormLayout(g_setup)
+        fl.setFieldGrowthPolicy(QtWidgets.QFormLayout.AllNonFixedFieldsGrow)
+        fl.setHorizontalSpacing(16)
+
+        def _add_full_width_path(
+            label: str,
+            help_text: str,
+            editor: QtWidgets.QLineEdit,
+            browse: QtWidgets.QToolButton,
+        ) -> None:
+            """Single, comfortably tall path editor spanning the whole form.
+
+            QLineEdit already supports horizontal scrolling and Ctrl+A/C.
+            Keep the complete current path in a tooltip, without a second
+            small/low-contrast label duplicating the same value.
+            """
+            host = QtWidgets.QWidget(g_setup)
+            host.setSizePolicy(
+                QtWidgets.QSizePolicy.Expanding,
+                QtWidgets.QSizePolicy.Preferred,
+            )
+            column = QtWidgets.QVBoxLayout(host)
+            column.setContentsMargins(0, 2, 0, 2)
+            column.setSpacing(6)
+            column.addWidget(self._param_label(label, help_text))
+
+            row = QtWidgets.QHBoxLayout()
+            row.setSpacing(8)
+            editor.setSizePolicy(
+                QtWidgets.QSizePolicy.Expanding,
+                QtWidgets.QSizePolicy.Fixed,
+            )
+            editor.setMinimumWidth(0)
+            editor.setFixedHeight(36)
+            editor.setAccessibleName(label)
+            browse.setFixedSize(36, 36)
+            editor.setToolTip(editor.text())
+            editor.textChanged.connect(editor.setToolTip)
+            row.addWidget(editor, 1)
+            row.addWidget(browse, 0)
+            column.addLayout(row)
+            fl.addRow(host)
+
         # Object
         row_obj = QtWidgets.QHBoxLayout()
         self.combo_object = QtWidgets.QComboBox()
@@ -2221,7 +2263,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
         fl.addRow(self._param_label("Binning", "Биннинг CCD.\nВлияет на масштаб [px] и шум.\nНе смешивай разные binning в одном run."), row_bin)
 
         # Workspace root (top-level base)
-        row_ws = QtWidgets.QHBoxLayout()
         self.edit_workspace_root = QtWidgets.QLineEdit()
         try:
             from scorpio_pipe.app_paths import pick_workspace_root
@@ -2231,9 +2272,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.edit_workspace_root.setText("")
         self.btn_pick_workspace_root = QtWidgets.QToolButton(text="…")
         self.btn_pick_workspace_root.setCursor(QtCore.Qt.PointingHandCursor)
-        row_ws.addWidget(self.edit_workspace_root, 1)
-        row_ws.addWidget(self.btn_pick_workspace_root)
-        fl.addRow(self._param_label("Workspace root", "Верхняя база workspace.\nLayout: <Night>/<Object>_<Disperser>_<Run>/<NN_stage>/.\nЗдесь живут все проекты."), row_ws)
+        _add_full_width_path(
+            "Workspace root",
+            "Верхняя база workspace.\nLayout: <Night>/<Object>_<Disperser>_<Run>/<NN_stage>/.\nЗдесь живут все проекты.",
+            self.edit_workspace_root,
+            self.btn_pick_workspace_root,
+        )
 
         # Run controls
         row_run = QtWidgets.QHBoxLayout()
@@ -2242,6 +2286,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.spin_run_id.setSpecialValueText("Auto")
         self.spin_run_id.setToolTip("0 = Auto (следующий свободный _01/_02/...)")
         self.btn_init_run = QtWidgets.QPushButton("Initialize run")
+        self.spin_run_id.setMinimumWidth(94)
+        self.btn_init_run.setMinimumWidth(142)
         row_run.addWidget(self.spin_run_id)
         row_run.addWidget(self.btn_init_run)
         fl.addRow(self._param_label("Run", "Номер run в рамках ночи/объекта/решётки.\nAuto = следующий свободный _01/_02/...\nInitialize создаёт/выбирает run-folder."), row_run)
@@ -2252,13 +2298,14 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.combo_recent_runs.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
         self.btn_switch_run = QtWidgets.QPushButton("Switch")
         self.btn_open_run = QtWidgets.QPushButton("Open…")
+        self.btn_switch_run.setMinimumWidth(76)
+        self.btn_open_run.setMinimumWidth(74)
         row_recent.addWidget(self.combo_recent_runs, 1)
         row_recent.addWidget(self.btn_switch_run)
         row_recent.addWidget(self.btn_open_run)
         fl.addRow(self._param_label("Recent runs", "Последние 10 run-folder.\nSwitch — открыть выбранный.\nOpen… — выбрать любой через проводник."), row_recent)
 
         # Work dir (run-root)
-        row_wd = QtWidgets.QHBoxLayout()
         self.edit_work_dir = QtWidgets.QLineEdit()
         # If the user edits the field manually, we stop auto-suggesting paths.
         self._workdir_user_edited = False
@@ -2267,9 +2314,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
         )
         self.btn_pick_work_dir = QtWidgets.QToolButton(text="…")
         self.btn_pick_work_dir.setCursor(QtCore.Qt.PointingHandCursor)
-        row_wd.addWidget(self.edit_work_dir, 1)
-        row_wd.addWidget(self.btn_pick_work_dir)
-        fl.addRow(self._param_label("Run folder", "Текущий run-folder (root для стадий).\nВнутри создаются папки <NN_stage>/.\nМетаданные — в manifest/."), row_wd)
+        _add_full_width_path(
+            "Run folder",
+            "Текущий run-folder (root для стадий).\nВнутри создаются папки <NN_stage>/.\nМетаданные — в manifest/.",
+            self.edit_work_dir,
+            self.btn_pick_work_dir,
+        )
 
         # Create/Load config actions
         row_cfg = QtWidgets.QHBoxLayout()
@@ -2292,9 +2342,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
         # right: YAML editor (manual edit)
         g_yaml = _box("Config YAML (editable)")
         splitter.addWidget(g_yaml)
-        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([430, 900])
+        splitter.setSizes([700, 760])
 
         yl = QtWidgets.QVBoxLayout(g_yaml)
         self.editor_yaml = QtWidgets.QPlainTextEdit()
