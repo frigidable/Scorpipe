@@ -25,3 +25,26 @@ def test_mini_night_fixture_matches_strict_run_layout(tmp_path: Path) -> None:
     assert passport["object"] == validated.object_name
     assert passport["disperser"] == validated.disperser
     assert passport["run_id"] == validated.run_id
+
+
+
+def test_mini_night_setup_readout_matches_all_synthetic_fits(tmp_path: Path) -> None:
+    from scorpio_pipe.frame_signature import FrameSignature
+
+    mn = make_mini_night(tmp_path)
+    setup = mn.cfg["frames"]["__setup__"]
+    expected = FrameSignature.from_setup(setup)
+    assert expected.readout == "nodeE_rate185.0_gain0.6200"
+
+    for role in ("bias", "flat", "neon", "obj"):
+        for name in mn.cfg["frames"][role]:
+            observed = FrameSignature.from_path(name)
+            assert observed.is_compatible_with(expected), (
+                role, name, observed.describe(), expected.describe()
+            )
+
+    # A different CCD readout must still fail the strict comparison.
+    wrong = FrameSignature.from_setup(
+        {**setup, "readout": "nodeE_rate225.0_gain3.5000"}
+    )
+    assert not FrameSignature.from_path(mn.cfg["frames"]["flat"][0]).is_compatible_with(wrong)
