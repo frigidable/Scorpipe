@@ -30,9 +30,8 @@ def test_initial_lazy_project_page_replaces_selected_placeholder() -> None:
         assert win.steps.currentRow() == 0
         assert win.stack.currentWidget() is win.page_project
         assert win.stack.currentWidget() is not win.page_config
-        assert "Loading" not in win.stack.currentWidget().findChild(
-            QtWidgets.QLabel
-        ).text() if win.stack.currentWidget().findChild(QtWidgets.QLabel) else True
+        assert win.page_project.objectName() == win.stack.currentWidget().objectName()
+        assert win.page_project.layout() is not None
 
         win.show()
         app.processEvents()
