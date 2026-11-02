@@ -77,3 +77,11 @@ selector without re-scanning the files.
 
 This is a real GUI lifecycle defect discovered by testing, not
 a failure of FITS reading or scientific reduction.
+
+## Exact-head CI audit
+
+The combined Draft #66 + #67 branch is tested against `main` for the
+GitHub Actions workflow, then retargeted to #66. Verify CI for the
+specific head commit containing the Inspect-before-Setup regression,
+not the earlier initial-Project-only commit. This CI does not replace
+Windows GUI testing on actual BTA FITS.
