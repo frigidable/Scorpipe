@@ -108,3 +108,77 @@ def test_first_project_page_is_built_synchronously_before_first_show():
                for x in statements)
     assert not any("QTimer.singleShot(0" in x and "_ensure_page_built" in x
                    for x in statements)
+
+
+def test_production_inspect_population_is_deferred_until_setup_exists():
+    class ProjectOnly:
+        _populate_objects_from_inspect = _method("_populate_objects_from_inspect")
+        _pages_built = {0}
+        _inspect = object()
+
+    project = ProjectOnly()
+    # No combo_object field is intentional; this exactly reproduces
+    # the Windows AttributeError after inspecting the 306-frame BTA night.
+    project._populate_objects_from_inspect()
+    assert not hasattr(project, "combo_object")
+
+
+def test_production_lazy_setup_construction_replays_finished_inspect():
+    from types import SimpleNamespace
+
+    class PlaceholderStack:
+        def __init__(self, old):
+            self.items = [object(), old]
+            self.active = old
+
+        def currentWidget(self):
+            return self.active
+
+        def removeWidget(self, widget):
+            self.items.remove(widget)
+            if self.active is widget:
+                self.active = self.items[0]
+
+        def insertWidget(self, index, widget):
+            self.items.insert(index, widget)
+
+        def setCurrentWidget(self, widget):
+            assert widget in self.items
+            self.active = widget
+
+    class SetupAfterInspect:
+        _ensure_page_built = _method("_ensure_page_built")
+
+        def __init__(self):
+            old = object()
+            self.new_setup = object()
+            self._pages_built = {0}
+            self._page_specs = {
+                1: ("setup", "page_config", lambda: self.new_setup),
+            }
+            self._page_widgets = {1: old}
+            self.stack = PlaceholderStack(old)
+            self._stage_page_index = [0, 1]
+            self.steps = SimpleNamespace(currentRow=lambda: 1)
+            self._inspect = SimpleNamespace(objects=["N2146sat"])
+            self.populated = []
+            self.errors = []
+            self.enable_updates = 0
+
+        def _populate_objects_from_inspect(self):
+            self.populated.append(tuple(self._inspect.objects))
+
+        def _log_exception(self, exc):
+            self.errors.append(str(exc))
+
+        def _update_enables(self):
+            self.enable_updates += 1
+
+    win = SetupAfterInspect()
+    win._ensure_page_built(1)
+    assert win.populated == [("N2146sat",)]
+    assert win._pages_built == {0, 1}
+    assert win.stack.currentWidget() is win.new_setup
+    assert win.page_config is win.new_setup
+    assert win.enable_updates == 1
+    assert not win.errors
