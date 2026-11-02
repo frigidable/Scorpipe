@@ -32,3 +32,12 @@ calibration is supplied. It does not infer a bias for 225-rate mode.
 This is a scientific guard, not an automatic calibration workaround.
 
 All source FITS remain immutable. Added unit and source-policy tests.
+
+### Acceptance
+
+The saved pipeline configuration can preserve the three Flat paths as
+**unapproved calibration candidates**; selection alone does not justify
+executing SuperFlat. With only 0.9/145 mode bias available, this stage
+must stop before writing any superflat. For diagnostic arc stacking,
+`superneon.bias_sub: false` must be an explicit separately reviewed
+choice; this patch does not automatically set that option.
