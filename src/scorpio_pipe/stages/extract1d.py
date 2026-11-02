@@ -744,9 +744,15 @@ def _boxcar_extract(
 
         if have_mask:
             mm = mask[y0:y1, j]
-            # OR all bits for output (keeps provenance of masked contributors)
+            # Preserve diagnostic aperture bits, but NO_COVERAGE is an
+            # *output* usability decision: a single uncovered input row
+            # must not veto a wavelength bin with sufficient valid rows.
+            # Match the corresponding optimal-extraction semantics.
             try:
-                out_mask[j] |= np.uint16(np.bitwise_or.reduce(mm))
+                aperture_bits = np.uint16(np.bitwise_or.reduce(mm))
+                out_mask[j] |= np.uint16(
+                    aperture_bits & np.uint16(~int(NO_COVERAGE) & 0xFFFF)
+                )
             except Exception:
                 pass
             good &= (mm & fatal_bits) == 0
