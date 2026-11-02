@@ -312,7 +312,7 @@ def measure_lines(
         row["fit_method"] = "continuum_subtracted_window_integral"
         row["blend_partners"] = partners
         row["blend_flag"] = bool(partners)
-        row["physical_flux_eligible"] = bool(row.get("detected")) and not partners
+        row["blend_safe_for_physical_ratios"] = bool(row.get("detected")) and not partners
         row["flux_interpretation"] = (
             "BLENDED_DIAGNOSTIC_ONLY" if partners
             else "ISOLATED_WINDOW_DIAGNOSTIC"
