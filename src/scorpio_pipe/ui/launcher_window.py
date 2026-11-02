@@ -54,26 +54,61 @@ def _lazy_outputs_tool_dialog():
 
 
 
-def _representative_header_from_inspect_df(df: Any) -> dict[str, Any] | None:
-    try:
-        if df is None or getattr(df, "empty", True) or "path" not in df.columns:
-            return None
+def _representative_header_from_inspect_df(
+    df: Any,
+    *,
+    object_name: str | None = None,
+    disperser: str | None = None,
+    slit: str | None = None,
+    binning: str | None = None,
+) -> dict[str, Any] | None:
+    """Use a SCI frame from the *selected* target/setup for run identity.
 
-        def _pick(kind: str) -> str | None:
-            try:
-                sub = df[df.get("kind") == kind]
-                if not sub.empty:
-                    return str(sub.iloc[0]["path"])
-            except Exception:
-                return None
-            return None
-
-        p0 = _pick("obj") or _pick("arc") or str(df.iloc[0]["path"])
-        if not p0:
-            return None
-        return dict(get_header_fields(Path(p0)))
-    except Exception:
+    No fallback to another object's first frame is permitted when a
+    selected science configuration is supplied.
+    """
+    if df is None or getattr(df, "empty", True) or "path" not in df.columns:
         return None
+    if "kind" not in df.columns:
+        return None
+    sub = df[df["kind"].astype(str) == "obj"]
+    selected = str(object_name or "").strip()
+    if selected:
+        objkey = "".join(ch for ch in selected.upper() if ch.isalnum())
+        if "object_norm" in sub.columns:
+            sub = sub[sub["object_norm"].astype(str) == objkey]
+        elif "object" in sub.columns:
+            sub = sub[sub["object"].astype(str).map(
+                lambda v: "".join(c for c in v.upper() if c.isalnum())
+            ) == objkey]
+        else:
+            return None
+    for column, value in (
+        ("disperser", disperser), ("slit", slit), ("binning", binning)
+    ):
+        value = str(value or "").strip()
+        if not value:
+            continue
+        if column not in sub.columns:
+            return None
+        sub = sub[sub[column].astype(str).str.strip() == value]
+    if sub.empty:
+        return None
+    path = str(sub.iloc[0]["path"]).strip()
+    if not path:
+        return None
+    header = dict(get_header_fields(Path(path)))
+    # Preserve original FITS header science evidence, but ensure the
+    # selected catalogue identity (not another object) is used.
+    if selected:
+        measured = "".join(ch for ch in str(header.get("OBJECT") or "").upper() if ch.isalnum())
+        if measured != "".join(ch for ch in selected.upper() if ch.isalnum()):
+            raise ValueError("Selected science object does not match FITS OBJECT")
+    # Inspector-derived physical slit selection is allowed as provenance,
+    # not as a change to any on-disk FITS header.
+    if str(slit or "").strip():
+        header["SLIT"] = str(slit).strip()
+    return header
 
 
 def load_context(cfg_path):  # type: ignore[override]
@@ -2295,6 +2330,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_open_run.clicked.connect(self._open_run_dialog)
         # Keep recent list fresh when user changes workspace root.
         self.edit_workspace_root.editingFinished.connect(self._refresh_recent_runs)
+        self.edit_workspace_root.editingFinished.connect(
+            lambda: self._suggest_work_dir()
+            if not getattr(self, "_workdir_user_edited", False) else None
+        )
         self.btn_pick_work_dir.clicked.connect(self._pick_work_dir)
         self.btn_suggest_workdir.clicked.connect(self._suggest_work_dir)
         self.btn_make_cfg.clicked.connect(self._do_make_cfg)
@@ -2518,10 +2557,20 @@ class LauncherWindow(QtWidgets.QMainWindow):
             header = None
             try:
                 if self._inspect is not None and getattr(self._inspect, "table", None) is not None:
-                    header = _representative_header_from_inspect_df(self._inspect.table)
+                    header = _representative_header_from_inspect_df(
+                        self._inspect.table,
+                        object_name=self.combo_object.currentText(),
+                        disperser=self.combo_disperser.currentText(),
+                        slit=self.combo_slit.currentText(),
+                        binning=self.combo_binning.currentText(),
+                    )
+                    if header is None:
+                        raise ValueError("No science FITS matches the selected object/setup")
             except Exception:
                 header = None
 
+            if header is None:
+                raise ValueError("Cannot initialize a run without a matching science FITS")
             run_id = int(self.spin_run_id.value()) if hasattr(self, "spin_run_id") else 0
             run_id_opt = None if run_id <= 0 else run_id
 
@@ -2616,13 +2665,23 @@ class LauncherWindow(QtWidgets.QMainWindow):
             header = None
             try:
                 if self._inspect is not None and getattr(self._inspect, "table", None) is not None:
-                    header = _representative_header_from_inspect_df(self._inspect.table)
+                    header = _representative_header_from_inspect_df(
+                        self._inspect.table,
+                        object_name=self.combo_object.currentText(),
+                        disperser=self.combo_disperser.currentText(),
+                        slit=self.combo_slit.currentText(),
+                        binning=self.combo_binning.currentText(),
+                    )
+                    if header is None:
+                        raise ValueError("No science FITS matches the selected object/setup")
             except Exception:
                 header = None
 
             run_id = int(self.spin_run_id.value()) if hasattr(self, "spin_run_id") else 0
             run_id_opt = None if run_id <= 0 else run_id
 
+            if header is None:
+                raise ValueError("Cannot suggest a run folder without a matching science FITS")
             rr = get_or_create_run_root(
                 ws,
                 dataset_path=Path(self.edit_data_dir.text()) if hasattr(self, "edit_data_dir") else None,
@@ -2632,17 +2691,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
             )
             self.edit_work_dir.setText(str(rr))
             self._workdir_user_edited = False
-        except Exception:
-            # fall back to the older heuristic
-            dmy = self._infer_night_date_parts()
-            if dmy is None:
-                now = datetime.now()
-                dd, mm, yyyy = int(now.day), int(now.month), int(now.year)
-            else:
-                dd, mm, yyyy = dmy
-            night_dir = f"{dd:02d}_{mm:02d}_{yyyy:04d}"
-            base = Path((self.edit_workspace_root.text() or "").strip()).expanduser() / night_dir
-            self.edit_work_dir.setText(str(base))
+        except Exception as exc:
+            # A guessed folder for an unknown night/target is less safe
+            # than reporting the missing science provenance explicitly.
+            if not getattr(self, "_workdir_user_edited", False):
+                self.edit_work_dir.clear()
+            self._log_error(f"Run folder suggestion unavailable: {exc}")
 
     def _populate_objects_from_inspect(self) -> None:
         # Project and Night Inspector are usable before lazy Setup is built.
@@ -2658,6 +2712,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         if self.combo_object.count() > 0:
             self.combo_object.setCurrentIndex(0)
         self._update_dispersers_from_inspect()
+        if not getattr(self, "_workdir_user_edited", False):
+            self._suggest_work_dir()
 
     def _update_dispersers_from_inspect(self) -> None:
         self.combo_disperser.blockSignals(True)
@@ -2841,9 +2897,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
     def _on_object_changed(self, *_: object) -> None:
         self._update_dispersers_from_inspect()
         try:
-            if (not self.edit_work_dir.text().strip()) and (
-                not getattr(self, "_workdir_user_edited", False)
-            ):
+            if not getattr(self, "_workdir_user_edited", False):
                 self._suggest_work_dir()
         except Exception:
             pass
@@ -2853,9 +2907,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._update_slit_binning_from_inspect()
         self._update_setup_hint()
         try:
-            if (not self.edit_work_dir.text().strip()) and (
-                not getattr(self, "_workdir_user_edited", False)
-            ):
+            if not getattr(self, "_workdir_user_edited", False):
                 self._suggest_work_dir()
         except Exception:
             pass
