@@ -38,3 +38,5 @@ https://doi.org/10.1093/mnras/stag939
 This PR is stacked after #55 and #58. A normal `main` CI run tests the
 integrated combined branch only; no individual component should be
 merged independently. Windows and real SCORPIO tests remain outstanding.
+
+CI integration note: this stacked branch is temporarily tested against main as a combined science chain; restore PR base to the A05 parent branch after the exact SHA CI gate.
