@@ -3025,7 +3025,23 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 slit=slit,
                 binning=binning,
             )
-            cfg_path.write_text(ac.to_yaml_text(), encoding="utf-8")
+            candidate_yaml = ac.to_yaml_text()
+            if not ac.frames.get("obj"):
+                raise ValueError(
+                    f"AutoConfig returned 0 SCI frames for {obj} / {disp} / "
+                    f"{slit} / {binning}; refusing to overwrite config.yaml"
+                )
+            if cfg_path.is_file():
+                # Create new config regenerates the entire YAML. Retain the
+                # existing science decisions and manual edits before replacing
+                # it, particularly after a BTA manifest-role recovery.
+                import shutil
+
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                backup = cfg_path.with_name(f"config.yaml.bak.{stamp}")
+                shutil.copy2(cfg_path, backup)
+                self._log_info(f"Preserved prior config: {backup}")
+            cfg_path.write_text(candidate_yaml, encoding="utf-8")
             self._log_info(f"Wrote config: {cfg_path}")
             self.edit_cfg_path.setText(str(cfg_path))
             self._load_config(cfg_path)
