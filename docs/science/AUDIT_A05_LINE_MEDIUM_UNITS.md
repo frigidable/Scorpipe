@@ -38,3 +38,8 @@ wavelength units.
 This is dependent on A02/A03 PR #55. It must not be merged before
 that dependency, an updated CI run, Windows regression, and scientific
 review of all coordinate-system metadata.
+
+CI verification note: this stacked branch is tested against the current
+`main` integration snapshot and must be retargeted to its parent feature
+branch before review/merge. The code and associated source provenance
+remain unchanged by this administrative check.
