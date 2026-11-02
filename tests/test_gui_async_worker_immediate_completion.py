@@ -8,6 +8,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 QtCore = pytest.importorskip("PySide6.QtCore")
+QtWidgets = pytest.importorskip("PySide6.QtWidgets")
 
 from scorpio_pipe.ui.async_worker import run_in_thread  # noqa: E402
 
@@ -23,7 +24,7 @@ def _wait_for(app, predicate, seconds: float = 3.0) -> bool:
 
 
 def test_immediate_background_results_are_never_lost_before_subscribing() -> None:
-    app = QtCore.QCoreApplication.instance() or QtCore.QCoreApplication([])
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     results = []
     handles = []
     for i in range(16):
@@ -41,7 +42,7 @@ def test_immediate_background_results_are_never_lost_before_subscribing() -> Non
 
 
 def test_immediate_background_failure_is_delivered() -> None:
-    app = QtCore.QCoreApplication.instance() or QtCore.QCoreApplication([])
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     failures = []
 
     def fail():
