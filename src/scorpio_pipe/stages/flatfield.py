@@ -123,6 +123,23 @@ def apply_flat(
 
     sel = None
     bvar_to_add = None
+
+    # Cosmics keeps CLEAN science images primary-only for GUI compatibility.
+    # If it already subtracted an indexed MasterBias, recover its separately
+    # stored ADU^2 uncertainty and add it to the independently estimated
+    # photon + read-noise variance *once*, before flat propagation and gain.
+    if hdr.get("BVARREF"):
+        from scorpio_pipe.cosmics_biasvar import read_clean_biasvar_sidecar
+
+        if var is not None:
+            raise ValueError(
+                "Input FITS declares both a VAR plane and a pending MasterBias "
+                "BVARREF; double counting cannot be excluded"
+            )
+        bvar_to_add = read_clean_biasvar_sidecar(
+            data_path, hdr, data.shape
+        )
+
     if do_bias_subtract and not bool(hdr.get("BIASSUB", False)):
         sel = resolve_master_bias(cfg, hdr, sci_shape=data.shape)
         if not sel.sci_path.exists():
@@ -233,8 +250,14 @@ def apply_flat(
             hdr["NOISRC"] = str(npar.source)
 
     # If bias VAR was deferred until after VAR estimation, add it now.
-    if bvar_to_add is not None and var is not None and bvar_to_add.shape == var.shape:
+    if bvar_to_add is not None:
+        if var is None or bvar_to_add.shape != var.shape:
+            raise ValueError("MasterBias VAR could not be propagated into Flatfield")
         var = (var + bvar_to_add).astype(np.float32)
+        hdr["BVARINC"] = (True, "MasterBias variance included in VAR")
+        if "BVARREF" in hdr:
+            del hdr["BVARREF"]
+        hdr.add_history("scorpio_pipe flatfield: MasterBias VAR included once")
 
     # Multiplicative correction: propagate division noise.
     # If flat VAR is present (MasterFlat), include it in the error budget:
