@@ -191,6 +191,8 @@ def _resolve_cosmics_superbias_for_kind(
     paths: list[Path],
     work_dir: Path,
     legacy_superbias: np.ndarray | None,
+    *,
+    selection_out: dict[str, Any] | None = None,
 ) -> np.ndarray | None:
     """Pick a geometry/readout-specific bias for one compatible frame set.
 
@@ -254,7 +256,69 @@ def _resolve_cosmics_superbias_for_kind(
             "Cosmics MasterBias geometry does not match the science frame set: "
             f"bias={bias.shape}, science={sorted(shapes)}"
         )
+
+    if selected.var_path is None or not selected.var_path.is_file():
+        raise FileNotFoundError(
+            "Cosmics indexed MasterBias must have a propagated variance "
+            f"map: {selected.var_path}"
+        )
+    var = np.asarray(
+        fits.getdata(selected.var_path, memmap=False), dtype=np.float32
+    )
+    if var.shape != bias.shape or not np.all(np.isfinite(var)) or np.any(var < 0):
+        raise ValueError(
+            "Cosmics selected MasterBias variance is invalid or has "
+            "incompatible geometry"
+        )
+    if selection_out is not None:
+        selection_out["selection"] = selected
+        selection_out["bias_var_adu2"] = var
     return bias
+
+
+def _attach_cosmics_masterbias_variance(
+    kind_out: Path,
+    paths: list[Path],
+    *,
+    selection: Any,
+    var_adu2: np.ndarray,
+) -> None:
+    """Link the actual MasterBias uncertainty to each primary-only CLEAN image.
+
+    The image and DQ sidecar remain compatible with the existing Cosmics GUI.
+    Missing output / wrong shape / incorrect BIASSUB raises instead of silently
+    producing a cleaned frame with incomplete noise provenance.
+    """
+    from scorpio_pipe.cosmics_biasvar import write_clean_biasvar_sidecar
+    from scorpio_pipe.stages.calib import stamp_bias_selection
+
+    for raw in paths:
+        clean = kind_out / "clean" / f"{raw.stem}_clean.fits"
+        if not clean.is_file():
+            raise FileNotFoundError(
+                f"Cosmics selected bias but cleaned FITS is absent: {clean}"
+            )
+        with fits.open(clean, memmap=False) as hdul:
+            if hdul[0].data is None:
+                raise ValueError(f"Cosmics cleaned FITS has no data: {clean}")
+            data = np.asarray(hdul[0].data, dtype=np.float32)
+            header = hdul[0].header.copy()
+        if not bool(header.get("BIASSUB", False)):
+            raise ValueError(
+                f"Cosmics selected MasterBias was not applied: {clean}"
+            )
+        if data.shape != np.asarray(var_adu2).shape:
+            raise ValueError(
+                f"Cosmics MasterBias variance shape mismatch: {clean}"
+            )
+        sidecar = write_clean_biasvar_sidecar(
+            clean, var_adu2=var_adu2, group_id=str(selection.gid)
+        )
+        header = stamp_bias_selection(header, selection)
+        header["BVARREF"] = (sidecar.name, "MasterBias variance sidecar")
+        header["BVARINC"] = (False, "MasterBias variance not in SCI VAR")
+        header["SB_REF"] = (selection.sci_path.name, "Selected MasterBias")
+        atomic_write_fits(clean, data, header=header, overwrite=True)
 
 
 def _robust_mad(x: np.ndarray, axis: int = 0) -> np.ndarray:
@@ -1607,9 +1671,11 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
         # Exact CCD readout/group selection before any cosmic replacement.
         # A global default MasterBias can only be used by legacy unindexed
         # observations. The indexed path fails closed on mixed readouts.
+        kind_bias_meta: dict[str, Any] = {}
         kind_superbias = (
             _resolve_cosmics_superbias_for_kind(
                 cfg, paths, work_dir, superbias,
+                selection_out=kind_bias_meta,
             )
             if bias_subtract else None
         )
@@ -1828,6 +1894,16 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
                 replaced_fraction=0.0,
                 per_frame_fraction=[0.0] * len(paths),
                 outputs=outputs,
+            )
+
+        # An indexed MasterBias may be subtracted only if its declared
+        # uncertainty remains available to Flatfield and Sky. The legacy
+        # cleaned image stays primary-only; variance has a typed sidecar.
+        if "selection" in kind_bias_meta:
+            _attach_cosmics_masterbias_variance(
+                kind_out, paths,
+                selection=kind_bias_meta["selection"],
+                var_adu2=kind_bias_meta["bias_var_adu2"],
             )
 
         # Write per-kind QC snapshot (machine-readable) for UI/diagnostics.
