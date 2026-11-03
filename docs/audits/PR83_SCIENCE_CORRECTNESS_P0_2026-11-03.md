@@ -241,12 +241,18 @@ The new `src/scorpio_pipe/spectral_axis_contract.py` defines
 
 - FITS `CTYPE1=AWAV` indicates air wavelengths, `CTYPE1=WAVE` indicates
   vacuum wavelengths; these must agree with `WAVEREF=air|vacuum`.
+  Nonlinear or nonwavelength `CTYPE1` values (`WAVE-LOG`, `AWAV-TAB`,
+  `FREQ`, `LINEAR`) require validated WCS conversions and are rejected.
 - `SPECSYS` must name a recognized FITS spectral reference frame and all
   inputs must share the same frame, medium, and spectral axis type.
 - Mixed `DLAMAP=True/False/absent` provenance is rejected, as is
   `DLAMAP=True` with `FLXFLAG=UNVERIFIED`.
 - Production inputs with `INSTRUME=SCORPIO*` require explicit, consistent
-  `WAVEREF`, `CTYPE1` and `SPECSYS`; missing fields fail closed.
+  `WAVEREF`, `CTYPE1`, `SPECSYS` and `DLAMAP`; missing fields fail
+  closed. `DLAMAP=True` additionally requires `FLXFLAG=OK` and a finite
+  `DLAM_A`; conflicting or unverified correction state is forbidden.
+  These are **provenance consistency checks**, not proof of external line
+  calibration.
 - Anonymous historical minimal test FITS with **all** spectral metadata
   absent may still run but are explicitly marked `SPCQUAL=UNQUAL`
   (not guessed air, vacuum, or TOPOCENT). Partially specified metadata
