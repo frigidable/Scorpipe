@@ -238,6 +238,24 @@ def _safe_json(obj: Any) -> Any:
     return obj
 
 
+def _extraction_mask_policy(*, is_stack: bool) -> tuple[int, int]:
+    """Return fatal input bits and informative bits to drop from 1D usability DQ.
+
+    A robustly coadded Stack2D sets REJECTED if *any constituent exposure*
+    was rejected or downweighted; its SCI/VAR remain usable when contributors
+    survive. The 2D MASK retains that provenance, but the 1D science MASK
+    must not mark the accepted stack pixels as fatal.
+
+    For an individual, unstacked science exposure, REJECTED is still fatal.
+    """
+    from scorpio_pipe.maskbits import BADPIX, COSMIC, NO_COVERAGE, REJECTED, SATURATED, USER
+
+    required = int(NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER)
+    if is_stack:
+        return required, int(REJECTED)
+    return required | int(REJECTED), 0
+
+
 def _is_stack2d_input(path: Path, hdr: fits.Header) -> bool:
     name = path.name.lower()
     if name in {"stack2d.fits", "stacked2d.fits"}:
@@ -1425,8 +1443,7 @@ def _run_extract1d_impl(
     if isinstance(ecfg.get("roi"), dict) and ecfg.get("roi"):
         roi.update({k: v for k, v in ecfg.get("roi", {}).items() if v is not None})
 
-    from scorpio_pipe.maskbits import BADPIX, COSMIC, NO_COVERAGE, REJECTED, SATURATED, USER
-    fatal_bits = int(NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED)
+    fatal_bits, informational_1d_bits = _extraction_mask_policy(is_stack=is_stack)
 
     sky_windows: list[tuple[int, int]] | None = None
     geo_meta: dict[str, Any] = {}
@@ -1559,6 +1576,14 @@ def _run_extract1d_impl(
             sky_resid=sky_resid,
             apply_local_sky=apply_local_sky,
         )
+    if informational_1d_bits:
+        # Retain contributor rejection provenance in Stack2D's 2D MASK and QC,
+        # while giving downstream line analysis a true 1D usability mask.
+        # REJECTED here means a different exposure was downweighted/rejected.
+        clear_bits = np.uint16(~informational_1d_bits & 0xFFFF)
+        mask_tr = np.asarray(mask_tr, dtype=np.uint16) & clear_bits
+        mask_fx = np.asarray(mask_fx, dtype=np.uint16) & clear_bits
+
     if method == "mean":
         # Convert sum → mean (and propagate VAR scaling).
         n_eff_tr = np.maximum(np.asarray(npix_tr, dtype=float), 1.0)
