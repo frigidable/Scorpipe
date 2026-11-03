@@ -2111,20 +2111,50 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                         degree=int(kel_cfg.get("bspline_degree", 3) or 3),
                         rng=rng,
                     )
-                    # flexure scan (best-effort; never fail the whole stage on flexure heuristics)
+                    # A spline trained on these same sky pixels has no
+                    # absolute laboratory wavelength reference. Shifting it
+                    # against its *own* training data is a self-consistency
+                    # diagnostic, NOT a measurement of spectral flexure.
                     try:
-                        flex = _estimate_flexure_delta(
+                        internal = _estimate_flexure_delta(
                             fit,
                             delta_max_A=float(kel_cfg.get("delta_max_A", 10.0) or 10.0),
                             delta_step_A=float(kel_cfg.get("delta_step_A", 0.2) or 0.2),
                             n_samples=int(kel_cfg.get("flexure_n_samples", 200000) or 200000),
                             rng=rng,
                         )
-                    except Exception as e:
-                        flex = {"delta_A": 0.0, "sigma_delta_A": None, "flexure_score": None, "flag": "FLEXURE_FAILED", "error": str(e)}
-                        stage_flags.append(make_flag("FLEXURE_FAILED", "WARN", "Flexure estimation failed; proceeding with delta_lambda=0", stem=stem, error=str(e)))
-                    delta_A = float(flex.get("delta_A") or 0.0)
-                    fit_meta = {k: v for k, v in fit.items() if k not in {"_cache", "coeff"}}
+                    except Exception as exc:
+                        internal = {"error": str(exc)}
+                    flex = {
+                        "verification": "unverified",
+                        "reference_kind": "none",
+                        "reference_id": None,
+                        "flag": "FLEXURE_UNVERIFIED",
+                        "delta_A": None,
+                        "sigma_delta_A": None,
+                        "flexure_score": None,
+                        "applied": False,
+                        "self_fit_shift_A": internal.get("delta_A"),
+                        "self_fit_sigma_A": internal.get("sigma_delta_A"),
+                        "self_fit_error": internal.get("error"),
+                    }
+                    # Sky subtraction uses only the nominal ARC lambda map.
+                    # Never use the non-identifiable self-fit shift for sky
+                    # subtraction, or write it as a measured SKYDLAM.
+                    delta_A = 0.0
+                    stage_flags.append(
+                        make_flag(
+                            "FLEXURE_UNVERIFIED",
+                            "WARN",
+                            "Sky self-fit has no independent sky-line reference; "
+                            "no wavelength correction was measured or applied",
+                            stem=stem,
+                        )
+                    )
+                    fit_meta = {
+                        k: v for k, v in fit.items()
+                        if k not in {"_cache", "coeff"}
+                    }
                     fit_meta["coeff"] = {
                         "basis_lambda": str((kel_cfg.get("basis_lambda") or "bspline")).lower(),
                         "knot_step_A": float(kel_cfg.get("knot_step_A", 1.0) or 1.0),
@@ -2136,7 +2166,8 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                         t=np.asarray(fit["basis"]["t"], dtype=float),
                         degree=int(fit["basis"]["degree"]),
                         c0=np.asarray(fit["coeff"]["c0"], dtype=float),
-                        c1=(np.asarray(fit["coeff"]["c1"], dtype=float) if fit["coeff"]["c1"] is not None else None),
+                        c1=(np.asarray(fit["coeff"]["c1"], dtype=float)
+                            if fit["coeff"]["c1"] is not None else None),
                         y_norm_rows=y_norm_rows,
                         delta_A=delta_A,
                         strip_rows=strip_rows,
@@ -2147,47 +2178,11 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                         "strip_rows": int(strip_rows),
                         "strip_workers": int(strip_workers),
                         "parallel_min_pixels": int(parallel_min_pixels),
-                        "parallel_enabled": bool(strip_workers > 1 and lam_eff.size >= parallel_min_pixels),
+                        "parallel_enabled": bool(
+                            strip_workers > 1 and lam_eff.size >= parallel_min_pixels
+                        ),
                         "mode": "bspline_tiled",
                     }
-
-                    # FLEXURE_UNCERTAIN heuristic
-                    sigd = flex.get("sigma_delta_A")
-                    score = flex.get("flexure_score")
-                    # FLEXURE_UNCERTAIN heuristic. Allow users/tests to disable
-                    # this warning by setting an extremely large threshold.
-                    unc_thr_raw = kel_cfg.get("delta_uncertain_A", 2.0)
-                    unc_thr = float(2.0 if unc_thr_raw is None else unc_thr_raw)
-                    # Disable uncertain warnings if user sets <=0 or an extremely large threshold.
-                    unc_enabled = np.isfinite(unc_thr) and (0.0 < unc_thr < 1e8)
-                    if unc_enabled:
-                        if sigd is None or (isinstance(sigd, (int, float)) and float(sigd) > unc_thr):
-                            stage_flags.append(
-                                make_flag(
-                                    "FLEXURE_UNCERTAIN",
-                                    "WARN",
-                                    "Flexure estimate is uncertain",
-                                    stem=stem,
-                                    sigma_delta_A=sigd,
-                                    flexure_score=score,
-                                    delta_uncertain_A=unc_thr,
-                                )
-                            )
-                    thr_raw = kel_cfg.get("delta_score_warn", 2.5)
-                    thr = float(2.5 if thr_raw is None else thr_raw)
-                    # Allow disabling by setting 0.0
-                    if score is not None and thr > 0.0 and float(score) < thr:
-                        stage_flags.append(
-                            make_flag(
-                                "FLEXURE_UNCERTAIN",
-                                "WARN",
-                                "Flexure significance is low",
-                                stem=stem,
-                                sigma_delta_A=sigd,
-                                flexure_score=score,
-                                delta_score_warn=thr,
-                            )
-                        )
 
                 skysub = (sci.astype(np.float32) - model.astype(np.float32)).astype(np.float32)
 
@@ -2273,7 +2268,8 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                 # Avoid Greek letters like λ/δ here.
                 hdr0["SKYKS"] = (float(kel_cfg.get("knot_step_A", 1.0) or 1.0), "lambda knot step (Angstrom)")
                 if flex is not None:
-                    hdr0["SKYDLAM"] = (float(flex.get("delta_A") or 0.0), "Flexure delta_lambda applied (Angstrom)")
+                    hdr0["SKYFLX"] = ("UNVERIF", "Spectral flexure not calibrated")
+                    hdr0["SKYDAPP"] = (False, "No independent flexure shift applied")
                 hdr0 = add_provenance(hdr0, cfg, stage="sky")
 
                 skymodel_path = out_dir / f"{stem}_skymodel_raw.fits"
@@ -2321,8 +2317,8 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                 # pixel scale: convert δλ to pixels using median dλ/dx at center row
                 flex_pix = None
                 flex_A = None
-                if flex is not None:
-                    flex_A = float(flex.get("delta_A") or 0.0)
+                if flex is not None and flex.get("delta_A") is not None:
+                    flex_A = float(flex["delta_A"])
                     try:
                         midy = int(ny // 2)
                         dldx = np.nanmedian(np.abs(np.diff(lam_eff[midy, :]))).item()
@@ -2644,6 +2640,9 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                 except Exception:
                     pass
         flexure_summary = {
+            "verification": "unverified",
+            "reference_kind": "none",
+            "reference_id": None,
             "delta_A_median": float(np.nanmedian(flex_deltas)) if flex_deltas else None,
             "sigma_delta_A_median": float(np.nanmedian(flex_sigmas)) if flex_sigmas else None,
             "flexure_score_median": float(np.nanmedian(flex_scores)) if flex_scores else None,
