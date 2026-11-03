@@ -90,6 +90,17 @@ def test_p3_lsf_publication_ready_and_kinprep_pipeline() -> None:
         assert Path(out_pub["outputs"]["spectrum"]).exists()
         assert Path(out_pub["outputs"]["wl"]).exists()
         assert Path(out_pub["outputs"]["dismap"]).exists()
+        assert out_pub["export_ok"] is True
+        assert out_pub["publication_ready"] is False
+        assert out_pub["science_qc_pass"] is False
+        assert out_pub["validation_level"] == "export_only"
+        for output in out_pub["outputs"].values():
+            with fits.open(output) as exported:
+                header = exported[0].header
+                assert header["EXPORTOK"] is True
+                assert header["PUBRDY"] is False
+                assert header["SCIQPASS"] is False
+                assert header["VALLEVEL"] == "EXPORT_ONLY"
         wl = fits.getdata(out_pub["outputs"]["wl"], ext=1).astype(float)
         dis = fits.getdata(out_pub["outputs"]["dismap"], ext=1).astype(float)
         assert wl.shape == lam_map.shape
