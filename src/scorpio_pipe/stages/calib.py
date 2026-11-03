@@ -406,6 +406,102 @@ def load_master_bias_index(work_dir: Path) -> dict[str, Any] | None:
         return None
 
 
+def _require_estimator_masterbias_index(
+    index: dict[str, Any],
+    group: dict[str, Any],
+    work_dir: Path,
+) -> None:
+    """Refuse cached MasterBias VAR with obsolete *frame-scatter* semantics.
+
+    The old on-disk index schema v2 encoded per-exposure dispersion (MAD^2)
+    as though it were the uncertainty of the combined MasterBias. Schema v3
+    explicitly records the estimator-variance definition and FITS provenance.
+    The legacy index is intentionally rejected before any subtraction.
+    """
+    schema = str(index.get("schema") or "")
+    if not schema:
+        # Historical minimally mocked indexes in low-level tests. Production
+        # build_superbias always stamps a named schema.
+        return
+    if schema != "scorpio_pipe.master_bias_index":
+        raise RuntimeError("Unrecognized MasterBias calibration index schema")
+    try:
+        version = int(index.get("schema_version") or 0)
+    except (TypeError, ValueError):
+        version = 0
+    if version < 3:
+        raise RuntimeError(
+            "Obsolete MasterBias variance definition (index schema v2 or "
+            "earlier): master_bias_var.fits contains individual-frame scatter, "
+            "not combined-estimator uncertainty. Regenerate MasterBias."
+        )
+    if version != 3:
+        raise RuntimeError(
+            f"Unsupported MasterBias variance schema version: {version}"
+        )
+
+    info = group.get("variance")
+    if not isinstance(info, dict) or info.get("definition") != (
+        "uncertainty_of_combined_master_bias"
+    ):
+        raise RuntimeError(
+            "MasterBias index lacks combined-estimator variance provenance"
+        )
+    model = str(info.get("model") or "")
+    if model not in {"MEANSEM", "GAUSSMED", "MEDASYMP", "CLIPAPPX"}:
+        raise RuntimeError(f"MasterBias estimator variance model invalid: {model}")
+
+    files = group.get("files") or {}
+    var_rel = files.get("var")
+    if not isinstance(var_rel, str) or not var_rel:
+        raise RuntimeError("Indexed MasterBias has no VAR product")
+    path = (Path(work_dir) / var_rel).resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"Indexed MasterBias estimator VAR missing: {path}")
+    header = fits.getheader(path)
+    if (str(header.get("BUNIT") or "").strip().upper() != "ADU^2"
+            or str(header.get("SB_VMOD") or "") != model
+            or str(header.get("SB_GID") or "") != str(group.get("gid") or "")):
+        raise RuntimeError(
+            "MasterBias VAR FITS estimator model, unit or group conflicts "
+            f"with index: {path}"
+        )
+    try:
+        n_used = int(group.get("n_used"))
+        n_hdr = int(header["NBIAS"])
+        n_min = int(header["SB_NMIN"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "MasterBias VAR missing estimator sample-count provenance"
+        ) from exc
+    if n_used < 2 or n_hdr != n_used or not (1 <= n_min <= n_used):
+        raise RuntimeError(
+            "MasterBias estimator variance has invalid sample-count metadata"
+        )
+    if model != "CLIPAPPX" and n_min != n_used:
+        raise RuntimeError(
+            "Unclipped MasterBias estimator has inconsistent sample counts"
+        )
+    if model == "CLIPAPPX" and n_min < 2:
+        raise RuntimeError(
+            "Clipped MasterBias has insufficient per-pixel samples; "
+            "mask or regenerate before science usage"
+        )
+    if model != "CLIPAPPX":
+        try:
+            factor = float(info["factor"])
+            factor_hdr = float(header["SB_VFAC"])
+        except (KeyError, ValueError, TypeError) as exc:
+            raise RuntimeError(
+                "MasterBias estimator variance factor is missing"
+            ) from exc
+        if not (np.isfinite(factor) and factor > 0
+                and np.isclose(factor, factor_hdr, rtol=1e-6)):
+            raise RuntimeError(
+                "MasterBias estimator variance factor conflicts with FITS"
+            )
+
+
 def _bias_key_from_header(hdr: fits.Header, *, fallback_shape: tuple[int, int] | None = None) -> BiasGroupKey:
     """Build BiasGroupKey from a science/calib header."""
 
@@ -522,6 +618,7 @@ def resolve_master_bias(
 
     if exact:
         best = sorted(exact, key=_score, reverse=True)[0]
+        _require_estimator_masterbias_index(idx, best, work_dir)
         files = best.get("files") or {}
         sdir = _resolve_work_dir(c)
         sci_p = (work_dir / str(files.get("sci"))).resolve() if files.get("sci") else _resolve_superbias_path(c, work_dir)
@@ -555,6 +652,7 @@ def resolve_master_bias(
 
     # Degraded fallback: pick best geometry-matching group with highest n_used.
     best = sorted(geom, key=_score, reverse=True)[0]
+    _require_estimator_masterbias_index(idx, best, work_dir)
     files = best.get("files") or {}
     sci_p = (work_dir / str(files.get("sci"))).resolve() if files.get("sci") else _resolve_superbias_path(c, work_dir)
     var_p = (work_dir / str(files.get("var"))).resolve() if files.get("var") else None
@@ -1360,7 +1458,8 @@ def build_superbias(
 
     index: dict[str, Any] = {
         "schema": "scorpio_pipe.master_bias_index",
-        "schema_version": 2,
+        # v3 changes VAR from per-exposure scatter to estimator uncertainty.
+        "schema_version": 3,
         "combine": str(combine),
         "sigma_clip": float(sigma_clip),
         "groups": [],
