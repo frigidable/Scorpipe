@@ -658,6 +658,29 @@ def _load_shifted_block(
     return s, v, m
 
 
+def _huber_weight_block(
+    w0: np.ndarray, residual: np.ndarray, huber_c: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Apply Huber factors without allowing zero-weight NaNs into a stack.
+
+    In IEEE-754 arithmetic, 0 * NaN is NaN. Detector NO_COVERAGE, invalid
+    wavelength and spatial-shift gaps can contain NaN SCI/VAR with w0=0.
+    Assign output weights only where both base weight and Huber factor are
+    finite, strictly positive, and physically usable.
+    """
+    ar = np.abs(np.asarray(residual, dtype=np.float64))
+    hub = np.where(
+        ar <= float(huber_c),
+        1.0,
+        float(huber_c) / np.maximum(ar, 1e-20),
+    ).astype(np.float32)
+    base = np.asarray(w0, dtype=np.float32)
+    w = np.zeros_like(base, dtype=np.float32)
+    usable = (base > 0) & np.isfinite(base) & np.isfinite(hub) & (hub > 0)
+    w[usable] = base[usable] * hub[usable]
+    return w, hub
+
+
 def _base_weight_block(
     sci: np.ndarray,
     var: np.ndarray,
@@ -759,9 +782,7 @@ def _stack_chunk_streaming(
                 v_eff, w0 = _base_weight_block(s, v, m, fatal_bits=fatal_bits, var_floor=var_floor)
                 if method0 in {"invvar_huber", "huber", "huber_invvar"}:
                     r = (s - last_mu) / np.sqrt(np.maximum(v_eff, 1e-20))
-                    ar = np.abs(r)
-                    hub = np.where(ar <= float(huber_c), 1.0, float(huber_c) / np.maximum(ar, 1e-20)).astype(np.float32)
-                    w = w0 * hub
+                    w, hub = _huber_weight_block(w0, r, float(huber_c))
                 elif method0 in {"invvar_clip", "sigma_clip", "clip"}:
                     r = (s - last_mu) / np.sqrt(np.maximum(v_eff, 1e-20))
                     keep = np.abs(r) <= float(clip_sigma)
@@ -793,9 +814,7 @@ def _stack_chunk_streaming(
         v_eff, w0 = _base_weight_block(s, v, m, fatal_bits=fatal_bits, var_floor=var_floor)
         if method0 in {"invvar_huber", "huber", "huber_invvar"}:
             r = (s - last_mu) / np.sqrt(np.maximum(v_eff, 1e-20))
-            ar = np.abs(r)
-            hub = np.where(ar <= float(huber_c), 1.0, float(huber_c) / np.maximum(ar, 1e-20)).astype(np.float32)
-            w = w0 * hub
+            w, hub = _huber_weight_block(w0, r, float(huber_c))
             suppressed |= np.isfinite(s) & (w0 > 0) & (hub < 1.0)
         elif method0 in {"invvar_clip", "sigma_clip", "clip"}:
             r = (s - last_mu) / np.sqrt(np.maximum(v_eff, 1e-20))
