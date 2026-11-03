@@ -10,6 +10,7 @@ pytest.importorskip("astropy")
 from scipy.ndimage import gaussian_filter1d
 
 from scorpio_pipe.stages.extract1d import _optimal_extract
+from scorpio_pipe.maskbits import BADPIX, NO_COVERAGE
 
 
 def _optimal_extract_reference(
@@ -106,7 +107,7 @@ def _optimal_extract_reference(
     out_var = np.full(nlam, np.nan, dtype=float)
     out_mask = np.zeros(nlam, dtype=np.uint16)
     out_npix = np.zeros(nlam, dtype=np.int16)
-    no_coverage = np.uint16(16)
+    no_coverage = np.uint16(NO_COVERAGE)
 
     for j in range(nlam):
         yc = float(y_center[j]) if j < len(y_center) else float(np.nanmedian(y_center))
@@ -118,9 +119,11 @@ def _optimal_extract_reference(
         if have_mask:
             mm = mask[y0 : y1 + 1, j]
             good &= (mm & fatal_bits) == 0
-            # Preserve DQ provenance but decide NO_COVERAGE separately.
+            # Preserve per-aperture DQ provenance, except input NO_COVERAGE:
+            # output coverage is a property of the remaining usable samples.
             out_mask[j] |= np.uint16(
-                np.bitwise_or.reduce(mm) & np.uint16(~16 & 0xFFFF)
+                np.bitwise_or.reduce(mm)
+                & np.uint16(~int(NO_COVERAGE) & 0xFFFF)
             )
 
         n_tot = int(y1 - y0 + 1)
@@ -163,7 +166,10 @@ def test_perf_40_5_optimal_vectorized_matches_reference() -> None:
     sci = rng.normal(loc=10.0, scale=3.0, size=(ny, nlam))
     var = rng.uniform(0.8, 2.2, size=(ny, nlam))
     mask = np.zeros((ny, nlam), dtype=np.uint16)
-    mask[rng.random((ny, nlam)) < 0.08] = 1
+    # BADPIX must be preserved as input provenance; NO_COVERAGE must
+    # be recomputed for the output rather than blindly OR-ed.
+    mask[rng.random((ny, nlam)) < 0.08] = BADPIX
+    mask[rng.random((ny, nlam)) < 0.02] |= NO_COVERAGE
     y_center = rng.uniform(-1.2, ny - 0.1, size=nlam)
     sky = rng.normal(scale=0.05, size=nlam)
 
@@ -173,7 +179,7 @@ def test_perf_40_5_optimal_vectorized_matches_reference() -> None:
         mask,
         y_center,
         ap_hw=4,
-        fatal_bits=1,
+        fatal_bits=int(BADPIX | NO_COVERAGE),
         min_good_frac=0.55,
         sky_resid=sky,
         apply_local_sky=True,
@@ -187,7 +193,7 @@ def test_perf_40_5_optimal_vectorized_matches_reference() -> None:
         mask,
         y_center,
         ap_hw=4,
-        fatal_bits=1,
+        fatal_bits=int(BADPIX | NO_COVERAGE),
         min_good_frac=0.55,
         sky_resid=sky,
         apply_local_sky=True,
@@ -197,7 +203,17 @@ def test_perf_40_5_optimal_vectorized_matches_reference() -> None:
         backend="numpy",
     )
 
-    for exp, obs in zip(ref, got[:5]):
-        assert np.allclose(exp, obs, equal_nan=True)
+    for i, (exp, obs) in enumerate(zip(ref, got[:5])):
+        if i == 2:
+            np.testing.assert_array_equal(
+                obs, exp, err_msg="1D MASK must respect canonical DQ-bit semantics"
+            )
+        else:
+            np.testing.assert_allclose(obs, exp, equal_nan=True, rtol=1e-12, atol=1e-12)
+
+    # A masked input BADPIX preserves its provenance, but one missing input
+    # must not automatically mark the whole 1D spectral bin NO_COVERAGE.
+    assert np.count_nonzero(got[2] & BADPIX) > 0
+    assert np.count_nonzero(got[2] & NO_COVERAGE) < nlam
     assert got[5]["vectorized"] is True
     assert got[5]["backend_used"] == "numpy"
