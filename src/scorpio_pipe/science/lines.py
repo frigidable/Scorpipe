@@ -101,6 +101,7 @@ def measure_line(
     spec: LineSpec,
     redshift: float = 0.0,
     mask: np.ndarray | None = None,
+    coverage_fraction: np.ndarray | None = None,
     waveref: str = "air",
     detection_snr: float = 3.0,
 ) -> dict[str, Any]:
@@ -117,6 +118,12 @@ def measure_line(
             raise ValueError("Line measurement MASK must be 1D integer bitmask")
         quality_ok = m_in == 0
     quality_ok &= np.isfinite(flux) & np.isfinite(var) & (var > 0)
+    coverage = None
+    if coverage_fraction is not None:
+        coverage = np.asarray(coverage_fraction, dtype=float)
+        if (coverage.shape != wave.shape or not np.all(np.isfinite(coverage))
+                or np.any(coverage < 0) or np.any(coverage > 1)):
+            raise ValueError("LineMeasure requires finite FRAC_USED in [0,1]")
     medium = str(waveref or "").strip().lower()
     if medium not in {"air", "vacuum"}:
         raise ValueError("Line measurement needs explicit air/vacuum WAVEREF")
@@ -137,6 +144,15 @@ def measure_line(
     m = (wave >= center - float(spec.window_half_width)) & (wave <= center + float(spec.window_half_width))
     if np.count_nonzero(m) < 3:
         return {'name': spec.name, 'detected': False, 'reason': 'insufficient_sampling'}
+    # V1 extraction's MASK reports usable 1D data, but losing a spatial
+    # contributor can still remove unknown line flux from a boxcar aperture.
+    # A *partial* line window is a measurement, NOT an automatically
+    # qualified total emission-line flux (and not a valid standard upper
+    # limit). Keep the partial integral for diagnostics and fail detection.
+    partial = bool(
+        coverage is not None
+        and (np.any(coverage[m] < 1.0 - 1e-6) or np.any(~quality_ok[m]))
+    )
     w = wave[m]
     f = flux[m]
     v = var[m]
@@ -168,7 +184,7 @@ def measure_line(
     err_cal = float(abs(flux_int) * np.nanmedian(cal_frac)) if cal_frac.size else 0.0
     sn = float(flux_int / err_stat) if err_stat > 0 else float("nan")
     detected = bool(np.isfinite(sn) and flux_int > 0
-                    and sn >= float(detection_snr))
+                    and sn >= float(detection_snr) and not partial)
     pos = np.clip(net, 0.0, np.inf)
     weight_sum = float(np.sum(pos * dl))
     centroid = None
@@ -195,7 +211,8 @@ def measure_line(
         'rest_wavelength': rest,
         'waveref': medium,
         'blend_warning': bool(blend_warning),
-        'flux_kind': ('window_integral_not_deblended' if blend_warning
+        'flux_kind': ('partial_window_integral_unqualified' if partial else
+                      'window_integral_not_deblended' if blend_warning
                       else 'continuum_subtracted_window_integral'),
         'sigma_kms_kind': 'observed_including_instrument_LSF',
         'expected_wavelength': float(center),
@@ -217,8 +234,11 @@ def measure_line(
         'err_total': float(np.hypot(err_stat, err_cal)),
         'snr_stat': float(sn),
         'detected': detected,
+        'reason': 'partial_aperture_or_spectral_coverage' if partial else None,
+        'coverage_complete': not partial if coverage is not None else None,
+        'min_spatial_fraction': float(np.min(coverage[m])) if coverage is not None else None,
         'detection_snr_threshold': float(detection_snr),
-        'upper_limit_3sigma': float(3.0 * err_stat) if not detected else None,
+        'upper_limit_3sigma': None if partial or detected else float(3.0 * err_stat),
         'n_samples': int(w.size),
         'n_masked_in_window': int(np.count_nonzero(~quality_ok[m])),
         **cont_meta,
@@ -236,6 +256,7 @@ def measure_lines(
     lines: Iterable[LineSpec] = DEFAULT_LINES,
     redshift: float = 0.0,
     mask: np.ndarray | None = None,
+    coverage_fraction: np.ndarray | None = None,
     waveref: str = "air",
     detection_snr: float = 3.0,
 ) -> list[dict[str, Any]]:
@@ -250,6 +271,7 @@ def measure_lines(
             spec=spec,
             redshift=redshift,
             mask=mask,
+            coverage_fraction=coverage_fraction,
             waveref=waveref,
             detection_snr=detection_snr,
         )

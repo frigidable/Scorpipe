@@ -525,6 +525,15 @@ def validate_spec1d_product(path: str | Path, *, stage: str) -> None:
             hf = hdul["SPEC_FIXED"]
             _require_cols(ht, ["LAMBDA", "FLUX_TRACE", "VAR_TRACE", "MASK_TRACE"])
             _require_cols(hf, ["LAMBDA", "FLUX_FIXED", "VAR_FIXED", "MASK_FIXED"])
+            dq_version = hdr0.get("DQ1DVER")
+            if dq_version is not None:
+                if int(dq_version) != 1 or str(hdr0.get("DQ1DSEM") or "") != "FATAL":
+                    raise ValueError("Unsupported DQ1D output-mask semantics")
+                for hdu, mode in ((ht, "TRACE"), (hf, "FIXED")):
+                    _require_cols(hdu, [f"DQ_ANY_{mode}", f"FRAC_{mode}"])
+                    fr = np.asarray(hdu.data[f"FRAC_{mode}"], dtype=float)
+                    if not np.all(np.isfinite(fr) & (fr >= 0) & (fr <= 1)):
+                        raise ValueError(f"Invalid FRAC_{mode} in DQ1D spectrum")
 
             lam = np.asarray(ht.data["LAMBDA"], dtype=float)
             var_t = np.asarray(ht.data["VAR_TRACE"], dtype=float)

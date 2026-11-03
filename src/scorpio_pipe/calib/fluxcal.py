@@ -308,7 +308,7 @@ def write_fluxcal_products(cfg: dict[str, Any], out_dir: str | Path, *, spec_pay
             hh['SKYUNIT'] = (spec_payload['flux_unit'], "Sky residual unit per sampled spatial pixel")
         hdr0['EXTID'] = ('TRACE+FIXED', "Both extraction modes separately calibrated")
         new_hdus = [fits.PrimaryHDU(header=hdr0), ht, hf]
-        for ext in ('FLUX2', 'VAR2', 'MASK2', 'NPIX2', 'SKY2'):
+        for ext in ('FLUX2', 'VAR2', 'MASK2', 'NPIX2', 'SKY2', 'DQANY2', 'FRAC2'):
             if ext not in hdul:
                 continue
             h = hdul[ext].copy()

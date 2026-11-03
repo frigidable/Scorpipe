@@ -207,8 +207,21 @@ def read_spec1d(path: str | Path, *, mode: str = "trace") -> dict[str, Any]:
         tab = hdul[extname].data
         if extname == "SPEC_TRACE":
             flux_col, var_col, mask_col, sky_col, npix_col = "FLUX_TRACE", "VAR_TRACE", "MASK_TRACE", "SKY_TRACE", "NPIX_TRACE"
+            dq_col, frac_col = "DQ_ANY_TRACE", "FRAC_TRACE"
         else:
             flux_col, var_col, mask_col, sky_col, npix_col = "FLUX_FIXED", "VAR_FIXED", "MASK_FIXED", "SKY_FIXED", "NPIX_FIXED"
+            dq_col, frac_col = "DQ_ANY_FIXED", "FRAC_FIXED"
+        dq_version = hdr0.get("DQ1DVER")
+        if dq_version is not None:
+            if int(dq_version) != 1 or str(hdr0.get("DQ1DSEM") or "") != "FATAL":
+                raise ValueError("Unsupported DQ1D science-usability schema")
+            if dq_col not in tab.names or frac_col not in tab.names:
+                raise ValueError("DQ1D schema requires per-mode DQ_ANY and FRAC columns")
+            frac = np.asarray(tab[frac_col], dtype=float)
+            if (not np.isfinite(frac).all() or np.any((frac < 0) | (frac > 1))):
+                raise ValueError("DQ1D fraction-used column must lie within [0,1]")
+        else:
+            frac = None
         return {
             "header": hdr0,
             "wave": np.asarray(tab["LAMBDA"], dtype=float),
@@ -217,6 +230,9 @@ def read_spec1d(path: str | Path, *, mode: str = "trace") -> dict[str, Any]:
             "mask": np.asarray(tab[mask_col]),
             "sky": np.asarray(tab[sky_col], dtype=float) if sky_col in tab.names else np.zeros(len(tab), dtype=float),
             "npix": np.asarray(tab[npix_col], dtype=float) if npix_col in tab.names else np.zeros(len(tab), dtype=float),
+            "dq1d_version": int(dq_version) if dq_version is not None else None,
+            "dq_any": np.asarray(tab[dq_col], dtype=np.uint16) if dq_version is not None else None,
+            "frac_used": frac,
             "waveref": str(hdr0.get("WAVEREF") or "air").strip().lower(),
             "bunit": str(hdr0.get("BUNIT") or hdr0.get("FLUXUNIT") or "ADU").strip(),
             "path": str(p),
