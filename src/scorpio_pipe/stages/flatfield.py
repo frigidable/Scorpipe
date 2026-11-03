@@ -311,9 +311,11 @@ def run_flatfield(cfg: dict, *, out_dir: Path | None = None) -> Path:
 
     Notes
     -----
-    - If cosmics stage was run with bias_subtract=True, then the cosmics-cleaned
-      frames are already superbias-subtracted (BIASSUB=True). In that case, we
-      avoid subtracting the superbias again.
+    - Bias subtraction is decided from the *actual input FITS BIASSUB flag*
+      inside apply_flat(), not the upstream cosmics configuration. Cosmics
+      may have requested bias subtraction but skipped it if the calibration
+      was absent or incompatible; assuming success can contaminate science
+      counts and the estimated Poisson variance.
     """
 
     work_dir = resolve_work_dir(cfg)
@@ -567,7 +569,6 @@ def run_flatfield(cfg: dict, *, out_dir: Path | None = None) -> Path:
                 fp = _resolve_man_path(fe.path)
                 frame_set_by_path[str(fp.resolve())] = str(sid)
 
-    cosmics_bias_sub = bool((cfg.get("cosmics", {}) or {}).get("bias_subtract", True))
     do_bias_sub_flat = bool(block.get("bias_subtract", True))
 
     gain_override = block.get("gain_e_per_adu")
@@ -611,11 +612,9 @@ def run_flatfield(cfg: dict, *, out_dir: Path | None = None) -> Path:
             clean = kind_clean_dir / f"{src0.stem}_clean.fits"
             src = clean if clean.exists() else src0
 
-            # If we use a cosmics-cleaned product AND cosmics already subtracted bias,
-            # then avoid doing it again.
-            do_bias_subtract = do_bias_sub_flat
-            if clean.exists() and cosmics_bias_sub:
-                do_bias_subtract = False
+            # Never infer that cosmics actually subtracted MasterBias from
+            # cfg.cosmics.bias_subtract. apply_flat checks the input's BIASSUB
+            # provenance and subtracts only when it is still required.
             # Choose the flat product for this frame.
             flat_for_frame = superflat_path
             if (manifest is not None) and (kind == "obj"):
@@ -636,7 +635,7 @@ def run_flatfield(cfg: dict, *, out_dir: Path | None = None) -> Path:
                 flat_for_frame,
                 dst,
                 cfg=cfg,
-                do_bias_subtract=do_bias_subtract,
+                do_bias_subtract=do_bias_sub_flat,
                 gain_override=float(gain_override) if gain_override is not None else None,
                 rdnoise_override=float(rdnoise_override) if rdnoise_override is not None else None,
                 stage_flags=stage_flags,
