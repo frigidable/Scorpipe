@@ -90,3 +90,37 @@ def test_bias_group_audit_shared_distinct_unknown():
     missing = bias_group_diagnostics([record, {}])
     assert missing["status"] == "UNKNOWN"
     assert missing["n_missing_group"] == 1
+
+
+def test_extract1d_keeps_shared_bias_uncertainty_status(tmp_path):
+    from scorpio_pipe.stages.extract1d import run_extract1d
+    from tests.test_extract_stacked_rejection_semantics import _write_stack
+
+    work = tmp_path / "work"
+    input_path = tmp_path / "stack2d.fits"
+    _write_stack(input_path, verified=True)
+    with fits.open(input_path, mode="update") as hdul:
+        h = hdul[0].header
+        h["STKVRALG"] = "W2VAR"
+        h["STKVARQ"] = "COND_ONLY"
+        h["STKXCVQ"] = "UNMODEL"
+        h["SBCOVQ"] = "UNMODEL"
+        h["SBGSTAT"] = "SHARED"
+        h["SBGRPN"] = 1
+        hdul.flush()
+    config = {
+        "work_dir": str(work),
+        "frames": {"__setup__": {"instrument": "scorpio", "mode": "longslit"}},
+        "extract1d": {
+            "input_mode": "stack2d", "method": "boxcar", "save_png": False
+        },
+    }
+    result = run_extract1d(config, in_fits=input_path, out_dir=work / "extract")
+    with fits.open(result["spec1d_fits"]) as hdul:
+        h = hdul[0].header
+        assert h["STKVRALG"] == "W2VAR"
+        assert h["STKVARQ"] == "COND_ONLY"
+        assert h["STKXCVQ"] == "UNMODEL"
+        assert h["SBCOVQ"] == "UNMODEL"
+        assert h["SBGSTAT"] == "SHARED"
+        assert h["SBGRPN"] == 1

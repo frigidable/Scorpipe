@@ -1817,6 +1817,24 @@ def _run_extract1d_impl(
         if k in hdr0:
             ohdr[k] = hdr0[k]
 
+    # Provenance of coadd variance limitations must survive extraction and
+    # flux calibration, otherwise later line S/N may appear unqualifiedly
+    # exact after dropping the Stack2D metadata.
+    for k in (
+        "STKMETH", "STKVRALG", "STKVARQ", "STKXCVQ", "STKYCVQ",
+        "SBCOVQ", "SBGSTAT", "SBGRPN", "SBGMISS",
+    ):
+        if k in hdr0:
+            ph[k] = hdr0[k]
+
+    # Preserve explicit conditional-variance and shared-calibration warnings.
+    for k in (
+        "STKMETH", "STKVRALG", "STKVARQ", "STKXCVQ", "STKYCVQ",
+        "SBCOVQ", "SBGSTAT", "SBGRPN", "SBGMISS",
+    ):
+        if k in hdr0:
+            ohdr[k] = hdr0[k]
+
     # Upstream degradation propagation (P0-L): keep these in the 1D primary header.
     for k in ("QADEGRD", "SKYOK", "SKYMD"):
         if k in hdr0:
