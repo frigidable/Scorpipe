@@ -72,6 +72,13 @@ def test_p2_syn_sky_sub_raw_reduces_sky_residuals_and_keeps_object():
         raw_path = layout.raw / "obj_0001.fits"
         _write_fits(raw_path, raw)
 
+        # Simulate a stale, already-rectified product from an older run.
+        # Sky must never copy future Linearize products into its own aliases.
+        stale = stage_dir(work_dir, "linearize") / "obj_0001_skysub.fits"
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        stale_hdr = fits.Header({"CRVAL1": 5000.0, "CDELT1": 2.0, "CRPIX1": 1.0})
+        fits.writeto(stale, np.full(raw.shape, -999.0, dtype="f4"), stale_hdr)
+
         cfg = {
             "work_dir": str(work_dir),
             "frames": {"obj": [str(raw_path)]},
@@ -103,6 +110,16 @@ def test_p2_syn_sky_sub_raw_reduces_sky_residuals_and_keeps_object():
         skysub_path = out[0]
 
         skysub = fits.getdata(skysub_path).astype(float)
+        for alias_name in ("obj_0001_skysub.fits", "obj_0001_sky_sub.fits"):
+            alias = sdir / alias_name
+            assert alias.exists()
+            assert np.array_equal(
+                fits.getdata(alias), fits.getdata(skysub_path),
+            ), "Sky alias may contain only the new raw-geometry Sky result"
+            alias_hdr = fits.getheader(alias)
+            assert "CRVAL1" not in alias_hdr
+            assert "CDELT1" not in alias_hdr
+            assert not np.all(fits.getdata(alias) == -999.0)
 
         # Sky bands should have fewer systematic residuals after subtraction.
         y1, y2 = cfg["roi"]["sky_y1"], cfg["roi"]["sky_y2"]
