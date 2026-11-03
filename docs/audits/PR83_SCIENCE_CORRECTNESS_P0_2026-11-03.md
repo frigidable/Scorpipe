@@ -216,3 +216,62 @@ Golden test would have left Linearize unable to read the proper provenance.
 the full synthetic Golden, then full fast suite and Smoke on a single pinned
 SHA. PR #83 stays Draft, and #87/#93 remain open pending an independently
 calibrated per-exposure algorithm.
+
+
+## Latest Windows QA baseline and spectral-frame consistency (#92)
+
+**Verified Windows QA at `bfea816d70c4b7b1ecc4e5a6e60891a6256f59d6`:**
+- Navigator and Smoke scientific WARN contracts: **10 passed**, 2 expected FITS comment warnings.
+- Full 11-stage Golden E2E: **1 passed**, 3 FITS comment warnings.
+- Full fast regression: **725 passed, 2 skipped, 2 deselected**, 19 warnings (mostly long FITS comments; one intentionally damaged FITS header test).
+- **736 successful test executions, zero failures**, with untracked `workspace/` untouched.
+
+This fixes the former `qc_report.json.qc.flags` versus Navigator root-flags mismatch and preserves the two honest Sky WARNs. **The baseline applies only to that commit**, not the following changes.
+
+### #92: air/vacuum, observer frame and correction provenance in Stack2D
+
+The earlier Stack2D verified image shapes, numerical `WaveGrid` equality
+within a wavelength tolerance, count/rate units and `REBNORM`, but
+not the **spectral coordinate semantics**: numerically identical
+`CRVAL1/CDELT1` can mean physically distinct air versus vacuum wavelengths
+or topocentric versus barycentric coordinates.
+
+The new `src/scorpio_pipe/spectral_axis_contract.py` defines
+`SpectralAxisContract` and validates:
+
+- FITS `CTYPE1=AWAV` indicates air wavelengths, `CTYPE1=WAVE` indicates
+  vacuum wavelengths; these must agree with `WAVEREF=air|vacuum`.
+- `SPECSYS` must name a recognized FITS spectral reference frame and all
+  inputs must share the same frame, medium, and spectral axis type.
+- Mixed `DLAMAP=True/False/absent` provenance is rejected, as is
+  `DLAMAP=True` with `FLXFLAG=UNVERIFIED`.
+- Production inputs with `INSTRUME=SCORPIO*` require explicit, consistent
+  `WAVEREF`, `CTYPE1` and `SPECSYS`; missing fields fail closed.
+- Anonymous historical minimal test FITS with **all** spectral metadata
+  absent may still run but are explicitly marked `SPCQUAL=UNQUAL`
+  (not guessed air, vacuum, or TOPOCENT). Partially specified metadata
+  fail even for anonymous files.
+- The original numerical-grid test, `BUNIT` and `REBNORM` gates remain
+  mandatory. The output FITS and Stack2D report carry spectral coordinate
+  qualification and per-input provenance.
+
+New tests `tests/test_stack2d_spectral_axis_contract.py` cover identical
+numeric wavelengths but incompatible air/vacuum, topo/bary/helio, invalid
+CTYPE1/WAVEREF pairing, missing fields, mixed flexure state, valid
+topocentric air/vacuum barycentric pairs, and explicitly unqualified
+historical fixtures.
+
+Authority: Greisen et al., A&A 446 (2006) 747 (FITS spectral WCS);
+FITS Standard section 8.4.1; Astropy SpectralCoord documentation.
+See https://fits.gsfc.nasa.gov/fits_wcs.html and
+https://docs.astropy.org/en/stable/coordinates/spectralcoord.html.
+
+**Not completed by this fix:** actual per-exposure barycentric/heliocentric
+transformation, injection-validated line velocities and line-shape
+preservation across resampling, and reliable provenance guarding against
+double-applied corrections even when `SPECSYS` is deceptively unchanged.
+Do not close #92 or promote this to science-qualified until a pinned Windows
+test run and physical wavelength injection checks are complete.
+
+The new HEAD remains Draft and unverified on Windows. No actual FITS
+N2146sat/config or untracked user workspaces have been altered.
