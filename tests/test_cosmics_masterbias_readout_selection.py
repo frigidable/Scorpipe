@@ -56,8 +56,15 @@ def _stub_bias_index(
         gain = float(header["GAIN"])
         if gain not in masters:
             raise RuntimeError(f"no matching MasterBias readout gain {gain}")
+        master = masters[gain]
+        var = master.with_name(master.stem + "_var.fits")
+        if not var.exists():
+            fits.writeto(
+                var, np.full((20, 28), 4.0, dtype="f4"),
+                header=fits.Header({"BUNIT": "ADU^2"}),
+            )
         return calib.BiasSelection(
-            sci_path=masters[gain], var_path=None, dq_path=None,
+            sci_path=master, var_path=var, dq_path=None,
             gid=f"ccd_gain_{gain}", degraded=False, reason="",
         )
 
@@ -97,6 +104,12 @@ def test_cosmics_uses_matching_masterbias_not_global_default(
         assert clean.exists()
         hdr = fits.getheader(clean)
         assert hdr["BIASSUB"] is True
+        assert hdr["SB_GID"] == "ccd_gain_0.62"
+        assert hdr["BVARREF"] == f"{p.stem}_clean_biasvar.fits"
+        assert hdr["BVARINC"] is False
+        with fits.open(clean.with_name(hdr["BVARREF"])) as hdul:
+            assert hdul[0].header["BUNIT"] == "ADU^2"
+            assert np.all(hdul[0].data == 4.0)
         assert np.median(fits.getdata(clean)) == pytest.approx(120, abs=1.0)
 
 
