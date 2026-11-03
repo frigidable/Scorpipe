@@ -29,6 +29,10 @@ import astropy.units as u
 from scorpio_pipe.fits_utils import open_fits_smart
 
 from scorpio_pipe.io.mef import write_sci_var_mask, try_read_grid, validate_sci_var_mask
+from scorpio_pipe.spectral_axis_contract import (
+    read_spectral_axis_contract,
+    validate_same_spectral_frame,
+)
 from scorpio_pipe.version import PIPELINE_VERSION
 from scorpio_pipe.maskbits import BADPIX, COSMIC, NO_COVERAGE, REJECTED, SATURATED, USER, EDGE
 
@@ -1005,6 +1009,10 @@ def run_stack2d(
     try:
         # First exposure defines reference shape, WCS/grid, and base unit.
         hdr0 = _get_primary_header(hduls[0]).copy()
+        spectral_contract = read_spectral_axis_contract(
+            hdr0, source=files[0].name,
+        )
+        report["spectral_axis_contract"] = spectral_contract.to_dict()
         # COUNT_V1 products must never be averaged with historically
         # density-normalized products that share the same apparent grid.
         ref_resampling = str(hdr0.get("REBNORM", "") or "").strip()
@@ -1084,6 +1092,12 @@ def run_stack2d(
         # Per-input metadata + strict validation.
         for p, h in zip(files, hduls):
             hdr = _get_primary_header(h)
+            this_spectral_contract = read_spectral_axis_contract(
+                hdr, source=p.name,
+            )
+            validate_same_spectral_frame(
+                spectral_contract, this_spectral_contract, source=p.name,
+            )
             this_resampling = str(hdr.get("REBNORM", "") or "").strip()
             if this_resampling != ref_resampling:
                 raise ValueError(
@@ -1173,6 +1187,7 @@ def run_stack2d(
                     "path": str(p),
                     "shape": [int(ny), int(nx)],
                     "bunit": str(unit_raw),
+                    "spectral_axis_contract": this_spectral_contract.to_dict(),
                     "base_unit": base,
                     "per_second": bool(per_sec),
                     "exptime_s": float(exptime) if exptime is not None else None,
@@ -1455,6 +1470,10 @@ def run_stack2d(
             hdr.add_history("Upstream sky subtraction was skipped/degraded (QADEGRD=1).")
 
         hdr.add_history(f"Scorpio Pipe {PIPELINE_VERSION}: stack2d")
+        hdr["SPCQUAL"] = (
+            "QUALIF" if spectral_contract.qualified else "UNQUAL",
+            "Spectral coordinate qualification",
+        )
         hdr["BUNIT"] = out_bunit
         _out_per_sec = "/s" in str(out_bunit).replace(" ", "").lower() or "s-1" in str(
             out_bunit
