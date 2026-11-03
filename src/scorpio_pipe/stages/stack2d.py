@@ -589,6 +589,8 @@ class _WeightedMeanAccumulator:
         if values.shape != self.mean.shape or weights.shape != self.mean.shape:
             raise ValueError("Accumulator shape mismatch")
         w = np.asarray(weights, dtype=np.float64)
+        if np.any(~np.isfinite(w)) or np.any(w < 0):
+            raise ValueError("Accumulator requires finite nonnegative weights")
         good = w > 0
         if not np.any(good):
             return
