@@ -77,3 +77,21 @@ def test_no_input_sky_stage_exits_nonzero_with_structured_report(tmp_path, capsy
     assert report["status"] == "FAIL"
     assert report["science_uncertainty_qualified"] is False
     assert "No raw SkySub FITS" in report["error"]
+
+
+def test_unknown_method_cannot_be_skipped_when_other_exposures_pass(tmp_path):
+    stage, science = _science_night(tmp_path / "night", capture=True)
+    unknown = stage / "other_exposure_skysub_raw.fits"
+    with fits.open(science, memmap=False) as hdul:
+        hdul[0].header["SKYMD"] = "unexpected_method"
+        hdul.writeto(unknown)
+    report = audit_sky_directory(stage)
+    assert report["n_sky_products"] == 2
+    assert report["n_kelson"] == 1
+    assert report["n_passed"] == 1
+    assert report["n_failed"] == 1
+    assert report["status"] == "FAIL"
+    assert "Unknown or missing" in next(
+        x["error"] for x in report["per_exposure"]
+        if x["stem"] == "other_exposure"
+    )

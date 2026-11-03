@@ -48,8 +48,10 @@ def audit_sky_directory(sky_directory: str | Path) -> dict[str, Any]:
                 pointer = str(hdr.get("SKYFRZP") or "").strip()
                 version = int(hdr.get("SKYFRZV") or 0)
             item["method"] = method
-            if method != "kelson_raw":
+            if method in {"sky_scale_raw", "passthrough"}:
                 item["status"] = "SKIPPED_OTHER_METHOD"
+            elif method != "kelson_raw":
+                raise ValueError("Unknown or missing SkySub science method")
             else:
                 # FITS header values are untrusted path strings. Only one
                 # sibling archive file, never an absolute/parent path, is
