@@ -60,13 +60,22 @@ def max_severity(flags: Iterable[dict[str, Any]] | None) -> str:
     return best
 
 
-@dataclass(frozen=True)
+@dataclass
 class QCGateError(RuntimeError):
-    """Raised when the QC gate blocks running a stage."""
+    """Raised when upstream QC ERROR flags prevent a stage from running.
+
+    Exceptions must not be frozen: Python and contextlib update traceback
+    attributes during propagation. A frozen dataclass masked the actual
+    upstream QC blockers with FrozenInstanceError.
+    """
 
     task: str
     blockers: list[dict[str, Any]]
     upstream_max_severity: str
+
+    def __post_init__(self) -> None:
+        # Give standard exception renderers the human-readable blocker detail.
+        RuntimeError.__init__(self, self.summary())
 
     def summary(self, max_items: int = 8) -> str:
         items = self.blockers[:max_items]
