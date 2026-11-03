@@ -43,7 +43,7 @@ Then
 
 The shared bias is ONE random CCD image reused by each exposure within
 its group. The code avoids full Npixel x Npixel covariance materialization;
-its sparse Cholesky/normal-equation factorization retains dimensional cost
+its sparse LU factorization of the normal equations retains dimensional cost
 in the spline coefficient space, not raw CCD pixel space.
 
 ## Relation to actual Scorpipe
@@ -84,3 +84,14 @@ complete geometry and noise contracts.
   https://arxiv.org/abs/astro-ph/0303507
 - Weighted least squares residual projection and covariance:
   https://mude.citg.tudelft.nl/book/2025/observation_theory/03_WeightedLSQ.html
+
+## Numerical conditioning and large-scale applicability
+
+The current primitive uses sparse LU on the weighted normal matrix.
+This squares the condition number relative to the original weighted
+design, and consequently requires a well-conditioned coefficient basis.
+It is a mathematical reference and NOT a verified replacement for the
+production `lsqr` solver. A future integration must compare conditioning,
+regularization, solver residuals and numerical rank, and use a stable
+least-squares factorization if needed. It must also validate the
+SkySub final selected mask and knot domain from the actual run.
