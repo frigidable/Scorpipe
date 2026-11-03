@@ -166,6 +166,11 @@ def build_sensfunc(cfg: dict[str, Any], *, standard_spec_path: str | Path, stand
     bad_mask = np.asarray(mask) != 0
     finite = np.isfinite(flux) & np.isfinite(var) & np.isfinite(ref_flux) & (ref_flux > 0) & (flux > 0)
     fit_mask = finite & (~feature_mask) & (~telluric_mask) & (~low_sn) & (~bad_mask)
+    if int(np.count_nonzero(fit_mask)) < 8:
+        raise ValueError(
+            "Cannot build Sensfunc: fewer than 8 finite, unmasked, high-S/N "
+            "standard-star samples with valid reference flux"
+        )
     raw_ratio = (flux * ext_corr) / ref_flux
     frac_unc = np.sqrt(np.clip(var, 0, np.inf)) / np.clip(np.abs(flux), 1e-12, np.inf)
     yfit = np.log(np.clip(raw_ratio, 1e-30, np.inf))
