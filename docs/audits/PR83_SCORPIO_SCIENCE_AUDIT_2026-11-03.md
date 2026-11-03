@@ -160,3 +160,43 @@ than a claim of empirical calibration of SCORPIO detector read noise.
 `4499d31f7352c093551e253a86f0db3730f26088`. The new
 estimator implementation and its Monte Carlo tests have not yet been
 executed in the user's Windows worktree.
+
+
+## Cached MasterBias schema invalidation and shared calibration covariance (pending Windows QA)
+
+The MasterBias index and MasterBias `VAR` format are now **scientifically versioned**:
+
+- New products use `scorpio_pipe.master_bias_index` **schema_version=3**, with per-group `variance.definition=uncertainty_of_combined_master_bias`, `model`, `factor`, `min_effective_n` and FITS `SB_VMOD/SB_VFAC/SB_NMIN/NBIAS/BUNIT/SB_GID` consistency.
+- During indexed MasterBias selection, `resolve_master_bias` validates the selected group's estimator-variance metadata against its actual FITS header; v1/v2 or missing schema version is rejected with an explicit request to **regenerate** MasterBias. The old v2 VAR was pixelwise bias-frame dispersion and cannot be silently relabeled as estimator VAR.
+- Partially mocked minimal indexes without a named schema remain compatible with low-level historical tests. Actual `build_superbias` always emits the named index. Do not treat anonymous manually constructed indexes as scientific provenance.
+- New `tests/test_masterbias_index_estimator_schema.py` verifies valid new selection and refuses old v1/v2/missing-version indexes, wrong methods, missing VAR, unit conflicts, wrong calibration GID and sample counts, and inconsistent variance factors.
+
+**Next methodological issue: shared calibration covariance.** Let a science exposure have
+`Y_i = S_i + n_i - (B_hat - B_true)`, where `n_i` is exposure-independent noise
+and `B_hat` is the *same* combined MasterBias subtracted from all exposures. Then
+
+`Cov(Y_i,Y_j) = δ_ij Var(n_i) + Var(B_hat)`,
+
+under independence of `n_i` and `B_hat`. A weighted stack with normalized
+weights `a_i` (sum a_i=1) has variance
+
+`Var(sum_i a_i Y_i) = sum_i a_i^2 Var(n_i) + (sum_i a_i)^2 Var(B_hat)`.
+
+The shared MasterBias term **does not shrink as 1/N science exposures**; the
+present Stack2D treats all input VAR planes as independent, and will therefore
+underestimate this common component when it enters each exposure VAR.
+
+Rectification can map the shared pixelwise detector MasterBias error into
+correlated wavelength/spatial pixels; input exposures with different
+wavelength shifts and different normalization need a transformed covariance
+term rather than naive per-pixel addition. The scientifically appropriate
+next work package is a separate `independent_variance` / `shared_calibration`
+uncertainty representation, propagation through Sky, Linearize and Stack2D,
+and Monte Carlo with a reused MasterBias. **Do not claim this is solved by
+the new estimator VAR map or by the passed synthetic Golden.**
+
+Validation on real SCORPIO-1/2 data and independently verified readout-noise
+benchmarks remain release blockers.
+
+Latest index-v3 code/tests have **not yet passed Windows QA**; the prior 690
+test executions passed at commit `3dac7434c69318373e253bbc855019d78d2cad4b`.
