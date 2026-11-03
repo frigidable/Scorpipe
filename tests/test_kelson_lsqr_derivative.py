@@ -100,3 +100,37 @@ def test_fixed_seed_is_reproducible_for_actual_sky_frozen_fit(tmp_path):
         rtol=0., atol=0.,
     )
     assert left["status"] == right["status"]
+
+
+def test_early_stopped_lsqr_jacobian_differs_from_converged_wls():
+    # This is an independent algebraic counterexample, not a replayed
+    # astronomy observation. It proves why an LSQR iteration cap cannot
+    # be silently replaced by the converged fixed-weight WLS derivative.
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.linalg import lsqr
+
+    X = np.asarray([
+        [1., 0., 1.],
+        [1., 1., 0.],
+        [0., 1., 2.],
+        [1., -1., 1.],
+        [0., 1., 1.],
+        [2., 0., 1.],
+    ])
+    A = csr_matrix(X)
+    base = np.array([3., 2., 8., 1., 4., -2.])
+    direction = np.array([1., -1., .5, 2., 0., -.4])
+    eps = .1
+
+    def derivative(itlim):
+        cp = lsqr(A, base + eps*direction, atol=1e-12,
+                  btol=1e-12, iter_lim=itlim)[0]
+        cm = lsqr(A, base - eps*direction, atol=1e-12,
+                  btol=1e-12, iter_lim=itlim)[0]
+        return (cp - cm) / (2.*eps)
+
+    exact = np.linalg.lstsq(X, direction, rcond=None)[0]
+    short_error = np.linalg.norm(X @ (derivative(1) - exact))
+    converged_error = np.linalg.norm(X @ (derivative(20) - exact))
+    assert short_error > .2
+    assert converged_error < 1e-10
