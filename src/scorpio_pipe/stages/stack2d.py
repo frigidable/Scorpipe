@@ -27,6 +27,7 @@ from scorpio_pipe.io.atomic_fits import atomic_write_fits
 import astropy.units as u
 
 from scorpio_pipe.fits_utils import open_fits_smart
+from scorpio_pipe.calib.bias_covariance import bias_group_diagnostics
 
 from scorpio_pipe.io.mef import write_sci_var_mask, try_read_grid, validate_sci_var_mask
 from scorpio_pipe.spectral_axis_contract import (
@@ -1238,6 +1239,8 @@ def run_stack2d(
                     "per_second": bool(per_sec),
                     "exptime_s": float(exptime) if exptime is not None else None,
                     "normalized_by_stack": bool(applied_norm),
+                    "bias_group_id": str(hdr.get("SB_GID") or "").strip() or None,
+                    "bias_var_included": bool(hdr["BVARINC"]) if "BVARINC" in hdr else None,
                     "grid": {
                         "lambda0_A": float(l0),
                         "dlambda_A": float(dl),
@@ -1245,6 +1248,12 @@ def run_stack2d(
                     },
                 }
             )
+
+        # Do not pretend this coadd's first SB_GID represents all inputs.
+        # Input VAR already combines detector and MasterBias estimator error;
+        # no safe correction can be inferred without separate noise components.
+        bias_audit = bias_group_diagnostics(kept_input_meta)
+        report["bias_covariance"] = bias_audit
 
         # Decide output unit string.
         out_bunit = f"{base_ref}/s" if normalize_exptime else str(unit0_raw)
@@ -1511,6 +1520,12 @@ def run_stack2d(
 
         # Write outputs.
         hdr = hdr0.copy()
+        if bias_audit["unique_group"] is None and "SB_GID" in hdr:
+            del hdr["SB_GID"]
+        hdr["SBGRPN"] = (int(bias_audit["n_groups_known"]), "Number of known MasterBias groups")
+        hdr["SBGMISS"] = (int(bias_audit["n_missing_group"]), "Inputs with missing MasterBias group")
+        hdr["SBGSTAT"] = (str(bias_audit["status"]), "MasterBias group sharing state")
+        hdr["SBCOVQ"] = ("UNMODEL", "Shared MasterBias covariance not propagated")
         if upstream_degraded:
             hdr["QADEGRD"] = (1, "Downstream product is degraded (sky-sub pass-through upstream)")
             hdr.add_history("Upstream sky subtraction was skipped/degraded (QADEGRD=1).")
@@ -1677,6 +1692,17 @@ def run_stack2d(
 
             thr, thr_meta = compute_thresholds(cfg)
             stage_flags: list[dict[str, Any]] = []
+            if bias_audit["shared_group_ids"]:
+                stage_flags.append(
+                    make_flag(
+                        "SHARED_MASTERBIAS_COVARIANCE_UNMODELLED",
+                        "WARN",
+                        "Input exposures share a MasterBias; Stack2D VAR does "
+                        "not include the full correlated calibration uncertainty.",
+                        groups=bias_audit["shared_group_ids"],
+                        all_bias_var_included=bool(bias_audit["all_bias_var_included"]),
+                    )
+                )
 
             # P0-L: carry upstream sky-sub pass-through into downstream QC
             if upstream_degraded:

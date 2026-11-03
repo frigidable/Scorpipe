@@ -193,6 +193,7 @@ def apply_flat(
                 bvar_to_add = bvar.astype(np.float32)
             else:
                 var = (var + bvar).astype(np.float32)
+                hdr["BVARINC"] = (True, "MasterBias estimator VAR included in VAR")
 
         # Combine DQ into the pipeline mask.
         if bdq is not None and bdq.shape == data.shape:
