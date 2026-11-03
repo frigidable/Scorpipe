@@ -193,7 +193,11 @@ def test_golden_mini_night_e2e(tmp_path: Path):
     sky_doc = json.loads(Path(sky_done).read_text(encoding="utf-8"))
     # A sky spline fitted to its own training pixels cannot establish
     # absolute flexure. Never transmit an apparently measured zero shift.
-    flex = sky_doc.get("flexure") or {}
+    # write_done_json() places all additional stage metadata in "extra";
+    # the scientific Sky flexure summary is not a top-level JSON field.
+    assert isinstance(sky_doc.get("extra"), dict), "Sky done.json missing extra"
+    flex = sky_doc["extra"].get("flexure")
+    assert isinstance(flex, dict), "Sky extra.flexure contract missing"
     # Sky-model FITS cannot inherit detector VAR, because a fitted model
     # has a different covariance. Require honest, incomplete provenance.
     sky_model_path = mn.work_dir / "09_sky" / "obj_01_skymodel_raw.fits"
