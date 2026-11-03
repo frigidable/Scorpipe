@@ -144,18 +144,41 @@ def _find_done_json(cfg: dict[str, Any], stage_key: str) -> Path | None:
 
 
 def _read_done_flags(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Read upstream QC without converting corrupted reports into clean QC.
+
+    Reports with no QC section are legitimate for some early stages, but a
+    present malformed report or malformed QC flags are never proof of safety.
+    """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return [], {}
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Cannot read upstream QC report: {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"Upstream QC report is not a JSON object: {path}")
 
-    qc = data.get("qc") if isinstance(data.get("qc"), dict) else {}
-    flags = qc.get("flags") if isinstance(qc.get("flags"), list) else []
-    out: list[dict[str, Any]] = []
-    for f in flags:
-        if isinstance(f, dict):
-            out.append(dict(f))
-    return out, data if isinstance(data, dict) else {}
+    qc = data.get("qc")
+    if qc is None:
+        return [], data
+    if not isinstance(qc, dict):
+        raise ValueError(f"Upstream QC field is not a JSON object: {path}")
+    flags = qc.get("flags")
+    if flags is None:
+        return [], data
+    if not isinstance(flags, list) or any(not isinstance(f, dict) for f in flags):
+        raise ValueError(f"Upstream QC flags are not a list of objects: {path}")
+    for flag in flags:
+        if not isinstance(flag.get("severity"), str):
+            raise ValueError(f"Upstream QC flag lacks a valid severity: {path}")
+        normalized = normalize_severity(flag["severity"])
+        raw = flag["severity"].strip().upper()
+        if raw not in (*_SEV_ORDER, "BAD", "FAIL", "FATAL", "CRIT",
+                       "CRITICAL", "WARNING", "OK"):
+            raise ValueError(
+                f"Unrecognized upstream QC flag severity {raw!r}: {path}"
+            )
+        if normalized not in _SEV_ORDER:
+            raise ValueError(f"Unrecognized upstream QC severity: {path}")
+    return [dict(f) for f in flags], data
 
 
 def check_qc_gate(
