@@ -100,28 +100,61 @@ def measure_line(
     calsys_abs: np.ndarray | None,
     spec: LineSpec,
     redshift: float = 0.0,
+    mask: np.ndarray | None = None,
+    waveref: str = "air",
+    detection_snr: float = 3.0,
 ) -> dict[str, Any]:
     wave = np.asarray(wave, dtype=float)
     flux = np.asarray(flux, dtype=float)
     var = np.asarray(var, dtype=float)
+    if flux.shape != wave.shape or var.shape != wave.shape or wave.ndim != 1:
+        raise ValueError("Line measurement expects same-length 1D wave/flux/var")
+    if mask is None:
+        quality_ok = np.ones(wave.shape, dtype=bool)
+    else:
+        m_in = np.asarray(mask)
+        if m_in.shape != wave.shape or m_in.dtype.kind not in "iu":
+            raise ValueError("Line measurement MASK must be 1D integer bitmask")
+        quality_ok = m_in == 0
+    quality_ok &= np.isfinite(flux) & np.isfinite(var) & (var > 0)
+    medium = str(waveref or "").strip().lower()
+    if medium not in {"air", "vacuum"}:
+        raise ValueError("Line measurement needs explicit air/vacuum WAVEREF")
+    if not (np.isfinite(detection_snr) and float(detection_snr) >= 3.0):
+        raise ValueError("Line detection threshold must be >= 3 sigma")
+    from scorpio_pipe.calib.common import air_to_vacuum
+
+    rest = float(spec.rest_wavelength)
+    if medium == "vacuum":
+        rest = float(air_to_vacuum(np.array([rest], dtype=float))[0])
     rel = np.zeros_like(wave, dtype=float) if calsys_rel is None else np.asarray(calsys_rel, dtype=float)
     tel = np.zeros_like(wave, dtype=float) if calsys_tell is None else np.asarray(calsys_tell, dtype=float)
     absu = np.zeros_like(wave, dtype=float) if calsys_abs is None else np.asarray(calsys_abs, dtype=float)
-    center = float(spec.rest_wavelength) * (1.0 + float(redshift))
+    center = rest * (1.0 + float(redshift))
+    # Masked/invalid pixels must not influence either continuum sidebands
+    # or integrated emission-line flux, even when their SCI is finite.
+    flux_for_continuum = np.where(quality_ok, flux, np.nan)
     m = (wave >= center - float(spec.window_half_width)) & (wave <= center + float(spec.window_half_width))
     if np.count_nonzero(m) < 3:
         return {'name': spec.name, 'detected': False, 'reason': 'insufficient_sampling'}
     w = wave[m]
     f = flux[m]
-    v = np.clip(var[m], 0.0, np.inf)
-    cont_full, cont_meta = _continuum_model(wave, flux, left=spec.continuum_left, right=spec.continuum_right, center=center)
+    v = var[m]
+    cont_full, cont_meta = _continuum_model(
+        wave, flux_for_continuum,
+        left=spec.continuum_left, right=spec.continuum_right, center=center
+    )
     cont = cont_full[m]
     net = f - cont
     dl = np.gradient(w) if w.size > 1 else np.ones_like(w)
     dl = np.asarray(dl, dtype=float)
-    fin = _finite_mask(w, f, v, cont, dl)
+    fin = _finite_mask(w, f, v, cont, dl) & quality_ok[m] & (dl > 0)
     if np.count_nonzero(fin) < 3:
-        return {'name': spec.name, 'detected': False, 'reason': 'nonfinite_window'}
+        return {
+            'name': spec.name, 'detected': False,
+            'reason': 'insufficient_valid_unmasked_pixels',
+            'n_unmasked': int(np.count_nonzero(fin)),
+        }
     w = w[fin]; f = f[fin]; v = v[fin]; cont = cont[fin]; net = net[fin]; dl = dl[fin]
     flux_int = float(np.sum(net * dl))
     err_stat = float(np.sqrt(np.sum(v * dl * dl)))
@@ -133,22 +166,38 @@ def measure_line(
     err_cal_tell = float(abs(flux_int) * tell_med)
     err_cal_abs = float(abs(flux_int) * abs_med)
     err_cal = float(abs(flux_int) * np.nanmedian(cal_frac)) if cal_frac.size else 0.0
+    sn = float(flux_int / err_stat) if err_stat > 0 else float("nan")
+    detected = bool(np.isfinite(sn) and flux_int > 0
+                    and sn >= float(detection_snr))
     pos = np.clip(net, 0.0, np.inf)
     weight_sum = float(np.sum(pos * dl))
-    centroid = float(np.sum(w * pos * dl) / weight_sum) if weight_sum > 0 else float(np.sum(w * np.abs(net) * dl) / max(1e-12, np.sum(np.abs(net) * dl)))
+    centroid = None
     sigma = None
-    if weight_sum > 0:
-        sigma_val = float(np.sqrt(max(0.0, np.sum(((w - centroid) ** 2) * pos * dl) / max(weight_sum, 1e-12))))
+    if detected and weight_sum > 0:
+        centroid = float(np.sum(w * pos * dl) / weight_sum)
+        sigma_val = float(np.sqrt(max(
+            0.0,
+            np.sum(((w - centroid) ** 2) * pos * dl) / weight_sum
+        )))
         sigma = sigma_val if math.isfinite(sigma_val) else None
     fwhm = sigma_to_fwhm(sigma)
-    sigma_kms = sigma_to_velocity_dispersion(spec.rest_wavelength, sigma)
-    velocity = velocity_from_centroid(spec.rest_wavelength, centroid)
+    # Observed line width includes instrumental broadening. Divide by
+    # observed wavelength, not the rest-frame wavelength of a redshifted line.
+    sigma_kms = sigma_to_velocity_dispersion(centroid, sigma) if centroid is not None else None
+    velocity = velocity_from_centroid(rest, centroid) if centroid is not None else None
     cont_level = float(np.nanmedian(cont)) if np.any(np.isfinite(cont)) else float('nan')
     ew = float(np.sum((net / np.clip(cont, 1e-12, np.inf)) * dl)) if np.isfinite(cont_level) and abs(cont_level) > 1e-12 else float('nan')
-    sn = abs(flux_int) / max(1e-12, err_stat)
+    blend_warning = spec.name in {
+        'Halpha', '[NII]6548', '[NII]6583',
+    }
     return {
         'name': spec.name,
-        'rest_wavelength': float(spec.rest_wavelength),
+        'rest_wavelength': rest,
+        'waveref': medium,
+        'blend_warning': bool(blend_warning),
+        'flux_kind': ('window_integral_not_deblended' if blend_warning
+                      else 'continuum_subtracted_window_integral'),
+        'sigma_kms_kind': 'observed_including_instrument_LSF',
         'expected_wavelength': float(center),
         'centroid': float(centroid),
         'velocity_kms': velocity,
@@ -165,8 +214,11 @@ def measure_line(
         'err_cal_abs': float(err_cal_abs),
         'err_total': float(np.hypot(err_stat, err_cal)),
         'snr_stat': float(sn),
-        'detected': bool(sn >= 2.0 or weight_sum > 0),
+        'detected': detected,
+        'detection_snr_threshold': float(detection_snr),
+        'upper_limit_3sigma': float(3.0 * err_stat) if not detected else None,
         'n_samples': int(w.size),
+        'n_masked_in_window': int(np.count_nonzero(~quality_ok[m])),
         **cont_meta,
     }
 
@@ -181,6 +233,9 @@ def measure_lines(
     calsys_abs: np.ndarray | None,
     lines: Iterable[LineSpec] = DEFAULT_LINES,
     redshift: float = 0.0,
+    mask: np.ndarray | None = None,
+    waveref: str = "air",
+    detection_snr: float = 3.0,
 ) -> list[dict[str, Any]]:
     return [
         measure_line(
@@ -192,6 +247,9 @@ def measure_lines(
             calsys_abs=calsys_abs,
             spec=spec,
             redshift=redshift,
+            mask=mask,
+            waveref=waveref,
+            detection_snr=detection_snr,
         )
         for spec in lines
     ]
