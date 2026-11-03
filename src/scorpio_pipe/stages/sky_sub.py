@@ -1575,6 +1575,8 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
     geom_cfg = sky_cfg.get("geometry") if isinstance(sky_cfg.get("geometry"), dict) else {}
     kel_cfg = sky_cfg.get("kelson_raw") if isinstance(sky_cfg.get("kelson_raw"), dict) else {}
     scl_cfg = sky_cfg.get("sky_scale_raw") if isinstance(sky_cfg.get("sky_scale_raw"), dict) else {}
+    freeze_cfg = sky_cfg.get("covariance_capture") if isinstance(sky_cfg.get("covariance_capture"), dict) else {}
+    frozen_capture_enabled = bool(freeze_cfg.get("enabled", False))
 
     primary = str(sky_cfg.get("primary_method") or sky_cfg.get("method") or "kelson_raw").lower()
 
@@ -2223,6 +2225,39 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                         "mode": "bspline_tiled",
                     }
 
+                # Optional ACTUAL post-clipping snapshot: save the fit's final
+                # native CCD sky pixels, weights, basis and wavelength map.
+                # A capture error is an ancillary warning and cannot replace
+                # otherwise valid science data with a sky-failure pass-through.
+                frozen_snapshot = None
+                if method_used == "kelson_raw" and frozen_capture_enabled:
+                    try:
+                        from scorpio_pipe.calib.sky_fit_capture import capture_kelson_fit
+
+                        frozen_snapshot = capture_kelson_fit(
+                            out_dir / f"{stem}_kelson_frozen_fit_v1.npz",
+                            fit=fit,
+                            lambda_map=lam_eff,
+                            y_norm_rows=y_norm_rows,
+                            candidate_flat_indices=(y_idx * nx + x_idx),
+                            candidate_lambda=lam_s,
+                            candidate_y=y_s_norm,
+                            candidate_data=d_s,
+                            candidate_variance=var_s,
+                        )
+                        fit_meta["frozen_covariance_capture"] = frozen_snapshot
+                    except Exception as exc:
+                        fit_meta["frozen_covariance_capture"] = {
+                            "status": "CAPTURE_FAILED",
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                        stage_flags.append(make_flag(
+                            "SKY_FROZEN_CAPTURE_FAILED", "WARN",
+                            "Optional frozen sky-fit provenance not available",
+                            stem=stem,
+                            error=f"{type(exc).__name__}: {exc}",
+                        ))
+
                 skysub = (sci.astype(np.float32) - model.astype(np.float32)).astype(np.float32)
 
                 # Detector variance and fitted-sky-model covariance are
@@ -2305,6 +2340,13 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                 # write products
                 hdr0 = hdr.copy()
                 hdr0["SKYMD"] = (str(method_used), "Sky model method")
+                if frozen_snapshot is not None:
+                    hdr0["SKYFRZV"] = (1, "Captured actual frozen sky fit schema")
+                    hdr0["SKYFRZQ"] = ("FIT_ONLY", "Conditional fit, not science covariance")
+                    hdr0["SKYFRZP"] = (
+                        Path(str(frozen_snapshot["path"])).name,
+                        "Fitted-sky covariance provenance snapshot",
+                    )
                 # FITS header comments must be plain printable ASCII (astropy enforces this).
                 # Avoid Greek letters like λ/δ here.
                 hdr0["SKYKS"] = (float(kel_cfg.get("knot_step_A", 1.0) or 1.0), "lambda knot step (Angstrom)")
