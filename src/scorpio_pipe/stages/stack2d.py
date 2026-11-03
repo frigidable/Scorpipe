@@ -581,15 +581,38 @@ class _WeightedMeanAccumulator:
 
     def __init__(self, shape: tuple[int, int]):
         self.sum_w = np.zeros(shape, dtype=np.float64)
+        # Variance under the FIXED weights actually used to average the
+        # exposures. This is NOT the robust estimator's full sampling variance
+        # or the cross-exposure covariance of shared calibration products.
+        self.sum_w2var = np.zeros(shape, dtype=np.float64)
         self.mean = np.full(shape, np.nan, dtype=np.float64)
 
-    def update(self, values: np.ndarray, weights: np.ndarray) -> None:
+    def update(
+        self, values: np.ndarray, weights: np.ndarray,
+        *, variances: np.ndarray | None = None,
+    ) -> None:
         if values.shape != self.mean.shape or weights.shape != self.mean.shape:
             raise ValueError("Accumulator shape mismatch")
         w = np.asarray(weights, dtype=np.float64)
-        if not np.any(w > 0):
+        if np.any(~np.isfinite(w)) or np.any(w < 0):
+            raise ValueError("Accumulator requires finite nonnegative weights")
+        good = w > 0
+        if not np.any(good):
             return
         x = np.asarray(values, dtype=np.float64)
+        if np.any(good & ~np.isfinite(x)):
+            raise ValueError("Accumulator requires finite positive-weight values")
+        if variances is not None:
+            if variances.shape != self.mean.shape:
+                raise ValueError("Accumulator variance shape mismatch")
+            v = np.asarray(variances, dtype=np.float64)
+            if np.any(good & (~np.isfinite(v) | (v < 0))):
+                raise ValueError("Invalid positive-weight input variance")
+            self.sum_w2var[good] += w[good] ** 2 * v[good]
+        else:
+            # Used only by preliminary mean estimation and older benchmark
+            # helpers. The FINAL science pass supplies the original v.
+            self.sum_w2var[good] += w[good]
         sw_old = self.sum_w
         sw_new = sw_old + w
         good = w > 0
@@ -606,7 +629,12 @@ class _WeightedMeanAccumulator:
 
     def finalize(self) -> tuple[np.ndarray, np.ndarray]:
         mean = self.mean.astype(np.float32, copy=False)
-        var = np.where(self.sum_w > 0, 1.0 / self.sum_w, np.nan).astype(np.float32)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            var = np.where(
+                self.sum_w > 0,
+                self.sum_w2var / (self.sum_w ** 2),
+                np.nan,
+            ).astype(np.float32)
         return mean, var
 
 
@@ -639,6 +667,27 @@ def _load_shifted_block(
     v = np.asarray(block_v, dtype=np.float32) * float(var_scale)
     m = np.asarray(block_m, dtype=np.uint16)
     return s, v, m
+
+
+def _huber_weight_block(
+    w0: np.ndarray, residual: np.ndarray, huber_c: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Apply Huber weighting without propagating zero-weight NaN gaps.
+
+    0 * NaN is NaN in IEEE arithmetic, so every zero-weight input must
+    remain exactly zero, regardless of its residual.
+    """
+    ar = np.abs(np.asarray(residual, dtype=np.float64))
+    hub = np.where(
+        ar <= float(huber_c),
+        1.0,
+        float(huber_c) / np.maximum(ar, 1e-20),
+    ).astype(np.float32)
+    base = np.asarray(w0, dtype=np.float32)
+    w = np.zeros_like(base, dtype=np.float32)
+    usable = (base > 0) & np.isfinite(base) & np.isfinite(hub) & (hub > 0)
+    w[usable] = base[usable] * hub[usable]
+    return w, hub
 
 
 def _base_weight_block(
@@ -742,9 +791,7 @@ def _stack_chunk_streaming(
                 v_eff, w0 = _base_weight_block(s, v, m, fatal_bits=fatal_bits, var_floor=var_floor)
                 if method0 in {"invvar_huber", "huber", "huber_invvar"}:
                     r = (s - last_mu) / np.sqrt(np.maximum(v_eff, 1e-20))
-                    ar = np.abs(r)
-                    hub = np.where(ar <= float(huber_c), 1.0, float(huber_c) / np.maximum(ar, 1e-20)).astype(np.float32)
-                    w = w0 * hub
+                    w, hub = _huber_weight_block(w0, r, float(huber_c))
                 elif method0 in {"invvar_clip", "sigma_clip", "clip"}:
                     r = (s - last_mu) / np.sqrt(np.maximum(v_eff, 1e-20))
                     keep = np.abs(r) <= float(clip_sigma)
@@ -776,9 +823,7 @@ def _stack_chunk_streaming(
         v_eff, w0 = _base_weight_block(s, v, m, fatal_bits=fatal_bits, var_floor=var_floor)
         if method0 in {"invvar_huber", "huber", "huber_invvar"}:
             r = (s - last_mu) / np.sqrt(np.maximum(v_eff, 1e-20))
-            ar = np.abs(r)
-            hub = np.where(ar <= float(huber_c), 1.0, float(huber_c) / np.maximum(ar, 1e-20)).astype(np.float32)
-            w = w0 * hub
+            w, hub = _huber_weight_block(w0, r, float(huber_c))
             suppressed |= np.isfinite(s) & (w0 > 0) & (hub < 1.0)
         elif method0 in {"invvar_clip", "sigma_clip", "clip"}:
             r = (s - last_mu) / np.sqrt(np.maximum(v_eff, 1e-20))
@@ -790,7 +835,7 @@ def _stack_chunk_streaming(
         accepted = w > 0
         cov += accepted.astype(np.int16)
         m_or |= np.where(accepted, m, 0).astype(np.uint16)
-        acc_final.update(s, w)
+        acc_final.update(s, w, variances=v)
 
     mu_final, var_final = acc_final.finalize()
     m_out = np.asarray(m_or, dtype=np.uint16)
@@ -1487,6 +1532,14 @@ def run_stack2d(
             "SCI/VAR in per-second units" if _out_per_sec else "SCI/VAR not normalized per second",
         )
         hdr["STKMETH"] = (method, "stack2d combine method")
+        hdr["STKVRALG"] = ("W2VAR", "Fixed-weight sum(w² Var_i) / (sum w)²")
+        hdr["STKVARQ"] = ("COND_ONLY", "Shared covariance/selection unmodelled")
+        # Qualification of marginal per-pixel variance is not a claim of
+        # downstream extracted-spectrum S/N accuracy. MasterBias can
+        # contribute cross-exposure covariance; fractional Y shifts induce
+        # cross-row covariance; clipping weights are data-derived.
+        hdr["STKXCVQ"] = ("UNMODEL", "Shared calibration covariance unmodelled")
+        hdr["STKYCVQ"] = ("UNMODEL" if y_align_enabled else "NONE", "Y-resampling covariance")
         if method in {"invvar_huber", "huber", "huber_invvar"}:
             hdr["STKHC"] = (float(huber_c), "Huber c")
         if method in {"invvar_clip", "sigma_clip", "clip"}:
