@@ -64,11 +64,17 @@ def test_stack2d_excludes_failed_sky_even_without_user_reject_bits(
         np.testing.assert_array_equal(
             hdul["COV"].data, np.full((8, 16), 2, dtype=np.int16),
         )
+    assert len(result["inputs"]) == len(inputs)
+    assert len({row["path"] for row in result["inputs"]}) == len(inputs)
     bad_meta = next(
         x for x in result["inputs"] if "bad_skysub" in x["path"]
     )
     assert bad_meta["rejected"] is True
     assert bad_meta["reject_reason"]["science_gate"] == "SKY_MODEL_FAILED"
+    assert bad_meta["spectral_axis_contract"] is None
+    accepted = [row for row in result["inputs"] if not row["rejected"]]
+    assert len(accepted) == 2
+    assert all(isinstance(row["spectral_axis_contract"], dict) for row in accepted)
 
 
 def test_stack2d_fails_closed_if_every_sky_input_is_passthrough(

@@ -899,6 +899,7 @@ def run_stack2d(
     inputs_meta: list[dict[str, object]] = []
     kept_files: list[Path] = []
     kept_hduls = []
+    kept_input_meta: list[dict[str, object]] = []
 
     for pth, hdul in zip(files, hduls):
         hdr = hdul[0].header
@@ -933,16 +934,17 @@ def run_stack2d(
                 "bitmask": int(reject_bitmask),
             }
 
-        inputs_meta.append(
-            {
-                "path": str(pth),
-                "qadegrd": qadegrd,
-                "skyok": skyok,
-                "has_skymodel_fail": has_skymodel_fail,
-                "rejected": rejected,
-                "reject_reason": reject_reason,
-            }
-        )
+        input_meta: dict[str, object] = {
+            "path": str(pth),
+            "qadegrd": qadegrd,
+            "skyok": skyok,
+            "has_skymodel_fail": has_skymodel_fail,
+            "rejected": rejected,
+            "reject_reason": reject_reason,
+            # Rejected inputs are not admitted to spectral WCS validation.
+            "spectral_axis_contract": None,
+        }
+        inputs_meta.append(input_meta)
 
         if rejected:
             try:
@@ -952,6 +954,7 @@ def run_stack2d(
         else:
             kept_files.append(pth)
             kept_hduls.append(hdul)
+            kept_input_meta.append(input_meta)
 
     files = kept_files
     hduls = kept_hduls
@@ -1090,7 +1093,7 @@ def run_stack2d(
         exptimes: list[float | None] = []
 
         # Per-input metadata + strict validation.
-        for p, h in zip(files, hduls):
+        for p, h, input_meta in zip(files, hduls, kept_input_meta):
             hdr = _get_primary_header(h)
             this_spectral_contract = read_spectral_axis_contract(
                 hdr, source=p.name,
@@ -1181,7 +1184,8 @@ def run_stack2d(
             sci_scales.append(float(s_scale))
             var_scales.append(float(s_scale * s_scale))
 
-            report["inputs"].append(
+            # Enrich the admission record rather than duplicating the input.
+            input_meta.update(
                 {
                     "file": p.name,
                     "path": str(p),

@@ -165,6 +165,9 @@ def test_consistent_air_topocentric_produces_qualified_stack(
         assert hdul[0].header["SPECSYS"] == "TOPOCENT"
         np.testing.assert_allclose(hdul["SCI"].data, 12.0, atol=1e-5)
     assert result["spectral_axis_contract"]["validation"] == "QUALIFIED"
+    assert len(result["inputs"]) == 2
+    assert len({row["path"] for row in result["inputs"]}) == 2
+    assert all(row["rejected"] is False for row in result["inputs"])
     assert all(row["spectral_axis_contract"]["validation"] == "QUALIFIED"
                for row in result["inputs"])
 
@@ -193,6 +196,9 @@ def test_legacy_unidentified_spectral_grids_remain_visibly_unqualified(
         assert "WAVEREF" not in hdul[0].header
         assert "SPECSYS" not in hdul[0].header
     assert result["spectral_axis_contract"]["validation"] == "UNQUAL"
+    assert len(result["inputs"]) == 2
+    assert all(row["spectral_axis_contract"]["validation"] == "UNQUAL"
+               for row in result["inputs"])
 
 
 def test_partially_labeled_anonymous_fits_never_defaults_implicitly(
