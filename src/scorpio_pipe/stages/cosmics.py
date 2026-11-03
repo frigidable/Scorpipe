@@ -226,7 +226,20 @@ def _resolve_cosmics_superbias_for_kind(
 
     index = load_master_bias_index(work_dir)
     if not (isinstance(index, dict) and index.get("groups")):
-        # Legacy unindexed runs: no claim of readout-group validation.
+        # Instrument-labelled SCORPIO observations must not use an
+        # unverified global MasterBias alias in Cosmics. Defer correction
+        # to the indexed per-readout Flatfield stage, or let strict Sky
+        # refuse the uncalibrated raw exposure.
+        if any(
+            str(hdr.get("INSTRUME") or "").strip().upper().startswith("SCORPIO")
+            for _, hdr, _ in entries
+        ):
+            log.warning(
+                "Cosmics deferred bias subtraction: SCORPIO MasterBias "
+                "group index is missing; unindexed default alias is unsafe"
+            )
+            return None
+        # Legacy non-SCORPIO unindexed runs retain the original behavior.
         return legacy_superbias
 
     selections = [
