@@ -66,3 +66,51 @@ def test_gate_still_blocks_error_and_ignores_warn(
     # Requesting an override is not sufficient without explicit configuration.
     with pytest.raises(gate.QCGateError):
         gate.check_qc_gate({}, task="stack2d", allow_override=True)
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ("{malformed-json", "Cannot read upstream QC report"),
+        ("[]", "not a JSON object"),
+        ('{"qc": "not-an-object"}', "QC field is not a JSON object"),
+        ('{"qc": {"flags": "ERROR"}}', "QC flags are not a list"),
+        ('{"qc": {"flags": [null]}}', "QC flags are not a list"),
+        ('{"qc": {"flags": [{"code": "UNKNOWN"}]}}', "lacks a valid severity"),
+        (
+            '{"qc": {"flags": [{"code": "UNKNOWN", "severity": "BOGUS"}]}}',
+            "Unrecognized upstream QC flag severity",
+        ),
+    ],
+)
+def test_gate_rejects_corrupt_upstream_qc_instead_of_assuming_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    payload: str,
+    expected: str,
+) -> None:
+    done = tmp_path / "linearize_done.json"
+    done.write_text(payload, encoding="utf-8")
+    monkeypatch.setattr(gate, "_stage_key_order", lambda: ["linearize", "stack2d"])
+    monkeypatch.setattr(
+        gate,
+        "_find_done_json",
+        lambda cfg, sk: done if sk == "linearize" else None,
+    )
+    with pytest.raises(ValueError, match=expected):
+        gate.check_qc_gate({}, task="stack2d")
+
+
+def test_gate_allows_valid_upstream_done_without_qc_flags(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    done = tmp_path / "linearize_done.json"
+    done.write_text('{"status": "ok"}', encoding="utf-8")
+    monkeypatch.setattr(gate, "_stage_key_order", lambda: ["linearize", "stack2d"])
+    monkeypatch.setattr(
+        gate,
+        "_find_done_json",
+        lambda cfg, sk: done if sk == "linearize" else None,
+    )
+    gate.check_qc_gate({}, task="stack2d")
