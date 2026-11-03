@@ -212,6 +212,14 @@ def _resolve_cosmics_superbias_for_kind(
             entries.append((path, hdul[0].header.copy(), hdul[0].data.shape))
     status = [bool(h.get("BIASSUB", False)) for _, h, _ in entries]
     if all(status):
+        # The existing Cosmics primary-image writer cannot rehome a linked
+        # pending bias-variance sidecar. Never turn an already-calibrated
+        # frame into a new CLEAN with a dangling BVARREF reference.
+        if any(h.get("BVARREF") for _, h, _ in entries):
+            raise ValueError(
+                "Cosmics cannot reclean exposures with pending MasterBias "
+                "BVARREF: first propagate the linked variance in Flatfield"
+            )
         return None  # Already corrected: never subtract a second time.
     if any(status):
         raise ValueError(
