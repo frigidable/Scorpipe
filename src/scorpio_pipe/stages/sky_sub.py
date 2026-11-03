@@ -2282,43 +2282,13 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                 write_sci_var_mask(skymodel_path, model, var=(var_model if var_model is not None else var), mask=mask, header=hdr0)
                 write_sci_var_mask(skysub_path, skysub, var=var_out, mask=mask, header=hdr0)
 
-                # Backward-compatible aliases (synthetic smoke tests / legacy scripts).
-                # Keep these as plain copies to avoid cross-platform symlink issues.
-                #
-                # Important nuance:
-                # - *_skysub_raw.fits is ALWAYS in RAW detector geometry (no wavelength grid).
-                # - Some legacy flows/tests expect 09_sky/*_skysub.fits to be directly stackable,
-                #   i.e. to carry a linear wavelength grid. If a linearized product already exists
-                #   (10_linearize/<stem>_skysub.fits), prefer copying THAT into 09_sky aliases.
-                alias_src = skysub_path
-                try:
-                    lin_dir = stage_dir(work_dir, "linearize")
-                    cand = [
-                        lin_dir / f"{stem}_skysub.fits",
-                        lin_dir / stem / f"{stem}_skysub.fits",
-                        lin_dir / f"{stem}_sky_sub.fits",
-                        lin_dir / stem / f"{stem}_sky_sub.fits",
-                    ]
-                    for c in cand:
-                        if not c.exists():
-                            continue
-                        try:
-                            with fits.open(c, memmap=False) as _hd:
-                                _h = _hd[0].header
-                            has_grid = ("SCORP_L0" in _h or "CRVAL1" in _h) and ("SCORP_DL" in _h or "CDELT1" in _h)
-                            if has_grid:
-                                alias_src = c
-                                break
-                        except Exception:
-                            continue
-                except Exception:
-                    pass
-
+                # Compatibility aliases belong to the current Sky stage only.
+                # NEVER pull a pre-existing 10_linearize product into 09_sky:
+                # it may belong to a previous science run (and has the wrong
+                # wavelength grid, geometry or reduction parameters).
+                # A legacy alias is explicitly a RAW-geometry Sky product.
                 for _alias in (f"{stem}_skysub.fits", f"{stem}_sky_sub.fits"):
-                    try:
-                        shutil.copy2(alias_src, out_dir / _alias)
-                    except Exception:
-                        pass
+                    shutil.copy2(skysub_path, out_dir / _alias)
                 for _alias in (f"{stem}_skymodel.fits", f"{stem}_sky_model.fits"):
                     try:
                         shutil.copy2(skymodel_path, out_dir / _alias)
