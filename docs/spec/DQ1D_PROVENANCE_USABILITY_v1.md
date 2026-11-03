@@ -38,8 +38,9 @@ When `DQ1DVER=1` and `DQ1DSEM=FATAL` are present:
    `FRAC<1`; **this does not imply that full-aperture object flux was
    recovered**, particularly for boxcar. A flux fraction cannot generally
    be inferred from a pixel fraction.
-4. Fluxcal copies `DQ1DVER` and per-extraction DQ/FRAC columns unchanged.
-   LineMeasure receives the spatial fraction only for tagged v1 spectra.
+4. Sensfunc excludes incompletely sampled standard-star apertures from
+   fitting response. Fluxcal copies `DQ1DVER` and per-extraction DQ/FRAC
+   columns unchanged. LineMeasure receives the spatial fraction only for tagged v1 spectra.
    If any pixel in the *line integration window* has `FRAC<1` or fails
    output spectral quality, the integrated line flux is marked partial and
    automatic `detected=True` is forbidden, even if the S/N is formally >3.

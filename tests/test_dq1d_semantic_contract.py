@@ -202,3 +202,40 @@ def test_line_measure_rejects_invalid_fraction_used():
             calsys_rel=None, calsys_tell=None, calsys_abs=None,
             spec=spec, coverage_fraction=np.full(wave.size, np.nan),
         )
+
+
+def test_sensfunc_does_not_fit_from_partially_missing_standard_spatial_aperture(
+    tmp_path, monkeypatch
+):
+    import scorpio_pipe.calib.sensfunc as sf
+    wave = np.arange(4000., 5101., dtype=float)
+    from astropy.io import fits
+    header = fits.Header()
+    header["WAVEREF"] = "air"
+    header["WAVEUNIT"] = "Angstrom"
+    header["BUNIT"] = "e-/s"
+    header["REBNORM"] = "COUNT_V1"
+    frac = np.ones_like(wave)
+    frac[600:800] = 0.8
+    monkeypatch.setattr(sf, "read_spec1d", lambda path, mode="trace": {
+        "wave": wave, "flux": np.full_like(wave, 10.),
+        "var": np.full_like(wave, 0.01),
+        "mask": np.zeros_like(wave, dtype=np.uint16),
+        "header": header, "waveref": "air", "bunit": "e-/s",
+        "frac_used": frac,
+    })
+    monkeypatch.setattr(sf, "ensure_refctx", lambda cfg: {"context_id": "c"})
+    monkeypatch.setattr(
+        sf, "_load_standard_reference",
+        lambda cfg, selected_name: ({}, tmp_path / "reference.csv", "f_lambda", "air"),
+    )
+    monkeypatch.setattr(sf, "read_small_csv", lambda path: {
+        "wavelength_A": wave,
+        "flux": np.full_like(wave, 2.),
+    })
+    monkeypatch.setattr(sf, "reference_path", lambda cfg, **kw: None)
+    monkeypatch.setattr(sf, "reference_metadata", lambda cfg, **kw: {})
+    result = sf.build_sensfunc({}, standard_spec_path=tmp_path / "fake.fits")
+    assert np.all(result["fit_mask"][600:800] == 0)
+    assert result["qc"]["mask_fractions"]["incomplete_aperture"] == pytest.approx(200 / 1101)
+    np.testing.assert_allclose(result["response_abs"], 5., rtol=0, atol=1e-4)

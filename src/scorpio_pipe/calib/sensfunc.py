@@ -225,8 +225,17 @@ def build_sensfunc(cfg: dict[str, Any], *, standard_spec_path: str | Path, stand
     snr = np.abs(flux) / np.sqrt(np.clip(var, 1e-12, np.inf))
     low_sn = snr < float((((cfg.get('fluxcal') if isinstance(cfg.get('fluxcal'), dict) else {}) or {}).get('sensfunc_min_snr', 5.0) or 5.0))
     bad_mask = np.asarray(mask) != 0
+    frac_used = spec.get('frac_used')
+    # DQ1D v1 MASK marks output usability. A spectrum may be numerically
+    # usable but still lack part of the standard's stellar PSF. Fitting its
+    # sensitivity would imprint that missing star flux into the response.
+    # Do not fit an uncorrected incomplete standard aperture.
+    incomplete_aperture = (
+        np.asarray(frac_used, dtype=float) < 1.0 - 1e-6
+        if frac_used is not None else np.zeros_like(wave, dtype=bool)
+    )
     finite = np.isfinite(flux) & np.isfinite(var) & np.isfinite(ref_flux) & (ref_flux > 0) & (flux > 0)
-    fit_mask = finite & (~feature_mask) & (~telluric_mask) & (~low_sn) & (~bad_mask)
+    fit_mask = finite & (~feature_mask) & (~telluric_mask) & (~low_sn) & (~bad_mask) & (~incomplete_aperture)
     raw_ratio = (flux * ext_corr) / ref_flux
     frac_unc = np.sqrt(np.clip(var, 0, np.inf)) / np.clip(np.abs(flux), 1e-12, np.inf)
     yfit = np.log(np.clip(raw_ratio, 1e-30, np.inf))
@@ -268,6 +277,7 @@ def build_sensfunc(cfg: dict[str, Any], *, standard_spec_path: str | Path, stand
             'telluric_mask': float(np.mean(telluric_mask)) if wave.size else 0.0,
             'low_sn': float(np.mean(low_sn)) if wave.size else 0.0,
             'bad_mask': float(np.mean(bad_mask)) if wave.size else 0.0,
+            'incomplete_aperture': float(np.mean(incomplete_aperture)) if wave.size else 0.0,
         },
         'residual_sigma_ln': float(sigma_ln),
         'fit_meta': fit_meta,

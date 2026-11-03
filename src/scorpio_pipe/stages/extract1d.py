@@ -1158,6 +1158,18 @@ def _write_spec1d_fits(
         dq_any_trace, dq_any_fixed, frac_trace, frac_fixed
     )):
         raise ValueError("Incomplete DQ1D provenance/coverage arrays")
+    if have_new_dq:
+        for name, dq, frac in (
+            ("TRACE", dq_any_trace, frac_trace),
+            ("FIXED", dq_any_fixed, frac_fixed),
+        ):
+            dq_arr = np.asarray(dq)
+            frac_arr = np.asarray(frac, dtype=float)
+            if dq_arr.shape != wave.shape or frac_arr.shape != wave.shape:
+                raise ValueError(f"DQ1D {name} provenance array length mismatch")
+            if (not np.isfinite(frac_arr).all() or np.any(frac_arr < 0)
+                    or np.any(frac_arr > 1)):
+                raise ValueError(f"DQ1D {name} spatial fraction must be in [0,1]")
 
     if "INPUT2D" in hdr0:
         ph["INPUT2D"] = (str(hdr0["INPUT2D"]), "2D input FITS used for extraction")
