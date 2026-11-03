@@ -1427,7 +1427,10 @@ def build_superbias(
                     instrument_hint=str(k.instrument),
                     require_gain=False,
                 )
-                h = stamp_noise_keywords(h, npar, overwrite=True)
+                # stamp_noise_keywords returns a *copy*. Apply its cards back
+                # into the caller's header instead of rebinding only this
+                # local variable (which silently lost RN_SRC and NOISRC).
+                h.update(stamp_noise_keywords(h, npar, overwrite=True))
                 # Extra compact diagnostics
                 if st.get('rn_est_adu') is not None:
                     h['RNADU'] = (float(st.get('rn_est_adu')), 'Read noise estimate [ADU]')
