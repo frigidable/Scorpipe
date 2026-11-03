@@ -86,8 +86,8 @@ def assess_kelson_lsqr_directional_derivatives(
         iter_lim=iter_limit,
     )
     replay_model_difference = float(
-        np.linalg.norm(fit @ (np.asarray(replay[0]) - c_saved))
-        / max(np.linalg.norm(fit @ c_saved), 1.)
+        np.linalg.norm(op.design @ (np.asarray(replay[0]) - c_saved))
+        / max(np.linalg.norm(op.design @ c_saved), 1.)
     )
     observed_rms = float(np.sqrt(np.mean(op.fit_weights ** -1)))
     epsilon = float(epsilon_sigma) * observed_rms
@@ -118,9 +118,18 @@ def assess_kelson_lsqr_directional_derivatives(
         relative = float(
             np.linalg.norm(difference) / max(np.linalg.norm(ideal), 1e-12)
         )
+        # Direct detector noise can hide a large model derivative error
+        # when averaged over the entire residual frame.
+        ideal_model_response = direction - ideal
+        finite_model_response = direction - finite_diff
+        model_relative = float(
+            np.linalg.norm(finite_model_response - ideal_model_response)
+            / max(np.linalg.norm(ideal_model_response), 1e-12)
+        )
         comparisons.append({
             "probe": j,
             "relative_l2_difference": relative,
+            "model_response_relative_l2_difference": model_relative,
             "plus_lsqr_stop": int(plus[1]),
             "minus_lsqr_stop": int(minus[1]),
             "plus_iterations": int(plus[2]),
@@ -132,15 +141,20 @@ def assess_kelson_lsqr_directional_derivatives(
         stops.extend([rec["plus_lsqr_stop"], rec["minus_lsqr_stop"]])
     numerical_convergence = all(x in (1, 2) for x in stops)
     max_difference = max(x["relative_l2_difference"] for x in comparisons)
+    max_model_difference = max(
+        x["model_response_relative_l2_difference"] for x in comparisons
+    )
     matched = (numerical_convergence and
                replay_model_difference <= replay_tolerance and
-               max_difference <= relative_tolerance)
+               max_difference <= relative_tolerance and
+               max_model_difference <= relative_tolerance)
     return {
         "status": "MATCH" if matched else "UNSTABLE",
         "scope": "CONDITIONAL_FINAL_SKY_MASK_ONLY",
         "n_probes": n_probes,
         "epsilon_native_signal": epsilon,
         "max_relative_l2_difference": max_difference,
+        "max_model_response_relative_l2_difference": max_model_difference,
         "replay_model_relative_difference": replay_model_difference,
         "original_lsqr_stop": saved_istop,
         "original_lsqr_condition_estimate": saved_condition,
