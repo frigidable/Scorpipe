@@ -1211,6 +1211,13 @@ def _fit_kelson_bspline(
         "clipped_frac": float(clipped_frac),
         "sigma_r_before": float(sig_before) if (sig_before is not None and np.isfinite(sig_before)) else None,
         "sigma_r_after": float(sig_after) if np.isfinite(sig_after) else None,
+        "solver_diagnostics": {
+            "method": "lsqr",
+            "atol": 1e-10, "btol": 1e-10, "iter_lim": 2000,
+            "stop_code": int(sol[1]), "iterations": int(sol[2]),
+            "residual_norm": float(sol[3]),
+            "condition_estimate": float(sol[6]),
+        },
         "coeff": {
             "c0": c0.astype(np.float32),
             "c1": (c1.astype(np.float32) if c1 is not None else None),

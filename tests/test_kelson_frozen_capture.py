@@ -63,6 +63,11 @@ def test_actual_fit_capture_roundtrips_postclip_selection_and_basis(tmp_path):
         assert payload["lambda_map"].shape == args["lambda_map"].shape
         assert payload["y_order"] == 1
         assert payload["fit_variance"].shape == op.fit_indices.shape
+        assert 0 <= int(payload["lsqr_stop"]) <= 7
+        assert int(payload["lsqr_iterations"]) >= 0
+        assert float(payload["lsqr_condition"]) >= 0.
+        assert float(payload["lsqr_residual"]) >= 0.
+        assert float(payload["lsqr_atol"]) == pytest.approx(1e-10)
     # Fitted spline basis and coefficients reproduce the production model.
     coeff = np.r_[c0, c1]
     reconstructed = np.asarray(op.design @ coeff).ravel()

@@ -18,6 +18,8 @@ _VERSION = 1
 _REQUIRED = frozenset({
     "version", "status", "lambda_map", "y_norm_rows", "fit_indices",
     "fit_variance", "knots", "degree", "y_order", "coeff0", "coeff1",
+    "lsqr_stop", "lsqr_iterations", "lsqr_residual", "lsqr_condition",
+    "lsqr_atol", "lsqr_btol", "lsqr_iter_limit",
 })
 
 
@@ -106,6 +108,23 @@ def capture_kelson_fit(
             raise ValueError("Unexpected spatial coefficients in y_order=0 fit")
         c1 = np.empty(0, dtype=np.float64)
 
+    solver = fit.get("solver_diagnostics") or {}
+    if str(solver.get("method") or "").strip().lower() != "lsqr":
+        raise ValueError("Actual Kelson LSQR diagnostics missing")
+    stop = int(solver["stop_code"])
+    iterations = int(solver["iterations"])
+    resnorm = float(solver["residual_norm"])
+    cond = float(solver["condition_estimate"])
+    atol = float(solver["atol"])
+    btol = float(solver["btol"])
+    itlim = int(solver["iter_lim"])
+    if (stop not in range(8) or iterations < 0 or iterations > itlim
+            or itlim <= 0 or not np.isfinite(resnorm) or resnorm < 0
+            or not np.isfinite(cond) or cond < 0
+            or not np.isfinite(atol) or atol <= 0
+            or not np.isfinite(btol) or btol <= 0):
+        raise ValueError("Invalid actual LSQR numerical diagnostics")
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -120,6 +139,13 @@ def capture_kelson_fit(
         "y_order": np.array(order, dtype=np.int16),
         "coeff0": c0,
         "coeff1": c1,
+        "lsqr_stop": np.array(stop, dtype=np.int16),
+        "lsqr_iterations": np.array(iterations, dtype=np.int32),
+        "lsqr_residual": np.array(resnorm, dtype=np.float64),
+        "lsqr_condition": np.array(cond, dtype=np.float64),
+        "lsqr_atol": np.array(atol, dtype=np.float64),
+        "lsqr_btol": np.array(btol, dtype=np.float64),
+        "lsqr_iter_limit": np.array(itlim, dtype=np.int32),
     }
     temp_path = None
     try:
@@ -145,6 +171,9 @@ def capture_kelson_fit(
         "n_final_fit_pixels": int(selected.size),
         "n_coefficients": int(n_basis * (order + 1)),
         "solver": "LSQR_FINITE_ITERATION",
+        "lsqr_stop_code": stop,
+        "lsqr_iterations": iterations,
+        "lsqr_condition": cond,
         "selection": "ACTUAL_POST_CLIP",
         "covariance_qualified": False,
     }
@@ -175,6 +204,19 @@ def load_frozen_kelson_fit(path: Path):
         y_order = int(data["y_order"])
         c0 = np.asarray(data["coeff0"], dtype=np.float64)
         c1 = np.asarray(data["coeff1"], dtype=np.float64)
+        stop = int(data["lsqr_stop"])
+        iterations = int(data["lsqr_iterations"])
+        residual = float(data["lsqr_residual"])
+        condition = float(data["lsqr_condition"])
+        atol = float(data["lsqr_atol"])
+        btol = float(data["lsqr_btol"])
+        max_iter = int(data["lsqr_iter_limit"])
+    if (stop not in range(8) or iterations < 0 or iterations > max_iter
+            or max_iter <= 0 or not np.isfinite(residual) or residual < 0
+            or not np.isfinite(condition) or condition < 0
+            or not np.isfinite(atol) or atol <= 0
+            or not np.isfinite(btol) or btol <= 0):
+        raise ValueError("Invalid stored LSQR diagnostics")
     if lam.ndim != 2 or ids.ndim != 1 or not np.issubdtype(ids.dtype, np.integer):
         raise ValueError("Invalid frozen CCD geometry/index type")
     if (not ids.size or len(np.unique(ids)) != ids.size or
