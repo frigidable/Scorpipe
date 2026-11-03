@@ -828,47 +828,82 @@ def _optimal_extract(
         mm_all = np.asarray(mask[rows_clip, cols], dtype=np.uint16)
         good &= (mm_all & np.uint16(fatal_bits)) == 0
 
-    prof = np.where(inside & np.isfinite(sl_all), sl_all, 0.0)
+    # Learn the spatial model exclusively from valid measurements. A masked
+    # cosmic ray must not pollute adjacent wavelengths through smoothing.
+    observed_profile = np.where(good, sl_all, 0.0)
     if clip_negative_profile:
-        prof = np.maximum(prof, 0.0)
-
-    good_prof = good
+        observed_profile = np.maximum(observed_profile, 0.0)
 
     try:
         sig = float(max(0.0, smooth_lambda_sigma))
     except Exception:
         sig = 3.0
     if sig > 0:
-        prof = gaussian_filter1d(prof, sigma=sig, axis=1, mode="nearest")
+        # Normalized convolution compensates for missing samples *before*
+        # smoothing. The resulting model is evaluated even at masked spatial
+        # pixels, which are excluded later from the optimal weighted sum.
+        num_profile = gaussian_filter1d(
+            observed_profile, sigma=sig, axis=1, mode="nearest"
+        )
+        support = gaussian_filter1d(
+            good.astype(float), sigma=sig, axis=1, mode="nearest"
+        )
+        profile_supported = inside & (support > 1e-12)
+        prof = np.divide(
+            num_profile, support,
+            out=np.zeros_like(num_profile), where=profile_supported,
+        )
+    else:
+        # Even with spectral smoothing disabled, the *profile model* must
+        # have values at isolated masked locations. Interpolate only the
+        # model (never SCI/VAR) from available wavelengths of the same row.
+        prof = observed_profile.copy()
+        profile_supported = good.copy()
+        for k in range(nwin):
+            valid = np.flatnonzero(good[k])
+            missing = np.flatnonzero(inside[k] & ~good[k])
+            if valid.size and missing.size:
+                prof[k, missing] = np.interp(
+                    missing, valid, observed_profile[k, valid]
+                )
+                profile_supported[k, missing] = True
 
-    prof_good = np.where(good_prof, prof, 0.0)
-    sum_prof = np.sum(prof_good, axis=0, dtype=float)
-    good_counts = np.sum(good_prof, axis=0, dtype=np.int32)
-    fallback = ~(sum_prof > float(min_profile_sum))
-
-    P = np.zeros_like(prof, dtype=float)
-    ok = ~fallback
-    if np.any(ok):
-        P[:, ok] = np.where(good_prof[:, ok], prof_good[:, ok] / sum_prof[None, ok], 0.0)
-    if np.any(fallback):
-        fb_good = fallback & (good_counts > 0)
-        if np.any(fb_good):
-            P[:, fb_good] = np.where(
-                good_prof[:, fb_good],
-                1.0 / good_counts[fb_good][None, :].astype(float),
-                0.0,
-            )
-        fb_empty = fallback & ~(good_counts > 0)
-        if np.any(fb_empty):
-            P[:, fb_empty] = 1.0 / float(nwin)
-
+    # P_j is normalized to the *geometric aperture*, not merely the surviving
+    # good samples. Otherwise dropping 1 of 3 uniform rows changes the
+    # estimand from full-aperture flux (30) to partial flux (20).
+    profile_amplitude = np.sum(
+        np.where(inside, prof, 0.0), axis=0, dtype=float
+    )
+    good_counts = np.sum(good, axis=0, dtype=np.int32)
     n_tot = np.sum(inside, axis=0, dtype=np.int32)
+    fallback = ~(profile_amplitude > float(min_profile_sum))
+    P = np.zeros_like(prof, dtype=float)
+    fitted = ~fallback
+    if np.any(fitted):
+        P[:, fitted] = np.where(
+            inside[:, fitted],
+            prof[:, fitted] / profile_amplitude[None, fitted],
+            0.0,
+        )
+    if np.any(fallback):
+        P[:, fallback] = np.where(
+            inside[:, fallback],
+            1.0 / np.maximum(n_tot[fallback], 1)[None, :],
+            0.0,
+        )
+    # If an aperture row has no data from which to infer its profile,
+    # the full-aperture flux is not scientifically qualified.
+    profile_unconstrained = np.any(inside & ~profile_supported, axis=0)
+
     from scorpio_pipe.maskbits import NO_COVERAGE
 
     meta: dict[str, Any] = {
         "profile_smooth_lambda_sigma": float(sig),
         "profile_clip_negative": bool(clip_negative_profile),
         "profile_fallback_frac": float(np.sum(fallback)) / float(max(1, nlam)),
+        "profile_unconstrained_frac": float(np.mean(profile_unconstrained)),
+        "profile_normalization": "full_geometric_aperture",
+        "profile_mask_policy": "exclude_before_normalized_smoothing",
         "backend_requested": str(backend_req),
         "numba_available": bool(_NUMBA_OK),
         "vectorized": True,
@@ -917,6 +952,10 @@ def _optimal_extract(
                 finite = ok_flux & np.isfinite(sky_arr)
                 flux[finite] = flux[finite] - sky_arr[finite] * (corr_num[finite] / denom[finite])
         meta["backend_used"] = "numpy"
+
+    # Distinguish a justified interpolation of the spatial *model* from
+    # an aperture whose shape is genuinely not constrained by any data.
+    out_mask[profile_unconstrained] |= np.uint16(NO_COVERAGE)
 
     if have_mask:
         # Keep the provenance of every geometrically sampled aperture pixel,

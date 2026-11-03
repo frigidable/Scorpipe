@@ -39,6 +39,7 @@ def _optimal_extract_reference(
 
     prof = np.zeros((nwin, nlam), dtype=float)
     good_prof = np.zeros((nwin, nlam), dtype=bool)
+    inside_prof = np.zeros((nwin, nlam), dtype=bool)
 
     for j in range(nlam):
         yc = float(y_center[j]) if j < len(y_center) else float(np.nanmedian(y_center))
@@ -62,25 +63,44 @@ def _optimal_extract_reference(
         k0 = int(y0 - (int(round(yc)) - ap_hw))
         k0 = int(np.clip(k0, 0, nwin - 1))
         k1 = min(nwin, k0 + sl.size)
-        prof[k0:k1, j] = p[: (k1 - k0)]
+        prof[k0:k1, j] = np.where(
+            good[: (k1 - k0)], p[: (k1 - k0)], 0.0
+        )
         good_prof[k0:k1, j] = good[: (k1 - k0)]
+        inside_prof[k0:k1, j] = True
 
     sig = float(max(0.0, smooth_lambda_sigma))
+    supported = good_prof.copy()
     if sig > 0:
         for k in range(nwin):
-            prof[k, :] = gaussian_filter1d(prof[k, :], sigma=sig, mode="nearest")
+            numer = gaussian_filter1d(prof[k], sigma=sig, mode="nearest")
+            support = gaussian_filter1d(
+                good_prof[k].astype(float), sigma=sig, mode="nearest"
+            )
+            supported[k] = inside_prof[k] & (support > 1e-12)
+            prof[k] = np.divide(
+                numer, support, out=np.zeros_like(numer),
+                where=supported[k],
+            )
+    else:
+        for k in range(nwin):
+            known = np.flatnonzero(good_prof[k])
+            missing = np.flatnonzero(inside_prof[k] & ~good_prof[k])
+            if known.size and missing.size:
+                prof[k, missing] = np.interp(
+                    missing, known, prof[k, known]
+                )
+                supported[k, missing] = True
 
     P = np.zeros_like(prof, dtype=float)
     for j in range(nlam):
-        g = good_prof[:, j]
-        s = float(np.sum(prof[g, j])) if np.any(g) else 0.0
+        aperture = inside_prof[:, j]
+        s = float(np.sum(prof[aperture, j]))
         if not (s > min_profile_sum):
-            if np.any(g):
-                P[g, j] = 1.0 / float(np.sum(g))
-            else:
-                P[:, j] = 1.0 / float(nwin)
+            if np.any(aperture):
+                P[aperture, j] = 1.0 / float(np.sum(aperture))
         else:
-            P[g, j] = prof[g, j] / s
+            P[aperture, j] = prof[aperture, j] / s
 
     flux = np.full(nlam, np.nan, dtype=float)
     out_var = np.full(nlam, np.nan, dtype=float)
@@ -98,6 +118,10 @@ def _optimal_extract_reference(
         if have_mask:
             mm = mask[y0 : y1 + 1, j]
             good &= (mm & fatal_bits) == 0
+            # Preserve DQ provenance but decide NO_COVERAGE separately.
+            out_mask[j] |= np.uint16(
+                np.bitwise_or.reduce(mm) & np.uint16(~16 & 0xFFFF)
+            )
 
         n_tot = int(y1 - y0 + 1)
         n_good = int(np.sum(good))
@@ -106,6 +130,8 @@ def _optimal_extract_reference(
             out_mask[j] |= no_coverage
             continue
         if n_good < int(math.ceil(min_good_frac * n_tot)):
+            out_mask[j] |= no_coverage
+        if np.any(inside_prof[:, j] & ~supported[:, j]):
             out_mask[j] |= no_coverage
 
         k0 = int(y0 - (int(round(yc)) - ap_hw))
