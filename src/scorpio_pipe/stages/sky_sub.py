@@ -2186,37 +2186,39 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
 
                 skysub = (sci.astype(np.float32) - model.astype(np.float32)).astype(np.float32)
 
-                # P0-D: variance after sky subtraction.
-                # Minimal honest model: add an extra scalar variance term estimated
-                # from robust sky residual scatter beyond the predicted VAR.
-                var_out = var
-                var_model = None
+                # Detector variance and fitted-sky-model covariance are
+                # different statistical objects:
+                # Var(D - M) = Var(D) + Var(M) - 2 Cov(D,M).
+                # An in-sample residual MAD is NOT Var(M). Do not present it
+                # as a calibrated model variance or attach detector VAR to
+                # the standalone model. Until a coefficient covariance / held-
+                # out evaluation exists, only detector VAR is propagated.
+                var_out = np.asarray(var, dtype=np.float32)
+                hdr["SKYVADD"] = (False, "No unverified sky-model VAR added")
+                hdr["SKYVSRC"] = ("DET_ONLY", "Sky-sub VAR: detector component")
+                hdr["SKYVCOV"] = ("UNKNOWN", "Sky model covariance not estimated")
+                hdr["SKYVQUAL"] = ("INCOMP", "Sky-sub VAR uncertainty incomplete")
                 try:
-                    # Use the same sky pixels used for QC (y_idx,x_idx).
                     res_sky = skysub[y_idx, x_idx]
                     vv = var[y_idx, x_idx]
                     okv = np.isfinite(res_sky) & np.isfinite(vv) & (vv > 0)
                     if np.any(okv):
                         sig_res = float(_robust_sigma(res_sky[okv]))
                         med_var = float(np.nanmedian(vv[okv]))
-                        add = max(sig_res * sig_res - med_var, 0.0)
-                        if np.isfinite(add) and add > 0:
-                            var_model = np.full_like(var, add, dtype=np.float32)
-                            var_out = (var + var_model).astype(np.float32)
-                            hdr['SKYVADD'] = (True, 'Variance includes sky-model term')
-                            hdr['SKYVMOD'] = (float(add), 'Added sky-model variance [e-^2]')
-                            hdr['SKYVSRC'] = ('RESMAD', 'Sky-model variance source')
-                            hdr['SKYMSIG'] = (float(sig_res), 'Sky residual sigma [e-]')
-                        else:
-                            hdr['SKYVADD'] = (False, 'No sky-model variance added')
-                    else:
-                        hdr['SKYVADD'] = (False, 'No sky pixels for VAR model')
+                        extra_emp = max(sig_res * sig_res - med_var, 0.0)
+                        if np.isfinite(sig_res):
+                            hdr["SKYMSIG"] = (sig_res, "In-sample sky residual sigma")
+                        if np.isfinite(extra_emp):
+                            hdr["SKYVEMP"] = (extra_emp, "Residual excess; NOT model variance")
                 except Exception:
-                    try:
-                        hdr['SKYVADD'] = (False, 'Sky-model VAR failed')
-                    except Exception:
-                        pass
-
+                    pass
+                stage_flags.append(make_flag(
+                    "SKY_MODEL_VAR_UNVERIFIED",
+                    "WARN",
+                    "Sky model covariance is unmeasured; SCI VAR contains "
+                    "detector noise only (in-sample residual MAD is diagnostic)",
+                    stem=stem,
+                ))
 
                 # QC on sky residuals
                 res = skysub[y_idx, x_idx]
@@ -2275,7 +2277,7 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                 skymodel_path = out_dir / f"{stem}_skymodel_raw.fits"
                 skysub_path = out_dir / f"{stem}_skysub_raw.fits"
                 # `write_sci_var_mask` uses keyword-only args for VAR/MASK.
-                write_sci_var_mask(skymodel_path, model, var=(var_model if var_model is not None else var), mask=mask, header=hdr0)
+                write_sci_var_mask(skymodel_path, model, var=None, mask=mask, header=hdr0)
                 write_sci_var_mask(skysub_path, skysub, var=var_out, mask=mask, header=hdr0)
 
                 # Compatibility aliases belong to the current Sky stage only.
@@ -2443,7 +2445,9 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                         skysub_skywin_png = out_dir / f"{stem}_skysub_raw_skywin.png"
 
                         model0 = np.zeros_like(sci0, dtype=np.float32)
-                        write_sci_var_mask(skymodel_path, model0, var=var0, mask=m0, header=hdr0)
+                        hdr0["SKYVQUAL"] = ("INCOMP", "No valid fitted-sky covariance")
+                        hdr0["SKYVCOV"] = ("UNKNOWN", "Sky model uncertainty unmeasured")
+                        write_sci_var_mask(skymodel_path, model0, var=None, mask=m0, header=hdr0)
                         write_sci_var_mask(skysub_path, sci0, var=var0, mask=m0, header=hdr0)
 
                         # Backward-compatible aliases.
