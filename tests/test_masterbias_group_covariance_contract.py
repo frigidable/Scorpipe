@@ -1,6 +1,7 @@
 """Independent grouped MasterBias covariance oracle and provenance tests."""
 import numpy as np
 import pytest
+from astropy.io import fits
 from scorpio_pipe.calib.bias_covariance import bias_group_diagnostics, fixed_weight_group_variance
 
 
