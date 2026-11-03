@@ -1529,7 +1529,7 @@ def run_stack2d(
             "SCI/VAR in per-second units" if _out_per_sec else "SCI/VAR not normalized per second",
         )
         hdr["STKMETH"] = (method, "stack2d combine method")
-        hdr["STKVRALG"] = ("W2VAR", "Fixed-weight sum(w² Var_i) / (sum w)²")
+        hdr["STKVRALG"] = ("W2VAR", "Fixed-weight sum(w_i**2*VAR_i)/sum(w_i)**2")
         hdr["STKVARQ"] = ("COND_ONLY", "Shared covariance/selection unmodelled")
         # Qualification of marginal per-pixel variance is not a claim of
         # downstream extracted-spectrum S/N accuracy. MasterBias can
