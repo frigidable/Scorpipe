@@ -153,6 +153,10 @@ def test_masterbias_pipeline_writes_estimator_var_and_provenance(
             normal_median_variance_factor(3),
         )
         assert hdr["NBIAS"] == 3
+        assert hdr["GAIN"] == pytest.approx(0.62)
+        assert hdr["RDNOISE"] == pytest.approx(3.0)
+        assert str(hdr["RN_SRC"]).strip()
+        assert str(hdr["NOISRC"]).strip()
         var = np.asarray(hdul[0].data, dtype=float)
     # The Golden bias has only Gaussian read noise. The expected uncertainty
     # of the *median master* is RN_e^2/gain^2 times finite-N factor.
