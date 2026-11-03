@@ -142,6 +142,17 @@ def apply_flat(
 
     if do_bias_subtract and not bool(hdr.get("BIASSUB", False)):
         sel = resolve_master_bias(cfg, hdr, sci_shape=data.shape)
+        instrument = str(hdr.get("INSTRUME") or "").strip().upper()
+        if (
+            instrument.startswith("SCORPIO")
+            and bool(sel.degraded)
+            and str(sel.reason).strip().upper() == "NOIDX"
+        ):
+            raise RuntimeError(
+                "Flatfield refuses unindexed SCORPIO MasterBias: exact CCD "
+                "readout-group provenance and bias VAR are unavailable. "
+                "Build MasterBias groups for the matching detector setup."
+            )
         if not sel.sci_path.exists():
             raise RuntimeError(f"MasterBias not found: {sel.sci_path}")
 
