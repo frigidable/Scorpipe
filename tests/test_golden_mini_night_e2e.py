@@ -194,6 +194,18 @@ def test_golden_mini_night_e2e(tmp_path: Path):
     # A sky spline fitted to its own training pixels cannot establish
     # absolute flexure. Never transmit an apparently measured zero shift.
     flex = sky_doc.get("flexure") or {}
+    # Sky-model FITS cannot inherit detector VAR, because a fitted model
+    # has a different covariance. Require honest, incomplete provenance.
+    sky_model_path = mn.work_dir / "09_sky" / "obj_01_skymodel_raw.fits"
+    with fits.open(sky_model_path, memmap=False) as model_hdul:
+        assert "SCI" in model_hdul and "VAR" not in model_hdul
+        assert model_hdul[0].header["SKYVQUAL"] == "INCOMP"
+        assert model_hdul[0].header["SKYVCOV"] == "UNKNOWN"
+    with fits.open(sky_products[0], memmap=False) as sky_science:
+        assert "VAR" in sky_science
+        assert sky_science[0].header["SKYVSRC"] == "DET_ONLY"
+    assert any(f.get("code") == "SKY_MODEL_VAR_UNVERIFIED"
+               for f in (sky_doc.get("qc") or {}).get("flags", []))
     assert flex.get("verification") == "unverified"
     assert flex.get("delta_A_median") is None
     assert flex.get("reference_id") is None
