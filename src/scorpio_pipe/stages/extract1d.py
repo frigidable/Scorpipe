@@ -238,6 +238,60 @@ def _safe_json(obj: Any) -> Any:
     return obj
 
 
+def _extraction_mask_policy(*, is_stack: bool) -> tuple[int, int]:
+    """Return (fatal input bits, 1D-only provenance bits to clear).
+
+    Stack2D REJECTED means that some constituent exposures were clipped or
+    downweighted. It is not by itself an invalidity of the accepted coadd.
+    For an individual exposure the same bit remains a fatal input DQ.
+    """
+    from scorpio_pipe.maskbits import BADPIX, COSMIC, NO_COVERAGE, REJECTED, SATURATED, USER
+
+    always_fatal = int(NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER)
+    if is_stack:
+        return always_fatal, int(REJECTED)
+    return always_fatal | int(REJECTED), 0
+
+
+def _strip_informational_1d_bits(mask: np.ndarray, *, bits: int) -> np.ndarray:
+    """Return output usability DQ; never modify the source 2D MASK."""
+    arr = np.asarray(mask, dtype=np.uint16)
+    if not int(bits):
+        return arr
+    return arr & np.uint16(~int(bits) & 0xFFFF)
+
+
+def _verified_stack_rejection_provenance(
+    path: Path, hdr: fits.Header, mask: np.ndarray,
+) -> bool:
+    """Only recast REJECTED as contributor provenance for verified Stack2D.
+
+    Legacy or merely stack-*named FITS may have different REJECTED semantics.
+    The final Stack2D must have a declared method, a correctly shaped integer
+    number-of-contributors map, and NO_COVERAGE for every uncovered pixel.
+    A failed check conservatively keeps REJECTED fatal.
+    """
+    from scorpio_pipe.maskbits import NO_COVERAGE
+
+    if not str(hdr.get("STKMETH") or "").strip():
+        return False
+    try:
+        with fits.open(path, memmap=False) as hdul:
+            if "COV" not in hdul:
+                return False
+            cov = np.asarray(hdul["COV"].data)
+        if cov.shape != mask.shape or cov.dtype.kind not in "iu":
+            return False
+        if np.any(cov < 0):
+            return False
+        invalid = (cov == 0) & ((mask & np.uint16(NO_COVERAGE)) == 0)
+        if np.any(invalid):
+            return False
+        return True
+    except (OSError, KeyError, TypeError, ValueError):
+        return False
+
+
 def _is_stack2d_input(path: Path, hdr: fits.Header) -> bool:
     name = path.name.lower()
     if name in {"stack2d.fits", "stacked2d.fits"}:
@@ -1464,8 +1518,12 @@ def _run_extract1d_impl(
     if isinstance(ecfg.get("roi"), dict) and ecfg.get("roi"):
         roi.update({k: v for k, v in ecfg.get("roi", {}).items() if v is not None})
 
-    from scorpio_pipe.maskbits import BADPIX, COSMIC, NO_COVERAGE, REJECTED, SATURATED, USER
-    fatal_bits = int(NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED)
+    qualified_stack_rejection = bool(
+        is_stack and _verified_stack_rejection_provenance(in_fits, hdr0, np.asarray(mask))
+    )
+    fatal_bits, informational_1d_bits = _extraction_mask_policy(
+        is_stack=qualified_stack_rejection
+    )
 
     sky_windows: list[tuple[int, int]] | None = None
     geo_meta: dict[str, Any] = {}
@@ -1598,6 +1656,13 @@ def _run_extract1d_impl(
             sky_resid=sky_resid,
             apply_local_sky=apply_local_sky,
         )
+    if informational_1d_bits:
+        # A stacked contributor was rejected, NOT this final 1D datum.
+        # Preserve rejected-contributor history in the original 2D stack
+        # mask/COV rather than abusing the output science usability mask.
+        mask_tr = _strip_informational_1d_bits(mask_tr, bits=informational_1d_bits)
+        mask_fx = _strip_informational_1d_bits(mask_fx, bits=informational_1d_bits)
+
     if method == "mean":
         # Convert sum → mean (and propagate VAR scaling).
         n_eff_tr = np.maximum(np.asarray(npix_tr, dtype=float), 1.0)
