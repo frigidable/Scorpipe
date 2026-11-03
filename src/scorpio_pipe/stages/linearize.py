@@ -1968,6 +1968,26 @@ def _process_linearize_frame(task: Dict[str, Any]) -> Dict[str, Any]:
         "no_coverage_frac": float(np.mean((rect_mask & NO_COVERAGE) != 0)),
     }
 
+def _read_sky_flexure_summary(
+    sky_done: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Read Sky flexure from the canonical done.json extra namespace.
+
+    Legacy top-level flexure is recognized for backwards compatibility,
+    but an independent wavelength reference is still required before
+    applying any shift; simply finding a numeric delta is insufficient.
+    """
+    if not isinstance(sky_done, dict):
+        return None
+    extra = sky_done.get("extra")
+    if isinstance(extra, dict):
+        flex = extra.get("flexure")
+        if isinstance(flex, dict):
+            return flex
+    legacy = sky_done.get("flexure")
+    return legacy if isinstance(legacy, dict) else None
+
+
 def run_linearize(
     cfg: Dict[str, Any],
     out_dir: Optional[Path] = None,
@@ -2459,8 +2479,11 @@ def run_linearize(
             except Exception:
                 sky_done = None
 
+        # Stage reports place scientific extras under `extra` in the
+        # versioned done.json schema; legacy reports sometimes used a
+        # top-level `flexure`. Never silently miss current provenance.
+        flex = _read_sky_flexure_summary(sky_done)
         if isinstance(sky_done, dict):
-            flex = sky_done.get("flexure") if isinstance(sky_done.get("flexure"), dict) else None
             if isinstance(flex, dict):
                 try:
                     delta_lambda_A = flex.get("delta_A_median")
@@ -2505,10 +2528,13 @@ def run_linearize(
         # plausible-looking delta but no independent reference: reject it.
         flexure_ref_verified = bool(
             isinstance(sky_done, dict)
-            and isinstance(sky_done.get("flexure"), dict)
-            and sky_done["flexure"].get("verification") == "independent_reference"
-            and isinstance(sky_done["flexure"].get("reference_id"), str)
-            and sky_done["flexure"]["reference_id"].strip()
+            and isinstance(flex, dict)
+            and flex.get("verification") == "independent_reference"
+            and isinstance(flex.get("reference_id"), str)
+            and flex["reference_id"].strip()
+            # A single series-median shift is not a valid per-exposure
+            # solution for exposures with potentially different flexure.
+            and len(obj_frames) == 1
         )
         if not flexure_ref_verified:
             delta_lambda_A = None
@@ -2525,7 +2551,7 @@ def run_linearize(
             delta_policy = "apply_if_ok"
         if delta_policy == "always" and not flexure_ref_verified:
             raise ValueError(
-                "linearize.delta_lambda_policy=always cannot apply unverified "
+                "linearize.delta_lambda_policy=always cannot apply unverified or series-median "
                 "self-fitted Sky flexure; independent sky-line wavelength "
                 "reference and reference_id are required"
             )
