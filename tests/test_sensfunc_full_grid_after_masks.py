@@ -8,6 +8,7 @@ and passed them to an interpolation with mismatched x/y lengths.
 from pathlib import Path
 
 import numpy as np
+import pytest
 from astropy.io import fits
 
 from scorpio_pipe.calib import sensfunc
@@ -89,3 +90,43 @@ def test_build_sensfunc_handles_realistic_balmer_mask(monkeypatch):
     balmer_mask = (wave >= 4840.0) & (wave <= 4890.0)
     assert np.all(payload["fit_mask"][balmer_mask] == 0)
     assert np.isfinite(payload["response_abs"][balmer_mask]).all()
+
+
+def test_build_sensfunc_fails_without_usable_reference_pixels(monkeypatch):
+    wave = np.arange(4300.0, 5400.0, 1.0)
+
+    def all_masked_standard(_path, *, mode):
+        return {
+            "wave": wave,
+            "flux": np.full_like(wave, 100.0),
+            "var": np.full_like(wave, 1.0),
+            "mask": np.ones(wave.shape, dtype=np.int32),
+            "header": fits.Header({
+                "REBNORM": "COUNT_V1",
+                "WAVEREF": "air",
+                "WAVEUNIT": "Angstrom",
+            }),
+            "waveref": "air",
+            "bunit": "e-/Angstrom/s",
+        }
+
+    monkeypatch.setattr(sensfunc, "read_spec1d", all_masked_standard)
+    monkeypatch.setattr(sensfunc, "ensure_refctx", lambda cfg: {"context_id": "synthetic"})
+    monkeypatch.setattr(
+        sensfunc, "_load_standard_reference",
+        lambda cfg, selected_name=None: (
+            {}, Path("synthetic_reference.csv"), "f_lambda", "air"
+        ),
+    )
+    monkeypatch.setattr(
+        sensfunc, "read_small_csv",
+        lambda _path: {
+            "wavelength_A": np.array([4000.0, 4800.0, 5600.0]),
+            "flux": np.array([2.0, 1.9, 1.8]),
+        },
+    )
+    monkeypatch.setattr(sensfunc, "reference_path", lambda *a, **kw: None)
+    monkeypatch.setattr(sensfunc, "reference_metadata", lambda *a, **kw: {})
+
+    with pytest.raises(ValueError, match="fewer than 8"):
+        sensfunc.build_sensfunc({}, standard_spec_path=Path("synthetic.fits"))
