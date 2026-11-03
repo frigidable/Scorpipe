@@ -1678,7 +1678,7 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
                 summary = _two_frame_diff_clean(
                     paths,
                     out_dir=kind_out,
-                    superbias=superbias,
+                    superbias=kind_superbias,
                     k=k,
                     dilate=int(
                         two_diff_dilate if two_diff_dilate is not None else dilate
@@ -1703,7 +1703,7 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
                 summary = _single_frame_lacosmic_clean(
                     paths[0],
                     out_dir=kind_out,
-                    superbias=superbias,
+                    superbias=kind_superbias,
                     bias_subtract=bias_subtract,
                     save_png=save_png,
                     save_mask_fits=save_mask_fits,
@@ -1724,7 +1724,7 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
                 summary = _single_frame_laplacian_clean(
                     paths[0],
                     out_dir=kind_out,
-                    superbias=superbias,
+                    superbias=kind_superbias,
                     k=k,
                     dilate=int(lap_dilate if lap_dilate is not None else dilate),
                     local_r=int(lap_local_r if lap_local_r is not None else local_r),
