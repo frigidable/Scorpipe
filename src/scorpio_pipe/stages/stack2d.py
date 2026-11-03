@@ -1461,6 +1461,8 @@ def run_stack2d(
             "SCI/VAR in per-second units" if _out_per_sec else "SCI/VAR not normalized per second",
         )
         hdr["STKMETH"] = (method, "stack2d combine method")
+        hdr["STKVRALG"] = ("W2VAR", "fixed-weight sum(w^2 input_VAR)/sum(w)^2")
+        hdr["STKVARQ"] = ("COND_ONLY", "No weight-selection or shared covariance")
         if method in {"invvar_huber", "huber", "huber_invvar"}:
             hdr["STKHC"] = (float(huber_c), "Huber c")
         if method in {"invvar_clip", "sigma_clip", "clip"}:
