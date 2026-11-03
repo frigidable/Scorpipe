@@ -33,7 +33,17 @@ BALMER_WINDOWS_A = [
 ]
 
 
-def _robust_spline_fit(x: np.ndarray, y: np.ndarray, w: np.ndarray | None = None) -> tuple[np.ndarray, dict[str, Any]]:
+def _robust_spline_fit(
+    x: np.ndarray,
+    y: np.ndarray,
+    w: np.ndarray | None = None,
+    *,
+    x_eval: np.ndarray | None = None,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Fit on valid calibration samples and evaluate on the requested grid."""
+    evaluation = np.asarray(x if x_eval is None else x_eval, dtype=float)
+    if evaluation.ndim != 1 or not np.all(np.isfinite(evaluation)):
+        raise ValueError("Sensfunc evaluation wavelengths must be finite and 1D")
     xx = np.asarray(x, dtype=float)
     yy = np.asarray(y, dtype=float)
     good = np.isfinite(xx) & np.isfinite(yy)
@@ -47,18 +57,21 @@ def _robust_spline_fit(x: np.ndarray, y: np.ndarray, w: np.ndarray | None = None
     if ww is not None:
         ww = ww[good]
     if xx.size < 8:
-        return np.full_like(x, np.nanmedian(yy) if yy.size else 1.0, dtype=float), {"method": "constant"}
+        raise ValueError(
+            "Sensfunc requires at least 8 valid, unmasked standard-star samples; "
+            f"got {xx.size}"
+        )
     order = np.argsort(xx)
     xx = xx[order]; yy = yy[order]; ww = ww[order] if ww is not None else None
     try:
         from scipy.interpolate import UnivariateSpline  # type: ignore
         s = max(1.0, float(xx.size)) * float(np.nanmedian(np.abs(yy - np.nanmedian(yy))) + 1e-6) ** 2
         spl = UnivariateSpline(xx, yy, w=ww, s=s)
-        fit = np.asarray(spl(np.asarray(x, dtype=float)), dtype=float)
+        fit = np.asarray(spl(evaluation), dtype=float)
         return fit, {"method": "UnivariateSpline", "s": float(s)}
     except Exception:
         co = np.polyfit(xx, yy, deg=min(5, max(1, xx.size - 1)), w=ww)
-        fit = np.polyval(co, np.asarray(x, dtype=float))
+        fit = np.polyval(co, evaluation)
         return fit, {"method": "polyfit", "degree": int(len(co) - 1)}
 
 
@@ -161,12 +174,21 @@ def build_sensfunc(cfg: dict[str, Any], *, standard_spec_path: str | Path, stand
     frac_unc = np.sqrt(np.clip(var, 0, np.inf)) / np.clip(np.abs(flux), 1e-12, np.inf)
     yfit = np.log(np.clip(raw_ratio, 1e-30, np.inf))
     weights = 1.0 / np.clip(frac_unc, 1e-4, np.inf)
-    model_log, fit_meta = _robust_spline_fit(wave[fit_mask], yfit[fit_mask], w=weights[fit_mask])
+    # The fit uses only good pixels, but the sensitivity must be published on
+    # the *entire* wavelength grid, including masked stellar/telluric features.
+    model_log, fit_meta = _robust_spline_fit(
+        wave[fit_mask], yfit[fit_mask],
+        w=weights[fit_mask], x_eval=wave,
+    )
+    if model_log.shape != wave.shape or not np.all(np.isfinite(model_log)):
+        raise ValueError("Sensfunc fit did not produce a finite full-grid response")
     response_abs = np.exp(model_log)
+    if not np.all(np.isfinite(response_abs) & (response_abs > 0)):
+        raise ValueError("Sensfunc response must be positive and finite on the full grid")
     clean = fit_mask & np.isfinite(response_abs) & (response_abs > 0)
     pivot = float(np.nanmedian(response_abs[clean])) if np.any(clean) else 1.0
     response_rel = response_abs / max(pivot, 1e-30)
-    resid = yfit[fit_mask] - np.interp(wave[fit_mask], wave, model_log)
+    resid = yfit[fit_mask] - model_log[fit_mask]
     sigma_ln = float(np.nanmedian(np.abs(resid - np.nanmedian(resid))) * 1.4826) if resid.size else 0.15
     response_unc = np.abs(response_abs) * max(sigma_ln, 0.02)
     q = {

@@ -172,9 +172,14 @@ def apply_fluxcal_to_spec1d(science_spec_path: str | Path, *, sensfunc_path: str
     if isinstance(standard_qc, dict):
         safe_for = standard_qc.get('safe_for')
     status = _status_from_safe_for(safe_for, telluric_applied=tell_applied)
-    if status == CalibrationStatus.ABSOLUTE_TRUSTED.value and isinstance(sensfunc_qc, dict):
-        if not bool(sensfunc_qc.get('extinction_applied')) or str(sensfunc_qc.get('airmass_provenance') or '').startswith('fallback:') or str(sensfunc_qc.get('airmass_provenance') or '') == 'missing':
-            status = CalibrationStatus.ABSOLUTE_APPROX.value
+    # The standard's atmospheric extinction may have been corrected when
+    # building Sensfunc, but this numerical API has not corrected the SCIENCE
+    # observation (or its constituent exposures). A physically uncorrected
+    # science spectrum must never be advertised as ABSOLUTE_TRUSTED, even
+    # when the standard-star quality is excellent.
+    science_extinction_applied = False
+    if status == CalibrationStatus.ABSOLUTE_TRUSTED.value:
+        status = CalibrationStatus.ABSOLUTE_APPROX.value
     # The response/transmission are shared deterministic calibrations of
     # two different extracted spectra. Preserve their independent content.
     # Response-fit covariance is separate from conditional detector VAR.
@@ -210,6 +215,8 @@ def apply_fluxcal_to_spec1d(science_spec_path: str | Path, *, sensfunc_path: str
         'fixed': fixed_payload,
         'header': spec['header'],
         'status': status,
+        'science_extinction_applied': science_extinction_applied,
+        'science_extinction_reason': 'per-exposure atmospheric transfer not yet modeled',
         'transmission': transmission,
         'tell_conf': tell_conf,
         'calsys_rel': calsys_rel,
@@ -394,6 +401,8 @@ def write_fluxcal_products(cfg: dict[str, Any], out_dir: str | Path, *, spec_pay
         'reference_context_id': str(reference_context_id),
         'safe_for': (standard_qc or {}).get('safe_for') if isinstance(standard_qc, dict) else None,
         'telluric_applied': bool(spec_payload['telluric_applied']),
+        'science_extinction_applied': bool(spec_payload['science_extinction_applied']),
+        'science_extinction_reason': str(spec_payload['science_extinction_reason']),
         'systematics': {
             'calsys_rel_median': float(np.nanmedian(spec_payload['calsys_rel'])),
             'calsys_tell_median': float(np.nanmedian(spec_payload['calsys_tell'])),
