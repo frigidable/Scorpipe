@@ -338,7 +338,9 @@ def write_sensfunc_products(out_dir: str | Path, payload: dict[str, Any]) -> dic
     ph['REFCTID'] = str(payload.get('reference_context_id') or '')
     ph['RESPUNIT'] = 'count_per_flux'
     # Qualify this specific sensitivity file, not merely its numerical arrays.
-    ph['SENSREFQ'] = str(payload.get('reference_quality') or 'UNQUAL')[:8].upper()
+    ph['SENSREFQ'] = (
+        'VERIFIED' if payload.get('reference_quality') == 'validated' else 'UNQUAL'
+    )
     table_path = write_bintable_fits(
         out_dir / 'sensfunc_table.fits',
         primary_header=ph,

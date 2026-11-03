@@ -153,3 +153,68 @@ def test_requested_masterflat_missing_aborts_before_rectification(tmp_path, monk
             stage_dir_path=tmp_path / "prepare",
             raw_path=raw,
         )
+
+
+def test_diagnostic_telluric_application_rejected_for_actual_science_spectrum(tmp_path):
+    """The numerical science API must reject tagged diagnostic transmission."""
+    from scorpio_pipe.calib.common import write_bintable_fits
+
+    wave = np.array([5000., 5001., 5002.])
+    sci = tmp_path / "science.fits"
+    fits.HDUList([
+        fits.PrimaryHDU(header=fits.Header({"BUNIT": "ADU", "WAVEREF": "air"})),
+        fits.BinTableHDU.from_columns([
+            fits.Column(name="LAMBDA", format="D", array=wave),
+            fits.Column(name="FLUX_TRACE", format="E", array=np.array([10., 10., 10.])),
+            fits.Column(name="VAR_TRACE", format="E", array=np.array([1., 1., 1.])),
+            fits.Column(name="MASK_TRACE", format="J", array=np.array([0, 0, 0])),
+        ], name="SPEC_TRACE"),
+    ]).writeto(sci)
+
+    sens = write_bintable_fits(
+        tmp_path / "sens.fits",
+        primary_header=fits.Header({"WAVEREF": "air"}),
+        extname="SENSFUNC",
+        columns={
+            "WAVELENGTH": wave,
+            "RESPONSE_ABS": np.full(3, 2.),
+            "RESPONSE_UNC": np.full(3, 0.02),
+        },
+    )
+    telluric = write_bintable_fits(
+        tmp_path / "telluric.fits",
+        primary_header=fits.Header({"TELQUAL": "DIAGNOSTIC", "WAVEREF": "air"}),
+        extname="TELLURIC_MODEL",
+        columns={
+            "WAVELENGTH": wave,
+            "TRANSMISSION": np.array([0.75, 0.8, 0.9]),
+            "CONFIDENCE": np.array([0.3, 0.3, 0.3]),
+        },
+    )
+
+    with pytest.raises(ValueError, match="UNQUALIFIED_TELLURIC_MODEL"):
+        fc.apply_fluxcal_to_spec1d(
+            sci, sensfunc_path=sens, telluric_path=telluric
+        )
+
+
+def test_requested_masterflat_processing_failure_aborts(tmp_path, monkeypatch):
+    raw = tmp_path / "standard.fits"
+    raw.write_bytes(b"dummy")
+    master = tmp_path / "superflat.fits"
+    master.write_bytes(b"dummy")
+    monkeypatch.setattr(sp, "_try_existing_rectified", lambda *a, **kw: None)
+    monkeypatch.setattr(sp, "_resolve_superflat_path", lambda *a, **kw: master)
+
+    def fail_flat(*a, **kw):
+        raise RuntimeError("injected detector-flat failure")
+
+    monkeypatch.setattr(sp, "apply_flat", fail_flat)
+    with pytest.raises(RuntimeError, match="STANDARD_FLATFIELD_FAILED") as ei:
+        sp._prepare_rectified_standard(
+            {"fluxcal": {"standard_apply_flat": True}},
+            run_root=tmp_path,
+            stage_dir_path=tmp_path / "prepare",
+            raw_path=raw,
+        )
+    assert isinstance(ei.value.__cause__, RuntimeError)
