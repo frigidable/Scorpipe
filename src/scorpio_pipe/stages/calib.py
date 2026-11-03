@@ -1210,7 +1210,7 @@ def build_superbias(
     Outputs (in the canonical superbias stage dir)
     ---------------------------------------------
     - master_bias.fits        (SCI)   : default group (best match to expected signature)
-    - master_bias_var.fits    (VAR)   : per-pixel variance estimate (ADU^2)
+    - master_bias_var.fits    (VAR)   : variance of the combined bias estimator (ADU^2)
     - master_bias_dq.fits     (DQ)    : uint16 mask (MASK schema v2)
     - master_bias_index.json  : group registry + file mapping
     - superbias.fits          : legacy alias for master_bias.fits
@@ -1318,35 +1318,23 @@ def build_superbias(
         except Exception:
             rn_est_adu, rn_diag = None, {}
 
-        # Combine
-        if combine == "median":
-            sci = np.median(arr, axis=0).astype(np.float32)
-        elif combine == "mean" and sigma_clip > 0:
-            med = np.median(arr, axis=0)
-            mad = np.median(np.abs(arr - med), axis=0)
-            sig = 1.4826 * mad
-            sig[sig <= 0] = 1.0
-            m = np.abs(arr - med) <= (sigma_clip * sig)
-            w = m.astype(np.float32)
-            num = (arr * w).sum(axis=0)
-            den = w.sum(axis=0)
-            den[den == 0] = 1.0
-            sci = (num / den).astype(np.float32)
-        else:
-            sci = np.mean(arr, axis=0).astype(np.float32)
+        # MasterBias uncertainty is the sampling variance of the
+        # *combined estimator*; the scatter of individual bias exposures
+        # alone is NOT a valid VAR to subtract from every science frame.
+        from scorpio_pipe.bias_uncertainty import master_bias_estimator_variance
 
-        # VAR: robust per-pixel dispersion estimator (MAD^2 in ADU^2).
-        if n_used >= 2:
-            med = np.median(arr, axis=0)
-            mad = np.median(np.abs(arr - med), axis=0)
-            sig = (1.4826 * mad).astype(np.float32)
-            var = (sig ** 2).astype(np.float32)
-        else:
-            var = np.zeros_like(sci, dtype=np.float32)
+        sci, var, var_meta = master_bias_estimator_variance(
+            arr, combine=combine, sigma_clip=sigma_clip,
+        )
 
-        # DQ: start with zeros; flag non-finite pixels as BADPIX.
+        # Fewer than two accepted samples after sigma clipping cannot
+        # determine a stable MasterBias pixel. Mark it as bad, rather than
+        # returning a zero SCI with an apparently valid VAR.
         dq = np.zeros(sci.shape, dtype=np.uint16)
-        badpix = ~np.isfinite(sci) | ~np.isfinite(var)
+        badpix = (
+            ~np.isfinite(sci) | ~np.isfinite(var)
+            | np.asarray(var_meta["invalid_support"], dtype=bool)
+        )
         if np.any(badpix):
             dq[badpix] |= np.uint16(maskbits.BADPIX)
             sci = sci.copy(); var = var.copy()
@@ -1360,6 +1348,10 @@ def build_superbias(
             "bad_shape": int(bad_shape),
             "combine": str(combine),
             "sigma_clip": float(sigma_clip),
+            "variance_model": str(var_meta["variance_model"]),
+            "variance_factor": var_meta["variance_factor"],
+            "min_effective_n": int(var_meta["n_effective_min"]),
+            "bad_support_pixels": int(np.count_nonzero(var_meta["invalid_support"])),
             "rn_est_adu": (float(rn_est_adu) if rn_est_adu is not None else None),
             "rn_pairs": int((rn_diag or {}).get('pairs_used') or 0),
             "rn_diag": (rn_diag or {}),
@@ -1398,6 +1390,10 @@ def build_superbias(
             h["SB_BAD"] = (int(st["bad_read"] + st["bad_shape"]), "Bias frames skipped")
             h["SB_METH"] = (str(combine), "Combine method")
             h["SB_CLIP"] = (float(sigma_clip), "Sigma clip (0=disabled)")
+            h["SB_VMOD"] = (str(st["variance_model"]), "Bias estimator VAR model")
+            h["SB_NMIN"] = (int(st["min_effective_n"]), "Minimum accepted samples")
+            if st["variance_factor"] is not None:
+                h["SB_VFAC"] = (float(st["variance_factor"]), "VAR/read noise variance factor")
             h["SB_GID"] = (str(gid), "MasterBias group id")
             h["SBINS"] = (str(k.instrument), "Bias instrument")
             h["SBNAX1"] = (int(k.nx), "Group NAXIS1")
@@ -1459,7 +1455,8 @@ def build_superbias(
         hv = fits.Header(hdr0)
         _stamp_common(hv)
         hv["BUNIT"] = ("ADU^2", "Variance unit")
-        hv.add_history("MasterBias VAR (per-pixel MAD^2)")
+        hv.add_history("MasterBias VAR: uncertainty of combined estimator, not frame scatter")
+        hv.add_history("Independent Gaussian read noise assumed; inspect SB_VMOD")
         atomic_write_fits(var_f, var.astype(np.float32), header=hv)
 
         # DQ
@@ -1478,6 +1475,15 @@ def build_superbias(
                 "n_used": int(st["n_used"]),
                 "bad_read": int(st["bad_read"]),
                 "bad_shape": int(st["bad_shape"]),
+                "variance": {
+                    "definition": "uncertainty_of_combined_master_bias",
+                    "unit": "ADU^2",
+                    "model": str(st["variance_model"]),
+                    "factor": st["variance_factor"],
+                    "min_effective_n": int(st["min_effective_n"]),
+                    "bad_support_pixels": int(st["bad_support_pixels"]),
+                    "assumptions": "independent_gaussian_read_noise",
+                },
                 "files": {
                     "sci": str(sci_f.relative_to(work_dir)),
                     "var": str(var_f.relative_to(work_dir)),
