@@ -327,6 +327,81 @@ def _require_calibration_semantics(stage: str, path: Path, hdr0: Any, *, product
         )
 
 
+def validate_eta_lambda_product(path: str | Path, *, stage: str) -> None:
+    """Validate the 1D, dimensionless eta(lambda) variance-scale sidecar.
+
+    Unlike the stacked SCI/VAR/MASK MEF, this file is *not* a science image:
+    its primary HDU contains one variance multiplier per wavelength pixel.
+    Retain a strict numerical and calibration-metadata contract nonetheless.
+    """
+    p = Path(path)
+    try:
+        from astropy.io import fits
+
+        with fits.open(p, memmap=False) as hdul:
+            if len(hdul) != 1 or not isinstance(hdul[0], fits.PrimaryHDU):
+                raise ProductContractError(
+                    stage=stage, path=str(p), code="ETA_LAYOUT",
+                    message="eta(lambda) requires a single primary-image HDU",
+                )
+            data = hdul[0].data
+            hdr = hdul[0].header
+            if data is None or np.asarray(data).ndim != 1 or np.asarray(data).size < 1:
+                raise ProductContractError(
+                    stage=stage, path=str(p), code="ETA_SHAPE",
+                    message="eta(lambda) must be a nonempty 1D primary array",
+                )
+            eta = np.asarray(data)
+            if not np.issubdtype(eta.dtype, np.floating):
+                raise ProductContractError(
+                    stage=stage, path=str(p), code="ETA_DTYPE",
+                    message="eta(lambda) must contain floating-point values",
+                )
+            if not np.all(np.isfinite(eta)) or np.any(eta <= 0):
+                raise ProductContractError(
+                    stage=stage, path=str(p), code="ETA_VALUES",
+                    message="eta(lambda) must contain only finite positive values",
+                )
+            if str(hdr.get("BUNIT", "") or "").strip().lower() != "dimensionless":
+                raise ProductContractError(
+                    stage=stage, path=str(p), code="ETA_BUNIT",
+                    message="eta(lambda) variance multipliers must be dimensionless",
+                )
+            if str(hdr.get("ETAMETH", "") or "").strip() != "sky_MAD/var_pred":
+                raise ProductContractError(
+                    stage=stage, path=str(p), code="ETA_METHOD",
+                    message="Missing or unknown eta(lambda) calibration method",
+                )
+            try:
+                smooth = int(hdr["ETASMO"])
+                lower = float(hdr["ETAMIN"])
+                upper = float(hdr["ETAMAX"])
+            except (KeyError, ValueError, TypeError) as exc:
+                raise ProductContractError(
+                    stage=stage, path=str(p), code="ETA_PARAMS",
+                    message="Missing or invalid ETASMO, ETAMIN, ETAMAX",
+                ) from exc
+            if (smooth < 3 or smooth % 2 == 0
+                    or not np.isfinite(lower) or not np.isfinite(upper)
+                    or lower <= 0 or upper < lower):
+                raise ProductContractError(
+                    stage=stage, path=str(p), code="ETA_PARAMS",
+                    message="Invalid smoothing window or eta bounds",
+                )
+            atol = max(1e-6, 5e-7 * upper)
+            if np.any(eta < lower - atol) or np.any(eta > upper + atol):
+                raise ProductContractError(
+                    stage=stage, path=str(p), code="ETA_BOUNDS",
+                    message="eta(lambda) values violate declared ETAMIN/ETAMAX",
+                )
+    except ProductContractError:
+        raise
+    except Exception as exc:
+        raise ProductContractError(
+            stage=stage, path=str(p), code="ETA_CONTRACT", message=str(exc),
+        ) from exc
+
+
 def validate_preview2d_product(path: str | Path, *, stage: str) -> None:
     """Validate a visualization-only SCI image without inventing VAR/MASK.
 
