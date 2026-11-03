@@ -11,6 +11,7 @@ from scorpio_pipe.calib.common import (
     ensure_refctx,
     find_standard_record,
     load_library_yaml,
+    normalize_name,
     plot_lines_png,
     read_interval_csv,
     read_small_csv,
@@ -87,20 +88,76 @@ def _load_standard_reference(cfg: dict[str, Any], *, selected_name: str | None) 
     if lib_path is None:
         raise FileNotFoundError('standards.library not found in reference context')
     lib = load_library_yaml(lib_path)
+    # The observed object's identity is a scientific input, not a selection
+    # hint. PR #106 also fixes the generic library lookup; this check guards
+    # Sensfunc independently while that change is reviewed.
+    if not str(selected_name or '').strip():
+        raise ValueError(
+            'STANDARD_IDENTITY_MISSING: an observed standard-star name '
+            'is required for a scientific sensitivity function'
+        )
     key, rec = find_standard_record(lib, selected_name)
     if rec is None:
-        raise FileNotFoundError('No standard entries in library.yaml')
-    tbl_req = str(rec.get('table') or '')
-    tbl_path = Path(tbl_req)
+        raise ValueError(
+            f'UNKNOWN_SPECTROPHOTOMETRIC_STANDARD: {selected_name!r}'
+        )
+    names = [str(key), str(rec.get('display_name') or key)]
+    aliases = rec.get('aliases') or []
+    if isinstance(aliases, (tuple, list)):
+        names.extend(str(alias) for alias in aliases)
+    if normalize_name(str(selected_name)) not in {
+        normalize_name(name) for name in names
+    }:
+        raise ValueError(
+            f'UNKNOWN_SPECTROPHOTOMETRIC_STANDARD: {selected_name!r}; '
+            'refusing to substitute another library entry'
+        )
+    # Neither a SHA-256 hash nor reproducible interpolation establishes that
+    # the spectral flux scale is physically valid. Require provenance and an
+    # explicit reference-quality attestation before numerical calibration.
+    quality = str(rec.get('scientific_status') or '').strip().lower()
+    if quality not in {'validated', 'verified'}:
+        raise ValueError(
+            f'UNVALIDATED_STANDARD_REFERENCE: {key!r} is {quality or "unqualified"}; '
+            'supply a traceable, validated reference spectrum (e.g. CALSPEC)'
+        )
+    if not str(rec.get('source') or '').strip():
+        raise ValueError(
+            f'STANDARD_REFERENCE_MISSING_PROVENANCE: {key!r} '
+            'must declare its calibration source'
+        )
+    units = str(rec.get('units') or '').strip().lower()
+    if units != 'f_lambda':
+        raise ValueError(
+            f'UNSUPPORTED_STANDARD_REFERENCE_UNITS: {units!r}; '
+            'convert external F_nu/Jy/AB data into explicit f_lambda first'
+        )
+    waveref = str(rec.get('wavelength_convention') or '').strip().lower()
+    if waveref not in {'air', 'vacuum'}:
+        raise ValueError(
+            f'STANDARD_REFERENCE_WAVEREF_INVALID: {waveref!r}'
+        )
+    tbl_req = str(rec.get('table') or '').strip()
+    if not tbl_req:
+        raise ValueError(f'STANDARD_REFERENCE_TABLE_MISSING: {key!r}')
+    tbl_path = Path(tbl_req).expanduser()
     if not tbl_path.is_absolute():
-        # table path in library is package-relative.
-        base = lib_path.parent.parent if lib_path.name == 'library.yaml' else lib_path.parent
-        cand = (base / tbl_path.name) if '/' not in tbl_req else (lib_path.parent.parent / tbl_req)
-        if cand.exists():
-            tbl_path = cand.resolve()
-        else:
-            tbl_path = reference_path(cfg, prefix='standards.') or cand.resolve()
-    return lib, tbl_path, str(rec.get('units') or 'f_lambda'), str(rec.get('wavelength_convention') or 'air')
+        # Resolve ONLY the table named by the matched library record. Never
+        # substitute the first unrelated standards.* reference from context.
+        candidates = [
+            lib_path.parent / tbl_path,
+            lib_path.parent.parent / tbl_path,
+        ]
+        found = next((p for p in candidates if p.is_file()), None)
+        if found is None:
+            raise FileNotFoundError(
+                f'STANDARD_REFERENCE_TABLE_MISSING: {tbl_req!r} '
+                f'relative to {lib_path}'
+            )
+        tbl_path = found.resolve()
+    if not tbl_path.is_file():
+        raise FileNotFoundError(f'STANDARD_REFERENCE_TABLE_MISSING: {tbl_path}')
+    return lib, tbl_path, units, waveref
 
 
 def build_sensfunc(cfg: dict[str, Any], *, standard_spec_path: str | Path, standard_qc: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -198,6 +255,8 @@ def build_sensfunc(cfg: dict[str, Any], *, standard_spec_path: str | Path, stand
         'reference_table': str(ref_tbl_path),
         'reference_units': str(ref_units),
         'reference_waveref': str(ref_waveref),
+        'reference_quality': 'validated',
+        'reference_identity_confirmed': True,
         'airmass': (float(airmass) if airmass is not None else None),
         'fit_points': int(np.count_nonzero(fit_mask)),
         'airmass_provenance': str(airmass_prov),
@@ -227,6 +286,7 @@ def build_sensfunc(cfg: dict[str, Any], *, standard_spec_path: str | Path, stand
         'flux_unit': 'erg/s/cm2/Angstrom',
         'waveref': str(spec.get('waveref') or 'air'),
         'reference_context_id': str(ctx.get('context_id') or ''),
+        'reference_quality': 'validated',
         'input_bunit': str(spec.get('bunit') or ''),
         'input_rebnorm': str(hdr0.get('REBNORM') or ''),
         'input_waveunit': str(hdr0.get('WAVEUNIT') or hdr0.get('CUNIT1') or '').strip(),
@@ -277,6 +337,8 @@ def write_sensfunc_products(out_dir: str | Path, payload: dict[str, Any]) -> dic
             raise ValueError('COUNT_V1 sensitivity requires declared air/vacuum medium')
     ph['REFCTID'] = str(payload.get('reference_context_id') or '')
     ph['RESPUNIT'] = 'count_per_flux'
+    # Qualify this specific sensitivity file, not merely its numerical arrays.
+    ph['SENSREFQ'] = str(payload.get('reference_quality') or 'UNQUAL')[:8].upper()
     table_path = write_bintable_fits(
         out_dir / 'sensfunc_table.fits',
         primary_header=ph,

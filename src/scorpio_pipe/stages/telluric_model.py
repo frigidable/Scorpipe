@@ -15,6 +15,6 @@ def run_telluric_model(cfg: dict[str, Any], *, run_root: Path, stage_dir_path: P
     payload = build_telluric_model(cfg, standard_spec_path=std_path)
     products = write_telluric_products(stage_dir_path, payload)
     qcp = payload.get('qc') or {}
-    status = 'warn' if float(qcp.get('median_confidence') or 0.0) < 0.35 else 'ok'
+    status = 'warn' if (not bool(qcp.get('science_qualified')) or float(qcp.get('median_confidence') or 0.0) < 0.35) else 'ok'
     write_done_json(stage='telluric_model', stage_dir=stage_dir_path, status=status, outputs=products, metrics={'median_confidence': qcp.get('median_confidence')}, qc=qcp)
     return (StageResult.warn if status == 'warn' else StageResult.ok)(products=products, artifacts=list(products.values()), qc=qcp, messages=['telluric model built'])
