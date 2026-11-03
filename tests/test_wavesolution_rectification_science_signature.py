@@ -41,6 +41,14 @@ def test_rectification_model_records_science_signature_separately_from_arc(
 
     wave = build_wavesolution(cfg, run_root=mn.work_dir)
     assert wave.lambda_map_fits.exists()
+
+    # The production 1D report has top-level RMS/pair-count fields. Guard
+    # the schema consumed by Golden and the independent numerical QC report.
+    ws1 = json.loads(wave.wavesolution_1d_json.read_text(encoding="utf-8"))
+    assert "fit" not in ws1
+    assert 0.0 <= float(ws1["rms_A"]) <= 0.05
+    assert 5 <= int(ws1["n_used"]) <= int(ws1["n_pairs"])
+
     model = json.loads(
         (wave.wavesol_dir / "rectification_model.json").read_text(encoding="utf-8")
     )
