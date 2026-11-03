@@ -458,7 +458,7 @@ def _write_mef(
     wave0: float | None = None,
     dw: float | None = None,
     unit: str = "Angstrom",
-    wave_ref: str = "UNKNOWN",
+    wave_ref: str | None = None,
 ) -> None:
 
     """Write a MEF product with SCI/VAR/MASK and optional COV.
@@ -480,16 +480,29 @@ def _write_mef(
     hdr.setdefault("SSYSOBS", str(hdr.get("SPECSYS", "TOPOCENT") or "TOPOCENT"))
     grid = None
     if wave0 is not None and dw is not None:
-        try:
-            grid = WaveGrid(
-                lambda0=float(wave0),
-                dlambda=float(dw),
-                nlam=int(np.asarray(sci).shape[1]),
-                unit=str(unit),
-                wave_ref=str(wave_ref),
+        # The common MEF writer stamps WaveGrid cards over the given header.
+        # Never let a default UNKNOWN erase a valid air/vacuum reference.
+        header_ref = str(hdr.get("WAVEREF", "") or "").strip().lower()
+        resolved_ref = str(
+            wave_ref if wave_ref is not None else header_ref
+        ).strip().lower()
+        if resolved_ref not in {"air", "vacuum"}:
+            raise ValueError(
+                "Linearize MEF requires WAVEREF=air or vacuum "
+                "for wavelength-calibrated output"
             )
-        except Exception:
-            grid = None
+        if header_ref and header_ref != resolved_ref:
+            raise ValueError(
+                "Conflicting wavelength reference: "
+                f"header={header_ref!r}, grid={resolved_ref!r}"
+            )
+        grid = WaveGrid(
+            lambda0=float(wave0),
+            dlambda=float(dw),
+            nlam=int(np.asarray(sci).shape[1]),
+            unit=str(unit),
+            wave_ref=resolved_ref,
+        )
 
     # Provide primary data for legacy tooling (fits.getdata reads primary).
     write_sci_var_mask(
@@ -2718,7 +2731,7 @@ def run_linearize(
                 wave0=wave0,
                 dw=dw,
                 unit=unit,
-                wave_ref=wave_ref,
+                wave_ref=waveref,
             )
             rect_paths.append(out_skysub)
 
@@ -2736,6 +2749,7 @@ def run_linearize(
                     wave0=wave0,
                     dw=dw,
                     unit=unit,
+                    wave_ref=waveref,
                 )
 
             if per_exp_dir is not None:
@@ -2750,6 +2764,7 @@ def run_linearize(
                     wave0=wave0,
                     dw=dw,
                     unit=unit,
+                    wave_ref=waveref,
                 )
 
             skysub_png = out_dir / f"{base_for_mask}_skysub.png"
@@ -2924,6 +2939,7 @@ def run_linearize(
             wave0=wave0,
             dw=dw,
             unit=unit,
+            wave_ref=waveref,
         )
 
         # Quicklook PNG
