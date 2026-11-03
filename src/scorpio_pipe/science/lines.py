@@ -199,7 +199,9 @@ def measure_line(
                       else 'continuum_subtracted_window_integral'),
         'sigma_kms_kind': 'observed_including_instrument_LSF',
         'expected_wavelength': float(center),
-        'centroid': float(centroid),
+        # A nondetection has no meaningful fitted line center; JSON null is
+        # intentional and must not be coerced with float(None).
+        'centroid': None if centroid is None else float(centroid),
         'velocity_kms': velocity,
         'flux': float(flux_int),
         'equivalent_width': float(ew),
