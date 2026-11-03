@@ -292,6 +292,67 @@ def _verified_stack_rejection_provenance(
         return False
 
 
+def _aperture_input_dq(
+    mask: np.ndarray | None, centers: np.ndarray, *, ap_hw: int,
+) -> np.ndarray:
+    """OR raw DQ inside each extraction aperture without changing usability."""
+    positions = np.asarray(centers, dtype=float)
+    out = np.zeros(positions.size, dtype=np.uint16)
+    if mask is None:
+        return out
+    source = np.asarray(mask, dtype=np.uint16)
+    if source.ndim != 2 or source.shape[1] != positions.size:
+        raise ValueError("Aperture provenance MASK shape mismatch")
+    ny = source.shape[0]
+    for j, yc in enumerate(positions):
+        if not np.isfinite(yc):
+            continue
+        y0 = max(0, int(math.floor(float(yc))) - int(ap_hw))
+        y1 = min(ny, int(math.floor(float(yc))) + int(ap_hw) + 1)
+        if y1 > y0:
+            out[j] = np.bitwise_or.reduce(source[y0:y1, j])
+    return out
+
+
+def _science_usable_1d_mask(
+    extracted_mask: np.ndarray, *,
+    upstream_degraded: bool = False,
+) -> np.ndarray:
+    """Translate pre-v1 mixed provenance into explicit output-fatal DQ.
+
+    Only NO_COVERAGE and SKYMODEL_FAIL are reliable post-extraction fatal
+    properties from the current kernels. All recognized excluded-input flags
+    remain in DQ_ANY, not MASK. Unknown bits are retained conservatively.
+    """
+    from scorpio_pipe.maskbits import (
+        NO_COVERAGE, BADPIX, COSMIC, SATURATED, EDGE, USER,
+        REJECTED, OUTSIDE_SLIT, INVALID_WAVELENGTH, SKYMODEL_FAIL,
+    )
+    src = np.asarray(extracted_mask, dtype=np.uint16)
+    known = int(
+        NO_COVERAGE | BADPIX | COSMIC | SATURATED | EDGE |
+        USER | REJECTED | OUTSIDE_SLIT | INVALID_WAVELENGTH | SKYMODEL_FAIL
+    )
+    unknown = np.uint16(~known & 0xFFFF)
+    fatal = np.uint16(int(NO_COVERAGE | SKYMODEL_FAIL))
+    out = (src & (fatal | unknown)).astype(np.uint16, copy=True)
+    if upstream_degraded:
+        out |= np.uint16(SKYMODEL_FAIL)
+    return out
+
+
+def _aperture_fraction_used(
+    npix: np.ndarray, *, ap_hw: int,
+) -> np.ndarray:
+    """Fraction of the NOMINAL geometric aperture with usable data.
+
+    This is a spatial-pixel fraction, NOT an inferred fraction of source
+    flux. It must never be used as a flux aperture correction.
+    """
+    n = np.asarray(npix, dtype=float)
+    return np.clip(n / float(2 * int(ap_hw) + 1), 0.0, 1.0)
+
+
 def _is_stack2d_input(path: Path, hdr: fits.Header) -> bool:
     name = path.name.lower()
     if name in {"stack2d.fits", "stacked2d.fits"}:
@@ -798,9 +859,12 @@ def _boxcar_extract(
 
         if have_mask:
             mm = mask[y0:y1, j]
-            # OR all bits for output (keeps provenance of masked contributors)
+            # Input NO_COVERAGE belongs to an excluded spatial pixel, not
+            # necessarily to the extracted spectral channel. Output coverage
+            # is determined below from the *actual usable contributors*.
             try:
-                out_mask[j] |= np.uint16(np.bitwise_or.reduce(mm))
+                aperture_bits = np.uint16(np.bitwise_or.reduce(mm))
+                out_mask[j] |= aperture_bits & np.uint16(~int(NO_COVERAGE) & 0xFFFF)
             except Exception:
                 pass
             good &= (mm & fatal_bits) == 0
@@ -1048,6 +1112,10 @@ def _write_spec1d_fits(
     mask_fixed: np.ndarray,
     sky_fixed: np.ndarray,
     npix_fixed: np.ndarray,
+    dq_any_trace: np.ndarray | None = None,
+    dq_any_fixed: np.ndarray | None = None,
+    frac_trace: np.ndarray | None = None,
+    frac_fixed: np.ndarray | None = None,
 ) -> None:
     """Write spec1d.fits (tables + lightweight preview images).
 
@@ -1079,7 +1147,17 @@ def _write_spec1d_fits(
     ph["PIPEVER"] = (str(PIPELINE_VERSION), "Pipeline version")
     ph["STAGE"] = ("12_extract", "Pipeline stage (directory name)")
     stamp_data_model(ph)
-
+    # Versioned *1D* mask semantics, independent of the global 2D bit map.
+    have_new_dq = all(x is not None for x in (
+        dq_any_trace, dq_any_fixed, frac_trace, frac_fixed
+    ))
+    if have_new_dq:
+        ph["DQ1DVER"] = (1, "1D science usability / aperture provenance schema")
+        ph["DQ1DSEM"] = ("FATAL", "MASK_* contains output-fatal DQ only")
+    elif any(x is not None for x in (
+        dq_any_trace, dq_any_fixed, frac_trace, frac_fixed
+    )):
+        raise ValueError("Incomplete DQ1D provenance/coverage arrays")
 
     if "INPUT2D" in hdr0:
         ph["INPUT2D"] = (str(hdr0["INPUT2D"]), "2D input FITS used for extraction")
@@ -1150,6 +1228,11 @@ def _write_spec1d_fits(
         fits.Column(name="SKY_TRACE", format="E", array=np.asarray(sky_trace, dtype=np.float32)),
         fits.Column(name="NPIX_TRACE", format="I", array=np.asarray(npix_trace, dtype=np.int16)),
     ]
+    if have_new_dq:
+        cols_trace.extend([
+            fits.Column(name="DQ_ANY_TRACE", format="J", array=np.asarray(dq_any_trace, dtype=np.int32)),
+            fits.Column(name="FRAC_TRACE", format="E", array=np.asarray(frac_trace, dtype=np.float32)),
+        ])
     ht = fits.BinTableHDU.from_columns(cols_trace, name="SPEC_TRACE")
     ht.header["WUNIT"] = (hdr0.get("CUNIT1", "Angstrom"), "Wavelength unit")
     ht.header["FUNIT"] = (hdr0.get("BUNIT", "ADU"), "Flux unit")
@@ -1163,6 +1246,11 @@ def _write_spec1d_fits(
         fits.Column(name="SKY_FIXED", format="E", array=np.asarray(sky_fixed, dtype=np.float32)),
         fits.Column(name="NPIX_FIXED", format="I", array=np.asarray(npix_fixed, dtype=np.int16)),
     ]
+    if have_new_dq:
+        cols_fixed.extend([
+            fits.Column(name="DQ_ANY_FIXED", format="J", array=np.asarray(dq_any_fixed, dtype=np.int32)),
+            fits.Column(name="FRAC_FIXED", format="E", array=np.asarray(frac_fixed, dtype=np.float32)),
+        ])
     hf = fits.BinTableHDU.from_columns(cols_fixed, name="SPEC_FIXED")
     hf.header["WUNIT"] = (hdr0.get("CUNIT1", "Angstrom"), "Wavelength unit")
     hf.header["FUNIT"] = (hdr0.get("BUNIT", "ADU"), "Flux unit")
@@ -1202,6 +1290,11 @@ def _write_spec1d_fits(
         _img("SKY2", sky2, np.float32),
     ]
 
+    if have_new_dq:
+        hdus.extend([
+            _img("DQANY2", np.vstack([dq_any_trace, dq_any_fixed]), np.int32),
+            _img("FRAC2", np.vstack([frac_trace, frac_fixed]), np.float32),
+        ])
     atomic_write_fits(out_path, fits.HDUList(hdus))
 
 
@@ -1524,6 +1617,10 @@ def _run_extract1d_impl(
     fatal_bits, informational_1d_bits = _extraction_mask_policy(
         is_stack=qualified_stack_rejection
     )
+    # Invalid lambda/slit geometry must not contribute even if their
+    # numerical SCI/VAR happen to be finite.
+    from scorpio_pipe.maskbits import INVALID_WAVELENGTH, OUTSIDE_SLIT
+    fatal_bits |= int(INVALID_WAVELENGTH | OUTSIDE_SLIT)
 
     sky_windows: list[tuple[int, int]] | None = None
     geo_meta: dict[str, Any] = {}
@@ -1663,6 +1760,24 @@ def _run_extract1d_impl(
         mask_tr = _strip_informational_1d_bits(mask_tr, bits=informational_1d_bits)
         mask_fx = _strip_informational_1d_bits(mask_fx, bits=informational_1d_bits)
 
+    # Legacy extraction kernels intentionally return mixed provenance flags
+    # for standalone numerical comparisons. At the FITS stage boundary we
+    # publish versioned, separate DQ_ANY and science-usability MASK columns.
+    dq_any_tr = _aperture_input_dq(
+        mask, trace.y_trace, ap_hw=trace.aperture_half_width
+    )
+    dq_any_fx = _aperture_input_dq(
+        mask, trace.y_fixed, ap_hw=trace.aperture_half_width
+    )
+    frac_tr = _aperture_fraction_used(npix_tr, ap_hw=trace.aperture_half_width)
+    frac_fx = _aperture_fraction_used(npix_fx, ap_hw=trace.aperture_half_width)
+    mask_tr = _science_usable_1d_mask(
+        mask_tr, upstream_degraded=upstream_sky_passthrough
+    )
+    mask_fx = _science_usable_1d_mask(
+        mask_fx, upstream_degraded=upstream_sky_passthrough
+    )
+
     if method == "mean":
         # Convert sum → mean (and propagate VAR scaling).
         n_eff_tr = np.maximum(np.asarray(npix_tr, dtype=float), 1.0)
@@ -1744,6 +1859,10 @@ def _run_extract1d_impl(
         mask_fixed=mask_fx,
         sky_fixed=sky_fx,
         npix_fixed=npix_fx,
+        dq_any_trace=dq_any_tr,
+        dq_any_fixed=dq_any_fx,
+        frac_trace=frac_tr,
+        frac_fixed=frac_fx,
     )
     # trace.json
     # Provide stable, explicit metadata for reproducibility and QC.
@@ -1974,6 +2093,9 @@ def _run_extract1d_impl(
             "extract": {
                 "method": method,
                 "input_mode": mode,
+                "dq1d_version": 1,
+                "trace_fraction_used_min": float(np.min(frac_tr)) if frac_tr.size else None,
+                "fixed_fraction_used_min": float(np.min(frac_fx)) if frac_fx.size else None,
                 "snr_trace_median": (
                     float(np.nanmedian(np.where(np.isfinite(var_tr) & (var_tr > 0), flux_tr / np.sqrt(var_tr), np.nan)))
                     if flux_tr.size else None

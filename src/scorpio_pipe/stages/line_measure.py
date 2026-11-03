@@ -61,6 +61,7 @@ def run_line_measure(cfg: dict[str, Any], *, run_root: Path, stage_dir_path: Pat
         lines=DEFAULT_LINES,
         redshift=redshift,
         mask=mask,
+        coverage_fraction=spec.get('frac_used') if spec.get('dq1d_version') == 1 else None,
         waveref=waveref,
         detection_snr=detection_snr,
     )
@@ -73,6 +74,10 @@ def run_line_measure(cfg: dict[str, Any], *, run_root: Path, stage_dir_path: Pat
         'calibration_systematics_path': str(calsys_path),
         'lines': rows,
         'reddening': redd,
+        'dq1d_version': spec.get('dq1d_version'),
+        'partial_line_windows': int(sum(
+            1 for row in rows if row.get('reason') == 'partial_aperture_or_spectral_coverage'
+        )),
         'calibration_status': json.loads(fluxcal_qc_path.read_text(encoding='utf-8')).get('status') if fluxcal_qc_path.exists() else None,
         'calibration_uncertainty_summary': {
             'median_rel': float(np.nanmedian(calsys['rel'])) if calsys['rel'].size else 0.0,
