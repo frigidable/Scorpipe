@@ -374,6 +374,7 @@ def _prepare_sky_input_planes(
     *,
     cfg: dict,
     sky_cfg: dict,
+    input_bias_var: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, fits.Header]:
     """Preserve upstream detector uncertainty and DQ; estimate VAR only if absent."""
     sci = np.asarray(sci)
@@ -440,8 +441,32 @@ def _prepare_sky_input_planes(
             require_gain=require_gain,
         )
 
+    if hdr.get("BVARREF") and input_bias_var is None:
+        raise ValueError(
+            "Sky missing declared Cosmics MasterBias variance sidecar"
+        )
+    if input_bias_var is not None:
+        if input_var is not None:
+            raise ValueError(
+                "Sky cannot combine a preexisting VAR plane and pending "
+                "Cosmics MasterBias variance without double-counting provenance"
+            )
+        from scorpio_pipe.cosmics_biasvar import validate_bias_var_extra
+
+        var = validate_bias_var_extra(
+            var, input_bias_var, sci.shape
+        )
+
     out_hdr = fits.Header(hdr)
-    out_hdr["SKYIVAR"] = ("INPUT" if input_var is not None else "ESTIM", "Sky input VAR source")
+    out_hdr["SKYIVAR"] = (
+        "INPUT" if input_var is not None else "ESTIM+BV"
+        if input_bias_var is not None else "ESTIM",
+        "Sky input VAR source",
+    )
+    if input_bias_var is not None:
+        out_hdr["BVARINC"] = (True, "MasterBias variance included in VAR")
+        if "BVARREF" in out_hdr:
+            del out_hdr["BVARREF"]
     sources = int(input_mask is not None) + int(cosmic_mask is not None)
     out_hdr["SKYIMSK"] = (
         "BOTH" if sources == 2 else "INPUT" if input_mask is not None
@@ -1792,9 +1817,12 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                 cosmic_mask = _try_load_mask_for_clean(
                     p, masks_fits_dir=obj_mask_dir, clean_header=hdr,
                 )
+                from scorpio_pipe.cosmics_biasvar import read_clean_biasvar_sidecar
+                input_bias_var = read_clean_biasvar_sidecar(p, hdr, sci.shape)
                 sci, var, mask, hdr = _prepare_sky_input_planes(
                     sci, input_var, input_mask, cosmic_mask, hdr,
                     cfg=cfg, sky_cfg=sky_cfg,
+                    input_bias_var=input_bias_var,
                 )
 
                 # IMPORTANT (P0-J): downstream geometry/fit helpers may modify arrays in-place.
