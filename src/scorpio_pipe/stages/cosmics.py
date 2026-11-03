@@ -186,6 +186,77 @@ def _load_superbias(work_dir: Path) -> np.ndarray | None:
     return None
 
 
+def _resolve_cosmics_superbias_for_kind(
+    cfg: dict[str, Any],
+    paths: list[Path],
+    work_dir: Path,
+    legacy_superbias: np.ndarray | None,
+) -> np.ndarray | None:
+    """Pick a geometry/readout-specific bias for one compatible frame set.
+
+    Multi-exposure cosmic rejection requires a homogeneous CCD input group.
+    With a MasterBias index, selecting the global default bias alias is unsafe:
+    select the exact input group or fail before writing any cleaned exposure.
+    Historical unindexed calibrations retain the existing compatibility path;
+    those still require a separate end-to-end uncertainty audit.
+    """
+    if not paths:
+        return None
+    entries: list[tuple[Path, fits.Header, tuple[int, ...]]] = []
+    for path in paths:
+        with fits.open(path, memmap=False) as hdul:
+            if hdul[0].data is None:
+                raise ValueError(f"Cosmics raw image has no primary data: {path}")
+            entries.append((path, hdul[0].header.copy(), hdul[0].data.shape))
+    status = [bool(h.get("BIASSUB", False)) for _, h, _ in entries]
+    if all(status):
+        return None  # Already corrected: never subtract a second time.
+    if any(status):
+        raise ValueError(
+            "Cosmics input set mixes BIASSUB=True and raw CCD frames. "
+            "Reduce separately or provide homogeneous calibrated inputs."
+        )
+
+    from scorpio_pipe.stages.calib import (
+        load_master_bias_index,
+        resolve_master_bias,
+    )
+
+    index = load_master_bias_index(work_dir)
+    if not (isinstance(index, dict) and index.get("groups")):
+        # Legacy unindexed runs: no claim of readout-group validation.
+        return legacy_superbias
+
+    selections = [
+        resolve_master_bias(cfg, hdr, sci_shape=tuple(shape),
+                            policy_override="strict")
+        for _, hdr, shape in entries
+    ]
+    groups = {sel.gid for sel in selections}
+    if len(groups) != 1 or not next(iter(groups)):
+        raise ValueError(
+            "Cosmics input exposures require different MasterBias readout "
+            "groups. Process these exposures separately."
+        )
+    selected = selections[0]
+    if selected.degraded:
+        raise ValueError(
+            "Cosmics MasterBias selection was degraded despite strict mode"
+        )
+    if not selected.sci_path.is_file():
+        raise FileNotFoundError(
+            f"Cosmics selected MasterBias is missing: {selected.sci_path}"
+        )
+    bias = np.asarray(fits.getdata(selected.sci_path, memmap=False), dtype=np.float32)
+    shapes = {shape for _, _, shape in entries}
+    if shapes != {bias.shape}:
+        raise ValueError(
+            "Cosmics MasterBias geometry does not match the science frame set: "
+            f"bias={bias.shape}, science={sorted(shapes)}"
+        )
+    return bias
+
+
 def _robust_mad(x: np.ndarray, axis: int = 0) -> np.ndarray:
     med = np.median(x, axis=axis)
     mad = np.median(np.abs(x - np.expand_dims(med, axis=axis)), axis=axis)
@@ -527,7 +598,12 @@ def _two_frame_diff_clean(
                 )
 
     if bias_subtract and superbias is not None:
-        if superbias.shape[0] >= ny and superbias.shape[1] >= nx:
+        already = [bool(hdr.get("BIASSUB", False)) for hdr in headers]
+        if any(already) and not all(already):
+            raise ValueError("Cosmics cannot mix BIASSUB=True and raw inputs")
+        if all(already):
+            pass  # Respect existing physical calibration provenance.
+        elif superbias.shape[0] >= ny and superbias.shape[1] >= nx:
             sb = superbias[:ny, :nx]
             datas = [d - sb for d in datas]
             for hdr in headers:
@@ -719,7 +795,9 @@ def _single_frame_laplacian_clean(
     # Evaluate detector ADC saturation before any bias correction/inpainting.
     detector_dq, hdr = carry_detector_saturation(img, None, hdr, cfg or {})
 
-    if bias_subtract and superbias is not None and superbias.shape == img.shape:
+    if (bias_subtract and superbias is not None
+            and superbias.shape == img.shape
+            and not bool(hdr.get("BIASSUB", False))):
         img = img - superbias
         hdr["BIASSUB"] = (True, "Superbias subtracted")
 
@@ -1526,6 +1604,16 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
         if len(paths) == 0:
             continue
 
+        # Exact CCD readout/group selection before any cosmic replacement.
+        # A global default MasterBias can only be used by legacy unindexed
+        # observations. The indexed path fails closed on mixed readouts.
+        kind_superbias = (
+            _resolve_cosmics_superbias_for_kind(
+                cfg, paths, work_dir, superbias,
+            )
+            if bias_subtract else None
+        )
+
         kind_out = out_root / kind
         kind_out.mkdir(parents=True, exist_ok=True)
 
@@ -1565,7 +1653,7 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
                 summary = _stack_mad_clean(
                     paths,
                     out_dir=kind_out,
-                    superbias=superbias,
+                    superbias=kind_superbias,
                     k=k,
                     mad_scale=mad_scale,
                     min_mad=min_mad,
