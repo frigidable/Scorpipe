@@ -171,10 +171,20 @@ def apply_barycentric_to_wavelength_grid(
     *,
     doppler_factor: float,
 ) -> tuple[float, float]:
-    """Apply barycentric correction to a *linear* wavelength grid.
+    """Apply the Astropy optical-convention barycentric correction to a linear grid.
 
-    Uses λ_bary = λ_obs / doppler_factor (doppler_factor = 1 + v/c).
+    Astropy SkyCoord.radial_velocity_correction returns a correction to ADD
+    to an observed optical-convention radial velocity. For f = 1 + v_corr/c,
+    redshifts transform as 1 + z_bary = (1 + z_topo) * f. Consequently
+    both wavelength zeropoint and spacing must multiply by f.
+
+    Never silently return uncorrected wavelengths for an invalid correction.
     """
-    if not np.isfinite(doppler_factor) or doppler_factor == 0:
-        return float(lambda0), float(dlambda)
-    return float(lambda0) / float(doppler_factor), float(dlambda) / float(doppler_factor)
+    factor = float(doppler_factor)
+    if not np.isfinite(factor) or factor <= 0:
+        raise ValueError("doppler_factor must be finite and strictly positive")
+    l0 = float(lambda0)
+    dl = float(dlambda)
+    if not np.isfinite(l0) or not np.isfinite(dl):
+        raise ValueError("lambda0 and dlambda must be finite")
+    return l0 * factor, dl * factor
