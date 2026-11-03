@@ -2500,7 +2500,22 @@ def run_linearize(
                     if flexure_score is not None and math.isfinite(flexure_score) and flexure_score < delta_score_warn:
                         flexure_flag = "UNCERTAIN"
 
-        # Policy: apply only if flexure_flag == OK (default) unless user overrides.
+        # A shift measured by fitting the sky to itself is not tied to any
+        # laboratory wavelengths. Old sky_done.json reports may contain a
+        # plausible-looking delta but no independent reference: reject it.
+        flexure_ref_verified = bool(
+            isinstance(sky_done, dict)
+            and isinstance(sky_done.get("flexure"), dict)
+            and sky_done["flexure"].get("verification") == "independent_reference"
+            and isinstance(sky_done["flexure"].get("reference_id"), str)
+            and sky_done["flexure"]["reference_id"].strip()
+        )
+        if not flexure_ref_verified:
+            delta_lambda_A = None
+            flexure_flag = "UNVERIFIED"
+            flexure_score = None
+
+        # Policy: apply only independently verified flexure.
         delta_policy = str(lcfg.get("delta_lambda_policy", "apply_if_ok")).strip().lower()
         if delta_policy in {"off", "false", "no", "0"}:
             delta_policy = "off"
@@ -2508,6 +2523,12 @@ def run_linearize(
             delta_policy = "always"
         else:
             delta_policy = "apply_if_ok"
+        if delta_policy == "always" and not flexure_ref_verified:
+            raise ValueError(
+                "linearize.delta_lambda_policy=always cannot apply unverified "
+                "self-fitted Sky flexure; independent sky-line wavelength "
+                "reference and reference_id are required"
+            )
 
         if delta_policy != "off" and delta_lambda_A is not None and unit != "pix":
             try:
@@ -2696,6 +2717,8 @@ def run_linearize(
                 "Normalize SCI/VAR by exposure time (e-/s)",
             )
             ohdr["TEXPS"] = (float(exptime_s), "Exposure time used for normalization (s)")
+            ohdr["FLXFLAG"] = (str(flexure_flag), "Spectral flexure status")
+            ohdr["DLAMAP"] = (bool(delta_lambda_applied), "Independent flexure shift applied")
             if delta_lambda_A is not None:
                 try:
                     ohdr["DLAM_A"] = (float(delta_lambda_A), "Wavelength shift from sky flexure (Angstrom)")
