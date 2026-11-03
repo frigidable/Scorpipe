@@ -1675,9 +1675,23 @@ def run_stack2d(
             except Exception:
                 gap_frac = None
 
+            # The empirical eta correction is part of the declared science
+            # variance model. A runtime exception while eta was requested is
+            # an ERROR, not a silently accepted uncalibrated VAR plane.
+            eta = report.get("eta") if isinstance(report.get("eta"), dict) else {}
+            if eta.get("enabled") and eta.get("error"):
+                stage_flags.append(
+                    make_flag(
+                        "ETA_APPLICATION_FAILED",
+                        "ERROR",
+                        "Requested eta(lambda) variance calibration failed; "
+                        "stack VAR is not empirically calibrated",
+                        error=str(eta["error"]),
+                    )
+                )
+
             # ETA sanity check
             try:
-                eta = report.get("eta") if isinstance(report.get("eta"), dict) else {}
                 if eta.get("applied"):
                     mn = eta.get("eta_min")
                     mx = eta.get("eta_max")
