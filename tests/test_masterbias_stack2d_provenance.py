@@ -91,3 +91,46 @@ def test_extraction_preserves_shared_calibration_uncertainty_metadata(tmp_path: 
         assert h["SBCOVQ"] == "UNMODEL"
         assert h["SBGSTAT"] == "SHARED"
         assert h["SBGRPN"] == 1
+
+
+def test_flatfield_stamps_bias_estimator_variance_in_existing_var_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    from scorpio_pipe.stages import flatfield, calib
+    from scorpio_pipe.stages.calib import BiasSelection
+    raw = tmp_path / "with_var.fits"
+    hdr = fits.Header()
+    hdr["BUNIT"] = "ADU"
+    hdr["GAIN"] = 2.0
+    hdr["RDNOISE"] = 4.0
+    hdr["BIASSUB"] = False
+    arr = np.full((4, 6), 110., dtype=np.float32)
+    fits.HDUList([
+        fits.PrimaryHDU(data=arr, header=hdr),
+        fits.ImageHDU(data=np.full((4, 6), 9., dtype=np.float32), name="VAR"),
+        fits.ImageHDU(data=np.zeros((4, 6), dtype=np.uint16), name="MASK"),
+    ]).writeto(raw)
+    bias_path = tmp_path / "bias.fits"
+    bvar_path = tmp_path / "bias_var.fits"
+    flat_path = tmp_path / "flat.fits"
+    fits.writeto(bias_path, np.full((4, 6), 10., dtype=np.float32))
+    fits.writeto(bvar_path, np.full((4, 6), 4., dtype=np.float32))
+    fits.writeto(flat_path, np.ones((4, 6), dtype=np.float32))
+    chosen = BiasSelection(
+        sci_path=bias_path, var_path=bvar_path, dq_path=None,
+        gid="bias-group-test", degraded=False, reason="",
+        gain_e_per_adu=2.0, rdnoise_e=4.0,
+    )
+    monkeypatch.setattr(calib, "resolve_master_bias", lambda cfg, hdr, **kw: chosen)
+    monkeypatch.setattr(flatfield, "ensure_compatible_calib", lambda *a, **kw: None)
+    dest = tmp_path / "flat_product.fits"
+    output, selection = flatfield.apply_flat(
+        raw, flat_path, dest, cfg={}, do_bias_subtract=True,
+    )
+    assert output == dest
+    assert selection.gid == "bias-group-test"
+    with fits.open(dest) as hdul:
+        assert hdul[0].header["BVARINC"] is True
+        assert hdul[0].header["SB_GID"] == "bias-group-test"
+        np.testing.assert_allclose(hdul["SCI"].data, 200., atol=1e-6)
+        np.testing.assert_allclose(hdul["VAR"].data, (9. + 4.) * 4., atol=1e-6)
