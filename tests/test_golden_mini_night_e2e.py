@@ -191,6 +191,14 @@ def test_golden_mini_night_e2e(tmp_path: Path):
     sky_done = PRODUCT_CATALOG.best_path(cfg, "sky_done", run_root=mn.work_dir)
     assert sky_done is not None and Path(sky_done).exists()
     sky_doc = json.loads(Path(sky_done).read_text(encoding="utf-8"))
+    # A sky spline fitted to its own training pixels cannot establish
+    # absolute flexure. Never transmit an apparently measured zero shift.
+    flex = sky_doc.get("flexure") or {}
+    assert flex.get("verification") == "unverified"
+    assert flex.get("delta_A_median") is None
+    assert flex.get("reference_id") is None
+    assert any(f.get("code") == "FLEXURE_UNVERIFIED"
+               for f in (sky_doc.get("qc") or {}).get("flags", []))
     sky_sigma = float(((sky_doc.get("metrics") or {}).get("robust_sigma_r_after_median")) or 0.0)
 
     # --- Mask fraction in linearize preview ---
@@ -218,6 +226,9 @@ def test_golden_mini_night_e2e(tmp_path: Path):
             assert rect_hdul[0].header["WAVEREF"] == "air"
             assert rect_hdul["SCI"].header["WAVEREF"] == "air"
             assert rect_hdul[0].header["CTYPE1"] == "AWAV"
+            assert rect_hdul[0].header["FLXFLAG"] == "UNVERIFIED"
+            assert rect_hdul[0].header["DLAMAP"] is False
+            assert "DLAM_A" not in rect_hdul[0].header
     mask_nonzero_frac = float(np.count_nonzero(m != 0) / (m.size if m.size else 1.0))
 
     # --- compare with tolerances ---
