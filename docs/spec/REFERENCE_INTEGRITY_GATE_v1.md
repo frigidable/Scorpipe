@@ -8,9 +8,12 @@ first-stage safety contract, not certification of flux or telluric accuracy.
 A standard-star spectrum can be used for `sensfunc` only if all conditions
 hold:
 
-1. The observed standard has a nonempty object identity, matching the selected
-   library key, `display_name` or explicitly curated `aliases` exactly after
-   normalization. The missing-name or first-entry fallback is forbidden.
+1. The observed standard has a nonempty object identity, uniquely matching
+   the selected library key, `display_name` or explicitly curated `aliases`
+   after normalization. The missing-name or first-entry fallback is forbidden,
+   including single-entry libraries; colliding normalized aliases are rejected.
+   This is stricter than the backward-compatible single-entry fallback
+   originally proposed in standalone PR #106.
 2. The matched record declares `scientific_status: validated` (or `verified`)
    and a nonempty `source` with identifiable, independently checked origin.
 3. The current implementation accepts only **absolute** physical

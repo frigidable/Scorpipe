@@ -134,17 +134,34 @@ def load_library_yaml(path: str | Path) -> dict[str, Any]:
 
 
 def find_standard_record(library: dict[str, Any], selected_name: str | None) -> tuple[str | None, dict[str, Any] | None]:
+    """Resolve a *unique* explicitly identified flux standard; never guess.
+
+    Matching is limited to the library key, display name, and curated aliases.
+    An absent identity or two records with the same normalized alias is
+    ambiguous even if the library contains only one entry.
+    """
     stds = library.get("standards") if isinstance(library, dict) else None
     if not isinstance(stds, dict) or not stds:
         return None, None
-    if selected_name:
-        nsel = normalize_name(selected_name)
-        for key, rec in stds.items():
-            disp = str((rec or {}).get("display_name") or key)
-            if normalize_name(disp) == nsel or normalize_name(str(key)) == nsel:
-                return str(key), dict(rec)
-    first_key = next(iter(stds.keys()))
-    return str(first_key), dict(stds[first_key])
+    nsel = normalize_name(str(selected_name or ""))
+    if not nsel:
+        return None, None
+
+    matches: list[tuple[str, dict[str, Any]]] = []
+    for key, rec in stds.items():
+        if not isinstance(rec, dict):
+            continue
+        names = [str(key), str(rec.get("display_name") or key)]
+        aliases = rec.get("aliases") or []
+        if isinstance(aliases, (list, tuple)):
+            names.extend(str(alias) for alias in aliases)
+        if any(normalize_name(name) == nsel for name in names):
+            matches.append((str(key), rec))
+    if len(matches) != 1:
+        # 0 means unknown; 2+ means aliased collision. Both fail closed.
+        return None, None
+    key, rec = matches[0]
+    return key, dict(rec)
 
 
 def air_to_vacuum(lam_air: np.ndarray) -> np.ndarray:
