@@ -218,3 +218,11 @@ def test_requested_masterflat_processing_failure_aborts(tmp_path, monkeypatch):
             raw_path=raw,
         )
     assert isinstance(ei.value.__cause__, RuntimeError)
+
+
+def test_shared_extraction_facade_exports_standard_rectification_kernel():
+    """StandardPrepare must import the public extraction facade successfully."""
+    from scorpio_pipe.extract import rectify_with_lambda_map
+    from scorpio_pipe.extract.core import rectify_with_lambda_map as core_rectify
+
+    assert rectify_with_lambda_map is core_rectify
