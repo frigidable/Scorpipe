@@ -7,7 +7,6 @@ and, equivalently, wavelength_bary = wavelength_topo * (1 + v_corr/c).
 Reference: https://docs.astropy.org/en/stable/coordinates/velocities.html
 """
 
-import numpy as np
 import pytest
 
 from scorpio_pipe.barycentric import apply_barycentric_to_wavelength_grid
