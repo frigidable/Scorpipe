@@ -327,6 +327,137 @@ def _require_calibration_semantics(stage: str, path: Path, hdr0: Any, *, product
         )
 
 
+def validate_eta_lambda_product(path: str | Path, *, stage: str) -> None:
+    """Validate the 1D, dimensionless eta(lambda) variance-scale sidecar.
+
+    Unlike the stacked SCI/VAR/MASK MEF, this file is *not* a science image:
+    its primary HDU contains one variance multiplier per wavelength pixel.
+    Retain a strict numerical and calibration-metadata contract nonetheless.
+    """
+    p = Path(path)
+    try:
+        from astropy.io import fits
+
+        with fits.open(p, memmap=False) as hdul:
+            if len(hdul) != 1 or not isinstance(hdul[0], fits.PrimaryHDU):
+                raise ProductContractError(
+                    stage=stage, path=str(p), code="ETA_LAYOUT",
+                    message="eta(lambda) requires a single primary-image HDU",
+                )
+            data = hdul[0].data
+            hdr = hdul[0].header
+            if data is None or np.asarray(data).ndim != 1 or np.asarray(data).size < 1:
+                raise ProductContractError(
+                    stage=stage, path=str(p), code="ETA_SHAPE",
+                    message="eta(lambda) must be a nonempty 1D primary array",
+                )
+            eta = np.asarray(data)
+            if not np.issubdtype(eta.dtype, np.floating):
+                raise ProductContractError(
+                    stage=stage, path=str(p), code="ETA_DTYPE",
+                    message="eta(lambda) must contain floating-point values",
+                )
+            if not np.all(np.isfinite(eta)) or np.any(eta <= 0):
+                raise ProductContractError(
+                    stage=stage, path=str(p), code="ETA_VALUES",
+                    message="eta(lambda) must contain only finite positive values",
+                )
+            if str(hdr.get("BUNIT", "") or "").strip().lower() != "dimensionless":
+                raise ProductContractError(
+                    stage=stage, path=str(p), code="ETA_BUNIT",
+                    message="eta(lambda) variance multipliers must be dimensionless",
+                )
+            if str(hdr.get("ETAMETH", "") or "").strip() != "sky_MAD/var_pred":
+                raise ProductContractError(
+                    stage=stage, path=str(p), code="ETA_METHOD",
+                    message="Missing or unknown eta(lambda) calibration method",
+                )
+            try:
+                smooth = int(hdr["ETASMO"])
+                lower = float(hdr["ETAMIN"])
+                upper = float(hdr["ETAMAX"])
+            except (KeyError, ValueError, TypeError) as exc:
+                raise ProductContractError(
+                    stage=stage, path=str(p), code="ETA_PARAMS",
+                    message="Missing or invalid ETASMO, ETAMIN, ETAMAX",
+                ) from exc
+            if (smooth < 3 or smooth % 2 == 0
+                    or not np.isfinite(lower) or not np.isfinite(upper)
+                    or lower <= 0 or upper < lower):
+                raise ProductContractError(
+                    stage=stage, path=str(p), code="ETA_PARAMS",
+                    message="Invalid smoothing window or eta bounds",
+                )
+            atol = max(1e-6, 5e-7 * upper)
+            if np.any(eta < lower - atol) or np.any(eta > upper + atol):
+                raise ProductContractError(
+                    stage=stage, path=str(p), code="ETA_BOUNDS",
+                    message="eta(lambda) values violate declared ETAMIN/ETAMAX",
+                )
+    except ProductContractError:
+        raise
+    except Exception as exc:
+        raise ProductContractError(
+            stage=stage, path=str(p), code="ETA_CONTRACT", message=str(exc),
+        ) from exc
+
+
+def validate_preview2d_product(path: str | Path, *, stage: str) -> None:
+    """Validate a visualization-only SCI image without inventing VAR/MASK.
+
+    A preview is not a science MEF: the median of sky-subtracted frames
+    intentionally has no propagated uncertainty. Require a real 2D SCI,
+    physical SCI units, exposure count and data-model metadata while keeping
+    strict SCI/VAR/MASK validation for actual science products.
+    """
+    p = Path(path)
+    try:
+        from astropy.io import fits
+
+        with fits.open(p, memmap=False) as hdul:
+            hdr = hdul[0].header
+            if "SCI" not in hdul or hdul["SCI"].data is None:
+                raise ProductContractError(
+                    stage=stage, path=str(p), code="PREVIEW_SCI_MISSING",
+                    message="Visualization preview requires a SCI image",
+                )
+            sci = np.asarray(hdul["SCI"].data)
+            sci_hdr = hdul["SCI"].header
+
+            _require_data_model(stage, p, hdr)
+            if sci.ndim != 2 or not sci.size:
+                raise ProductContractError(
+                    stage=stage, path=str(p), code="PREVIEW_SHAPE",
+                    message="Visualization preview SCI must be a nonempty 2D image",
+                )
+            if not np.all(np.isfinite(sci)):
+                raise ProductContractError(
+                    stage=stage, path=str(p), code="PREVIEW_NONFINITE",
+                    message="Visualization preview SCI contains nonfinite values",
+                )
+            bunit = str(sci_hdr.get("BUNIT") or hdr.get("BUNIT") or "").strip()
+            if not is_recognized_sci_bunit(bunit):
+                raise ProductContractError(
+                    stage=stage, path=str(p), code="PREVIEW_BUNIT",
+                    message=f"Unrecognized preview SCI BUNIT: {bunit!r}",
+                )
+            try:
+                nexp = int(hdr.get("NEXP", 0))
+            except (ValueError, TypeError):
+                nexp = 0
+            if nexp < 1:
+                raise ProductContractError(
+                    stage=stage, path=str(p), code="PREVIEW_NEXP",
+                    message="Preview must record NEXP >= 1",
+                )
+    except ProductContractError:
+        raise
+    except Exception as e:
+        raise ProductContractError(
+            stage=stage, path=str(p), code="PREVIEW_CONTRACT", message=str(e),
+        ) from e
+
+
 def validate_mef2d_product(path: str | Path, *, stage: str) -> None:
     """Validate a 2D MEF product: SCI/VAR/MASK."""
 

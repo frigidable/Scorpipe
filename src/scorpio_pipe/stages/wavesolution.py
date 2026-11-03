@@ -15,6 +15,10 @@ from numpy.polynomial.chebyshev import chebvander2d, chebval2d
 log = logging.getLogger(__name__)
 
 
+class ScienceSetupMismatchError(RuntimeError):
+    """Mutually incompatible science setups cannot share a wavelength map."""
+
+
 # --------------------------- IO helpers ---------------------------
 
 
@@ -1525,7 +1529,7 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
                 parts = []
                 for k, paths in setup_groups.items():
                     parts.append({"setup_key": list(k), "n": len(paths), "examples": paths[:3]})
-                raise RuntimeError(
+                raise ScienceSetupMismatchError(
                     "Multiple distinct science setups detected in this wavesolution run. "
                     "Build wavelength solutions per-setup (separate work dirs/configs), or run in a mode that "
                     "produces per-setup solutions. Details: "
@@ -1563,11 +1567,14 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
                 "n_arcs": int(len(arc_list)),
                 "arc_checks": arc_checks,
             }
-    except CalibrationMismatchError:
-        # must-match mismatch is a hard ERROR
+    except (CalibrationMismatchError, ScienceSetupMismatchError):
+        # Must-match calibration mismatches and mixed science setups are
+        # explicitly fatal. Never downgrade these deterministic science
+        # configuration errors to ARC_COMPAT_CHECK_FAILED warnings.
         raise
     except Exception as e:
-        # Do not fail the whole stage just because we could not read headers.
+        # Independent unreadable ARC metadata remain a diagnostic warning;
+        # deterministic incompatibilities above must never enter this path.
         try:
             from scorpio_pipe.qc.flags import make_flag
 
@@ -2075,7 +2082,8 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
         final_view=False,
     )
     _plot_residuals_vs_lambda(
-        lams_all=lams_cp,
+        lam_key=np.round(lams_cp.astype(float), 3),
+        lam_all=lams_cp,
         dlam_all=resid2d,
         used_mask=used2d,
         rejected_lines_A=rej,
@@ -2083,7 +2091,7 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
         title="Δλ vs λ (per-line medians)",
     )
     _plot_residuals_vs_y(
-        ys_pix_all=ys_cp,
+        y_all=ys_cp,
         dlam_all=resid2d,
         used_mask=used2d,
         outpng=resid_vs_y_png,
@@ -2264,7 +2272,36 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
     from scorpio_pipe.frame_signature import FrameSignature
     from scorpio_pipe.qc.lambda_map import validate_lambda_map
 
-    frame_sig = FrameSignature.from_path(superneon_fits)
+    # rectification_model.frame_signature is the signature of the SCIENCE
+    # detector frames to which the wavelength map will be applied, not the arc
+    # stack. Arcs may legitimately use a different gain/rate. Arc/SCI setup
+    # compatibility (including geometry and NODE) was checked above by
+    # ensure_compatible_calib(..., kind="arc", strict=True,
+    # allow_readout_diff=True). Preserve both signatures for provenance.
+    arc_sig = FrameSignature.from_path(arc_list[0]) if arc_list else FrameSignature.from_path(superneon_fits)
+    if obj_list:
+        frame_sig = FrameSignature.from_path(obj_list[0])
+        if frame_sig.shape != tuple(int(x) for x in lam_map_out.shape):
+            raise RuntimeError(
+                "Science-frame detector shape does not match lambda_map: "
+                f"science={frame_sig.shape}, lambda_map={tuple(lam_map_out.shape)}"
+            )
+        for science_path in obj_list[1:]:
+            candidate = FrameSignature.from_path(science_path)
+            if not candidate.is_compatible_with(frame_sig):
+                raise RuntimeError(
+                    "Multiple incompatible science detector signatures in one "
+                    "wavelength solution: "
+                    f"reference={frame_sig.describe()}, "
+                    f"frame={science_path}: {candidate.describe()}"
+                )
+        frame_sig_origin = "science"
+    else:
+        # Calibration-only workflows can create a wavelength solution before
+        # science selection. Record the fallback explicitly; science applications
+        # must still validate their own detector geometry and provenance.
+        frame_sig = arc_sig
+        frame_sig_origin = "arc_fallback"
 
     lam_diag = validate_lambda_map(
         lambda_map_fits,
@@ -2345,6 +2382,8 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
         "pipeline_version": str(PIPELINE_VERSION),
         "stage": "wavesolution",
         "frame_signature": frame_sig.to_dict(),
+        "frame_signature_origin": frame_sig_origin,
+        "arc_frame_signature": arc_sig.to_dict(),
         "input_shape": [ny_in, nx_in],
         "output_shape": [ny_out, int(nlam)],
         "y_crop": {"top": int(y_crop_top), "bottom": int(y_crop_bottom)},
@@ -2545,8 +2584,6 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
         # --- quicklook for lambda_map (navigator-friendly) ---
         lambda_map_png = outdir / "lambda_map.png"
         try:
-            from astropy.io import fits
-            import numpy as np
             from scorpio_pipe.io.quicklook import write_quicklook_png
 
             with fits.open(lambda_map_fits, memmap=False) as hdul:

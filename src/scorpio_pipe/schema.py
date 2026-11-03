@@ -582,6 +582,13 @@ class ConfigSchema(BaseModel):
     project_root: Optional[str] = None
     work_dir_abs: Optional[str] = None
     setup: Optional[Dict[str, Any]] = None
+    # Runtime-only metadata injected by load_config() to record project
+    # manifest provenance and role-selection state. Pydantic treats leading
+    # underscore field names as private attributes, so register the external
+    # key through an explicit alias instead. Keep it out of serialized YAML.
+    project_manifest_runtime: Optional[Dict[str, Any]] = Field(
+        default=None, alias="_project_manifest", exclude=True
+    )
     _profiles_applied: Optional[List[str]] = None
 
     @model_validator(mode="before")

@@ -39,8 +39,18 @@ def run_line_measure(cfg: dict[str, Any], *, run_root: Path, stage_dir_path: Pat
     wave = np.asarray(spec['wave'], dtype=float)
     flux = np.asarray(spec['flux'], dtype=float)
     var = np.asarray(spec['var'], dtype=float)
+    mask = np.asarray(spec['mask'])
+    # The generic table reader retains historical air defaults. For
+    # scientific line centres, guessing missing wavelength medium can shift
+    # derived velocities: require the actual output FITS to declare it.
+    waveref = str(spec['header'].get('WAVEREF') or '').strip().lower()
+    if waveref not in {'air', 'vacuum'}:
+        raise ValueError(
+            'LineMeasure requires explicit WAVEREF=air/vacuum in flux-calibrated spectrum'
+        )
     scfg = cfg.get('science') if isinstance(cfg.get('science'), dict) else {}
     redshift = float((scfg or {}).get('redshift', 0.0) or 0.0)
+    detection_snr = float((scfg or {}).get('line_detection_snr', 3.0) or 3.0)
     rows = measure_lines(
         wave,
         flux,
@@ -50,6 +60,9 @@ def run_line_measure(cfg: dict[str, Any], *, run_root: Path, stage_dir_path: Pat
         calsys_abs=calsys['abs'],
         lines=DEFAULT_LINES,
         redshift=redshift,
+        mask=mask,
+        waveref=waveref,
+        detection_snr=detection_snr,
     )
     lines_by_name = {str(r.get('name')): r for r in rows if isinstance(r, dict)}
     redd = balmer_decrement_summary(lines_by_name)

@@ -53,7 +53,7 @@ def _write_nan_preserving_sci(path: Path, data: np.ndarray, *, header: fits.Head
                 shdr[k] = v
             except Exception:
                 pass
-    for k in ("BUNIT", "WAVEUNIT", "WAVEREF", "MAPTYPE", "LSFUNIT", "SCORPWCS", "PUBRDY"):
+    for k in ("BUNIT", "WAVEUNIT", "WAVEREF", "MAPTYPE", "LSFUNIT", "SCORPWCS", "PUBRDY", "EXPORTOK", "VALLEVEL", "SCIQPASS"):
         if k in phdr and k not in shdr:
             try:
                 shdr[k] = phdr[k]
@@ -110,9 +110,19 @@ def run_publication_ready(cfg: dict[str, Any], *, out_dir: Path | None = None) -
 
     grid_raw = _approx_grid_from_row(wl_map, wl_hdr)
 
+    # Export completion cannot certify astrophysical science accuracy.
+    # Publication readiness requires independent sky, LSF, covariance,
+    # flux-calibration and validation gates not enforced by this writer.
+    def _stamp_export_status(h: fits.Header) -> fits.Header:
+        h["EXPORTOK"] = (True, "Requested export product created")
+        h["PUBRDY"] = (False, "Scientific publication validation incomplete")
+        h["SCIQPASS"] = (False, "Science QC not certified by export")
+        h["VALLEVEL"] = ("EXPORT_ONLY", "No independent science validation")
+        return h
+
     ph_spectrum = fits.Header(shdr)
     ph_spectrum["PIPEVER"] = (str(PIPELINE_VERSION), "Pipeline version")
-    ph_spectrum["PUBRDY"] = (True, "Publication-ready export")
+    ph_spectrum = _stamp_export_status(ph_spectrum)
     ph_spectrum["BUNIT"] = str(ph_spectrum.get("BUNIT", "adu/s") or "adu/s")
     ph_spectrum = add_provenance(ph_spectrum, cfg, stage="publication_ready")
 
@@ -122,7 +132,7 @@ def run_publication_ready(cfg: dict[str, Any], *, out_dir: Path | None = None) -
     ph_wl = fits.Header(wl_hdr)
     ph_wl["BUNIT"] = (str(wl_hdr.get("WAVEUNIT", "Angstrom") or "Angstrom"), "Wavelength unit")
     ph_wl["MAPTYPE"] = ("lambda", "Per-pixel wavelength map")
-    ph_wl["PUBRDY"] = (True, "Publication-ready export")
+    ph_wl = _stamp_export_status(ph_wl)
     ph_wl["SCORPWCS"] = ("approx_central_row", "Primary WCS is approximate; SCI pixels are authoritative")
     ph_wl = add_provenance(ph_wl, cfg, stage="publication_ready")
     wl_path = out_dir / "wl.fts"
@@ -132,7 +142,7 @@ def run_publication_ready(cfg: dict[str, Any], *, out_dir: Path | None = None) -
     ph_dis["BUNIT"] = ("Angstrom", "Instrumental sigma")
     ph_dis["LSFUNIT"] = ("sigma_A", "Instrumental resolution quantity")
     ph_dis["MAPTYPE"] = ("dismap", "Per-pixel instrumental sigma map")
-    ph_dis["PUBRDY"] = (True, "Publication-ready export")
+    ph_dis = _stamp_export_status(ph_dis)
     ph_dis["SCORPWCS"] = ("approx_central_row", "Primary WCS is approximate; SCI pixels are authoritative")
     ph_dis = add_provenance(ph_dis, cfg, stage="publication_ready")
     dis_path = out_dir / "dismap.fts"
@@ -141,6 +151,10 @@ def run_publication_ready(cfg: dict[str, Any], *, out_dir: Path | None = None) -
     sidecar = {
         "stage": "publication_ready",
         "pipeline_version": str(PIPELINE_VERSION),
+        "export_ok": True,
+        "science_qc_pass": False,
+        "validation_level": "export_only",
+        "publication_ready": False,
         "inputs": {
             "stack2d": str(stack_path),
             "lambda_map": str(wdir / "lambda_map.fits"),

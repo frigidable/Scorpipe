@@ -60,21 +60,24 @@ def _find_done(st_dir: Path, candidates: Iterable[str]) -> Path | None:
 def _status_from_done(done: dict[str, Any] | None) -> str:
     if not done:
         return "NOT_RUN"
-    st = (done.get("status") or "").lower()
-    if st == "ok":
-        return "DONE_OK"
-    if st == "warn":
-        return "DONE_WARN"
-    if st in {"fail", "error"}:
+    st = str(done.get("status") or "").strip().lower()
+    if st in {"fail", "error", "blocked"}:
         return "DONE_FAIL"
-    # Fallback: use qc max severity if present
-    sev = str(done.get("qc", {}).get("max_severity", "") or "").upper()
-    if sev == "ERROR":
+    # "ok" means the stage completed computationally; it does not erase
+    # WARN/ERROR scientific QC flags in the same stage's done.json.
+    qc = done.get("qc") if isinstance(done.get("qc"), dict) else {}
+    sev = str(qc.get("max_severity") or "").strip().upper()
+    for fl in _stage_flags(done):
+        flag_sev = str(fl.get("severity") or "").strip().upper()
+        if flag_sev in {"ERROR", "FATAL", "CRITICAL"}:
+            sev = "ERROR"
+            break
+        if flag_sev in {"WARN", "WARNING"} and sev not in {"ERROR", "FATAL", "CRITICAL"}:
+            sev = "WARN"
+    if sev in {"ERROR", "FATAL", "CRITICAL"}:
         return "DONE_FAIL"
-    if sev == "WARN":
+    if st == "warn" or sev in {"WARN", "WARNING"}:
         return "DONE_WARN"
-    if sev == "OK":
-        return "DONE_OK"
     return "DONE_OK"
 
 
@@ -143,14 +146,25 @@ def _collect_products(run_root: Path, done: dict[str, Any] | None) -> list[dict[
 
 
 def _stage_flags(done: dict[str, Any] | None) -> list[dict[str, Any]]:
-    if not done:
+    if not isinstance(done, dict):
         return []
-    flags: list[dict[str, Any]] = []
-    if isinstance(done.get("qc", {}).get("flags"), list):
-        flags += [f for f in done["qc"]["flags"] if isinstance(f, dict)]
+    qc = done.get("qc") if isinstance(done.get("qc"), dict) else {}
+    # A legacy top-level flag list must not duplicate the canonical qc.flags.
+    if isinstance(qc.get("flags"), list):
+        return [f for f in qc["flags"] if isinstance(f, dict)]
     if isinstance(done.get("flags"), list):
-        flags += [f for f in done["flags"] if isinstance(f, dict)]
-    return flags
+        return [f for f in done["flags"] if isinstance(f, dict)]
+    return []
+
+
+def _report_flags(report: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Read QC-report flags from the canonical report.qc.flags namespace.
+
+    Report producers write `payload["qc"]["flags"]`, not root `flags`.
+    Retain a legacy top-level fallback for old reports, without combining
+    both and accidentally counting each warning twice.
+    """
+    return _stage_flags(report)
 
 
 def _summarize_qc(flags: list[dict[str, Any]]) -> dict[str, Any]:
@@ -217,7 +231,7 @@ def build_navigator(run_root: str | Path, *, overwrite: bool = True) -> Path:
     # QC summary
     qc_json = rr / "qc" / "qc_report.json"
     qc_doc = _read_json(qc_json) if qc_json.is_file() else None
-    qc_summary = _summarize_qc(qc_doc.get("flags", []) if isinstance(qc_doc, dict) else [])
+    qc_summary = _summarize_qc(_report_flags(qc_doc))
     qc_summary["report"] = _rel(rr, qc_json) if qc_json.is_file() else None
 
     stages: list[dict[str, Any]] = []

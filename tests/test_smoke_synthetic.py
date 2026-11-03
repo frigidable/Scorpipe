@@ -241,6 +241,24 @@ def test_smoke_synthetic_chain_golden():
 
         sig = _signature(qc_doc, nav_doc)
 
+        # These warnings are REQUIRED scientific provenance, not arbitrary
+        # golden drift. A self-fitted sky spline is not an independent flexure
+        # reference; detector VAR omits the fitted sky-model covariance.
+        # Removing or downgrading either warning is a scientific regression.
+        assert sig["qc"] == {
+            "max_severity": "WARN",
+            "flag_codes": [
+                "FLEXURE_UNVERIFIED",
+                "SKY_MODEL_VAR_UNVERIFIED",
+            ],
+        }
+        assert sig["navigator"]["qc_summary"] == {
+            "max_severity": "WARN",
+            "n_warn": 2,
+            "n_error": 0,
+        }
+        assert sig["navigator"]["stages_status"]["sky"] == "DONE_WARN"
+
         assert GOLDEN.exists(), f"Golden file missing: {GOLDEN}"
         golden = json.loads(GOLDEN.read_text(encoding="utf-8"))
         assert sig == golden

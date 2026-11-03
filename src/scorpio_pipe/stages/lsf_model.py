@@ -289,14 +289,33 @@ def _build_measured_lsf_map(
     return out, meta
 
 
+def _columnwise_finite_median(plane: np.ndarray) -> np.ndarray:
+    """Column medians on available data; entirely invalid columns stay NaN.
+
+    np.nanmedian(plane, axis=0) warns for every all-NaN wavelength
+    column. Such columns legitimately arise at wavelength-map edges and
+    must remain explicitly uncalibrated, not filled or extrapolated.
+    """
+    arr = np.asarray(plane, dtype=float)
+    if arr.ndim != 2:
+        raise ValueError("LSF wavelength column median expects a 2D plane")
+    med = np.full(arr.shape[1], np.nan, dtype=float)
+    valid = np.any(np.isfinite(arr), axis=0)
+    if np.any(valid):
+        subset = arr[:, valid]
+        subset = np.where(np.isfinite(subset), subset, np.nan)
+        med[valid] = np.nanmedian(subset, axis=0)
+    return med
+
+
 def _approx_linear_grid_from_lambda_map(lam_map: np.ndarray, hdr: fits.Header) -> WaveGrid | None:
     ny, nx = lam_map.shape
     y0 = int(np.clip(int(round(float(hdr.get("SLITPOS", ny / 2.0) or ny / 2.0))), 0, ny - 1))
     row = np.asarray(lam_map[y0], dtype=float)
     m = np.isfinite(row)
     if int(np.sum(m)) < 8:
-        m = np.isfinite(np.nanmedian(lam_map, axis=0))
-        row = np.asarray(np.nanmedian(lam_map, axis=0), dtype=float)
+        row = _columnwise_finite_median(lam_map)
+        m = np.isfinite(row)
     if int(np.sum(m)) < 8:
         return None
     x = np.flatnonzero(m).astype(float)
@@ -364,8 +383,8 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
     mpath = out_dir / "lsf_model.json"
     summary_1d: dict[str, Any] = {}
     if np.isfinite(lam_map).any() and np.isfinite(lsf_map).any():
-        lam1d = np.nanmedian(lam_map, axis=0)
-        sig1d = np.nanmedian(lsf_map, axis=0)
+        lam1d = _columnwise_finite_median(lam_map)
+        sig1d = _columnwise_finite_median(lsf_map)
         good = np.isfinite(lam1d) & np.isfinite(sig1d)
         summary_1d = {
             "lambda_A": [float(v) for v in lam1d[good]],

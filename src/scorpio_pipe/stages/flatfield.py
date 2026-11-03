@@ -123,8 +123,36 @@ def apply_flat(
 
     sel = None
     bvar_to_add = None
+
+    # Cosmics keeps CLEAN science images primary-only for GUI compatibility.
+    # If it already subtracted an indexed MasterBias, recover its separately
+    # stored ADU^2 uncertainty and add it to the independently estimated
+    # photon + read-noise variance *once*, before flat propagation and gain.
+    if hdr.get("BVARREF"):
+        from scorpio_pipe.cosmics_biasvar import read_clean_biasvar_sidecar
+
+        if var is not None:
+            raise ValueError(
+                "Input FITS declares both a VAR plane and a pending MasterBias "
+                "BVARREF; double counting cannot be excluded"
+            )
+        bvar_to_add = read_clean_biasvar_sidecar(
+            data_path, hdr, data.shape
+        )
+
     if do_bias_subtract and not bool(hdr.get("BIASSUB", False)):
         sel = resolve_master_bias(cfg, hdr, sci_shape=data.shape)
+        instrument = str(hdr.get("INSTRUME") or "").strip().upper()
+        if (
+            instrument.startswith("SCORPIO")
+            and bool(sel.degraded)
+            and str(sel.reason).strip().upper() == "NOIDX"
+        ):
+            raise RuntimeError(
+                "Flatfield refuses unindexed SCORPIO MasterBias: exact CCD "
+                "readout-group provenance and bias VAR are unavailable. "
+                "Build MasterBias groups for the matching detector setup."
+            )
         if not sel.sci_path.exists():
             raise RuntimeError(f"MasterBias not found: {sel.sci_path}")
 
@@ -233,8 +261,14 @@ def apply_flat(
             hdr["NOISRC"] = str(npar.source)
 
     # If bias VAR was deferred until after VAR estimation, add it now.
-    if bvar_to_add is not None and var is not None and bvar_to_add.shape == var.shape:
+    if bvar_to_add is not None:
+        if var is None or bvar_to_add.shape != var.shape:
+            raise ValueError("MasterBias VAR could not be propagated into Flatfield")
         var = (var + bvar_to_add).astype(np.float32)
+        hdr["BVARINC"] = (True, "MasterBias variance included in VAR")
+        if "BVARREF" in hdr:
+            del hdr["BVARREF"]
+        hdr.add_history("scorpio_pipe flatfield: MasterBias VAR included once")
 
     # Multiplicative correction: propagate division noise.
     # If flat VAR is present (MasterFlat), include it in the error budget:
@@ -311,9 +345,11 @@ def run_flatfield(cfg: dict, *, out_dir: Path | None = None) -> Path:
 
     Notes
     -----
-    - If cosmics stage was run with bias_subtract=True, then the cosmics-cleaned
-      frames are already superbias-subtracted (BIASSUB=True). In that case, we
-      avoid subtracting the superbias again.
+    - Bias subtraction is decided from the *actual input FITS BIASSUB flag*
+      inside apply_flat(), not the upstream cosmics configuration. Cosmics
+      may have requested bias subtraction but skipped it if the calibration
+      was absent or incompatible; assuming success can contaminate science
+      counts and the estimated Poisson variance.
     """
 
     work_dir = resolve_work_dir(cfg)
@@ -567,7 +603,6 @@ def run_flatfield(cfg: dict, *, out_dir: Path | None = None) -> Path:
                 fp = _resolve_man_path(fe.path)
                 frame_set_by_path[str(fp.resolve())] = str(sid)
 
-    cosmics_bias_sub = bool((cfg.get("cosmics", {}) or {}).get("bias_subtract", True))
     do_bias_sub_flat = bool(block.get("bias_subtract", True))
 
     gain_override = block.get("gain_e_per_adu")
@@ -611,11 +646,9 @@ def run_flatfield(cfg: dict, *, out_dir: Path | None = None) -> Path:
             clean = kind_clean_dir / f"{src0.stem}_clean.fits"
             src = clean if clean.exists() else src0
 
-            # If we use a cosmics-cleaned product AND cosmics already subtracted bias,
-            # then avoid doing it again.
-            do_bias_subtract = do_bias_sub_flat
-            if clean.exists() and cosmics_bias_sub:
-                do_bias_subtract = False
+            # Never infer that cosmics actually subtracted MasterBias from
+            # cfg.cosmics.bias_subtract. apply_flat checks the input's BIASSUB
+            # provenance and subtracts only when it is still required.
             # Choose the flat product for this frame.
             flat_for_frame = superflat_path
             if (manifest is not None) and (kind == "obj"):
@@ -636,7 +669,7 @@ def run_flatfield(cfg: dict, *, out_dir: Path | None = None) -> Path:
                 flat_for_frame,
                 dst,
                 cfg=cfg,
-                do_bias_subtract=do_bias_subtract,
+                do_bias_subtract=do_bias_sub_flat,
                 gain_override=float(gain_override) if gain_override is not None else None,
                 rdnoise_override=float(rdnoise_override) if rdnoise_override is not None else None,
                 stage_flags=stage_flags,

@@ -389,6 +389,64 @@ def _set_linear_wcs(
     return ohdr
 
 
+def _stamp_stacked_noise_provenance(
+    header: fits.Header,
+    per_exposure: list[dict[str, Any]],
+) -> fits.Header:
+    """Describe the noise-model inputs of a variance-weighted preview stack.
+
+    Individual detector noise parameters are not applied a second time during
+    stacking: the variance plane is propagated from the per-exposure products.
+    Header GAIN/RDNOISE are *descriptive* of those inputs. In mixed cases they
+    are explicitly identified as medians; the detailed values and sources live
+    in linearize_done.json under noise.per_exposure.
+    """
+    if not per_exposure:
+        raise ValueError("Cannot stamp stacked noise provenance without exposure records")
+
+    gains: list[float] = []
+    read_noises: list[float] = []
+    sources: list[str] = []
+    for i, item in enumerate(per_exposure):
+        try:
+            gain = float(item["gain_e_per_adu"])
+            rn = float(item["rdnoise_e"])
+            source = str(item["noise_source"]).strip()
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"Incomplete noise provenance for exposure {i}") from exc
+        if not (np.isfinite(gain) and gain > 0 and np.isfinite(rn) and rn >= 0 and source):
+            raise ValueError(f"Invalid noise provenance for exposure {i}")
+        gains.append(gain)
+        read_noises.append(rn)
+        sources.append(source)
+
+    homogeneous = (
+        all(v == gains[0] for v in gains)
+        and all(v == read_noises[0] for v in read_noises)
+        and all(v == sources[0] for v in sources)
+    )
+    result = fits.Header(header)
+    result["GAIN"] = (
+        float(np.median(gains)),
+        "Median input gain [e-/ADU]; see NOISRC",
+    )
+    result["RDNOISE"] = (
+        float(np.median(read_noises)),
+        "Median input read noise [e-]; see NOISRC",
+    )
+    result["NOISRC"] = (
+        sources[0] if homogeneous else "PER_EXP_MEDIAN",
+        "Noise summary origin; per-exposure details in done JSON",
+    )
+    result["NOIAGG"] = (
+        "SAME" if homogeneous else "MEDIAN",
+        "Noise header represents input values or their median",
+    )
+    result["NOINEXP"] = (len(per_exposure), "Number of noise-provenance records")
+    result["NOIDET"] = ("linearize_done.json", "Per-exposure noise provenance")
+    return result
+
+
 def _write_mef(
     path: Path,
     sci: np.ndarray,
@@ -400,7 +458,7 @@ def _write_mef(
     wave0: float | None = None,
     dw: float | None = None,
     unit: str = "Angstrom",
-    wave_ref: str = "UNKNOWN",
+    wave_ref: str | None = None,
 ) -> None:
 
     """Write a MEF product with SCI/VAR/MASK and optional COV.
@@ -422,16 +480,29 @@ def _write_mef(
     hdr.setdefault("SSYSOBS", str(hdr.get("SPECSYS", "TOPOCENT") or "TOPOCENT"))
     grid = None
     if wave0 is not None and dw is not None:
-        try:
-            grid = WaveGrid(
-                lambda0=float(wave0),
-                dlambda=float(dw),
-                nlam=int(np.asarray(sci).shape[1]),
-                unit=str(unit),
-                wave_ref=str(wave_ref),
+        # The common MEF writer stamps WaveGrid cards over the given header.
+        # Never let a default UNKNOWN erase a valid air/vacuum reference.
+        header_ref = str(hdr.get("WAVEREF", "") or "").strip().lower()
+        resolved_ref = str(
+            wave_ref if wave_ref is not None else header_ref
+        ).strip().lower()
+        if resolved_ref not in {"air", "vacuum"}:
+            raise ValueError(
+                "Linearize MEF requires WAVEREF=air or vacuum "
+                "for wavelength-calibrated output"
             )
-        except Exception:
-            grid = None
+        if header_ref and header_ref != resolved_ref:
+            raise ValueError(
+                "Conflicting wavelength reference: "
+                f"header={header_ref!r}, grid={resolved_ref!r}"
+            )
+        grid = WaveGrid(
+            lambda0=float(wave0),
+            dlambda=float(dw),
+            nlam=int(np.asarray(sci).shape[1]),
+            unit=str(unit),
+            wave_ref=resolved_ref,
+        )
 
     # Provide primary data for legacy tooling (fits.getdata reads primary).
     write_sci_var_mask(
@@ -1897,6 +1968,44 @@ def _process_linearize_frame(task: Dict[str, Any]) -> Dict[str, Any]:
         "no_coverage_frac": float(np.mean((rect_mask & NO_COVERAGE) != 0)),
     }
 
+def _read_sky_flexure_summary(
+    sky_done: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Read Sky flexure from the canonical done.json extra namespace.
+
+    Legacy top-level flexure is recognized for backwards compatibility,
+    but an independent wavelength reference is still required before
+    applying any shift; simply finding a numeric delta is insufficient.
+    """
+    if not isinstance(sky_done, dict):
+        return None
+    extra = sky_done.get("extra")
+    if isinstance(extra, dict):
+        flex = extra.get("flexure")
+        if isinstance(flex, dict):
+            return flex
+    legacy = sky_done.get("flexure")
+    return legacy if isinstance(legacy, dict) else None
+
+
+def _has_independent_flexure_reference(
+    summary: dict[str, Any] | None, *, n_exposures: int,
+) -> bool:
+    """Only one-exposure shifts may use the legacy scalar grid correction.
+
+    For a sequence of science frames, even a verified *median* delta would
+    smear differently shifted spectra. A separately validated per-exposure
+    wavelength mapping is required before series flexure can be applied.
+    """
+    return bool(
+        isinstance(summary, dict)
+        and summary.get("verification") == "independent_reference"
+        and isinstance(summary.get("reference_id"), str)
+        and summary["reference_id"].strip()
+        and int(n_exposures) == 1
+    )
+
+
 def run_linearize(
     cfg: Dict[str, Any],
     out_dir: Optional[Path] = None,
@@ -2388,8 +2497,11 @@ def run_linearize(
             except Exception:
                 sky_done = None
 
+        # Stage reports place scientific extras under `extra` in the
+        # versioned done.json schema; legacy reports sometimes used a
+        # top-level `flexure`. Never silently miss current provenance.
+        flex = _read_sky_flexure_summary(sky_done)
         if isinstance(sky_done, dict):
-            flex = sky_done.get("flexure") if isinstance(sky_done.get("flexure"), dict) else None
             if isinstance(flex, dict):
                 try:
                     delta_lambda_A = flex.get("delta_A_median")
@@ -2429,7 +2541,18 @@ def run_linearize(
                     if flexure_score is not None and math.isfinite(flexure_score) and flexure_score < delta_score_warn:
                         flexure_flag = "UNCERTAIN"
 
-        # Policy: apply only if flexure_flag == OK (default) unless user overrides.
+        # A shift measured by fitting the sky to itself is not tied to any
+        # laboratory wavelengths. Old sky_done.json reports may contain a
+        # plausible-looking delta but no independent reference: reject it.
+        flexure_ref_verified = _has_independent_flexure_reference(
+            flex, n_exposures=len(obj_frames)
+        )
+        if not flexure_ref_verified:
+            delta_lambda_A = None
+            flexure_flag = "UNVERIFIED"
+            flexure_score = None
+
+        # Policy: apply only independently verified flexure.
         delta_policy = str(lcfg.get("delta_lambda_policy", "apply_if_ok")).strip().lower()
         if delta_policy in {"off", "false", "no", "0"}:
             delta_policy = "off"
@@ -2437,6 +2560,12 @@ def run_linearize(
             delta_policy = "always"
         else:
             delta_policy = "apply_if_ok"
+        if delta_policy == "always" and not flexure_ref_verified:
+            raise ValueError(
+                "linearize.delta_lambda_policy=always cannot apply unverified or series-median "
+                "self-fitted Sky flexure; independent sky-line wavelength "
+                "reference and reference_id are required"
+            )
 
         if delta_policy != "off" and delta_lambda_A is not None and unit != "pix":
             try:
@@ -2625,6 +2754,8 @@ def run_linearize(
                 "Normalize SCI/VAR by exposure time (e-/s)",
             )
             ohdr["TEXPS"] = (float(exptime_s), "Exposure time used for normalization (s)")
+            ohdr["FLXFLAG"] = (str(flexure_flag), "Spectral flexure status")
+            ohdr["DLAMAP"] = (bool(delta_lambda_applied), "Independent flexure shift applied")
             if delta_lambda_A is not None:
                 try:
                     ohdr["DLAM_A"] = (float(delta_lambda_A), "Wavelength shift from sky flexure (Angstrom)")
@@ -2660,7 +2791,7 @@ def run_linearize(
                 wave0=wave0,
                 dw=dw,
                 unit=unit,
-                wave_ref=wave_ref,
+                wave_ref=waveref,
             )
             rect_paths.append(out_skysub)
 
@@ -2678,6 +2809,7 @@ def run_linearize(
                     wave0=wave0,
                     dw=dw,
                     unit=unit,
+                    wave_ref=waveref,
                 )
 
             if per_exp_dir is not None:
@@ -2692,6 +2824,7 @@ def run_linearize(
                     wave0=wave0,
                     dw=dw,
                     unit=unit,
+                    wave_ref=waveref,
                 )
 
             skysub_png = out_dir / f"{base_for_mask}_skysub.png"
@@ -2851,6 +2984,10 @@ def run_linearize(
         if robust_stack:
             hdr0["STKSIG"] = (float(stack_sigma), "Sigma clip threshold")
             hdr0["STKITR"] = (int(stack_maxiters), "Sigma clip iterations")
+        # The preview header originates from lambda_map, not a detector SCI
+        # exposure. Preserve actual per-exposure noise provenance rather than
+        # inventing a gain/read-noise or copying an arbitrary first frame.
+        hdr0 = _stamp_stacked_noise_provenance(hdr0, noise_meta)
         hdr0 = add_provenance(hdr0, cfg, stage="linearize")
         _write_mef(
             preview_fits,
@@ -2862,6 +2999,7 @@ def run_linearize(
             wave0=wave0,
             dw=dw,
             unit=unit,
+            wave_ref=waveref,
         )
 
         # Quicklook PNG

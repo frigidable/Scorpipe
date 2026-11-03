@@ -40,18 +40,35 @@ class WaveGrid:
     unit: str = "Angstrom"
 
     wave_ref: str = "UNKNOWN"
+
     def to_wcs_cards(self) -> dict[str, Any]:
+        """Preserve a numerical grid without inventing its physical medium.
+
+        FITS WCS WAVE denotes *vacuum* wavelengths; an unidentified legacy
+        grid must never be silently written as WAVE or as WAVEREF=unknown.
+        Such products remain explicitly unqualified until a real reference
+        is provided by the upstream wavelength calibration.
+        """
         ref = str(self.wave_ref or "UNKNOWN").strip().upper()
-        ctype = "AWAV" if ref in ("AIR", "A", "AWAV") else "WAVE"
-        return {
+        cards: dict[str, Any] = {
             "CRVAL1": float(self.lambda0),
             "CDELT1": float(self.dlambda),
             "CRPIX1": 1.0,
-            "CTYPE1": ctype,
             "CUNIT1": str(self.unit),
-            "WAVEREF": ref.lower() if ref != "UNKNOWN" else "unknown",
             "WAVEUNIT": str(self.unit),
         }
+        if ref in {"", "UNKNOWN"}:
+            return cards
+        if ref in {"AIR", "A", "AWAV"}:
+            cards.update({"CTYPE1": "AWAV", "WAVEREF": "air"})
+        elif ref in {"VACUUM", "VAC", "WAVE"}:
+            cards.update({"CTYPE1": "WAVE", "WAVEREF": "vacuum"})
+        else:
+            raise ValueError(
+                f"Unsupported wavelength reference {self.wave_ref!r}; "
+                "use air, vacuum, or UNKNOWN"
+            )
+        return cards
 
 
 def _apply_cards(hdr: fits.Header, cards: dict[str, Any]) -> None:
