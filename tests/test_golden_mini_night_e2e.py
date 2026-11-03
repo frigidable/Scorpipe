@@ -34,6 +34,32 @@ from tests.golden.mini_night import make_mini_night
 GOLDEN = Path(__file__).parent / "golden" / "mini_night_expected.json"
 
 
+def _read_wavesol_1d_rms_A(doc: dict) -> float:
+    """Read the production wavesolution_1d.json top-level RMS (Angstroms).
+
+    A nested fit.rms_A is not part of the emitted schema. Missing, invalid,
+    nonfinite or negative calibration quality must fail Golden explicitly.
+    """
+    if not isinstance(doc, dict) or "rms_A" not in doc:
+        raise AssertionError("wavesolution_1d.json missing top-level rms_A")
+    try:
+        rms = float(doc["rms_A"])
+        n_used = int(doc["n_used"])
+        n_pairs = int(doc["n_pairs"])
+    except (TypeError, ValueError, KeyError) as exc:
+        raise AssertionError(
+            "wavesolution_1d.json has invalid rms_A/n_used/n_pairs"
+        ) from exc
+    if not np.isfinite(rms) or rms < 0:
+        raise AssertionError(f"wavesolution_1d.json invalid rms_A={rms!r}")
+    if not (5 <= n_used <= n_pairs):
+        raise AssertionError(
+            f"wavesolution_1d.json insufficient fitted pairs: "
+            f"n_used={n_used}, n_pairs={n_pairs}"
+        )
+    return rms
+
+
 def _get_tol(tol: dict, key: str) -> tuple[float, float]:
     t = tol.get(key) if isinstance(tol.get(key), dict) else {}
     abs_tol = float(t.get("abs", 0.0) or 0.0)
@@ -159,7 +185,7 @@ def test_golden_mini_night_e2e(tmp_path: Path):
     ws1 = PRODUCT_CATALOG.best_path(cfg, "wavesolution_1d_json", run_root=mn.work_dir)
     assert ws1 is not None and Path(ws1).exists()
     ws1_doc = json.loads(Path(ws1).read_text(encoding="utf-8"))
-    rms1d = float((ws1_doc.get("fit") or {}).get("rms_A"))
+    rms1d = _read_wavesol_1d_rms_A(ws1_doc)
 
     # --- Sky robust sigma (MAD*1.4826) ---
     sky_done = PRODUCT_CATALOG.best_path(cfg, "sky_done", run_root=mn.work_dir)
