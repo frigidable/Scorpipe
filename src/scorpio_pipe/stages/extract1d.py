@@ -1195,6 +1195,14 @@ def _write_spec1d_fits(
     if "ETAPATH" in hdr0:
         ph["ETAPATH"] = hdr0["ETAPATH"]
 
+    # Science variance provenance and qualification from Stack2D.
+    for key in (
+        "STKMETH", "STKVRALG", "STKVARQ", "STKXCVQ", "STKYCVQ",
+        "SBCOVQ", "SBGSTAT", "SBGRPN", "SBGMISS",
+    ):
+        if key in hdr0:
+            ph[key] = hdr0[key]
+
     # Upstream degradation flags (P0-L)
     if "QADEGRD" in hdr0:
         ph["QADEGRD"] = hdr0["QADEGRD"]
@@ -1813,6 +1821,14 @@ def _run_extract1d_impl(
     for k in (
         "CRVAL1", "CDELT1", "CD1_1", "CRPIX1", "CTYPE1", "CUNIT1",
         "BUNIT", "SCORPUM", "NORMEXP", "REBNORM",
+    ):
+        if k in hdr0:
+            ohdr[k] = hdr0[k]
+
+    # Preserve explicit conditional-variance and shared-calibration warnings.
+    for k in (
+        "STKMETH", "STKVRALG", "STKVARQ", "STKXCVQ", "STKYCVQ",
+        "SBCOVQ", "SBGSTAT", "SBGRPN", "SBGMISS",
     ):
         if k in hdr0:
             ohdr[k] = hdr0[k]
