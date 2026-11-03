@@ -29,6 +29,34 @@ def _read_calsys(path: str | Path | None, nlam: int) -> dict[str, np.ndarray]:
         return out
 
 
+def _qualify_lines_for_shared_bias_covariance(
+    rows: list[dict[str, Any]], header: Any,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Withhold formal detections when shared MasterBias VAR is unmodelled.
+
+    The line flux estimate remains diagnostic. Its reported conditional
+    S/N and errors are not calibrated for the correlated shared bias.
+    """
+    shared = (
+        str(header.get("SBGSTAT") or "").strip().upper() == "SHARED"
+        and str(header.get("SBCOVQ") or "").strip().upper() == "UNMODEL"
+    )
+    qualified: list[dict[str, Any]] = []
+    for entry in rows:
+        row = dict(entry)
+        row["uncertainty_qualified"] = not shared
+        if shared:
+            row["conditional_detection_candidate"] = bool(row.get("detected"))
+            row["detected"] = False
+            row["upper_limit_3sigma"] = None
+            row["uncertainty_status"] = "SHARED_MASTERBIAS_COVARIANCE_UNMODELLED"
+            # Existing partial-window reasons and mask diagnoses remain.
+            if not row.get("reason"):
+                row["reason"] = "uncertified_shared_masterbias_uncertainty"
+        qualified.append(row)
+    return qualified, shared
+
+
 def run_line_measure(cfg: dict[str, Any], *, run_root: Path, stage_dir_path: Path) -> StageResult:
     stage_dir_path.mkdir(parents=True, exist_ok=True)
     spec_path = PRODUCT_CATALOG.best_path(cfg, 'fluxcal_spec1d_fits', run_root=run_root)
@@ -65,6 +93,9 @@ def run_line_measure(cfg: dict[str, Any], *, run_root: Path, stage_dir_path: Pat
         waveref=waveref,
         detection_snr=detection_snr,
     )
+    rows, shared_bias_unqualified = _qualify_lines_for_shared_bias_covariance(
+        rows, spec["header"]
+    )
     lines_by_name = {str(r.get('name')): r for r in rows if isinstance(r, dict)}
     redd = balmer_decrement_summary(lines_by_name)
     csv_path = write_lines_csv(stage_dir_path / 'science_lines.csv', rows)
@@ -78,6 +109,7 @@ def run_line_measure(cfg: dict[str, Any], *, run_root: Path, stage_dir_path: Pat
         'partial_line_windows': int(sum(
             1 for row in rows if row.get('reason') == 'partial_aperture_or_spectral_coverage'
         )),
+        'shared_bias_variance_unqualified': bool(shared_bias_unqualified),
         'calibration_status': json.loads(fluxcal_qc_path.read_text(encoding='utf-8')).get('status') if fluxcal_qc_path.exists() else None,
         'calibration_uncertainty_summary': {
             'median_rel': float(np.nanmedian(calsys['rel'])) if calsys['rel'].size else 0.0,
@@ -94,6 +126,7 @@ def run_line_measure(cfg: dict[str, Any], *, run_root: Path, stage_dir_path: Pat
         'stage': 'line_measure',
         'n_lines_total': int(len(rows)),
         'n_lines_detected': n_det,
+        'shared_bias_variance_unqualified': bool(shared_bias_unqualified),
         'strongest_line': (max(detected, key=lambda r: abs(float(r.get('flux') or 0.0)))['name'] if detected else None),
         'reddening': redd,
     }

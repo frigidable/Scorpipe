@@ -39,6 +39,10 @@ or misrepresent common calibration uncertainty.
   SHARED_MASTERBIAS_COVARIANCE_UNMODELLED.
 - Extract1D carries these flags, plus Stack2D STKVARQ and STKXCVQ, into
   its published SPEC1D header; Fluxcal can preserve them as provenance.
+- LineMeasure withholds automated detected=True and 3-sigma upper-limit
+  claims specifically for a proven shared MasterBias with SBCOVQ=UNMODEL.
+  It retains the numerical partial or conditional flux/SNR for diagnostics;
+  this value is not a science-qualified significance.
 - Actual science SCI/VAR/MASK are **unchanged** by this patch.
 
 ## Why issue #117 remains OPEN
