@@ -1031,6 +1031,35 @@ def _single_frame_laplacian_clean(
 
 
 
+def _reconcile_lacosmic_line_protection(
+    original: np.ndarray,
+    cleaned: np.ndarray,
+    crmask: np.ndarray,
+    line_protect: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Reconcile Astro-SCRAPPY's *already replaced* pixels with protected lines.
+
+    Returns CLEAN, retained cosmic mask, and ambiguous line/cosmic overlap.
+    A positive CR classification on an apparent emission line is ambiguous:
+    keep the observed photon counts, but attach BADPIX to the DQ sidecar.
+    Silent replacement without either a mask or preserved signal is forbidden.
+    """
+    before = np.asarray(original, dtype=np.float32)
+    after = np.asarray(cleaned, dtype=np.float32).copy()
+    cr = np.asarray(crmask, dtype=bool)
+    if before.shape != after.shape or cr.shape != before.shape:
+        raise ValueError("Astro-SCRAPPY original, cleaned and mask shapes differ")
+    ambiguous = np.zeros(cr.shape, dtype=bool)
+    if line_protect is not None:
+        protected = np.asarray(line_protect, dtype=bool)
+        if protected.shape != cr.shape:
+            raise ValueError("Line protection shape does not match cosmic mask")
+        ambiguous = cr & protected
+        after[ambiguous] = before[ambiguous]
+        cr = cr & (~protected)
+    return after, cr, ambiguous
+
+
 def _single_frame_lacosmic_clean(
     path: Path,
     *,
@@ -1089,18 +1118,35 @@ def _single_frame_lacosmic_clean(
             "Install scorpio-pipe with the required dependencies (astroscrappy) or choose another cosmics method."
         ) from e
 
+    # Astro-SCRAPPY defaults to GAIN=1 e-/ADU and RN=6.5 e-; these
+    # assumptions are not valid for arbitrary SCORPIO readout modes.
+    from scorpio_pipe.noise_model import resolve_noise_params
+
+    npar = resolve_noise_params(
+        hdr, cfg=cfg or {},
+        require_gain=str(hdr.get("INSTRUME") or "").upper().startswith("SCORPIO"),
+    )
     crmask, cleaned_eval = astroscrappy.detect_cosmics(
         img_eval,
         sigclip=float(sigclip),
         sigfrac=float(sigfrac),
         objlim=float(objlim),
         niter=int(max(1, niter)),
+        gain=float(npar.gain_e_per_adu),
+        readnoise=float(npar.rdnoise_e),
         verbose=False,
     )
-    m_eval = np.asarray(crmask, dtype=bool)
-    if line_protect is not None:
-        m_eval = m_eval & (~line_protect)
-    cleaned_eval = np.asarray(cleaned_eval, dtype=np.float32)
+    cleaned_eval, m_eval, protected_ambiguous = (
+        _reconcile_lacosmic_line_protection(
+            img_eval, cleaned_eval, crmask, line_protect,
+        )
+    )
+    if np.any(protected_ambiguous):
+        ambiguous_full = _merge_roi_bool(
+            protected_ambiguous, img.shape, roi,
+        )
+        detector_dq = np.asarray(detector_dq, dtype=np.uint16).copy()
+        detector_dq[ambiguous_full] |= np.uint16(maskbits.BADPIX)
     engine = "astroscrappy"
     sigma_lap = float("nan")
 
@@ -1122,6 +1168,9 @@ def _single_frame_lacosmic_clean(
     h["COSM_SC"] = (float(sigclip), "L.A.Cosmic sigclip")
     h["COSM_SF"] = (float(sigfrac), "L.A.Cosmic sigfrac")
     h["COSM_OL"] = (float(objlim), "L.A.Cosmic objlim")
+    h["COSM_GN"] = (float(npar.gain_e_per_adu), "Astro-SCRAPPY gain e-/ADU")
+    h["COSM_RN"] = (float(npar.rdnoise_e), "Astro-SCRAPPY read noise e-")
+    h["COSM_N"] = (int(np.count_nonzero(protected_ambiguous)), "Ambiguous line/CR pixels, BADPIX")
     _stamp_roi_header(h, roi)
     h["HISTORY"] = "scorpio_pipe cosmics: la_cosmic (van Dokkum-like)"
     atomic_write_fits(out_f, cleaned.astype(np.float32), header=h, overwrite=True)
