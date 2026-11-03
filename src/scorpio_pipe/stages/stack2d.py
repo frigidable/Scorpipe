@@ -615,9 +615,6 @@ class _WeightedMeanAccumulator:
             self.sum_w2var[good] += w[good]
         sw_old = self.sum_w
         sw_new = sw_old + w
-        good = w > 0
-        if not np.any(good):
-            return
         first = good & (sw_old <= 0)
         if np.any(first):
             self.mean[first] = x[first]

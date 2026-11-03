@@ -203,3 +203,32 @@ def test_fixed_weight_variance_independent_monte_carlo_oracle():
         )
     _, result = acc.finalize()
     np.testing.assert_allclose(result[0, 0], predicted, rtol=1e-7)
+
+
+def test_stack2d_publishes_conditional_variance_qualification(tmp_path):
+    from scorpio_pipe.stages.stack2d import run_stack2d
+    from scorpio_pipe.workspace_paths import stage_dir
+    from tests.test_perf_40_4_stack2d_streaming import _write_linearized_input
+
+    work = tmp_path / "night"
+    linearize = stage_dir(work, "linearize")
+    linearize.mkdir(parents=True, exist_ok=True)
+    a, b = linearize / "one_skysub.fits", linearize / "two_skysub.fits"
+    _write_linearized_input(a, 10., var_value=4.)
+    _write_linearized_input(b, 12., var_value=4.)
+    cfg = {
+        "work_dir": str(work),
+        "stack2d": {
+            "enabled": True, "method": "invvar_huber",
+            "robust_iter": 1, "chunk_rows": 4, "save_png": False,
+            "eta": {"enabled": False},
+        },
+    }
+    result = run_stack2d(cfg, inputs=[a, b], out_dir=stage_dir(work, "stack2d"))
+    with fits.open(result["stack2d_fits"]) as hdul:
+        h = hdul[0].header
+        assert h["STKVRALG"] == "W2VAR"
+        assert h["STKVARQ"] == "COND_ONLY"
+        assert h["STKXCVQ"] == "UNMODEL"
+        assert h["STKYCVQ"] == "NONE"
+        np.testing.assert_allclose(hdul["VAR"].data, 2., atol=1e-5)
