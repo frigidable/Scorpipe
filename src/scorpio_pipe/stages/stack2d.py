@@ -577,20 +577,36 @@ class _WeightedMeanAccumulator:
 
     def __init__(self, shape: tuple[int, int]):
         self.sum_w = np.zeros(shape, dtype=np.float64)
+        # For arbitrary deterministic weights, Var(weighted mean) is
+        # sum(w_i**2 * input_var_i) / sum(w_i)**2, not 1/sum(w_i).
+        self.sum_w2var = np.zeros(shape, dtype=np.float64)
         self.mean = np.full(shape, np.nan, dtype=np.float64)
 
-    def update(self, values: np.ndarray, weights: np.ndarray) -> None:
+    def update(
+        self, values: np.ndarray, weights: np.ndarray,
+        *, variances: np.ndarray | None = None,
+    ) -> None:
         if values.shape != self.mean.shape or weights.shape != self.mean.shape:
             raise ValueError("Accumulator shape mismatch")
         w = np.asarray(weights, dtype=np.float64)
-        if not np.any(w > 0):
-            return
-        x = np.asarray(values, dtype=np.float64)
-        sw_old = self.sum_w
-        sw_new = sw_old + w
         good = w > 0
         if not np.any(good):
             return
+        x = np.asarray(values, dtype=np.float64)
+        if variances is not None:
+            if variances.shape != self.mean.shape:
+                raise ValueError("Accumulator variance shape mismatch")
+            v = np.asarray(variances, dtype=np.float64)
+            if np.any(good & (~np.isfinite(v) | (v < 0))):
+                raise ValueError("Invalid positive-weight input variance")
+            self.sum_w2var[good] += w[good] ** 2 * v[good]
+        else:
+            # Compatibility for benchmark-only callers that supply weights,
+            # but no detector variance. Production final combination MUST
+            # pass variances explicitly for its conditional science VAR.
+            self.sum_w2var[good] += w[good]
+        sw_old = self.sum_w
+        sw_new = sw_old + w
         first = good & (sw_old <= 0)
         if np.any(first):
             self.mean[first] = x[first]
@@ -602,7 +618,12 @@ class _WeightedMeanAccumulator:
 
     def finalize(self) -> tuple[np.ndarray, np.ndarray]:
         mean = self.mean.astype(np.float32, copy=False)
-        var = np.where(self.sum_w > 0, 1.0 / self.sum_w, np.nan).astype(np.float32)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            var = np.where(
+                self.sum_w > 0,
+                self.sum_w2var / (self.sum_w ** 2),
+                np.nan,
+            ).astype(np.float32)
         return mean, var
 
 
@@ -786,7 +807,7 @@ def _stack_chunk_streaming(
         accepted = w > 0
         cov += accepted.astype(np.int16)
         m_or |= np.where(accepted, m, 0).astype(np.uint16)
-        acc_final.update(s, w)
+        acc_final.update(s, w, variances=v)
 
     mu_final, var_final = acc_final.finalize()
     m_out = np.asarray(m_or, dtype=np.uint16)
