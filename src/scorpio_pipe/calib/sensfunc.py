@@ -76,7 +76,10 @@ def _load_standard_reference(cfg: dict[str, Any], *, selected_name: str | None) 
     lib = load_library_yaml(lib_path)
     key, rec = find_standard_record(lib, selected_name)
     if rec is None:
-        raise FileNotFoundError('No standard entries in library.yaml')
+        raise ValueError(
+            f"No matching spectrophotometric reference for standard {selected_name!r}; "
+            "never substitute a different star or the first library entry"
+        )
     tbl_req = str(rec.get('table') or '')
     tbl_path = Path(tbl_req)
     if not tbl_path.is_absolute():
