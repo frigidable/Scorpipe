@@ -165,6 +165,11 @@ def make_mini_night(tmp_path: Path) -> MiniNight:
 
     for i in range(2):
         h = _sc2_header(imagetyp="object", obj=f"obj{i+1}", ny=ny, nx=nx, exptime_s=300.0)
+        # This fixture explicitly simulates a zero-electronic-pedestal CCD
+        # product, NOT a raw detector exposure. Sky is forbidden to assume
+        # BIASSUB for real SCORPIO data without calibration provenance.
+        h["BIASSUB"] = (True, "Synthetic electronic pedestal removed")
+        h["SIMBZERO"] = (True, "Synthetic CCD bias offset is zero")
         object_signal = np.broadcast_to(120.0 + sky_spec[None, :], (ny, nx)).copy()
         object_signal[28:36, :] += obj_bump[None, :]
         img = bias_level + _synthetic_ccd(object_signal, rng)
