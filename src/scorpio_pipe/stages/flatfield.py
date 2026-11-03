@@ -11,10 +11,11 @@ from scorpio_pipe.calib.compat import ensure_compatible_calib
 from scorpio_pipe.fits_utils import open_fits_smart
 from scorpio_pipe import maskbits
 from scorpio_pipe.io.mef import write_sci_var_mask
+from scorpio_pipe.calib.bias_components import decompose_flat_masterbias_variance
 from scorpio_pipe.detector_saturation import carry_detector_saturation
 from scorpio_pipe.noise_model import estimate_variance_adu2, resolve_noise_params
 from scorpio_pipe.paths import resolve_work_dir
-from scorpio_pipe.units_model import ensure_electron_units
+from scorpio_pipe.units_model import ensure_electron_units, UnitModel
 from scorpio_pipe.workspace_paths import stage_dir
 
 
@@ -123,6 +124,7 @@ def apply_flat(
 
     sel = None
     bvar_to_add = None
+    bvar_used_adu2 = None
 
     # Cosmics keeps CLEAN science images primary-only for GUI compatibility.
     # If it already subtracted an indexed MasterBias, recover its separately
@@ -139,6 +141,7 @@ def apply_flat(
         bvar_to_add = read_clean_biasvar_sidecar(
             data_path, hdr, data.shape
         )
+        bvar_used_adu2 = np.asarray(bvar_to_add, dtype=np.float32).copy()
 
     if do_bias_subtract and not bool(hdr.get("BIASSUB", False)):
         sel = resolve_master_bias(cfg, hdr, sci_shape=data.shape)
@@ -189,6 +192,7 @@ def apply_flat(
 
         # If bias VAR is present, subtraction adds variance (same units).
         if bvar is not None and bvar.shape == data.shape:
+            bvar_used_adu2 = np.asarray(bvar, dtype=np.float32).copy()
             if var is None:
                 bvar_to_add = bvar.astype(np.float32)
             else:
@@ -306,6 +310,39 @@ def apply_flat(
     var_corr = var_corr_e
     hdr = hdr_e
 
+    # The instrument's selected MasterBias variance is preserved separately
+    # from the per-exposure total VAR; shared errors are not independent.
+    component_hdus = []
+    if bvar_used_adu2 is not None:
+        if prov.unit_model_in != UnitModel.ADU:
+            raise ValueError(
+                "Indexed ADU^2 MasterBias components require ADU input units"
+            )
+        bias_group = str(hdr.get("SB_GID") or "").strip()
+        if bias_group and bool(hdr.get("BVARINC", False)):
+            vbias, vrest, bsens = decompose_flat_masterbias_variance(
+                var_corr, bvar_used_adu2, sf_safe,
+                float(prov.gain_e_per_adu),
+            )
+            for name, array, unit in (
+                ("VBIAS", vbias, "e-^2"),
+                ("VREST", vrest, "e-^2"),
+                ("BSENS", bsens, "e-/ADU"),
+                ("BVARADU", bvar_used_adu2, "ADU^2"),
+            ):
+                eh = fits.Header()
+                eh["BUNIT"] = unit
+                component_hdus.append(fits.ImageHDU(
+                    data=np.asarray(array, dtype=np.float32), header=eh, name=name,
+                ))
+            hdr["VCMPVER"] = (1, "FlatField variance component schema")
+            hdr["VCMPQ"] = ("LOCAL", "Pre-sky diagonal components")
+            hdr["VCMPGID"] = (bias_group, "Indexed MasterBias variance group")
+        else:
+            hdr["VCMPQ"] = ("NO_GID", "Missing MasterBias group identity")
+    elif bool(hdr.get("BVARINC", False)):
+        hdr["VCMPQ"] = ("NO_SRC", "Original MasterBias variance map not available")
+
     # Contract (P0-B): MEF products must always carry a MASK plane.
     # Upstream inputs may lack a DQ/mask, in which case we create an all-zero mask
     # for determinism and downstream compatibility.
@@ -323,6 +360,7 @@ def apply_flat(
         mask=mask,
         header=hdr,
         primary_data=corr,
+        extra_hdus=component_hdus if component_hdus else None,
         overwrite=True,
     )
     return out_path, sel
