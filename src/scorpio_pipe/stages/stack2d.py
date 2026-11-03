@@ -1068,7 +1068,10 @@ def run_stack2d(
         unit0_raw = hdr0.get("BUNIT", hdr0.get("SCIUNIT", ""))
         base0, per_sec0 = _split_rate_unit(str(unit0_raw))
         norm0 = bool(hdr0.get("NORMEXP", False))
-        per_sec0 = bool(per_sec0 or norm0)
+        if norm0 and not per_sec0:
+            raise ValueError(
+                "stack2d: first input has NORMEXP=True but BUNIT is not a rate"
+            )
         if not base0:
             raise ValueError("stack2d: missing BUNIT/SCIUNIT in first input")
 
@@ -1131,10 +1134,20 @@ def run_stack2d(
             unit_raw = hdr.get("BUNIT", hdr.get("SCIUNIT", ""))
             base, per_sec = _split_rate_unit(str(unit_raw))
             norm = bool(hdr.get("NORMEXP", False))
-            per_sec = bool(per_sec or norm)
+            if norm and not per_sec:
+                raise ValueError(
+                    f"stack2d: NORMEXP=True contradicts BUNIT in {p.name}: {unit_raw!r}"
+                )
             if base != base_ref:
                 raise ValueError(
                     f"stack2d: incompatible SCI unit base in {p.name}: {base!r} != {base_ref!r}"
+                )
+            if not normalize_exptime and per_sec != per_sec0:
+                raise ValueError(
+                    "stack2d: incompatible SCI dimensions; cannot combine "
+                    f"integrated {base_ref!r} with rate {base_ref!r}/s "
+                    "when normalize_exptime=False. Convert inputs to the "
+                    "same physical unit or enable explicit EXPTIME normalization."
                 )
 
             exptime = _get_exptime_seconds(hdr)
