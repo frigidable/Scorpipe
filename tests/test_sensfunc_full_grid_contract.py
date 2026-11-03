@@ -7,6 +7,7 @@ import pytest
 from astropy.io import fits
 
 import scorpio_pipe.calib.sensfunc as sf
+from scorpio_pipe.calib.common import write_bintable_fits
 
 
 def test_sensfunc_fits_on_good_pixels_and_publishes_full_grid(tmp_path, monkeypatch):
@@ -78,3 +79,38 @@ def test_sensfunc_direct_fit_respects_full_evaluation_grid():
     assert meta["method"] in {"UnivariateSpline", "polyfit"}
     assert model.shape == x.shape
     np.testing.assert_allclose(np.exp(model), 5., atol=1e-4)
+
+
+def test_shared_fits_table_writer_roundtrips_calibration_masks_and_numeric_types(tmp_path):
+    """Regression for the import-before-use and uint8-as-text writer defects."""
+    path = write_bintable_fits(
+        tmp_path / "table.fits",
+        extname="DATA",
+        columns={
+            "WAVELENGTH": np.array([4000.0, 4001.0, 4002.0], dtype=np.float64),
+            "RESPONSE": np.array([1.5, 2.0, 3.5], dtype=np.float32),
+            "FIT_MASK": np.array([1, 0, 1], dtype=np.uint8),
+            "DQ16": np.array([0, 65535, 42], dtype=np.uint16),
+            "LARGE_COUNT": np.array([0, 2**40, 1], dtype=np.int64),
+            "KEEP": np.array([True, False, True], dtype=np.bool_),
+        },
+    )
+    with fits.open(path, memmap=False) as hdul:
+        tab = hdul["DATA"].data
+        assert tab["FIT_MASK"].dtype.kind in "iu"
+        np.testing.assert_array_equal(tab["FIT_MASK"], [1, 0, 1])
+        np.testing.assert_array_equal(tab["DQ16"], [0, 65535, 42])
+        np.testing.assert_array_equal(tab["LARGE_COUNT"], [0, 2**40, 1])
+        np.testing.assert_array_equal(tab["KEEP"], [True, False, True])
+        np.testing.assert_allclose(tab["WAVELENGTH"], [4000., 4001., 4002.])
+        np.testing.assert_allclose(tab["RESPONSE"], [1.5, 2., 3.5])
+
+
+def test_shared_fits_table_writer_rejects_unsupported_uint64(tmp_path):
+    with pytest.raises(ValueError, match="uint64 requires explicit"):
+        write_bintable_fits(
+            tmp_path / "bad.fits",
+            extname="DATA",
+            columns={"VALUE": np.array([2**63 + 1], dtype=np.uint64)},
+        )
+    assert not (tmp_path / "bad.fits").exists()

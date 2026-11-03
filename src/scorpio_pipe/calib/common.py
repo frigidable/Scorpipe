@@ -207,19 +207,39 @@ def read_spec1d(path: str | Path, *, mode: str = "trace") -> dict[str, Any]:
 
 
 def write_bintable_fits(path: str | Path, *, primary_header: fits.Header | None = None, extname: str, columns: dict[str, Any]) -> Path:
+    """Write numeric calibration columns without silently converting DQ flags to text."""
+    from astropy.io import fits
+
     cols = []
     for name, arr in columns.items():
         aa = np.asarray(arr)
-        if aa.dtype.kind in 'if':
-            fmt = 'D' if aa.dtype.kind == 'f' and aa.dtype.itemsize > 4 else 'E'
-            if aa.dtype.kind == 'i':
+        if aa.ndim != 1:
+            raise ValueError(f"FITS table column {name!r} must be one-dimensional")
+        if aa.dtype.kind == 'f':
+            fmt = 'D' if aa.dtype.itemsize > 4 else 'E'
+        elif aa.dtype.kind == 'i':
+            fmt = 'K' if aa.dtype.itemsize > 4 else 'J'
+        elif aa.dtype.kind == 'u':
+            # FITS B is unsigned 8-bit. Larger unsigned values fit without
+            # overflow in signed J (uint16) or K (uint32) table columns.
+            if aa.dtype.itemsize == 1:
+                fmt = 'B'
+            elif aa.dtype.itemsize <= 2:
                 fmt = 'J'
+            elif aa.dtype.itemsize <= 4:
+                fmt = 'K'
+            else:
+                raise ValueError(
+                    f"FITS table column {name!r}: uint64 requires explicit "
+                    "unsigned scaling, not a lossy signed conversion"
+                )
+        elif aa.dtype.kind == 'b':
+            fmt = 'L'
         else:
             aa = aa.astype(str)
-            width = max(1, max(len(str(x)) for x in aa))
-            fmt = f'{width}A'
+            width = max((len(str(x)) for x in aa), default=1)
+            fmt = f'{max(1, width)}A'
         cols.append(fits.Column(name=str(name), format=fmt, array=aa))
-    from astropy.io import fits
     hdul = fits.HDUList([fits.PrimaryHDU(header=(fits.Header() if primary_header is None else primary_header)), fits.BinTableHDU.from_columns(cols, name=str(extname))])
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
