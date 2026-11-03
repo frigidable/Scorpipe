@@ -95,3 +95,25 @@ def test_unknown_method_cannot_be_skipped_when_other_exposures_pass(tmp_path):
         x["error"] for x in report["per_exposure"]
         if x["stem"] == "other_exposure"
     )
+
+
+def test_passthrough_sky_failure_is_not_mistaken_for_qualified_kelsen(tmp_path):
+    # Real SkySub soft failure uses SKYMD=none; that is an invalid
+    # science-model product for this capture audit, not a valid skip.
+    stage, science = _science_night(tmp_path / "night", capture=True)
+    with fits.open(science, mode="update", memmap=False) as hdul:
+        hdul[0].header["SKYMD"] = "none"
+    report = audit_sky_directory(stage)
+    assert report["status"] == "FAIL"
+    assert report["n_failed"] == 1
+    assert "Unknown or missing" in report["per_exposure"][0]["error"]
+
+
+def test_other_legitimate_sky_method_is_reported_not_kelson_pass(tmp_path):
+    stage, science = _science_night(tmp_path / "night", capture=True)
+    with fits.open(science, mode="update", memmap=False) as hdul:
+        hdul[0].header["SKYMD"] = "sky_scale_raw"
+    report = audit_sky_directory(stage)
+    assert report["n_kelson"] == 0
+    assert report["per_exposure"][0]["status"] == "SKIPPED_OTHER_METHOD"
+    assert report["status"] == "FAIL"

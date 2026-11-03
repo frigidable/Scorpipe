@@ -64,7 +64,10 @@ It prints JSON to stdout, including per-exposure model/LSQR checks, the
 number of Kelson science products, passed/failed cases and explicit gaps.
 Exit code **0** requires at least one Kelson exposure and no failed
 products; exit code **1** means missing/invalid data or an audit failure.
-Non-Kelson methods are explicitly skipped; a stage with only other
+Only explicitly recognized alternative methods (e.g. `sky_scale_raw`)
+are skipped. Unknown/missing `SKYMD` and SkySub's soft-failure
+`SKYMD=none` are reported as failures, not silently counted as
+success or as valid alternate reductions. A stage with only other
 methods cannot pass the Kelson audit. The scanner accepts archive
 references only as sibling file basenames to prevent FITS path traversal.
 No science files, workspace data or reports are written.
