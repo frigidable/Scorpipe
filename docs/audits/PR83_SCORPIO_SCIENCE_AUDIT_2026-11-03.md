@@ -66,3 +66,32 @@ The previous fast suite reported 2 skipped tests, 2 deselected tests (the latter
 - Raw N2146sat frames and existing validated reductions are **not modified** by this audit.
 
 **Release interpretation:** PR #83 has a validated synthetic E2E baseline. It is **not yet a production science certification** for real SCORPIO-1/2 exposures until the three P0 remaining risks above have an implemented, tested, and reviewed solution.
+
+
+## Follow-up implementation — indexed Cosmics→Flatfield/Sky bias variance (pending Windows QA)
+
+The original risk descriptions above record the **pre-remediation state**. The follow-up changes below have been implemented after the verified baseline, but have **not yet passed Windows testing**.
+
+1. **Exact indexed MasterBias selection for Cosmics.** For each reduction group the stage reads input FITS headers, distinguishes already-debiased from raw input, requires exact indexed MasterBias group resolution with `policy_override="strict"`, and rejects mixed CCD readout groups or mixed `BIASSUB` states before science output. The old global default alias is no longer used when an index exists. For instrument-labelled SCORPIO data without an index, bias subtraction is deferred rather than claiming unknown legacy group compatibility. Non-SCORPIO legacy helper runs retain their historical fallback.
+2. **MasterBias variance handoff.** For successful indexed subtraction, `*_clean_biasvar.fits` stores the selected MasterBias uncertainty in ADU². `CLEAN` remains a primary-image FITS to preserve GUI compatibility and references its sidecar by `BVARREF`, `SB_GID` and `BVARINC=False`. The shared sidecar reader strictly validates the exact adjacent filename, units, dimensions, finite nonnegative values, schema marker, group identity and single-addition state. Flatfield and direct Sky now combine this variance with independently modeled photon and read-noise contributions, stamp `BVARINC=True` and discard the no-longer-applicable relative sidecar path in their own outputs.
+3. **Raw SCORPIO Sky gate.** `_prepare_sky_input_planes` rejects an instrument-labelled SCORPIO input without `BIASSUB=True`, regardless of whether an input VAR plane exists. This blocks unverified raw electronic pedestal and its physically incorrect Poisson noise. The Golden synthetic science images explicitly declare their zero electronic pedestal, as required by this new contract. Generic unlabeled legacy test images retain the old low-level path.
+4. **Unindexed Flatfield guard.** Real SCORPIO science no longer accepts a `resolve_master_bias` result with `degraded=True, reason=NOIDX`; building exact detector/readout groups is required.
+
+### Outstanding scientific questions after this follow-up
+
+- **Definition of MasterBias variance:** `stages/calib.py:_combine_group` currently writes pixelwise `(1.4826 × MAD)²` over the source bias-frame stack. That estimates the scatter of individual frames, not generally the statistical variance of the *combined MasterBias estimator*. For (N) independent bias inputs, the uncertainty of a mean master decreases approximately as (1/N), while a median estimator has a different finite-(N) factor. The newly implemented sidecar faithfully transmits the **existing upstream** variance product, not a newly validated estimator-uncertainty model. Publication-grade uncertainty claims require a separate Monte Carlo/calibration audit and a correction of this definition as appropriate for the chosen combine method.
+- **Interpolation/inpainting covariance:** replacement of cosmic-affected pixels using another exposure or a local median changes per-pixel variance and induces correlations. The new sidecar addresses the MasterBias term only; covariance induced by cosmic rejection, subsequent rectification and combination must be separately characterized.
+- **Calibration provenance for older processed files:** legacy `BIASSUB=True` FITS without `SB_GID` or linked uncertainty may predate these contracts. Such files cannot automatically be promoted to fully provenance-certified science products. Require a targeted legacy-migration/QA policy.
+- **Identity-free FITS inputs:** the strict raw-bias gate currently activates for `INSTRUME` beginning with `SCORPIO`. Anonymous generic CCD arrays can still exercise legacy helpers; do not claim the guard certifies arbitrary unlabelled real observations.
+- **FITS comment-length warnings:** header comment truncation remains unresolved; do not globally suppress.
+
+### Regression tests added
+
+`tests/test_cosmics_masterbias_readout_selection.py`,
+`tests/test_cosmics_masterbias_variance_handoff.py`,
+`tests/test_scorpio_unindexed_bias_fails_closed.py`, and
+`tests/test_sky_sc2_bias_provenance_gate.py`.
+
+These exercise exact matching, mixed-group rejection, no double subtraction, correct units and variance propagation, missing/corrupt sidecars, strict SCORPIO raw-input refusal, and unindexed MasterBias rejection.
+
+**Release gate:** repeat narrowly targeted Windows tests, then Golden, full fast regression, and Smoke on one pinned commit. Treat this implementation as unverified until those results return. The previous 596-fast-test success belongs to commit `2f190078e755a2c66ccc82729e97fc3b24817720`, not the new branch head.
