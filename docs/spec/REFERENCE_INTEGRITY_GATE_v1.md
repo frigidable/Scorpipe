@@ -68,8 +68,11 @@ held-out spectral tests. The current template is not silently promoted to it.
 
 - No claim that `scientific_status=validated` alone proves correct CALSPEC
   content or aperture/slit-loss calibration.
-- Bring generic standard lookup utility in PR #106 into parity with this
-  strict Sensfunc identity gate before merging.
+- The generic lookup logic and curated-alias tests proposed in PR #106
+  are incorporated here, with stricter rejection of missing identities even
+  in single-star libraries and of ambiguous aliases. Treat PR #106 as an
+  overlapping draft: do not merge both independently without reconciling
+  duplicate tests and policies.
 - Eliminate untagged legacy telluric model application in a follow-up
   migration, with upgraded product schema and explicit compatibility handling.
 - Require a trusted standard/science Flat transfer contract and matching
