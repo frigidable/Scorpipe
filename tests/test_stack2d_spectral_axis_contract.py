@@ -43,6 +43,8 @@ def _write(
         if dlamap is not None:
             h["DLAMAP"] = dlamap
             h["FLXFLAG"] = "OK" if dlamap else "UNVERIFIED"
+            if dlamap:
+                h["DLAM_A"] = 0.25
         hdul.flush()
 
 
@@ -105,6 +107,29 @@ def test_scorpio_missing_spectral_metadata_fails_closed(
 ) -> None:
     with pytest.raises(ValueError, match="SCORPIO Stack2D requires explicit"):
         _run(tmp_path, first={field: ""})
+
+
+def test_scorpio_rejects_missing_flexure_provenance(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="requires explicit DLAMAP"):
+        _run(tmp_path, first={"dlamap": None})
+
+
+def test_applied_flexure_without_a_calibrated_shift_is_rejected(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "science_skysub.fits"
+    _write_linearized_input(path, 10.0)
+    with fits.open(path, mode="update") as hdul:
+        hdr = hdul[0].header
+        hdr["INSTRUME"] = "SCORPIO-2"
+        hdr["WAVEREF"] = "air"
+        hdr["CTYPE1"] = "AWAV"
+        hdr["SPECSYS"] = "TOPOCENT"
+        hdr["DLAMAP"] = True
+        hdr["FLXFLAG"] = "OK"
+        hdul.flush()
+    with pytest.raises(ValueError, match="requires finite DLAM_A"):
+        read_spectral_axis_contract(fits.getheader(path))
 
 
 def test_scorpio_rejects_applied_unverified_flexure(tmp_path: Path) -> None:
