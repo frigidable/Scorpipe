@@ -109,6 +109,14 @@ def test_scorpio_missing_spectral_metadata_fails_closed(
         _run(tmp_path, first={field: ""})
 
 
+@pytest.mark.parametrize("ctype", ["WAVE-LOG", "AWAV-TAB", "FREQ", "LINEAR"])
+def test_stack2d_refuses_nonlinear_or_nonwavelength_wcs(
+    tmp_path: Path, ctype: str,
+) -> None:
+    with pytest.raises(ValueError, match="unsupported spectral CTYPE1"):
+        _run(tmp_path, first={"ctype": ctype})
+
+
 def test_scorpio_rejects_missing_flexure_provenance(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="requires explicit DLAMAP"):
         _run(tmp_path, first={"dlamap": None})
