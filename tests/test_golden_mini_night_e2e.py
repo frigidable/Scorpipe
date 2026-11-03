@@ -109,7 +109,19 @@ def test_golden_mini_night_e2e(tmp_path: Path):
     stack_eta = stack_report.get("eta") or {}
     assert stack_eta.get("applied") is True, stack_eta
     assert not stack_eta.get("error"), stack_eta
-    assert (mn.work_dir / "11_stack" / "eta_lambda.fits").exists()
+    eta_path = mn.work_dir / "11_stack" / "eta_lambda.fits"
+    stack_path = mn.work_dir / "11_stack" / "stack2d.fits"
+    assert eta_path.exists() and stack_path.exists()
+    with fits.open(eta_path, memmap=False) as eta_hdul, fits.open(
+        stack_path, memmap=False
+    ) as stack_hdul:
+        eta_values = np.asarray(eta_hdul[0].data, dtype=float)
+        stack_sci = np.asarray(stack_hdul["SCI"].data)
+        assert eta_values.ndim == 1 and eta_values.size == stack_sci.shape[1]
+        assert np.all(np.isfinite(eta_values) & (eta_values > 0))
+        assert bool(stack_hdul[0].header["ETAAPPL"]) is True
+        assert stack_hdul[0].header["ETAPATH"] == eta_path.name
+        assert "VAR" in stack_hdul and "MASK" in stack_hdul
     sigma_after = float(stack_eta["sigma_after_eta"])
     assert np.isfinite(sigma_after)
     assert abs(sigma_after - 1.0) <= 0.5, (
