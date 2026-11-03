@@ -168,6 +168,20 @@ def test_cosmics_never_subtracts_twice_when_input_is_debiased(
         assert np.median(fits.getdata(clean)) == pytest.approx(120, abs=1.0)
 
 
+def test_cosmics_refuses_recleaning_pending_bias_variance(
+    tmp_path: Path,
+) -> None:
+    a = _frame(tmp_path / "linked.fits", debiased=True)
+    with fits.open(a, mode="update") as hdul:
+        hdul[0].header["BVARREF"] = "linked_clean_biasvar.fits"
+        hdul[0].header["BVARINC"] = False
+        hdul.flush()
+    with pytest.raises(ValueError, match="pending MasterBias BVARREF"):
+        cosmics._resolve_cosmics_superbias_for_kind(
+            {}, [a], tmp_path, None
+        )
+
+
 def test_cosmics_rejects_wrong_masterbias_geometry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
