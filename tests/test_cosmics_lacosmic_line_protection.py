@@ -104,6 +104,7 @@ def test_singleframe_lacosmic_preserves_line_and_propagates_ambiguity(
         assert hdr["COSM_GN"] == pytest.approx(0.62)
         assert hdr["COSM_RN"] == pytest.approx(3.0)
         assert hdr["COSM_N"] == 1
+        assert hdr["COSM_RS"] == "HDR"
         assert hdr["BIASSUB"] is True  # no double subtraction of 1000 ADU
     dq = fits.getdata(dqfile)
     assert bool(int(dq[5, 5]) & int(maskbits.BADPIX))
@@ -132,3 +133,30 @@ def test_lacosmic_reconciler_rejects_wrong_shapes_and_preserves_untouched(
             cosmics._reconcile_lacosmic_line_protection(
                 original, altered, cr, protect,
             )
+
+
+def test_lacosmic_rejects_electron_units_with_adu_gain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "already_electrons.fits"
+    fits.writeto(
+        source, np.ones((8, 12), dtype="f4"),
+        fits.Header({
+            "BUNIT": "e-", "INSTRUME": "SCORPIO-2",
+            "GAIN": 0.62, "RDNOISE": 3.0, "BIASSUB": True,
+        }),
+    )
+    monkeypatch.setitem(
+        sys.modules, "astroscrappy",
+        types.SimpleNamespace(detect_cosmics=lambda *a, **kw: None),
+    )
+    with pytest.raises(ValueError, match="detector-integrated ADU"):
+        cosmics._single_frame_lacosmic_clean(
+            source,
+            out_dir=tmp_path / "cosmics",
+            superbias=None,
+            bias_subtract=False,
+            save_png=False,
+            save_mask_fits=False,
+            cfg={},
+        )
