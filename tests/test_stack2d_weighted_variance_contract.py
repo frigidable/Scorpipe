@@ -7,6 +7,7 @@ variance of weights estimated from noisy data.
 """
 
 import numpy as np
+import pytest
 from astropy.io import fits
 
 from scorpio_pipe.maskbits import NO_COVERAGE
@@ -150,3 +151,15 @@ def test_real_streaming_huber_handles_missing_frame_without_poisoning_neighbor()
     finally:
         invalid.close()
         valid.close()
+
+
+@pytest.mark.parametrize("bad_weight", [np.nan, np.inf, -1.0])
+def test_accumulator_refuses_invalid_weights_before_sum_is_poisoned(bad_weight):
+    acc = _WeightedMeanAccumulator((1, 2))
+    with pytest.raises(ValueError, match="finite nonnegative weights"):
+        acc.update(
+            np.asarray([[1.0, 2.0]]),
+            np.asarray([[1.0, bad_weight]]),
+            variances=np.ones((1, 2)),
+        )
+    assert np.array_equal(acc.sum_w, np.zeros((1, 2)))
