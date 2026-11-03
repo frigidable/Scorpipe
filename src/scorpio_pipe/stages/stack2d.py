@@ -1502,7 +1502,9 @@ def run_stack2d(
             # eta(lambda) plot
             if eta_fits.exists():
                 try:
-                    from astropy.io import fits
+                    # fits is imported at module scope. A nested import here
+                    # shadowed it for the entire run_stack2d() function and
+                    # prevented eta(lambda) from being written.
                     import matplotlib.pyplot as plt
                     import numpy as _np
 
