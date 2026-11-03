@@ -867,8 +867,9 @@ def run_stack2d(
     hduls = [open_fits_smart(p, memmap="auto") for p in files]
 
 
-    # P0-L: upstream degradation propagation + optional operator-controlled rejection.
-    # By default we *do not* auto-exclude frames; we only propagate QADEGRD.
+    # Failed sky subtraction cannot contribute to a scientific stack, even
+    # when sky.failure_policy='soft' produced a diagnostic pass-through.
+    # Optional user rejection flags apply in addition to this mandatory gate.
     from scorpio_pipe.maskbits import SKYMODEL_FAIL
 
     reject_names = st_cfg.get("reject_if_mask_bits") or []
@@ -910,9 +911,18 @@ def run_stack2d(
             mask = np.zeros_like(_get_sci_data(hdul), dtype=np.uint16)
         has_skymodel_fail = bool(np.any(mask & SKYMODEL_FAIL))
 
-        rejected = False
+        rejected = bool(
+            (skyok is not None and not bool(skyok))
+            or has_skymodel_fail
+        )
         reject_reason = None
-        if reject_bitmask != 0 and bool(np.any(mask & reject_bitmask)):
+        if rejected:
+            reject_reason = {
+                "science_gate": "SKY_MODEL_FAILED",
+                "skyok": skyok,
+                "has_skymodel_fail": has_skymodel_fail,
+            }
+        elif reject_bitmask != 0 and bool(np.any(mask & reject_bitmask)):
             rejected = True
             reject_reason = {
                 "mask_bits": [str(x) for x in reject_names],
@@ -944,7 +954,8 @@ def run_stack2d(
 
     if not files:
         raise RuntimeError(
-            "All inputs were rejected by stack2d.reject_if_mask_bits; nothing left to stack."
+            "All Stack2D inputs failed mandatory sky-model QC or configured "
+            "reject_if_mask_bits; no scientifically usable exposure remains."
         )
 
     upstream_degraded = any(
