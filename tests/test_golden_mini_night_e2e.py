@@ -149,7 +149,20 @@ def test_golden_mini_night_e2e(tmp_path: Path):
         assert str(hdul[0].header["NOISRC"]).strip()
         assert int(hdul[0].header["NOINEXP"]) == len(mn.cfg["frames"]["obj"])
         assert hdul[0].header["NOIDET"] == "linearize_done.json"
+        assert str(hdul[0].header["WAVEREF"]).lower() == "air"
+        assert str(hdul["SCI"].header["WAVEREF"]).lower() == "air"
+        assert str(hdul[0].header["CTYPE1"]).upper() == "AWAV"
     assert m is not None
+
+    # Check a per-exposure SCIENCE output as well as the stacked preview;
+    # both must use the wavelength medium declared by lambda_map.
+    for idx in (1, 2):
+        rect = mn.work_dir / "10_linearize" / f"obj_{idx:02d}_skysub.fits"
+        assert rect.exists()
+        with fits.open(rect, memmap=False) as rect_hdul:
+            assert rect_hdul[0].header["WAVEREF"] == "air"
+            assert rect_hdul["SCI"].header["WAVEREF"] == "air"
+            assert rect_hdul[0].header["CTYPE1"] == "AWAV"
     mask_nonzero_frac = float(np.count_nonzero(m != 0) / (m.size if m.size else 1.0))
 
     # --- compare with tolerances ---
