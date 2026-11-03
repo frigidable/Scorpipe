@@ -97,7 +97,7 @@ def test_unknown_method_cannot_be_skipped_when_other_exposures_pass(tmp_path):
     )
 
 
-def test_passthrough_sky_failure_is_not_mistaken_for_qualified_kelsen(tmp_path):
+def test_passthrough_sky_failure_cannot_pass_kelson_fidelity(tmp_path):
     # Real SkySub soft failure uses SKYMD=none; that is an invalid
     # science-model product for this capture audit, not a valid skip.
     stage, science = _science_night(tmp_path / "night", capture=True)
