@@ -91,6 +91,11 @@ def read_spectral_axis_contract(
         specsys = "UNKNOWN"
 
     flexure_applied: bool | None = None
+    if production and "DLAMAP" not in hdr:
+        raise ValueError(
+            f"{source}: SCORPIO Stack2D requires explicit DLAMAP "
+            "flexure-correction provenance"
+        )
     if "DLAMAP" in hdr:
         val = hdr["DLAMAP"]
         if not isinstance(val, bool):
@@ -98,13 +103,25 @@ def read_spectral_axis_contract(
                 f"{source}: DLAMAP must be a FITS logical, got {val!r}"
             )
         flexure_applied = bool(val)
-        if (
-            flexure_applied and
-            str(hdr.get("FLXFLAG") or "").strip().upper() == "UNVERIFIED"
-        ):
-            raise ValueError(
-                f"{source}: DLAMAP=True contradicts unverified flexure"
-            )
+        if flexure_applied:
+            flag = str(hdr.get("FLXFLAG") or "").strip().upper()
+            if flag != "OK":
+                raise ValueError(
+                    f"{source}: DLAMAP=True requires independently "
+                    "verified FLXFLAG=OK"
+                )
+            try:
+                delta = float(hdr["DLAM_A"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"{source}: applied flexure requires finite DLAM_A"
+                ) from exc
+            from math import isfinite
+
+            if not isfinite(delta):
+                raise ValueError(
+                    f"{source}: applied flexure requires finite DLAM_A"
+                )
 
     qualified = (
         medium != "UNKNOWN"
