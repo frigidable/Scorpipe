@@ -1093,7 +1093,11 @@ def _single_frame_lacosmic_clean(
     img, hdr, _info = read_image_smart(path, memmap="auto", dtype=np.float32)
     # Evaluate detector ADC saturation before any bias correction/inpainting.
     detector_dq, hdr = carry_detector_saturation(img, None, hdr, cfg or {})
-    if bias_subtract and superbias is not None and superbias.shape == img.shape:
+    if (
+        bias_subtract and superbias is not None
+        and superbias.shape == img.shape
+        and not bool(hdr.get("BIASSUB", False))
+    ):
         img = img - superbias
         hdr["BIASSUB"] = (True, "Superbias subtracted")
 
