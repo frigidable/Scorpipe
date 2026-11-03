@@ -1988,6 +1988,24 @@ def _read_sky_flexure_summary(
     return legacy if isinstance(legacy, dict) else None
 
 
+def _has_independent_flexure_reference(
+    summary: dict[str, Any] | None, *, n_exposures: int,
+) -> bool:
+    """Only one-exposure shifts may use the legacy scalar grid correction.
+
+    For a sequence of science frames, even a verified *median* delta would
+    smear differently shifted spectra. A separately validated per-exposure
+    wavelength mapping is required before series flexure can be applied.
+    """
+    return bool(
+        isinstance(summary, dict)
+        and summary.get("verification") == "independent_reference"
+        and isinstance(summary.get("reference_id"), str)
+        and summary["reference_id"].strip()
+        and int(n_exposures) == 1
+    )
+
+
 def run_linearize(
     cfg: Dict[str, Any],
     out_dir: Optional[Path] = None,
@@ -2526,15 +2544,8 @@ def run_linearize(
         # A shift measured by fitting the sky to itself is not tied to any
         # laboratory wavelengths. Old sky_done.json reports may contain a
         # plausible-looking delta but no independent reference: reject it.
-        flexure_ref_verified = bool(
-            isinstance(sky_done, dict)
-            and isinstance(flex, dict)
-            and flex.get("verification") == "independent_reference"
-            and isinstance(flex.get("reference_id"), str)
-            and flex["reference_id"].strip()
-            # A single series-median shift is not a valid per-exposure
-            # solution for exposures with potentially different flexure.
-            and len(obj_frames) == 1
+        flexure_ref_verified = _has_independent_flexure_reference(
+            flex, n_exposures=len(obj_frames)
         )
         if not flexure_ref_verified:
             delta_lambda_A = None
