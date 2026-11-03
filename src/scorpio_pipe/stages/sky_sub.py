@@ -362,6 +362,35 @@ def _read_sky_input_planes(
         var = _plane("VAR")
         mask = _plane("MASK")
 
+        # An explicit FlatField component schema MUST be complete before
+        # this stage drops its pre-sky-only component maps. A missing map
+        # must never be accepted as a physically valid decomposition.
+        if "VCMPVER" in hdr:
+            if int(hdr["VCMPVER"]) != 1:
+                raise ValueError("Unsupported FlatField variance component version")
+            if (str(hdr.get("VCMPGID") or "").strip() !=
+                    str(hdr.get("SB_GID") or "").strip() or
+                    not str(hdr.get("VCMPGID") or "").strip()):
+                raise ValueError("MasterBias component group provenance mismatch")
+            if var is None:
+                raise ValueError("FlatField variance components require input VAR")
+            arrays = {}
+            for name in ("VBIAS", "VREST", "BSENS", "BVARADU"):
+                value = _plane(name)
+                if value is None:
+                    raise ValueError(f"FlatField variance component {name} missing")
+                arrays[name] = np.asarray(value, dtype=np.float64)
+            vb, vr, bs, bm = (arrays[k] for k in
+                              ("VBIAS", "VREST", "BSENS", "BVARADU"))
+            if (not np.isfinite(vb).all() or not np.isfinite(vr).all()
+                    or not np.isfinite(bs).all() or not np.isfinite(bm).all()
+                    or np.any(vb < 0) or np.any(vr < 0) or np.any(bm < 0)):
+                raise ValueError("Invalid FlatField MasterBias component values")
+            if not np.allclose(vb + vr, var, rtol=3e-5, atol=3e-5):
+                raise ValueError("FlatField component variance closure failed")
+            if not np.allclose(vb, bs**2 * bm, rtol=3e-5, atol=3e-5):
+                raise ValueError("FlatField MasterBias derivative closure failed")
+
     return sci, var, mask, hdr
 
 
@@ -474,6 +503,16 @@ def _prepare_sky_input_planes(
         )
 
     out_hdr = fits.Header(hdr)
+    if "VCMPVER" in out_hdr:
+        if int(out_hdr["VCMPVER"]) != 1:
+            raise ValueError("Unsupported incoming variance component version")
+        # Current SkySub fits a data-dependent sky model and does not
+        # propagate the required bias-response operator. Do not retain a
+        # false claim that FlatField component HDUs survive in sky products.
+        del out_hdr["VCMPVER"]
+        if "VCMPGID" in out_hdr:
+            del out_hdr["VCMPGID"]
+        out_hdr["VCMPQ"] = ("SKY_LOST", "Pre-sky components not propagated")
     out_hdr["SKYIVAR"] = (
         "INPUT" if input_var is not None else "ESTIM+BV"
         if input_bias_var is not None else "ESTIM",
