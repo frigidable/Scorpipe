@@ -378,6 +378,22 @@ def _prepare_sky_input_planes(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, fits.Header]:
     """Preserve upstream detector uncertainty and DQ; estimate VAR only if absent."""
     sci = np.asarray(sci)
+
+    # An SCORPIO observation without evidence of electronic bias subtraction
+    # cannot be interpreted as photoelectron counts. In particular, the
+    # Poisson+RN fallback must never treat raw detector pedestal as photons.
+    # Historical generic synthetic fixtures without an instrument label may
+    # still exercise the low-level numerical helper, but instrument-identified
+    # science always requires a declared calibration state.
+    instrument = str(hdr.get("INSTRUME") or "").strip().upper()
+    if instrument.startswith("SCORPIO") and not bool(hdr.get("BIASSUB", False)):
+        raise ValueError(
+            "Sky refuses SCORPIO detector input without verified "
+            "BIASSUB=True. Run compatible bias calibration (Cosmics or "
+            "Flatfield) before sky subtraction; raw ADU pedestal cannot "
+            "be used in the CCD variance model."
+        )
+
     mask = np.zeros(sci.shape, dtype=np.uint16)
     for name, layer in (("MASK", input_mask), ("cosmics MASK", cosmic_mask)):
         if layer is None:
