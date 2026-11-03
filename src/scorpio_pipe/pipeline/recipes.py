@@ -12,35 +12,42 @@ class RecipeDef:
     description: str
 
 
+# Scientific dependency contract (checked by tests/test_recipe_science_dependencies.py):
+# With both stages present, Cosmic cleaning must precede Flatfield because
+# Flatfield selects *_clean.fits if available. Duplicate task aliases must
+# never appear in recipes: run_sequence creates the full plan *before* running.
+# This ordering is necessary, but not sufficient, for science provenance:
+# Flatfield should also validate upstream product identity/freshness at runtime.
+
 RECIPES: dict[str, RecipeDef] = {
     'quicklook_science': RecipeDef(
         key='quicklook_science',
         label='Quicklook science',
-        tasks=('manifest', 'superbias', 'biascorr', 'wavesolution', 'lsf_model', 'sky', 'sky_refine', 'linearize', 'stack2d', 'extract1d', 'publication_ready', 'kinematics_prep', 'qc_report', 'observer_dashboard'),
+        tasks=('manifest', 'superbias', 'wavesolution', 'lsf_model', 'sky', 'sky_refine', 'linearize', 'stack2d', 'extract1d', 'publication_ready', 'kinematics_prep', 'qc_report', 'observer_dashboard'),
         description='Fast observer quicklook from raw science frames to extracted spectra and QC.',
     ),
     'full_reduction': RecipeDef(
         key='full_reduction',
         label='Full reduction',
-        tasks=('manifest', 'superbias', 'biascorr', 'superflat', 'flatfield', 'cosmics', 'superneon', 'slit_sanity', 'geometry_prior', 'lineid_prepare', 'arclineid', 'wavesolution', 'lsf_model', 'sky', 'sky_refine', 'linearize', 'stack2d', 'extract1d', 'publication_ready', 'kinematics_prep', 'qc_report', 'observer_dashboard'),
+        tasks=('manifest', 'superbias', 'superflat', 'cosmics', 'flatfield', 'superneon', 'slit_sanity', 'geometry_prior', 'lineid_prepare', 'wavesolution', 'lsf_model', 'sky', 'sky_refine', 'linearize', 'stack2d', 'extract1d', 'publication_ready', 'kinematics_prep', 'qc_report', 'observer_dashboard'),
         description='Full reduction stack without flux calibration / science interpretation.',
     ),
     'standard_star_reduction': RecipeDef(
         key='standard_star_reduction',
         label='Standard-star reduction',
-        tasks=('manifest', 'superbias', 'biascorr', 'superflat', 'flatfield', 'superneon', 'slit_sanity', 'geometry_prior', 'lineid_prepare', 'arclineid', 'wavesolution', 'standard_prepare'),
+        tasks=('manifest', 'superbias', 'superflat', 'flatfield', 'superneon', 'slit_sanity', 'geometry_prior', 'lineid_prepare', 'wavesolution', 'standard_prepare'),
         description='Reduce and extract the standard star as a calibration object.',
     ),
     'relative_flux_calibration': RecipeDef(
         key='relative_flux_calibration',
         label='Relative flux calibration',
-        tasks=('manifest', 'superbias', 'biascorr', 'superflat', 'flatfield', 'superneon', 'slit_sanity', 'geometry_prior', 'lineid_prepare', 'arclineid', 'wavesolution', 'standard_prepare', 'sensfunc', 'extract1d', 'fluxcal_apply'),
+        tasks=('manifest', 'superbias', 'superflat', 'flatfield', 'superneon', 'slit_sanity', 'geometry_prior', 'lineid_prepare', 'wavesolution', 'standard_prepare', 'sensfunc', 'extract1d', 'fluxcal_apply'),
         description='Build sensfunc and apply relative flux calibration.',
     ),
     'full_science_calibration_report': RecipeDef(
         key='full_science_calibration_report',
         label='Full science + calibration + report',
-        tasks=('manifest', 'superbias', 'biascorr', 'superflat', 'flatfield', 'cosmics', 'superneon', 'slit_sanity', 'geometry_prior', 'lineid_prepare', 'arclineid', 'wavesolution', 'lsf_model', 'sky', 'sky_refine', 'linearize', 'stack2d', 'extract1d', 'publication_ready', 'kinematics_prep', 'standard_prepare', 'sensfunc', 'telluric_model', 'fluxcal_apply', 'line_measure', 'science_report', 'qc_report', 'observer_dashboard'),
+        tasks=('manifest', 'superbias', 'superflat', 'cosmics', 'flatfield', 'superneon', 'slit_sanity', 'geometry_prior', 'lineid_prepare', 'wavesolution', 'lsf_model', 'sky', 'sky_refine', 'linearize', 'stack2d', 'extract1d', 'publication_ready', 'kinematics_prep', 'standard_prepare', 'sensfunc', 'telluric_model', 'fluxcal_apply', 'line_measure', 'science_report', 'qc_report', 'observer_dashboard'),
         description='Closed observer workflow from reduction to calibrated report and science lines.',
     ),
 }
