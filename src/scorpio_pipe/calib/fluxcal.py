@@ -38,6 +38,7 @@ def _load_telluric(path: str | Path) -> dict[str, np.ndarray]:
             'trans': np.asarray(tab['TRANSMISSION'], dtype=float),
             'conf': np.asarray(tab['CONFIDENCE'], dtype=float),
             'waveref': str(hdr.get('WAVEREF') or 'air').strip().lower(),
+            'quality': str(hdr.get('TELQUAL') or '').strip().upper(),
         }
 
 
@@ -157,6 +158,12 @@ def apply_fluxcal_to_spec1d(science_spec_path: str | Path, *, sensfunc_path: str
     transmission = np.ones_like(wave)
     if telluric_path is not None and Path(telluric_path).exists():
         tel = _load_telluric(telluric_path)
+        if str(tel.get('quality') or '').upper() == 'DIAGNOSTIC':
+            raise ValueError(
+                'UNQUALIFIED_TELLURIC_MODEL: diagnostic standard-derived '
+                'transmission cannot be applied to a science spectrum; '
+                'use relative flux calibration without this model'
+            )
         if sci_norm == 'COUNT_V1':
             tel_ref = str(tel.get('waveref') or '').strip().lower()
             if tel_ref != sci_ref:
