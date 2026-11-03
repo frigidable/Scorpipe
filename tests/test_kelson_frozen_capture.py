@@ -99,11 +99,15 @@ def test_loader_rejects_incomplete_versioned_snapshot(tmp_path):
 def _science_night(work: Path, capture: bool):
     rng = np.random.default_rng(27)
     layout = ensure_work_layout(work)
+    # The workspace contract creates stage directories lazily and does not
+    # create raw/; a standalone test fixture must create both explicitly.
+    layout.raw.mkdir(parents=True, exist_ok=True)
     ny, nx = 48, 128
     y = np.arange(ny)[:, None]
     x = np.arange(nx)[None, :]
     lam = np.repeat((5000. + 2.*x), ny, axis=0)
     wavesol = stage_dir(work, "wavesol")
+    wavesol.mkdir(parents=True, exist_ok=True)
     fits.writeto(wavesol / "lambda_map.fits", lam.astype("f4"), overwrite=True)
     skyline = sum(65. * np.exp(-.5*((x-c)/1.3)**2) for c in (30., 60., 92.))
     obj = 35. * np.exp(-.5*((y-24.)/2.0)**2) * (10. + .03*x)
