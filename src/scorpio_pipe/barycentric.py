@@ -173,8 +173,13 @@ def apply_barycentric_to_wavelength_grid(
 ) -> tuple[float, float]:
     """Apply barycentric correction to a *linear* wavelength grid.
 
-    Uses λ_bary = λ_obs / doppler_factor (doppler_factor = 1 + v/c).
+    Uses λ_bary = λ_obs * doppler_factor, where doppler_factor = 1 + v/c
+    is the *positive optical* barycentric correction returned by Astropy.
+    For this sign convention, dividing instead of multiplying reverses the
+    velocity correction. See SkyCoord.radial_velocity_correction documentation.
     """
-    if not np.isfinite(doppler_factor) or doppler_factor == 0:
-        return float(lambda0), float(dlambda)
-    return float(lambda0) / float(doppler_factor), float(dlambda) / float(doppler_factor)
+    if not np.isfinite(doppler_factor) or float(doppler_factor) <= 0:
+        raise ValueError("Barycentric Doppler factor must be finite and positive")
+    if not (np.isfinite(lambda0) and np.isfinite(dlambda) and dlambda != 0):
+        raise ValueError("Barycentric wavelength grid must be finite and nondegenerate")
+    return float(lambda0) * float(doppler_factor), float(dlambda) * float(doppler_factor)
