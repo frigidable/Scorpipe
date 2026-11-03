@@ -256,6 +256,14 @@ def _extraction_mask_policy(*, is_stack: bool) -> tuple[int, int]:
     return required | int(REJECTED), 0
 
 
+def _strip_informational_1d_bits(mask: np.ndarray, *, bits: int) -> np.ndarray:
+    """Return the output usability mask, keeping 2D provenance untouched."""
+    out = np.asarray(mask, dtype=np.uint16)
+    if bits == 0:
+        return out
+    return out & np.uint16(~int(bits) & 0xFFFF)
+
+
 def _is_stack2d_input(path: Path, hdr: fits.Header) -> bool:
     name = path.name.lower()
     if name in {"stack2d.fits", "stacked2d.fits"}:
@@ -1580,9 +1588,8 @@ def _run_extract1d_impl(
         # Retain contributor rejection provenance in Stack2D's 2D MASK and QC,
         # while giving downstream line analysis a true 1D usability mask.
         # REJECTED here means a different exposure was downweighted/rejected.
-        clear_bits = np.uint16(~informational_1d_bits & 0xFFFF)
-        mask_tr = np.asarray(mask_tr, dtype=np.uint16) & clear_bits
-        mask_fx = np.asarray(mask_fx, dtype=np.uint16) & clear_bits
+        mask_tr = _strip_informational_1d_bits(mask_tr, bits=informational_1d_bits)
+        mask_fx = _strip_informational_1d_bits(mask_fx, bits=informational_1d_bits)
 
     if method == "mean":
         # Convert sum → mean (and propagate VAR scaling).
