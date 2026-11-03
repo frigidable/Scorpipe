@@ -1323,9 +1323,30 @@ def run_sequence(
             except Exception:
                 pass
             raise
-        except Exception:
-            # Never let gating crash the runner; it should only gate when data exists.
-            pass
+        except Exception as exc:
+            # The QC gate is a scientific safety boundary. A broken checker,
+            # corrupted upstream report or I/O failure must never silently
+            # turn into permission to run the downstream science stage.
+            reason = (
+                f"QC gate evaluation failed for task '{t}': "
+                f"{type(exc).__name__}: {exc}"
+            )
+            log.exception("%s", reason)
+            _upsert_stage_done_json(
+                t, status="blocked", stage_hash=_expected_hash(t),
+                reason=reason,
+                started_utc=datetime.now(timezone.utc).isoformat(),
+                finished_utc=datetime.now(timezone.utc).isoformat(),
+                duration_s=0.0,
+                err_code="QC_GATE_EVALUATION_FAILED", err_msg=reason,
+            )
+            record_stage_result(
+                out_dir, t, status="blocked", stage_hash=None,
+                message=reason, trace=None,
+                meta={"qc_override": bool(qc_override)},
+            )
+            _update_artifact_index(t)
+            raise RuntimeError(reason) from exc
 
         stage_hash = compute_stage_hash(
             stage=t,
