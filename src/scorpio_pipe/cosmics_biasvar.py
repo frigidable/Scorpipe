@@ -83,3 +83,23 @@ def read_clean_biasvar_sidecar(
         if not np.all(np.isfinite(arr)) or np.any(arr < 0):
             raise ValueError("Linked MasterBias VAR contains unphysical values")
         return np.asarray(arr, dtype=np.float32)
+
+
+def validate_bias_var_extra(
+    baseline_var_adu2: np.ndarray,
+    bias_var_adu2: np.ndarray,
+    sci_shape: tuple[int, ...],
+) -> np.ndarray:
+    """Include one pending MasterBias term in the sky variance estimate.
+
+    Only use this when input VAR was missing and independently estimated from
+    *bias-subtracted* science counts. The resulting variance remains in ADU^2.
+    """
+    base = np.asarray(baseline_var_adu2, dtype=float)
+    bias = np.asarray(bias_var_adu2, dtype=float)
+    if base.shape != tuple(sci_shape) or bias.shape != tuple(sci_shape):
+        raise ValueError("MasterBias VAR / sky variance geometry mismatch")
+    if (not np.all(np.isfinite(base)) or not np.all(np.isfinite(bias))
+            or np.any(base < 0) or np.any(bias < 0)):
+        raise ValueError("MasterBias VAR / sky variance is unphysical")
+    return np.asarray(base + bias, dtype=np.float32)
