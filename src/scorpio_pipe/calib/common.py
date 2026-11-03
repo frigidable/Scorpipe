@@ -137,14 +137,28 @@ def find_standard_record(library: dict[str, Any], selected_name: str | None) -> 
     stds = library.get("standards") if isinstance(library, dict) else None
     if not isinstance(stds, dict) or not stds:
         return None, None
-    if selected_name:
+    if selected_name and str(selected_name).strip():
         nsel = normalize_name(selected_name)
         for key, rec in stds.items():
-            disp = str((rec or {}).get("display_name") or key)
-            if normalize_name(disp) == nsel or normalize_name(str(key)) == nsel:
+            if not isinstance(rec, dict):
+                continue
+            names = [str(key), str(rec.get("display_name") or key)]
+            aliases = rec.get("aliases") or []
+            if isinstance(aliases, (list, tuple)):
+                names.extend(str(alias) for alias in aliases)
+            if any(normalize_name(name) == nsel for name in names):
                 return str(key), dict(rec)
-    first_key = next(iter(stds.keys()))
-    return str(first_key), dict(stds[first_key])
+        # An identified standard must NEVER be substituted with an
+        # unrelated star merely because it is first in the library.
+        return None, None
+
+    # Historical convenience for a one-star library without a supplied
+    # identifier; multi-star selection must not depend on YAML ordering.
+    if len(stds) != 1:
+        return None, None
+    first_key = next(iter(stds))
+    rec = stds[first_key]
+    return (str(first_key), dict(rec)) if isinstance(rec, dict) else (None, None)
 
 
 def air_to_vacuum(lam_air: np.ndarray) -> np.ndarray:
