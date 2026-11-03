@@ -144,6 +144,11 @@ def test_golden_mini_night_e2e(tmp_path: Path):
     with fits.open(lin_prev, memmap=False) as hdul:
         m = np.asarray(hdul["MASK"].data, dtype=np.uint16) if "MASK" in hdul else None
         assert bool(hdul[0].header["NORMEXP"]) is True
+        assert float(hdul[0].header["GAIN"]) > 0
+        assert float(hdul[0].header["RDNOISE"]) >= 0
+        assert str(hdul[0].header["NOISRC"]).strip()
+        assert int(hdul[0].header["NOINEXP"]) == len(mn.cfg["frames"]["obj"])
+        assert hdul[0].header["NOIDET"] == "linearize_done.json"
     assert m is not None
     mask_nonzero_frac = float(np.count_nonzero(m != 0) / (m.size if m.size else 1.0))
 
