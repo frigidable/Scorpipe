@@ -62,7 +62,7 @@ def test_real_flatfield_writes_closed_bias_variance_components(tmp_path, monkeyp
         assert hdul[0].header["VCMPGID"] == "readout_group_1"
         assert hdul[0].header["SB_GID"] == "readout_group_1"
         assert hdul[0].header["BVARINC"] is True
-        assert {"VBIAS", "VREST", "BSENS", "BVARADU"}.issubset(hdul)
+        assert all(name in hdul for name in ("VBIAS", "VREST", "BSENS", "BVARADU"))
         np.testing.assert_allclose(hdul["SCI"].data, 100., rtol=0, atol=1e-5)
         np.testing.assert_allclose(hdul["VAR"].data, 13., rtol=0, atol=1e-5)
         np.testing.assert_allclose(hdul["VBIAS"].data, 4., rtol=0, atol=1e-5)
