@@ -13,6 +13,7 @@ import pytest
 
 fits = pytest.importorskip("astropy.io.fits")
 
+from scorpio_pipe.io.mef import WaveGrid
 from scorpio_pipe.spectral_axis_contract import read_spectral_axis_contract
 from scorpio_pipe.stages.stack2d import run_stack2d
 from scorpio_pipe.workspace_paths import stage_dir
@@ -191,10 +192,18 @@ def test_legacy_unidentified_spectral_grids_remain_visibly_unqualified(
         "instrument": "", "dlamap": None,
     }
     result = _run(tmp_path, first=old, second=old)
-    with fits.open(result["stack2d_fits"]) as hdul:
-        assert hdul[0].header["SPCQUAL"] == "UNQUAL"
-        assert "WAVEREF" not in hdul[0].header
-        assert "SPECSYS" not in hdul[0].header
+    # Both canonical and legacy output must preserve *unknown* semantics.
+    for key in ("stack2d_fits", "stacked2d_fits"):
+        with fits.open(result[key]) as hdul:
+            assert hdul[0].header["SPCQUAL"] == "UNQUAL"
+            for hdu in (hdul[0], hdul["SCI"], hdul["VAR"], hdul["MASK"]):
+                for field in ("WAVEREF", "CTYPE1", "SPECSYS"):
+                    assert field not in hdu.header
+            assert hdul[0].header["CRVAL1"] == 5000.0
+            assert hdul[0].header["CDELT1"] == 1.0
+            assert read_spectral_axis_contract(
+                hdul[0].header
+            ).to_dict()["validation"] == "UNQUAL"
     assert result["spectral_axis_contract"]["validation"] == "UNQUAL"
     assert len(result["inputs"]) == 2
     assert all(row["spectral_axis_contract"]["validation"] == "UNQUAL"
@@ -208,3 +217,27 @@ def test_partially_labeled_anonymous_fits_never_defaults_implicitly(
         _run(tmp_path, first={
             "instrument": "", "specsys": "",
         })
+
+
+@pytest.mark.parametrize(
+    ("medium", "ctype", "waveref"),
+    [
+        ("air", "AWAV", "air"),
+        ("vacuum", "WAVE", "vacuum"),
+        ("UNKNOWN", None, None),
+        ("", None, None),
+    ],
+)
+def test_wavegrid_writer_does_not_invent_spectral_medium(
+    medium: str, ctype: str | None, waveref: str | None,
+) -> None:
+    cards = WaveGrid(5000.0, 1.0, 16, wave_ref=medium).to_wcs_cards()
+    assert cards["CRVAL1"] == 5000.0
+    assert cards["CDELT1"] == 1.0
+    assert cards.get("CTYPE1") == ctype
+    assert cards.get("WAVEREF") == waveref
+
+
+def test_wavegrid_writer_rejects_unsupported_medium() -> None:
+    with pytest.raises(ValueError, match="Unsupported wavelength reference"):
+        WaveGrid(5000.0, 1.0, 16, wave_ref="arbitrary").to_wcs_cards()
