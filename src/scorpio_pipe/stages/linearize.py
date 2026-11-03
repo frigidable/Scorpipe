@@ -389,6 +389,64 @@ def _set_linear_wcs(
     return ohdr
 
 
+def _stamp_stacked_noise_provenance(
+    header: fits.Header,
+    per_exposure: list[dict[str, Any]],
+) -> fits.Header:
+    """Describe the noise-model inputs of a variance-weighted preview stack.
+
+    Individual detector noise parameters are not applied a second time during
+    stacking: the variance plane is propagated from the per-exposure products.
+    Header GAIN/RDNOISE are *descriptive* of those inputs. In mixed cases they
+    are explicitly identified as medians; the detailed values and sources live
+    in linearize_done.json under noise.per_exposure.
+    """
+    if not per_exposure:
+        raise ValueError("Cannot stamp stacked noise provenance without exposure records")
+
+    gains: list[float] = []
+    read_noises: list[float] = []
+    sources: list[str] = []
+    for i, item in enumerate(per_exposure):
+        try:
+            gain = float(item["gain_e_per_adu"])
+            rn = float(item["rdnoise_e"])
+            source = str(item["noise_source"]).strip()
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"Incomplete noise provenance for exposure {i}") from exc
+        if not (np.isfinite(gain) and gain > 0 and np.isfinite(rn) and rn >= 0 and source):
+            raise ValueError(f"Invalid noise provenance for exposure {i}")
+        gains.append(gain)
+        read_noises.append(rn)
+        sources.append(source)
+
+    homogeneous = (
+        all(v == gains[0] for v in gains)
+        and all(v == read_noises[0] for v in read_noises)
+        and all(v == sources[0] for v in sources)
+    )
+    result = fits.Header(header)
+    result["GAIN"] = (
+        float(np.median(gains)),
+        "Median input gain [e-/ADU]; see NOISRC",
+    )
+    result["RDNOISE"] = (
+        float(np.median(read_noises)),
+        "Median input read noise [e-]; see NOISRC",
+    )
+    result["NOISRC"] = (
+        sources[0] if homogeneous else "PER_EXP_MEDIAN",
+        "Noise summary origin; per-exposure details in done JSON",
+    )
+    result["NOIAGG"] = (
+        "SAME" if homogeneous else "MEDIAN",
+        "Noise header represents input values or their median",
+    )
+    result["NOINEXP"] = (len(per_exposure), "Number of noise-provenance records")
+    result["NOIDET"] = ("linearize_done.json", "Per-exposure noise provenance")
+    return result
+
+
 def _write_mef(
     path: Path,
     sci: np.ndarray,
@@ -2851,6 +2909,10 @@ def run_linearize(
         if robust_stack:
             hdr0["STKSIG"] = (float(stack_sigma), "Sigma clip threshold")
             hdr0["STKITR"] = (int(stack_maxiters), "Sigma clip iterations")
+        # The preview header originates from lambda_map, not a detector SCI
+        # exposure. Preserve actual per-exposure noise provenance rather than
+        # inventing a gain/read-noise or copying an arbitrary first frame.
+        hdr0 = _stamp_stacked_noise_provenance(hdr0, noise_meta)
         hdr0 = add_provenance(hdr0, cfg, stage="linearize")
         _write_mef(
             preview_fits,
