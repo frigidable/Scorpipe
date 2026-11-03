@@ -129,3 +129,19 @@ Then rerun Golden, fast and Smoke on a **single pinned HEAD** without QC
 overrides. Do not alter real N2146sat FITS, existing reductions, or
 untracked `workspace/`. Do not merge while covariance/statistical
 uncertainty model and real instrumental validation remain unresolved.
+
+## Follow-up: fail-closed QC evaluation (pending Windows QA)
+
+At `8037e2e38ce4ffbcf4fee3670168f37b09b9fc85`, independent Windows tests confirmed **47/47 Science Correctness P0**, **Golden 1/1**, **686 fast passed, 2 skipped, 2 deselected**, and **Smoke 1/1**, for **735 passing test executions** without failure. All 11 Golden stages ran without scientific QC overrides. Local untracked `workspace/` was retained.
+
+A subsequent review confirmed another old-main P0 persisted on that revision: `pipeline/engine.py` had `except Exception: pass` around the mandatory `check_qc_gate` invocation. I/O exceptions, JSON parse errors, or programming defects in the checker could therefore permit downstream science stages without an operative QC gate. `qc/gate.py:_read_done_flags` also silently converted malformed upstream JSON into zero QC flags.
+
+The next PR changes (which **have not yet passed Windows QA**) now:
+
+- Fail closed and mark the stage `blocked` with error code `QC_GATE_EVALUATION_FAILED` if the QC check itself raises unexpectedly; preserve the original exception as `__cause__` and never execute the science task.
+- Reject existing upstream `done.json` files that cannot be parsed as JSON objects, contain an invalid QC object, invalid flag list, non-object flags, missing or unrecognized severity. Reports *without* a QC subsection remain allowed for stages that do not emit science flags.
+- Add targeted malformed-report tests and a real `run_sequence` integration regression that simulates an I/O failure during QC evaluation and verifies the stage was not executed.
+
+**Remaining limitation:** the engine currently plans `resume/skip` decisions ahead of executing upstream tasks. This can create stale reuse decisions if products are regenerated during the same run. Resolving this requires dependency-aware live revalidation, rather than disguising stale products as successfully checked stages. Also, missing upstream reports where reports are mandatory need a separate per-stage requirement specification; absence is not automatically evidence of an error for every optional stage.
+
+Run `tests/test_qc_gate_fail_closed_engine.py`, `tests/test_qc_gate_exception_diagnostics.py`, complete Golden, fast regression, and Smoke on the **same new HEAD** before updating the verified baseline. Real SCORPIO FITS and user workspaces remain untouched.
