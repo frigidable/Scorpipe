@@ -90,6 +90,7 @@ def test_cosmics_bias_variance_sidecar_consumed_once_by_direct_sky(
     [
         "missing", "wrong_gid", "wrong_shape", "wrong_unit", "negative",
         "nan", "wrong_ref", "not_biassub", "already_included",
+        "electron_unit",
     ],
 )
 def test_cosmics_bias_variance_handoff_fails_closed(
@@ -108,6 +109,8 @@ def test_cosmics_bias_variance_handoff_fails_closed(
         hdr["BIASSUB"] = False
     elif damage == "already_included":
         hdr["BVARINC"] = True
+    elif damage == "electron_unit":
+        hdr["BUNIT"] = "e-"
     else:
         with fits.open(sidecar, mode="update") as hdul:
             if damage == "wrong_gid":
