@@ -61,16 +61,15 @@ def read_spectral_axis_contract(
         medium = "UNKNOWN"
 
     ctype = str(hdr.get("CTYPE1") or "").strip().upper()
-    ctype_kind = ctype.split("-", 1)[0]
-    if ctype_kind and ctype_kind not in {"AWAV", "WAVE"}:
-        # A wavelength-calibrated Stack2D input must not have a pixel or
-        # frequency-only spectral axis, even when a numeric grid is readable.
+    if ctype and ctype not in {"AWAV", "WAVE"}:
+        # WAVE-LOG, AWAV-TAB etc. require specialized WCS transforms;
+        # try_read_grid's linear CRVAL/CDELT interpretation is insufficient.
+        # Likewise a frequency, velocity or pixel axis is not an Angstrom grid.
         raise ValueError(
             f"{source}: unsupported spectral CTYPE1={ctype!r}; "
-            "Stack2D requires FITS WAVE or AWAV"
+            "Stack2D accepts only linear FITS WAVE or AWAV"
         )
-    if not ctype_kind:
-        ctype_kind = "UNKNOWN"
+    ctype_kind = ctype or "UNKNOWN"
 
     medium_from_ctype = {"AWAV": "air", "WAVE": "vacuum"}
     if (
