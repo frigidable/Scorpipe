@@ -100,6 +100,23 @@ def test_golden_mini_night_e2e(tmp_path: Path):
 
     cfg = load_config_any(mn.cfg_path)
 
+    # The full Golden run must pass the real Stack2D ETA gate. In particular,
+    # a failure to create eta_lambda.fits must never be silently classified as
+    # "applied", and an uncalibrated noise model must block extraction.
+    stack_report_path = mn.work_dir / "11_stack" / "stack_done.json"
+    assert stack_report_path.exists(), "Stack2D report missing"
+    stack_report = json.loads(stack_report_path.read_text(encoding="utf-8"))
+    stack_eta = stack_report.get("eta") or {}
+    assert stack_eta.get("applied") is True, stack_eta
+    assert not stack_eta.get("error"), stack_eta
+    assert (mn.work_dir / "11_stack" / "eta_lambda.fits").exists()
+    sigma_after = float(stack_eta["sigma_after_eta"])
+    assert np.isfinite(sigma_after)
+    assert abs(sigma_after - 1.0) <= 0.5, (
+        f"Normalized sky-noise sigma after eta = {sigma_after:.3f}, "
+        "which violates the unchanged scientific Stack2D QC ERROR threshold"
+    )
+
     # Preview is a visualization-only SCI image. Its physical unit must match
     # a real sky-subtracted SCI product, not the lambda_map wavelength unit.
     sky_preview = PRODUCT_CATALOG.best_path(cfg, "sky_preview_fits", run_root=mn.work_dir)
