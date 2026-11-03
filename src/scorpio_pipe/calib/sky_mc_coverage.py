@@ -175,8 +175,12 @@ def synthetic_grouped_sky_coverage(
 
     empirical = np.cov(measurements, rowvar=False, ddof=1)
     z = measurements / np.sqrt(np.diag(analytic))[None, :]
+    z_independent_only = measurements / np.sqrt(np.diag(independent))[None, :]
     coverage_1sigma = np.mean(np.abs(z) <= 1., axis=0)
     coverage_95 = np.mean(np.abs(z) <= 1.95996398454, axis=0)
+    coverage_95_independent_only = np.mean(
+        np.abs(z_independent_only) <= 1.95996398454, axis=0
+    )
     expected_1sigma = erf(1. / sqrt(2.))
     expected_95 = .95
     variance_relative_error = np.abs(
@@ -213,6 +217,7 @@ def synthetic_grouped_sky_coverage(
         "cross_covariance_scaled_error": float(cross_covariance_error),
         "coverage_1sigma": coverage_1sigma.tolist(),
         "coverage_95percent": coverage_95.tolist(),
+        "coverage_95percent_independent_only": coverage_95_independent_only.tolist(),
         "standardized_mean": mean_z.tolist(),
         "variance_relative_tolerance": variance_limit,
         "cross_covariance_scaled_tolerance": cov_limit,
