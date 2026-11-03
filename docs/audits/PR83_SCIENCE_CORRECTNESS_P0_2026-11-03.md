@@ -145,3 +145,40 @@ The next PR changes (which **have not yet passed Windows QA**) now:
 **Remaining limitation:** the engine currently plans `resume/skip` decisions ahead of executing upstream tasks. This can create stale reuse decisions if products are regenerated during the same run. Resolving this requires dependency-aware live revalidation, rather than disguising stale products as successfully checked stages. Also, missing upstream reports where reports are mandatory need a separate per-stage requirement specification; absence is not automatically evidence of an error for every optional stage.
 
 Run `tests/test_qc_gate_fail_closed_engine.py`, `tests/test_qc_gate_exception_diagnostics.py`, complete Golden, fast regression, and Smoke on the **same new HEAD** before updating the verified baseline. Real SCORPIO FITS and user workspaces remain untouched.
+
+
+## Follow-up: external wavelength-reference and Sky/CCD contracts (pending Windows QA)
+
+**Baseline:** the last locally verified Windows commit was `51363331648eba63db95a0ddf5cc4c39a440f369`: QC fail-closed contracts 24 passed, Golden E2E 1 passed, fast regression 695 passed (2 skipped, 2 deselected), synthetic smoke 1 passed — **721 test executions passed**, zero failures. The changes below are **new and not yet Windows-tested**.
+
+### #87: Sky self-fit cannot establish absolute flexure
+
+The prior audit was **partly incorrect** when it said Linearize did not apply Sky's `SKYDLAM`: the current `linearize.py` contained an active block that read the median `sky_done.json.flexure.delta_A_median`, shifted the common wavelength grid and `lambda_map`, and wrote `DLAM_A` / `DLAMAP`. That transfer existed, but it had no independent laboratory-reference verification.
+
+The `_estimate_flexure_delta` in `sky_sub.py` compares a BSpline model to the *same sky data used to fit the BSpline*. Without an external spectral reference, the absolute shift is not identifiable. It is now retained solely as `self_fit_shift_A` diagnostic; Sky reports `FLEXURE_UNVERIFIED`, `delta_A=None`, `SKYFLX=UNVERIF`, `SKYDAPP=False`, and uses `delta_A=0` when evaluating its fitted sky model. Linearize rejects unverified / legacy no-reference shifts by default; the explicit `delta_lambda_policy=always` requires a verified independent reference rather than bypassing this contract. The Golden asserts that no self-fit correction is applied. This is an **interim fail-safe**, not a replacement for a physically anchored flexure algorithm.
+
+Reference: PypeIt flexure documentation https://pypeit.readthedocs.io/en/state/calibrations/flexure.html — PypeIt cross-correlates observed sky lines against an archived independent sky spectrum and validates the resulting shift. A future Scorpipe external-reference algorithm must specify laboratory line list/template, wavelength medium (air/vac), spectral resolution, significance, uncertainty, per-exposure correction, and independent injection tests.
+
+### #88: fitted-sky variance is not raw detector variance
+
+The previous `skymodel_raw.fits` writer fell back to the detector `VAR` if an empirical residual variance was missing, and sometimes used in-sample `max(sigma_residual^2 - median(VAR_input), 0)` as if it were `Var(M_sky)`. This is not a valid fitted-model uncertainty estimator: `Var(D-M)=Var(D)+Var(M)-2Cov(D,M)`.
+
+For now, Sky exports `skymodel_raw.fits` with SCI/MASK and **no VAR extension** rather than invented model uncertainty. Sky-subtracted SCI keeps its **detector-only** VAR and explicitly stamps `SKYVSRC=DET_ONLY`, `SKYVCOV=UNKNOWN`, `SKYVQUAL=INCOMP`, `SKYVADD=False`, and QC `SKY_MODEL_VAR_UNVERIFIED` WARN. In-sample residual excess is diagnostics `SKYVEMP` only; it is **not added** to science VAR. The Golden asserts the new FITS metadata. This is honest uncertainty provenance, **not a complete sky-model covariance solution**. Publication-grade sky covariance still needs held-out sky pixels / injections / parameter covariance, and input detector/resampling covariance.
+
+### #89: Astro-SCRAPPY protected-line SCI and detector noise
+
+`astroscrappy.detect_cosmics` returns the *already inpainted* science image. Simply unsetting its returned cosmic mask for `line_protect` pixels previously concealed interpolation. The new `_reconcile_lacosmic_line_protection` restores the observed SCI on overlaps and flags ambiguous line/CR pixels as `BADPIX` in the mandatory DQ sidecar. Unprotected cosmic pixels stay interpolated and marked `COSMIC`. The actual frame's gain and read noise (resolved from its FITS/config) are passed to Astro-SCRAPPY, rather than relying on defaults of GAIN=1 e-/ADU, RN=6.5 e-. A further single-frame double-bias guard was fixed. Synthetic tests cover known narrow-line SCI, real injected impulse and complete DQ provenance. Ambiguous overlaps intentionally remain masked in downstream photometry until corroborated by another exposure.
+
+Reference: Astro-SCRAPPY API https://astroscrappy.readthedocs.io/en/latest/api/astroscrappy.detect_cosmics.html.
+
+### #90: count versus count-rate dimensional consistency
+
+Without `normalize_exptime`, Stack2D now rejects `ADU` mixed with `ADU/s` or `e-` mixed with `e-/s` even though the *base* unit matches. It also rejects `NORMEXP=True` coupled to an integrated-count BUNIT. With explicit EXPTIME normalization, SCI scales as 1/t and VAR as 1/t². Tests include both file orderings, valid conversion and bad metadata.
+
+### Additional time-ordering issue: Sky must not copy future Linearize results
+
+Compatibility aliases `09_sky/<stem>_skysub.fits` and `*_sky_sub.fits` are now **always** copies of the new RAW-geometry `*_skysub_raw.fits`. The code no longer preferentially copies any stale `10_linearize/<stem>_skysub.fits`. An existing synthetic Sky regression injects an incorrect previous Linearize FITS product and verifies that current Sky aliases contain only current RAW data.
+
+### Validation and release status
+
+PR #83 remains **Draft**. The above new changes must be run through their targeted tests and the full Windows Golden, regression and Smoke on one exact SHA. The prior 721-pass baseline is not evidence of success of these changes. **Issues #87 and #88 remain methodologically open** after the fail-safe patches; #89 and #90 should remain open until QA and physical-line injections confirm the new behavior. Spatial slit coordinate map #91, shared MasterBias covariance, robust Stack2D variance, atmospheric extinction and real SCORPIO benchmarks remain independent work packages. Raw N2146sat FITS/config and untracked QA `workspace/` must not be altered.
