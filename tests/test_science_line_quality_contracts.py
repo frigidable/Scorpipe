@@ -61,7 +61,17 @@ def test_positive_noise_spike_is_not_a_detection() -> None:
     assert row["detected"] is False
     assert row["snr_stat"] < 3
     assert row["centroid"] is None
+    assert row["velocity_kms"] is None
+    assert row["sigma"] is None
+    assert row["sigma_kms"] is None
+    assert row["fwhm"] is None
     assert row["upper_limit_3sigma"] > row["flux"]
+    import json
+
+    restored = json.loads(json.dumps(row))
+    assert restored["detected"] is False
+    assert restored["centroid"] is None
+    assert restored["velocity_kms"] is None
 
 
 def test_negative_absorption_does_not_become_emission() -> None:
@@ -70,6 +80,9 @@ def test_negative_absorption_does_not_become_emission() -> None:
     assert row["flux"] < 0
     assert row["detected"] is False
     assert row["snr_stat"] < 0
+    assert row["centroid"] is None
+    assert row["velocity_kms"] is None
+    assert row["sigma_kms"] is None
 
 
 def test_finite_cosmic_spike_is_rejected_by_integer_mask() -> None:
