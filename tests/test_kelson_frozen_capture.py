@@ -123,7 +123,9 @@ def _science_night(work: Path, capture: bool):
             "primary_method": "kelson_raw",
             "save_png": False,
             "covariance_capture": {"enabled": capture},
-            "kelson_raw": {"knot_step_A": 2., "object_eating_warn": -1.},
+            # A coarser knot spacing than the sampled wavelength step keeps
+            # the frozen WLS normal matrix full-rank for this fixture.
+            "kelson_raw": {"knot_step_A": 4., "object_eating_warn": -1.},
         },
     }
     run_sky_sub(config)
