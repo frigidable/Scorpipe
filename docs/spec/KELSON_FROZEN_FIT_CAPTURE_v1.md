@@ -16,6 +16,8 @@ no-pickle NPZ file per science frame:
   coefficients used for sky-model evaluation;
 - pixel indices of the FINAL sigma-clipping keep set in full raw-CCD geometry;
 - corresponding positive variances used by the final WLS fit;
+- actual terminal LSQR stop code, iteration count, residual norm,
+  condition estimate and explicit solver tolerance/iteration limit;
 - explicit version (1) and status (`FROZEN_CONDITIONAL`).
 
 The retained indices are mapped through the real `_fit_kelson_bspline`
@@ -44,3 +46,18 @@ be taken as current authoritative output without current-header linkage.
   through SkySub and forward to Linearize with group relationships.
 - Propagate MasterFlat shared noise, sky estimator and clipping-selection
   effects before removing `SBCOVQ=UNMODEL` or qualifying measured S/N.
+
+## Numerical solver caveat
+
+The saved solver diagnostics identify the *actual* final LSQR invocation
+(including its stop code, residual norm and condition estimate). A saved
+final fit selection still does NOT make the full reduction derivative
+linear: selecting the sky mask, clipping samples, choosing knot ranges
+and evaluating sky-model quality are data-dependent procedures.
+The auxiliary `FrozenSkyWLS` re-solves an ideal fixed-weight WLS
+normal system, and its outputs need not equal finite-iteration LSQR at
+machine precision. Any observational use must qualify this discrepancy.
+
+The NPZ archive is an auxiliary output and the production path does
+not read it. The presence of `SKYFRZP` means *snapshot captured*, not
+science-grade calibrated covariance.
