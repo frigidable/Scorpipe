@@ -49,3 +49,27 @@ After Windows QA, use real SCORPIO datasets to characterize the
 distribution of model reconstruction errors, LSQR stopping/convergence,
 condition estimates and optical-edge/wavelength-map pathologies.
 This must precede using grouped covariance in production science S/N.
+
+## Batch audit of a real SCORPIO Sky stage
+
+After a fresh SkySub run on real, correctly associated RAW exposures with
+`sky.covariance_capture.enabled: true`, a **read-only** command audits all
+Kelson science frames in the produced stage directory:
+
+```powershell
+& $py -m scorpio_pipe.calib.sky_fit_batch "C:\\path\\to\\run\\09_sky"
+```
+
+It prints JSON to stdout, including per-exposure model/LSQR checks, the
+number of Kelson science products, passed/failed cases and explicit gaps.
+Exit code **0** requires at least one Kelson exposure and no failed
+products; exit code **1** means missing/invalid data or an audit failure.
+Non-Kelson methods are explicitly skipped; a stage with only other
+methods cannot pass the Kelson audit. The scanner accepts archive
+references only as sibling file basenames to prevent FITS path traversal.
+No science files, workspace data or reports are written.
+
+No calibration covariance is certified by this audit:
+`science_uncertainty_qualified=false` is unconditional. Compare the
+reports across SCORPIO-1/SCORPIO-2 nights, sky-line strengths, spatial
+slit geometry and selected CCD readout groups before advancing #117.
