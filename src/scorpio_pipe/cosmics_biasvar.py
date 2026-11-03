@@ -56,6 +56,10 @@ def read_clean_biasvar_sidecar(
         raise ValueError(f"Untrusted or inconsistent MasterBias BVARREF: {ref}")
     if not bool(hdr.get("BIASSUB", False)):
         raise ValueError("MasterBias VAR link requires BIASSUB=True")
+    from scorpio_pipe.units_model import UnitModel, infer_unit_model
+
+    if infer_unit_model(hdr, default=UnitModel.ADU) != UnitModel.ADU:
+        raise ValueError("Pending MasterBias VAR requires ADU science units")
     gid = str(hdr.get("SB_GID") or "").strip()
     if not gid:
         raise ValueError("Linked MasterBias VAR requires SB_GID")
