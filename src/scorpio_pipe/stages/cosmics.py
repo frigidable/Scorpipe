@@ -219,6 +219,16 @@ def _resolve_cosmics_superbias_for_kind(
             "Reduce separately or provide homogeneous calibrated inputs."
         )
 
+    # This stage subtracts a MasterBias defined in ADU; interpreting an
+    # electron-valued CLEAN input as ADU would corrupt both SCI and VAR.
+    from scorpio_pipe.units_model import UnitModel, infer_unit_model
+
+    for path, hdr, _ in entries:
+        if infer_unit_model(hdr, default=UnitModel.ADU) != UnitModel.ADU:
+            raise ValueError(
+                f"Cosmics MasterBias subtraction requires ADU science: {path}"
+            )
+
     from scorpio_pipe.stages.calib import (
         load_master_bias_index,
         resolve_master_bias,
@@ -275,9 +285,14 @@ def _resolve_cosmics_superbias_for_kind(
             "Cosmics indexed MasterBias must have a propagated variance "
             f"map: {selected.var_path}"
         )
-    var = np.asarray(
-        fits.getdata(selected.var_path, memmap=False), dtype=np.float32
-    )
+    with fits.open(selected.var_path, memmap=False) as hdul:
+        if str(hdul[0].header.get("BUNIT") or "").strip().upper() != "ADU^2":
+            raise ValueError(
+                "Indexed Cosmics MasterBias VAR must explicitly use ADU^2"
+            )
+        if hdul[0].data is None:
+            raise ValueError("Selected MasterBias VAR has no image data")
+        var = np.asarray(hdul[0].data, dtype=np.float32)
     if var.shape != bias.shape or not np.all(np.isfinite(var)) or np.any(var < 0):
         raise ValueError(
             "Cosmics selected MasterBias variance is invalid or has "
