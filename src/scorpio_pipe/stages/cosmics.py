@@ -1122,6 +1122,12 @@ def _single_frame_lacosmic_clean(
             "Install scorpio-pipe with the required dependencies (astroscrappy) or choose another cosmics method."
         ) from e
 
+    # Astro-SCRAPPY builds its noise model from input detector ADU.
+    # Feeding an electron-valued or per-second image with an e-/ADU gain
+    # produces dimensionally incorrect thresholds.
+    from scorpio_pipe.units_model import UnitModel, infer_unit_model
+    if infer_unit_model(hdr, default=UnitModel.ADU) != UnitModel.ADU:
+        raise ValueError("LA-Cosmic requires detector-integrated ADU science")
     # Astro-SCRAPPY defaults to GAIN=1 e-/ADU and RN=6.5 e-; these
     # assumptions are not valid for arbitrary SCORPIO readout modes.
     from scorpio_pipe.noise_model import resolve_noise_params
@@ -1174,6 +1180,7 @@ def _single_frame_lacosmic_clean(
     h["COSM_OL"] = (float(objlim), "L.A.Cosmic objlim")
     h["COSM_GN"] = (float(npar.gain_e_per_adu), "Astro-SCRAPPY gain e-/ADU")
     h["COSM_RN"] = (float(npar.rdnoise_e), "Astro-SCRAPPY read noise e-")
+    h["COSM_RS"] = (str(npar.rn_src)[:8], "Cosmics read-noise provenance")
     h["COSM_N"] = (int(np.count_nonzero(protected_ambiguous)), "Ambiguous line/CR pixels, BADPIX")
     _stamp_roi_header(h, roi)
     h["HISTORY"] = "scorpio_pipe cosmics: la_cosmic (van Dokkum-like)"
