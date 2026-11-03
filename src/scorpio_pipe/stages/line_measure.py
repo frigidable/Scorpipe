@@ -41,10 +41,18 @@ def _qualify_lines_for_shared_bias_covariance(
         str(header.get("SBGSTAT") or "").strip().upper() == "SHARED"
         and str(header.get("SBCOVQ") or "").strip().upper() == "UNMODEL"
     )
+    model_unqualified = (
+        str(header.get("STKVARQ") or "").strip().upper() == "COND_ONLY"
+        or str(header.get("STKXCVQ") or "").strip().upper() == "UNMODEL"
+        or str(header.get("SBCOVQ") or "").strip().upper() == "UNMODEL"
+    )
     qualified: list[dict[str, Any]] = []
     for entry in rows:
         row = dict(entry)
-        row["uncertainty_qualified"] = not shared
+        # Never assert science-level uncertainty qualification merely
+        # because this ONE known shared-bias trigger was absent.
+        row["uncertainty_qualified"] = False if model_unqualified else None
+        row["shared_bias_detection_gate_triggered"] = bool(shared)
         if shared:
             row["conditional_detection_candidate"] = bool(row.get("detected"))
             row["detected"] = False

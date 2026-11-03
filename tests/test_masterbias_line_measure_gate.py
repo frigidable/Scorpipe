@@ -31,7 +31,8 @@ def test_distinct_bias_groups_do_not_trigger_specific_shared_bias_gate():
     rows, blocked = _qualify_lines_for_shared_bias_covariance([_line()], h)
     assert not blocked
     assert rows[0]["detected"] is True
-    assert rows[0]["uncertainty_qualified"] is True
+    assert rows[0]["uncertainty_qualified"] is False
+    assert rows[0]["shared_bias_detection_gate_triggered"] is False
 
 
 def test_missing_group_provenance_preserves_legacy_but_does_not_certify_it():
@@ -39,6 +40,7 @@ def test_missing_group_provenance_preserves_legacy_but_does_not_certify_it():
     rows, blocked = _qualify_lines_for_shared_bias_covariance([_line()], h)
     assert not blocked
     assert rows[0]["detected"] is True
+    assert rows[0]["uncertainty_qualified"] is None
 
 
 def test_shared_bias_does_not_override_prior_partial_spectral_failure():
