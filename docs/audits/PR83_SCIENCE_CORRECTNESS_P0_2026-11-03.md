@@ -182,3 +182,37 @@ Compatibility aliases `09_sky/<stem>_skysub.fits` and `*_sky_sub.fits` are now *
 ### Validation and release status
 
 PR #83 remains **Draft**. The above new changes must be run through their targeted tests and the full Windows Golden, regression and Smoke on one exact SHA. The prior 721-pass baseline is not evidence of success of these changes. **Issues #87 and #88 remain methodologically open** after the fail-safe patches; #89 and #90 should remain open until QA and physical-line injections confirm the new behavior. Spatial slit coordinate map #91, shared MasterBias covariance, robust Stack2D variance, atmospheric extinction and real SCORPIO benchmarks remain independent work packages. Raw N2146sat FITS/config and untracked QA `workspace/` must not be altered.
+
+
+## Windows QA follow-up: Sky flexure JSON schema mismatch
+
+The user's pinned Windows run at `dae32b089429f3ebf8f40665fd2ad7dcf79d9730`
+passed **39/39 targeted P0 tests**, including LA-Cosmic protected-line DQ, input ADU
+semantics, Stack2D count/rate units, previous Sky geometry, and QC blocking.
+The eleven-stage Golden **ran through the pipeline but failed its new
+provenance assertion**: `sky_done.json` had no top-level `flexure`.
+The fast and Smoke suites were therefore not rerun on that SHA.
+
+Root cause: the canonical `write_done_json(..., extra={"flexure": ...})`
+writer serializes the scientific report under **`extra.flexure`**, not
+`flexure`. Both the Golden and the Linearize consumer read the incorrect
+top-level field. This was a cross-stage JSON-schema mismatch: fixing only the
+Golden test would have left Linearize unable to read the proper provenance.
+
+- Golden now explicitly asserts `extra.flexure.verification=unverified`, a
+  null measured shift and the same absent applied shift on per-exposure FITS.
+- Linearize now reads `extra.flexure` first, with a legacy top-level fallback
+  that can never bypass the independent-reference requirement.
+- A median shift for **multiple** science exposures is categorically
+  rejected by the current scalar-application path, even if someone marks
+  the summary as independently referenced: true per-exposure flexure mapping
+  is required for science-series application.
+- New `tests/test_linearize_sky_flexure_schema.py` covers the canonical
+  namespace, stale conflicting top-level values, malformed metadata,
+  independent-reference requirements, and 2+/multi-exposure global-median
+  rejection. No scientific QC thresholds have been relaxed.
+
+**Current fixes pending Windows QA**: rerun the new reader-contract unit tests,
+the full synthetic Golden, then full fast suite and Smoke on a single pinned
+SHA. PR #83 stays Draft, and #87/#93 remain open pending an independently
+calibrated per-exposure algorithm.
