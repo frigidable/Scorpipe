@@ -9,7 +9,8 @@ variance of weights estimated from noisy data.
 import numpy as np
 from astropy.io import fits
 
-from scorpio_pipe.stages.stack2d import _WeightedMeanAccumulator, _stack_chunk_streaming
+from scorpio_pipe.maskbits import NO_COVERAGE
+from scorpio_pipe.stages.stack2d import _WeightedMeanAccumulator, _stack_chunk_streaming, _huber_weight_block
 
 
 def test_accumulator_huber_weights_use_w_squared_times_detector_var():
@@ -101,3 +102,51 @@ def test_real_streaming_floor_does_not_replace_detector_variance():
     expected = (.25**2 * 1.0 + (1 / 9)**2 * 9.0) / (.25 + 1 / 9)**2
     np.testing.assert_allclose(var[0, 0], expected, rtol=1e-6)
     assert cov[0, 0] == 2
+
+
+def test_huber_weights_never_multiply_zero_by_nan():
+    w0 = np.asarray([[0.0, 1.0, 0.0]], dtype=np.float32)
+    residual = np.asarray([[np.nan, 0.0, np.inf]], dtype=float)
+    weights, hub = _huber_weight_block(w0, residual, 2.0)
+    np.testing.assert_array_equal(weights, np.asarray([[0.0, 1.0, 0.0]]))
+    assert np.isfinite(weights).all()
+    assert np.isnan(hub[0, 0])  # NaN in diagnostic cannot enter the weight
+
+
+def test_real_streaming_huber_handles_missing_frame_without_poisoning_neighbor():
+    # In a single Y chunk, the first exposure lacks one wavelength bin
+    # entirely; another exposure measures it correctly. The old w0*hub
+    # produced 0*NaN=NaN and poisoned sum_w despite another valid exposure.
+    invalid = fits.HDUList([
+        fits.PrimaryHDU(data=np.asarray([[np.nan, 0.0]], dtype=np.float32)),
+        fits.ImageHDU(
+            data=np.asarray([[np.nan, 1.0]], dtype=np.float32),
+            name="VAR",
+        ),
+        fits.ImageHDU(
+            data=np.asarray([[int(NO_COVERAGE), 0]], dtype=np.uint16),
+            name="MASK",
+        ),
+    ])
+    valid = fits.HDUList([
+        fits.PrimaryHDU(data=np.asarray([[4.0, 0.0]], dtype=np.float32)),
+        fits.ImageHDU(data=np.ones((1, 2), dtype=np.float32), name="VAR"),
+        fits.ImageHDU(data=np.zeros((1, 2), dtype=np.uint16), name="MASK"),
+    ])
+    try:
+        for n_iter in [0, 3]:
+            sci, var, mask, cov, *_ = _stack_chunk_streaming(
+                hduls=[invalid, valid], y0=0, y1=1,
+                method="invvar_huber", robust_iter=n_iter, huber_c=2.0,
+                clip_sigma=4.0, y_shifts=[0.0, 0.0],
+                y_align_enabled=False, sci_scales=[1.0, 1.0],
+                var_scales=[1.0, 1.0],
+                fatal_bits=np.uint16(NO_COVERAGE), var_floor=None,
+            )
+            np.testing.assert_allclose(sci, [[4.0, 0.0]], atol=1e-7)
+            np.testing.assert_allclose(var, [[1.0, 0.5]], atol=1e-7)
+            np.testing.assert_array_equal(cov, [[1, 2]])
+            np.testing.assert_array_equal(mask, [[0, 0]])
+    finally:
+        invalid.close()
+        valid.close()
