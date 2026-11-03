@@ -95,3 +95,68 @@ The original risk descriptions above record the **pre-remediation state**. The f
 These exercise exact matching, mixed-group rejection, no double subtraction, correct units and variance propagation, missing/corrupt sidecars, strict SCORPIO raw-input refusal, and unindexed MasterBias rejection.
 
 **Release gate:** repeat narrowly targeted Windows tests, then Golden, full fast regression, and Smoke on one pinned commit. Treat this implementation as unverified until those results return. The previous 596-fast-test success belongs to commit `2f190078e755a2c66ccc82729e97fc3b24817720`, not the new branch head.
+
+
+## Follow-up: uncertainty of the *combined* MasterBias (pending Windows QA)
+
+The initial indexed MasterBias variance handoff above transmitted the legacy
+`(1.4826 MAD)^2` **single-exposure scatter** as though it were the uncertainty
+of the combined master. That is not the correct statistical object when a
+single MasterBias realization is subtracted from a science exposure.
+
+The bias producer now uses
+`src/scorpio_pipe/bias_uncertainty.py:master_bias_estimator_variance`
+to calculate a per-pixel **estimator variance** from `N>=2` independent
+Gaussian-approximate CCD bias measurements:
+
+- For the un-clipped arithmetic mean,
+  `Var(B_mean) = s^2/N`, where `s^2` is the unbiased (`ddof=1`)
+  temporal sample variance in ADU².
+- For the un-clipped sample median,
+  `Var(B_median) = s^2 c_N` where `c_N` is the variance of the
+  normal median for unit-variance independent samples. For `2<=N<=64`,
+  `c_N` is computed using the exact Gaussian order-statistic beta
+  marginal / adjacent-order-statistic joint distributions (with numerical
+  integration); e.g. `c_2=0.5`, `c_3≈0.4486711046`,
+  `c_4≈0.2981996185`. For `N>64` the documented asymptotic
+  `π/(2N)` is used.
+- A sigma-clipped mean has data-dependent selection. The producer
+  estimates variance using the full temporal `s²` divided by the number
+  of retained values, labels it `CLIPAPPX`, and marks pixels with fewer
+  than two retained samples as `BADPIX`. This model is **approximate**
+  and should undergo clip-threshold-specific injection/Monte Carlo
+  studies before scientific certification.
+- A single bias exposure can no longer masquerade as an empirical master
+  with a zero-variance plane; `N=1` is rejected.
+- FITS primary headers carry `SB_VMOD` (`MEANSEM`,
+  `GAUSSMED`, `MEDASYMP`, `CLIPAPPX`), `SB_VFAC` where constant,
+  `SB_NMIN`, `NBIAS` and `BUNIT=ADU^2`; the group index includes a
+  variance-definition record. Corrected a separate FITS Header copy
+  bug so `RN_SRC` and `NOISRC` remain visible with GAIN/RDNOISE.
+
+**Crucial caveats:** The model assumes independent bias-frame read noise,
+stationary electronics and an approximately Gaussian temporal distribution.
+It does not represent common-mode drift, readout correlations, shutter/
+temperature evolution, or the covariance across scientific exposures
+created by subtracting the *same* MasterBias from each exposure. The
+coadded stack variance must eventually retain this shared calibration term
+instead of reducing it as though every exposure had an independent bias.
+Those effects require their own science validation and covariance model.
+
+**Compatibility concern:** Already-produced `master_bias_var.fits` files
+from older runs contain the legacy temporal-scatter definition. They must
+be regenerated before using the revised estimator interpretation; a
+cache/schema migration guard and identification of all old artifacts are
+still outstanding. This PR remains Draft.
+
+Reference basis: MIT 18.650 "Order Statistics, Quantiles, and Sample Quantiles"
+(https://math.mit.edu/~rmd/650/ordstats-quant.pdf), particularly the
+Beta representation of continuous order statistics; N. Davison,
+*Statistical Models*, sample quantile asymptotic normality. These are
+the theoretical grounds for the normal-order-statistic factor rather
+than a claim of empirical calibration of SCORPIO detector read noise.
+
+**Current QA status:** The earlier green result was at
+`4499d31f7352c093551e253a86f0db3730f26088`. The new
+estimator implementation and its Monte Carlo tests have not yet been
+executed in the user's Windows worktree.
