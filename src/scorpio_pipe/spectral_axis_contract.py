@@ -105,6 +105,10 @@ def read_spectral_axis_contract(
         flexure_applied = bool(val)
         if flexure_applied:
             flag = str(hdr.get("FLXFLAG") or "").strip().upper()
+            if flag == "UNVERIFIED":
+                raise ValueError(
+                    f"{source}: DLAMAP=True contradicts unverified flexure"
+                )
             if flag != "OK":
                 raise ValueError(
                     f"{source}: DLAMAP=True requires independently "
