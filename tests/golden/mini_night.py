@@ -45,6 +45,7 @@ def _sc2_header(
     h["EXPTIME"] = (float(exptime_s), "Exposure time (s)")
     h["RATE"] = 185.0
     h["GAIN"] = 0.62
+    h["RDNOISE"] = (3.0, "Synthetic CCD read noise [electrons]")
     h["NODE"] = "E"
     h["BINNING"] = "1x1"
     h["UT"] = "14:59:02.89"
@@ -71,6 +72,32 @@ def _write_fits(path: Path, data: np.ndarray, header: "fits.Header") -> Path:
 
 def _gauss1d(x: np.ndarray, mu: float, sig: float) -> np.ndarray:
     return np.exp(-0.5 * ((x - float(mu)) / float(sig)) ** 2)
+
+
+def _synthetic_ccd(
+    mean_photo_adu: np.ndarray,
+    rng: np.random.Generator,
+    *,
+    gain_e_per_adu: float = 0.62,
+    read_noise_e: float = 3.0,
+) -> np.ndarray:
+    """Sample photoelectron shot noise and independent CCD read noise.
+
+    All Golden input frames have already had their electronic bias pedestal
+    removed (zero-offset ADU). This matches the Poisson+read-noise variance
+    estimator used when a raw science input lacks an upstream VAR extension.
+    Nonzero bias offsets need a separate explicit debiasing pathway.
+    """
+    mean = np.asarray(mean_photo_adu, dtype=np.float64)
+    if not np.all(np.isfinite(mean)) or np.any(mean < 0):
+        raise ValueError("Synthetic photoelectron mean must be nonnegative and finite")
+    gain = float(gain_e_per_adu)
+    rn = float(read_noise_e)
+    if not (np.isfinite(gain) and gain > 0 and np.isfinite(rn) and rn >= 0):
+        raise ValueError("Synthetic CCD gain/read noise must be physical")
+    poisson_e = rng.poisson(mean * gain)
+    noise_e = rng.normal(0.0, rn, size=mean.shape)
+    return (poisson_e + noise_e) / gain
 
 
 def make_mini_night(tmp_path: Path) -> MiniNight:
@@ -102,18 +129,20 @@ def make_mini_night(tmp_path: Path) -> MiniNight:
     x = np.arange(nx, dtype=float)
 
     # --- bias frames ---
-    bias_level = 1000.0
-    rn = 3.0
+    # All frames use a zero electronic pedestal so the *estimated* Poisson
+    # variance does not mistake a detector bias offset for source photons.
+    bias_level = 0.0
     for i in range(3):
         h = _sc2_header(imagetyp="bias", obj=f"bias{i+1}", ny=ny, nx=nx, exptime_s=0.0)
-        img = bias_level + rng.normal(0.0, rn, size=(ny, nx))
+        img = bias_level + _synthetic_ccd(np.zeros((ny, nx)), rng)
         _write_fits(data_dir / f"bias_{i+1:02d}.fits", img, h)
 
     # --- flat frames ---
     for i in range(3):
         h = _sc2_header(imagetyp="flat", obj=f"flat{i+1}", ny=ny, nx=nx, exptime_s=10.0)
         grad = 1.0 + 0.15 * (x / float(nx - 1))
-        img = bias_level + 5000.0 * grad[None, :] + rng.normal(0.0, 10.0, size=(ny, nx))
+        flat_signal = np.broadcast_to(5000.0 * grad[None, :], (ny, nx))
+        img = bias_level + _synthetic_ccd(flat_signal, rng)
         _write_fits(data_dir / f"flat_{i+1:02d}.fits", img, h)
 
     # --- neon (arc) frames ---
@@ -123,7 +152,8 @@ def make_mini_night(tmp_path: Path) -> MiniNight:
         spec = np.zeros(nx, dtype=float)
         for mu in line_x:
             spec += 700.0 * _gauss1d(x, mu, 1.2)
-        img = bias_level + 50.0 + spec[None, :] + rng.normal(0.0, 2.0, size=(ny, nx))
+        neon_signal = np.broadcast_to(50.0 + spec[None, :], (ny, nx))
+        img = bias_level + _synthetic_ccd(neon_signal, rng)
         _write_fits(data_dir / f"neon_{i+1:02d}.fits", img, h)
 
     # --- object (science) frames ---
@@ -135,8 +165,9 @@ def make_mini_night(tmp_path: Path) -> MiniNight:
 
     for i in range(2):
         h = _sc2_header(imagetyp="object", obj=f"obj{i+1}", ny=ny, nx=nx, exptime_s=300.0)
-        img = bias_level + 120.0 + sky_spec[None, :] + rng.normal(0.0, 4.0, size=(ny, nx))
-        img[28:36, :] += obj_bump[None, :]
+        object_signal = np.broadcast_to(120.0 + sky_spec[None, :], (ny, nx)).copy()
+        object_signal[28:36, :] += obj_bump[None, :]
+        img = bias_level + _synthetic_ccd(object_signal, rng)
         _write_fits(data_dir / f"obj_{i+1:02d}.fits", img, h)
 
     # Hand pairs for wavesolution: enforce a perfectly linear dispersion law.
