@@ -15,6 +15,10 @@ from numpy.polynomial.chebyshev import chebvander2d, chebval2d
 log = logging.getLogger(__name__)
 
 
+class ScienceSetupMismatchError(RuntimeError):
+    """Mutually incompatible science setups cannot share a wavelength map."""
+
+
 # --------------------------- IO helpers ---------------------------
 
 
@@ -1525,7 +1529,7 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
                 parts = []
                 for k, paths in setup_groups.items():
                     parts.append({"setup_key": list(k), "n": len(paths), "examples": paths[:3]})
-                raise RuntimeError(
+                raise ScienceSetupMismatchError(
                     "Multiple distinct science setups detected in this wavesolution run. "
                     "Build wavelength solutions per-setup (separate work dirs/configs), or run in a mode that "
                     "produces per-setup solutions. Details: "
@@ -1563,11 +1567,14 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
                 "n_arcs": int(len(arc_list)),
                 "arc_checks": arc_checks,
             }
-    except CalibrationMismatchError:
-        # must-match mismatch is a hard ERROR
+    except (CalibrationMismatchError, ScienceSetupMismatchError):
+        # Must-match calibration mismatches and mixed science setups are
+        # explicitly fatal. Never downgrade these deterministic science
+        # configuration errors to ARC_COMPAT_CHECK_FAILED warnings.
         raise
     except Exception as e:
-        # Do not fail the whole stage just because we could not read headers.
+        # Independent unreadable ARC metadata remain a diagnostic warning;
+        # deterministic incompatibilities above must never enter this path.
         try:
             from scorpio_pipe.qc.flags import make_flag
 
