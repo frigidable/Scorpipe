@@ -389,7 +389,8 @@ def test_production_kelson_bspline_and_count_v1_row_plans_full_chain(y_order):
         n = ny*nx
         outputs = np.column_stack([
             forward(np.eye(n)[j]) for j in range(n)
-        ]).T
+        ])
+        assert outputs.shape == (2, n)
         design = op.design.toarray()
         root = np.sqrt(op.fit_weights)
         train = design[op.fit_indices]*root[:, None]
