@@ -53,7 +53,11 @@ class AutoConfig:
             # duplicated "work/.../work/..." when resolving relative paths.
             work_dir=self.work_dir,
             project={
-                "wave_reference": "UNKNOWN",
+                # The bundled SCORPIO He-Ne-Ar wavelength lists (neon_lines.csv
+                # and henear_lines.csv) explicitly use standard-air Angstroms.
+                # This describes the chosen atlas, not an instrument-intrinsic
+                # prohibition on later air/vacuum conversions.
+                "wave_reference": "air",
                 "barycentric_correction": "OFF",
             },
             instrument=instrument_section,
