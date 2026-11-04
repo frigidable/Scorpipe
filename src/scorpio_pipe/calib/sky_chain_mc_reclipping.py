@@ -165,7 +165,7 @@ def synthetic_reclipped_sky_to_1d_coverage(
             "obj": obj.ravel(), "base": base_signal, "var_ind": v_ind,
             "sensitivity": sensitivity, "total_var": total_var,
             "baseline_keep": keep0, "sky_operator": sky_op,
-            "exposure": ex, "refit": refit,
+            "knot": knot, "exposure": ex,
         })
 
     def predicted(left_E: np.ndarray, right_E: np.ndarray,
@@ -236,14 +236,17 @@ def synthetic_reclipped_sky_to_1d_coverage(
         for e, state in enumerate(states):
             noisy = (state["base"] + indep_noise[e][k]
                      + state["sensitivity"]*common_bias[labels[e]][k])
-            fit = state["refit"](noisy[idx])
+            fit = _fit_kelson_bspline(
+                state["wave"].ravel()[idx], yfit, noisy[idx],
+                state["total_var"][idx], knot_step_A=4., degree=2,
+                y_order=int(y_order), clip_sigma=float(clip_sigma),
+                max_iter=4, min_pixels=64, rng=np.random.default_rng(0),
+            )
             kept = np.asarray(fit["_cache"]["keep"], dtype=bool)
             if kept.shape != state["baseline_keep"].shape:
                 raise RuntimeError("Synthetic refit sky sample size changed")
             if not np.array_equal(
-                np.asarray(fit["basis"]["t"]), knot if False else
-                # The exact saved knot vector is checked per exposure.
-                state["sky_operator"].knots
+                np.asarray(fit["basis"]["t"]), state["knot"]
             ):
                 raise RuntimeError("Synthetic refit sky wavelength knots changed")
             changed[k, e] = np.any(kept != state["baseline_keep"])
