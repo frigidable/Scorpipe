@@ -131,6 +131,7 @@ def covariance_of_frozen_sky_chain_grouped_pair(
 
     independent = 0.
     groups: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    group_shapes: dict[str, tuple[int, int]] = {}
     for i, (exposure, sky, prevar, sensitivity, gid, valid) in enumerate(zip(
         exposures, sky_operators, independent_variances, bias_sensitivities,
         group_ids, validated,
@@ -139,10 +140,14 @@ def covariance_of_frozen_sky_chain_grouped_pair(
         prevar = np.asarray(prevar, dtype=np.float64)
         sensitivity = np.asarray(sensitivity, dtype=np.float64)
         if (not isinstance(sky, FrozenSkyWLS) or sky.n_pixels != int(np.prod(shape))
+                or sky.ridge != 0.
                 or prevar.shape != shape or sensitivity.shape != shape
                 or not np.isfinite(prevar).all() or np.any(prevar < 0)
                 or not np.isfinite(sensitivity).all()):
             raise ValueError("Pre-sky noise, sensitivity and frozen SkySub CCD geometry invalid")
+        if gid in group_shapes and group_shapes[gid] != shape:
+            raise ValueError("Same MasterBias group has incompatible 2-D CCD shapes")
+        group_shapes[gid] = shape
         p = _chain_pre_sky_functional(
             exposure, ny_out=ny_out, nlam=nlam,
             extraction=E_left, fluxcal_transfer=d,

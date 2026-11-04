@@ -247,3 +247,30 @@ def test_unknown_upstream_lineage_and_unsupported_geometry_fail_closed(damage):
         ]
     with pytest.raises(ValueError):
         covariance_of_frozen_sky_chain_grouped_pair(**args)
+
+
+def test_same_group_rejects_different_raw_ccd_shapes_with_equal_pixel_count():
+    """A 2x8 and 4x4 CCD cannot share one mapped MasterBias pixel field."""
+    s = _model(("A", "A"))
+    args = _kwargs(s)
+    old = s["exposures"][1]
+    args["exposures"] = [s["exposures"][0], FrozenCovarianceExposure(
+        old.row_plans, old.input_variance.reshape(2, 8),
+        old.valid_mask.reshape(2, 8), old.stack_weights,
+        old.y_shift, old.output_scale,
+    )]
+    with pytest.raises(ValueError):
+        covariance_of_frozen_sky_chain_grouped_pair(**args)
+
+
+def test_ridge_sky_fit_rejected_as_not_production_kelson_lsqr():
+    s = _model()
+    args = _kwargs(s)
+    source = s["ops"][0]
+    args["sky_operators"] = [
+        FrozenSkyWLS(source.design, source.fit_indices,
+                     source.fit_weights, ridge=0.001),
+        s["ops"][1],
+    ]
+    with pytest.raises(ValueError, match="SkySub CCD geometry"):
+        covariance_of_frozen_sky_chain_grouped_pair(**args)
