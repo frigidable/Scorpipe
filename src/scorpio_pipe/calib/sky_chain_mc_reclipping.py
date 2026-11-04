@@ -164,7 +164,9 @@ def synthetic_reclipped_sky_to_1d_coverage(
             "wave": wavelength, "basis": basis, "sky_true": sky_true,
             "obj": obj.ravel(), "base": base_signal, "var_ind": v_ind,
             "sensitivity": sensitivity, "total_var": total_var,
-            "baseline_keep": keep0, "sky_operator": sky_op,
+            "baseline_keep": keep0,
+            "baseline_lsqr_stop": int(fit0["solver_diagnostics"]["stop_code"]),
+            "sky_operator": sky_op,
             "knot": knot, "exposure": ex,
         })
 
@@ -284,8 +286,9 @@ def synthetic_reclipped_sky_to_1d_coverage(
         and np.max(np.abs(coverage95-.95)) <= tol_95
     )
     n_bad = np.sum(bad_stop, axis=0).astype(int).tolist()
+    baseline_stops = [int(q["baseline_lsqr_stop"]) for q in states]
     n_changed = np.sum(changed, axis=0).astype(int).tolist()
-    if any(n_bad):
+    if any(n_bad) or any(code not in (1, 2) for code in baseline_stops):
         status = "NUMERIC_UNSTABLE"
     elif any(n_changed):
         status = "SELECTION_VARIABLE"
@@ -312,6 +315,7 @@ def synthetic_reclipped_sky_to_1d_coverage(
         "conditional_mc_consistent": consistent,
         "selection_change_fraction_any_exposure": float(np.mean(np.any(changed, axis=1))),
         "selection_changed_per_exposure": n_changed,
+        "baseline_lsqr_stop_codes": baseline_stops,
         "nonconverged_per_exposure": n_bad,
         "tolerances": {
             "relative_variance": tol_var,
