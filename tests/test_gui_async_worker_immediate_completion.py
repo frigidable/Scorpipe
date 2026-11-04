@@ -84,3 +84,42 @@ def test_worker_survives_deleted_qt_signal_owner(raise_in_worker: bool) -> None:
         release.set()
     assert handle.wait(timeout_ms=3000)
     assert handle.is_done
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_terminal_state_visible_inside_completion_callback(raises: bool) -> None:
+    """Callbacks must not race RunHandle._done, even under immediate delivery."""
+    import threading
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    started = threading.Event()
+    release = threading.Event()
+    seen = []
+
+    def job():
+        started.set()
+        if not release.wait(timeout=3.):
+            raise RuntimeError("test worker release timed out")
+        if raises:
+            raise ValueError("intentional-terminal-state-failure")
+        return "completed"
+
+    handle = run_in_thread(
+        job,
+        name="test-worker-terminal-callback-order",
+        on_finished=lambda result: seen.append(("finished", result, handle.is_done)),
+        on_failed=lambda traceback: seen.append(("failed", traceback, handle.is_done)),
+    )
+    try:
+        assert started.wait(timeout=2.), "Worker was not scheduled"
+    finally:
+        release.set()
+
+    assert _wait_for(app, lambda: len(seen) == 1)
+    assert handle.is_done
+    if raises:
+        assert seen[0][0] == "failed"
+        assert "intentional-terminal-state-failure" in seen[0][1]
+    else:
+        assert seen[0][:2] == ("finished", "completed")
+    assert seen[0][2] is True, "Terminal callback observed a nonterminal handle"

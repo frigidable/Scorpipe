@@ -342,8 +342,14 @@ class _PoolRunnable(QtCore.QRunnable):
                 outcome = "cancelled"
             elif h.is_stale:
                 outcome = "stale"
-            elif not _emit_worker_signal(h.worker, "finished", res):
-                outcome = "stale"
+            else:
+                # A Qt callback can run on the receiving thread while
+                # signal.emit() is still in progress. Publish completion
+                # BEFORE delivering the callback, so clients observing a
+                # finished result always see handle.is_done == True.
+                h._done.set()
+                if not _emit_worker_signal(h.worker, "finished", res):
+                    outcome = "stale"
         except Exception:
             tb = traceback.format_exc()
             if h.is_cancelled:
@@ -352,6 +358,9 @@ class _PoolRunnable(QtCore.QRunnable):
                 outcome = "stale"
             else:
                 outcome = "failed"
+                # Mirror the successful path: even an immediate failed
+                # callback must observe terminal handle state.
+                h._done.set()
                 if not _emit_worker_signal(h.worker, "failed", tb):
                     outcome = "stale"
         finally:
@@ -598,9 +607,11 @@ def run_in_thread(
             _mark_job_running(h)
             res = fn()
             if not (h.is_stale or h.is_cancelled):
+                h._done.set()
                 sig.finished.emit(res)
             _finish_job(h, outcome=("cancelled" if h.is_cancelled else ("stale" if h.is_stale else "finished")))
         except Exception:
+            h._done.set()
             sig.failed.emit(traceback.format_exc())
             _finish_job(h, outcome="failed")
 
