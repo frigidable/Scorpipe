@@ -250,16 +250,39 @@ def test_unknown_upstream_lineage_and_unsupported_geometry_fail_closed(damage):
 
 
 def test_same_group_rejects_different_raw_ccd_shapes_with_equal_pixel_count():
-    """A 2x8 and 4x4 CCD cannot share one mapped MasterBias pixel field."""
+    """Both geometries are independently valid before group compatibility fails."""
+    from scorpio_pipe.stages.linearize import _build_linearize_row_plan
+
     s = _model(("A", "A"))
     args = _kwargs(s)
-    old = s["exposures"][1]
-    args["exposures"] = [s["exposures"][0], FrozenCovarianceExposure(
-        old.row_plans, old.input_variance.reshape(2, 8),
-        old.valid_mask.reshape(2, 8), old.stack_weights,
-        old.y_shift, old.output_scale,
-    )]
-    with pytest.raises(ValueError):
+    a, b = s["exposures"]
+
+    # Four output slit rows. Exposure A supplies rows 2-3; exposure B,
+    # with a true 2x8 RAW geometry, supplies rows 0-1.
+    wa = np.zeros_like(a.stack_weights)
+    wb = np.zeros_like(b.stack_weights)
+    wa[2:] = 1.
+    wb[:2] = 1.
+    first = FrozenCovarianceExposure(
+        a.row_plans, a.input_variance, a.valid_mask, wa,
+        a.y_shift, a.output_scale,
+    )
+    row_plan = _build_linearize_row_plan(
+        np.arange(8, dtype=float), np.linspace(-.5, 7.5, 4),
+    )
+    assert row_plan is not None
+    second = FrozenCovarianceExposure(
+        [row_plan, row_plan], np.ones((2, 8)), np.ones((2, 8), dtype=bool),
+        wb, 0., b.output_scale,
+    )
+    args["exposures"] = [first, second]
+    args["independent_variances"] = [
+        s["var"][0], np.ones((2, 8)),
+    ]
+    args["bias_sensitivities"] = [
+        s["sensitivity"][0], np.ones((2, 8)),
+    ]
+    with pytest.raises(ValueError, match="incompatible 2-D CCD shapes"):
         covariance_of_frozen_sky_chain_grouped_pair(**args)
 
 

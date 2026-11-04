@@ -84,8 +84,10 @@ derive on-the-fly extraction weights, differentiate clipping decisions,
 couple uncertain wavelength solutions to source flux, derive MasterFlat
 correlation fields, propagate the resampled covariance into an actual
 published FITS product or attest an observational dataset. Testing
-correct mathematics does NOT release scientific `VAR`:
-`science_uncertainty_qualified=false`, `SBCOVQ=UNMODEL` and
-`VCMPQ=SKY_LOST` remain scientifically unchanged.
+correct mathematics does NOT release scientific `VAR`. This API
+returns only the independent, shared and total covariance **numbers**;
+it has no mechanism to issue a `science_uncertainty_qualified` flag.
+The existing `SBCOVQ=UNMODEL` and `VCMPQ=SKY_LOST` statuses
+remain scientifically unchanged.
 
 No real observation inputs or output files are used in these tests.
