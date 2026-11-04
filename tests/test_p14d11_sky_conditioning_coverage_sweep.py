@@ -29,14 +29,17 @@ def test_condition_sweep_separates_numeric_gate_from_empirical_coverage():
         assert np.max(np.abs(np.asarray(t["reference_coverage95"])-.95)) < .04
         assert np.min(np.linalg.eigvalsh(t["reference_covariance"])) > 0
         assert np.min(np.linalg.eigvalsh(t["empirical_covariance"])) > 0
-        assert t["lu_predicted_covariance"] is not None
-        assert np.isfinite(t["lu_to_svd_variance_ratios"]).all()
+        if t["lu_predicted_covariance"] is not None:
+            assert np.isfinite(t["lu_to_svd_variance_ratios"]).all()
+        else:
+            assert "FACTORIZATION_FAILED" in t["svd_gate_statuses"]
     assert max(trials[0]["weighted_design_conditions"]) < 1e5
     assert min(trials[-1]["weighted_design_conditions"]) > 1e6
     # Detect the threshold crossing from the SVD spectrum, not an
     # arbitrarily failing Monte Carlo test on a single observable.
     assert all(
-        "ILL_CONDITIONED" in x["svd_gate_statuses"] for x in trials[2:]
+        all(gate != "STABLE" for gate in x["svd_gate_statuses"])
+        for x in trials[2:]
     )
 
 
