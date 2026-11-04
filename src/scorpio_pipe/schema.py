@@ -570,6 +570,15 @@ class ConfigSchema(BaseModel):
     stack2d: Stack2DBlock = Field(default_factory=Stack2DBlock)
     extract1d: Extract1DBlock = Field(default_factory=Extract1DBlock)
 
+    lsf_model: Dict[str, Any] = Field(default_factory=dict)
+    sky_refine: Dict[str, Any] = Field(default_factory=dict)
+
+    observer_setup_preset: Optional[Dict[str, Any]] = Field(
+        default=None,
+        alias="_observer_setup_preset",
+        exclude=True,
+    )
+
     # Deprecated/compat: historically some configs used a top-level "noise".
     # Stages should prefer namespaced noise (e.g. wavesol.noise).
     noise: Optional[Dict[str, Any]] = None
@@ -589,7 +598,11 @@ class ConfigSchema(BaseModel):
     project_manifest_runtime: Optional[Dict[str, Any]] = Field(
         default=None, alias="_project_manifest", exclude=True
     )
-    _profiles_applied: Optional[List[str]] = None
+    profiles_applied_runtime: Optional[List[str]] = Field(
+        default=None,
+        alias="_profiles_applied",
+        exclude=True,
+    )
 
     @model_validator(mode="before")
     @classmethod

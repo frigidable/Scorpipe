@@ -96,6 +96,8 @@ def load_config(cfg_path: str | Path) -> dict[str, Any]:
     # project_root / rel" switched a fresh GUI run to paths outside its run root.
     # Explicit legacy "work/..." paths stay relative to the Git project root.
     wd = Path(cfg.get("work_dir", cfg_dir))
+    # Preserve the established run-layout initialization contract.
+    ensure_work_layout(wd)
     calib = cfg.get("calib") or {}
     if isinstance(calib, dict):
         def _resolve_calib_path(value: str | Path) -> Path:
