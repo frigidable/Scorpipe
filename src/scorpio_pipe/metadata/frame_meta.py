@@ -382,7 +382,18 @@ def _derive_mid_exposure_utc(dt_utc: datetime, exptime: float | None) -> tuple[d
 
 def _extract_calibration_metadata(b: "_MetaBuilder", dt_utc: datetime, exptime: float | None) -> dict[str, Any]:
     airmass = b.get_float("airmass", ["AIRMASS", "AIRMAS"], default=None)
-    zd = b.get_float("zenith_distance_deg", ["ZDIST", "ZD", "ZENITHD", "ZENITH"], default=None)
+    # In SCORPIO-1 headers, Z is the telescope zenith distance [deg].
+    # Preserve named aliases first; do not interpret Z for other instruments.
+    zd_keys = ["ZDIST", "ZD", "ZENITHD", "ZENITH"]
+    if b.instrument == "SCORPIO1":
+        zd_keys.append("Z")
+    zd = b.get_float("zenith_distance_deg", zd_keys, default=None)
+    if zd is not None and (not math.isfinite(zd) or not 0.0 <= zd <= 180.0):
+        raise HeaderContractError(
+            "Invalid zenith distance: must be finite and within 0..180 degrees",
+            instrument=b.instrument,
+            context={"value": zd, "source": b.prov.get("zenith_distance_deg", "")},
+        )
     parang = b.get_float("parallactic_angle_deg", ["PARANGLE", "PARANG", "PARALLAC"], default=None)
     seeing = b.get_float("seeing_fwhm_arcsec", ["SEEING", "SEEING1", "FWHM"], default=None)
     observatory = b.get_str("observatory", ["OBSERVAT", "OBSERVATORY", "TELESCOP"], default="")
