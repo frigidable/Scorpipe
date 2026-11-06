@@ -43,6 +43,7 @@ def case(tmp_path):
     c = {
         "work_dir": str(run),
         "data_dir": str(data),
+        "project": {"wave_reference": "air"},
         "calib": {"bias_policy": "strict"},
         "flatfield": {"enabled": False},
         "superneon": {"bias_sub": False},
@@ -127,3 +128,29 @@ def test_fatal_policy_and_prior_calibration_products(tmp_path):
     (conf.parent / "02_superbias").mkdir()
     with pytest.raises(RuntimeError, match="Prior stage products"):
         m.collect(conf)
+
+
+def test_air_convention_is_explicit_and_wrong_value_fails_before_build(tmp_path):
+    m = module()
+    conf, cfg, data = case(tmp_path)
+    assert m.collect(conf)[0]["status"] == "PRECHECK_PASSED_NOT_SCIENCE_VALIDATION"
+    for value in ("UNKNOWN", "vacuum", ""):
+        cfg["project"]["wave_reference"] = value
+        conf.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+        with pytest.raises(RuntimeError, match="project.wave_reference=air"):
+            m.collect(conf)
+
+
+def test_autoconfig_emits_air_for_scorpio_instead_of_unknown():
+    from scorpio_pipe.autocfg import AutoConfig
+    for instrument in ("SCORPIO", "SCORPIO-2"):
+        c = AutoConfig(
+            data_dir="D:/synthetic",
+            object_name="Test",
+            frames={"__setup__": {"instrument": instrument, "mode": "Spectra",
+                                    "disperser": "VPHG1200", "slit": "1.0",
+                                    "binning": "1x2", "window": "", "shape": "1032x2080"}},
+            work_dir=".",
+        )
+        data = yaml.safe_load(c.to_yaml_text())
+        assert data["project"]["wave_reference"] == "air"
