@@ -48,3 +48,48 @@ def test_reject_shape_and_gain():
         mod.spatial_pair(a, a[:64])
     with pytest.raises(ValueError, match="gain"):
         mod.spatial_pair(a, a, gain=-3)
+
+
+def test_faint_edge_tiles_reported_and_excluded_without_abort():
+    mod = load()
+    rng = np.random.default_rng(42)
+    y, x = np.mgrid[:256, :256]
+    signal = 12000.0 + 10*x + 5*y
+    a = signal + rng.normal(0, 45, signal.shape)
+    b = signal + rng.normal(0, 45, signal.shape)
+    a[:, :64] = 1000
+    b[:, :64] = 1000
+    result = mod.spatial_pair(a, b, tile=64)
+    assert result["n_tiles_total"] == 16
+    assert result["n_tiles"] == 12
+    assert result["n_tiles_excluded_low_coverage"] == 4
+    assert result["fraction_tiles_accepted"] == 0.75
+    assert np.isnan(result["tile_medians_percent"][:, 0]).all()
+    assert np.isfinite(result["tile_medians_percent"][:, 1:]).all()
+    assert not result["tile_accepted"][:, 0].any()
+    assert np.isfinite(result["highpass_residual_normalized_mad"])
+    assert sum(result["axis_fraction"].values()) == pytest.approx(1.0)
+
+
+def test_partly_illuminated_tiles_fail_only_when_coverage_insufficient():
+    mod = load()
+    a = np.full((128, 128), 1000.0)
+    b = a.copy()
+    a[:32, :] = 12000
+    b[:32, :] = 12000
+    # >1000 bright pixels overall, but no tile reaches the >=75% threshold.
+    with pytest.raises(RuntimeError, match="Insufficient spatial coverage"):
+        mod.spatial_pair(a, b, tile=64)
+
+
+def test_saturated_tile_excluded_and_reported():
+    mod = load()
+    rng = np.random.default_rng(18)
+    a = rng.normal(12000, 40, (256, 256))
+    b = rng.normal(12000, 40, (256, 256))
+    a[64:128, 64:128] = 65000
+    result = mod.spatial_pair(a, b, tile=64)
+    assert result["n_tiles_excluded_low_coverage"] == 1
+    assert result["n_pixels_above_saturation_threshold"] == 64*64
+    assert not result["tile_accepted"][1, 1]
+    assert np.isnan(result["tile_medians_percent"][1, 1])
