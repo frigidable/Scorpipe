@@ -212,7 +212,7 @@ def run(csv_path):
     csv_output = out / "sc1_fast_flat_shift_windows.csv"
     json_output = out / "sc1_fast_flat_shift_summary.json"
     with csv_output.open("w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0]))
+        writer = csv.DictWriter(f, fieldnames=list(dict.fromkeys(k for row in rows for k in row)))
         writer.writeheader(); writer.writerows(rows)
     json_output.write_text(json.dumps({
         "status":"DIAGNOSTIC_ONLY_HOLD", "not_approved_as_shift_calibration":True,
