@@ -42,6 +42,16 @@ def collect(config_path: Path) -> tuple[dict, list[Path]]:
     workdir = Path(str(cfg.get("work_dir", ""))).expanduser()
     if not workdir.is_absolute() or workdir.resolve() != config_path.parent:
         raise RuntimeError("Configured work_dir must exactly equal this config directory")
+    project = cfg.get("project") or {}
+    if not isinstance(project, dict):
+        raise RuntimeError("project must be a YAML mapping")
+    wave_ref = str(project.get("wave_reference") or "").strip().lower()
+    if wave_ref != "air":
+        raise RuntimeError(
+            "SCORPIO-1/2 He-Ne-Ar reference requires project.wave_reference=air "
+            f"for this night (got {wave_ref!r}); correct saved config before stage run. "
+            "Do not bypass typed validation or alter detector FITS."
+        )
     if (cfg.get("calib") or {}).get("bias_policy") != "strict":
         raise RuntimeError("Cross-readout fallback prohibited: require strict bias policy")
     if bool((cfg.get("flatfield") or {}).get("enabled", False)):
