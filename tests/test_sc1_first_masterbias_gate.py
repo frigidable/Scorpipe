@@ -24,8 +24,8 @@ def module():
 def case(tmp_path):
     run = tmp_path / "run"
     data = tmp_path / "raw"
-    run.mkdir()
-    data.mkdir()
+    run.mkdir(parents=True)
+    data.mkdir(parents=True)
     selected = {}
     for role, count in (("bias", 20), ("obj", 7), ("flat", 3), ("neon", 2)):
         selected[role] = []
