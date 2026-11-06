@@ -49,6 +49,7 @@ def robust_sigma(values):
 
 
 def spatial_pair(a, b, *, gain=3.5, readnoise_adu=2.1, tile=64):
+    """Sparse-coverage-safe diagnostic; no interpretation as certified flat."""
     if a.shape != b.shape or a.ndim != 2:
         raise ValueError("Flat dimensions mismatch")
     if gain <= 0 or readnoise_adu < 0 or tile <= 0:
@@ -67,49 +68,115 @@ def spatial_pair(a, b, *, gain=3.5, readnoise_adu=2.1, tile=64):
     ratio = np.full(a.shape, np.nan, dtype=np.float64)
     ratio[valid] = a[valid]/(scale*b[valid])-1.0
     ny, nx = h//tile, w//tile
-    tiles = ratio.reshape(ny,tile,nx,tile).transpose(0,2,1,3).reshape(ny,nx,tile*tile)
-    flags = valid.reshape(ny,tile,nx,tile).transpose(0,2,1,3).reshape(ny,nx,tile*tile)
-    if not np.all(flags.sum(axis=-1) >= int(0.75*tile*tile)):
-        raise RuntimeError("Some spatial tiles have <75% useful pixels")
-    tile_med = np.nanmedian(tiles, axis=-1)
-    model_rel = np.repeat(np.repeat(tile_med,tile,axis=0),tile,axis=1)
-    relative_scale = scale*(1.0+model_rel)
-    residual = a-relative_scale*b
-    # Conditional noise model only: assumes header GAIN is electrons/ADU.
-    expected = np.sqrt(
-        (np.maximum(a,0) + relative_scale**2*np.maximum(b,0))/gain
-        + (1.0+relative_scale**2)*readnoise_adu**2
+    tiles = ratio.reshape(ny, tile, nx, tile).transpose(
+        0, 2, 1, 3
+    ).reshape(ny, nx, tile*tile)
+    flags = valid.reshape(ny, tile, nx, tile).transpose(
+        0, 2, 1, 3
+    ).reshape(ny, nx, tile*tile)
+    counts = flags.sum(axis=-1)
+    tile_fraction = counts.astype(float)/(tile*tile)
+    enough = counts >= int(np.ceil(0.75*tile*tile))
+    n_tiles = int(enough.size)
+    n_used = int(enough.sum())
+    # Allow edge/low-illumination tiles, but reject unusably narrow coverage.
+    min_tiles = max(8, int(np.ceil(0.10*n_tiles)))
+    if n_used < min_tiles:
+        raise RuntimeError(
+            f"Insufficient spatial coverage: {n_used}/{n_tiles} tiles "
+            f"with >=75% valid bright pixels (require {min_tiles})"
+        )
+
+    tile_med = np.full((ny, nx), np.nan, dtype=np.float64)
+    for iy, ix in zip(*np.nonzero(enough)):
+        tile_med[iy, ix] = float(np.median(tiles[iy, ix, flags[iy, ix]]))
+
+    # Use the locally estimated ratio only in sufficiently illuminated tiles.
+    model_rel = np.repeat(np.repeat(tile_med, tile, axis=0), tile, axis=1)
+    selected = valid & np.repeat(np.repeat(enough, tile, axis=0), tile, axis=1)
+    local_scale = scale*(1.0+model_rel[selected])
+    aa = a[selected]
+    bb = b[selected]
+    # Noise model is conditional on GAIN being e-/ADU; not instrument-certified.
+    predicted = np.sqrt(
+        (np.maximum(aa, 0.0)+local_scale**2*np.maximum(bb, 0.0))/gain
+        +(1.0+local_scale**2)*readnoise_adu**2
     )
-    z = (residual/expected)[valid]
-    center = float(np.mean(tile_med))
-    col = np.mean(tile_med,axis=0)-center
-    row = np.mean(tile_med,axis=1)-center
-    interaction = tile_med - (center+col[None,:]+row[:,None])
-    total = float(np.var(tile_med))
-    if total > 0:
+    z = (aa-local_scale*bb)/predicted
+
+    # Missing tiles make naive row/column variance decomposition biased.
+    # Calculate sequential explained-variance shares on only observed tiles:
+    # dispersion-X first, slit-Y conditional on X, then interaction residual.
+    iy, ix = np.nonzero(enough)
+    v = tile_med[enough]
+    grand = float(np.mean(v))
+    counts_x = np.bincount(ix, minlength=nx)
+    counts_y = np.bincount(iy, minlength=ny)
+    pred_x = np.bincount(ix, weights=v, minlength=nx)[ix]/counts_x[ix]
+    ss0 = float(np.sum((v-grand)**2))
+    ssx = float(np.sum((v-pred_x)**2))
+    x_effect = np.zeros(nx, dtype=np.float64)
+    y_effect = np.zeros(ny, dtype=np.float64)
+    for _ in range(100):
+        x_next = np.bincount(
+            ix, weights=v-grand-y_effect[iy], minlength=nx
+        )/np.maximum(counts_x, 1)
+        y_next = np.bincount(
+            iy, weights=v-grand-x_next[ix], minlength=ny
+        )/np.maximum(counts_y, 1)
+        change = max(
+            float(np.max(np.abs(x_next-x_effect))),
+            float(np.max(np.abs(y_next-y_effect))),
+        )
+        x_effect, y_effect = x_next, y_next
+        if change < 1e-12:
+            break
+    ssxy = float(np.sum((v-grand-x_effect[ix]-y_effect[iy])**2))
+    if ss0 > 1e-24:
+        shares = np.maximum(
+            [ss0-ssx, ssx-ssxy, ssxy], 0.0
+        )
+        shares = shares/np.sum(shares)
         fractions = dict(
-            dispersion_x=float(np.var(col)/total),
-            slit_y=float(np.var(row)/total),
-            interaction_xy=float(np.var(interaction)/total),
+            dispersion_x=float(shares[0]),
+            slit_y=float(shares[1]),
+            interaction_xy=float(shares[2]),
         )
     else:
         fractions = dict(dispersion_x=0.0, slit_y=0.0, interaction_xy=0.0)
+
     return dict(
         tile_size=tile,
         n_pixels=int(valid.sum()),
-        n_tiles=int(tile_med.size),
+        n_pixels_in_accepted_tiles=int(selected.sum()),
+        n_tiles=n_used,
+        n_tiles_total=n_tiles,
+        n_tiles_excluded_low_coverage=n_tiles-n_used,
+        fraction_tiles_accepted=n_used/n_tiles,
+        fraction_pixels_bright_and_valid=float(valid.mean()),
+        fraction_selected_among_valid=float(selected.sum()/valid.sum()),
+        n_pixels_below_brightness_threshold=int(np.sum(
+            np.isfinite(a) & np.isfinite(b)
+            & ((a <= 2500) | (b <= 2500))
+        )),
+        n_pixels_above_saturation_threshold=int(np.sum(
+            np.isfinite(a) & np.isfinite(b)
+            & ((a >= 60000) | (b >= 60000))
+        )),
         scalar_a_over_b=scale,
-        tile_ratio_std_percent=100*float(np.std(tile_med)),
-        tile_ratio_p05_percent=100*float(np.percentile(tile_med,5)),
-        tile_ratio_p95_percent=100*float(np.percentile(tile_med,95)),
-        tile_ratio_peak_to_peak_percent=100*float(np.ptp(tile_med)),
+        tile_ratio_std_percent=100*float(np.std(v)),
+        tile_ratio_p05_percent=100*float(np.percentile(v, 5)),
+        tile_ratio_p95_percent=100*float(np.percentile(v, 95)),
+        tile_ratio_peak_to_peak_percent=100*float(np.ptp(v)),
         highpass_residual_normalized_mad=robust_sigma(z),
         highpass_residual_fraction_gt_5sigma=float(np.mean(np.abs(z)>5)),
-        median_expected_pixel_sigma_adu=float(np.median(expected[valid])),
+        median_expected_pixel_sigma_adu=float(np.median(predicted)),
         axis_fraction=fractions,
+        axis_decomposition="sequential_OLS_X_first_Y_conditional_observed_tiles",
         tile_medians_percent=100*tile_med,
+        tile_valid_fraction=tile_fraction,
+        tile_accepted=enough,
     )
-
 
 def selftest():
     rng = np.random.default_rng(1206)
@@ -161,23 +228,34 @@ def run(csv_path):
         for tile in (32,64,128):
             res=spatial_pair(corrected[i],corrected[j],tile=tile)
             tile_map=res.pop("tile_medians_percent")
+            fractions=res.pop("tile_valid_fraction")
+            accepted=res.pop("tile_accepted")
             if tile==64:
                 for y,x in np.ndindex(tile_map.shape):
+                    is_accepted=bool(accepted[y,x])
                     tile_rows.append(dict(
                         flat_a=FLATS[i], flat_b=FLATS[j], tile_y=int(y),
-                        tile_x=int(x), relative_offset_percent=float(tile_map[y,x]),
+                        tile_x=int(x),
+                        valid_fraction=float(fractions[y,x]),
+                        accepted_for_model=is_accepted,
+                        relative_offset_percent=(
+                            float(tile_map[y,x]) if is_accepted else ""
+                        ),
                     ))
             res.update(flat_a=FLATS[i],flat_b=FLATS[j])
             results.append(res)
             print(f"{FLATS[i]} / {FLATS[j]} tile={tile}: "
                   f"smooth={res['tile_ratio_std_percent']:.4f}% "
                   f"highpass_zMAD={res['highpass_residual_normalized_mad']:.4f} "
+                  f"coverage={res['n_tiles']}/{res['n_tiles_total']} tiles "
                   f"Xshare={100*res['axis_fraction']['dispersion_x']:.1f}%",flush=True)
     summary=dict(
         status="DIAGNOSTIC_ONLY_HOLD",
         candidate_sidebands_not_certified=True,
         gain_e_per_adu_assumption_unverified=True,
         physical_cause_of_differences_not_identified=True,
+        low_coverage_tiles_excluded_not_silently_imputed=True,
+        x_y_shares_are_order_dependent_for_sparse_coverage=True,
         flats=meta, comparisons=results,
     )
     jpath=csv_path.with_name("sc1_fast_flat_spatial_summary.json")
