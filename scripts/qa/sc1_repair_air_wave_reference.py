@@ -103,6 +103,15 @@ def repair(config: Path, backup_dir: Path) -> dict:
 
     # Validate *in memory* before writing the file.
     cfg = load_config_any(config)
+    effective_project = cfg.get("project") or {}
+    if not isinstance(effective_project, dict):
+        raise RuntimeError("Effective project config must be a YAML mapping")
+    actual_resolved = str(effective_project.get("wave_reference") or "").strip().lower()
+    if mode == "ALREADY_AIR" and actual_resolved != "air":
+        raise RuntimeError(
+            "Saved YAML says air, but effective config after profile overrides "
+            f"has wave_reference={actual_resolved!r}; fix profile source first"
+        )
     cfg.setdefault("project", {})["wave_reference"] = "air"
     build_typed_config(cfg, config_path=config)
     if mode == "ALREADY_AIR":
