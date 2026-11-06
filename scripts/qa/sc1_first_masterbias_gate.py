@@ -76,7 +76,7 @@ def collect(config_path: Path) -> tuple[dict, list[Path]]:
                 raise FileNotFoundError(f"Missing {role} frame: {p}")
             files.append(p)
             if p in all_paths:
-                raise RuntimeError(f"Duplicate FITS used in multiple roles: {p}")
+                raise RuntimeError(f"Duplicate FITS selection (within/across roles): {p}")
             all_paths.append(p)
         if role == "bias" and {p.name.lower() for p in files} != EXPECTED_BIASES:
             raise RuntimeError("Selected 20 BIAS are not the audited early20 cohort")
