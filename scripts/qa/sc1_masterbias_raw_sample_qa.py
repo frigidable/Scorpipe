@@ -153,7 +153,7 @@ def run(config_path, output_path):
     raw_sample = np.empty((20,len(selected)),dtype=np.float64)
     rows = []
     for j, path in enumerate(raw_paths):
-        with fits.open(path,memmap=True,do_not_scale_image_data=True) as hdul:
+        with fits.open(path,memmap=False) as hdul:
             h = hdul[0].header
             data = hdul[0].data
             if data is None or data.shape != EXPECTED_SHAPE:
