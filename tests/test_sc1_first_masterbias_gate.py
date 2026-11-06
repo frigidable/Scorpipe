@@ -86,14 +86,30 @@ def test_invalid_science_bias_mode_fails_closed(tmp_path):
         m.collect(conf)
 
 
-def test_missing_frame_and_wrong_bias_cohort_fail_closed(tmp_path):
+def test_missing_frame_fails_closed(tmp_path):
     m = module()
     conf, cfg, data = case(tmp_path)
     (data / cfg["frames"]["neon"][0]).unlink()
     with pytest.raises(FileNotFoundError):
         m.collect(conf)
-    conf, cfg, data = case(tmp_path / "new")
+
+
+def test_duplicate_bias_selection_fails_closed(tmp_path):
+    m = module()
+    conf, cfg, data = case(tmp_path)
     cfg["frames"]["bias"][-1] = cfg["frames"]["bias"][0]
+    conf.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="Duplicate FITS selection"):
+        m.collect(conf)
+
+
+def test_distinct_but_wrong_bias_cohort_fails_closed(tmp_path):
+    m = module()
+    conf, cfg, data = case(tmp_path)
+    old_name = cfg["frames"]["bias"][-1]
+    replacement_name = "s22800121.fts"
+    (data / replacement_name).write_bytes((data / old_name).read_bytes())
+    cfg["frames"]["bias"][-1] = replacement_name
     conf.write_text(yaml.safe_dump(cfg), encoding="utf-8")
     with pytest.raises(RuntimeError, match="audited early20 cohort"):
         m.collect(conf)
