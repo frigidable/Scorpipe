@@ -80,7 +80,7 @@ def spatial_pair(a, b, *, gain=3.5, readnoise_adu=2.1, tile=64):
     n_tiles = int(enough.size)
     n_used = int(enough.sum())
     # Allow edge/low-illumination tiles, but reject unusably narrow coverage.
-    min_tiles = max(8, int(np.ceil(0.10*n_tiles)))
+    min_tiles = min(n_tiles, max(8, int(np.ceil(0.10*n_tiles))))
     if n_used < min_tiles:
         raise RuntimeError(
             f"Insufficient spatial coverage: {n_used}/{n_tiles} tiles "
