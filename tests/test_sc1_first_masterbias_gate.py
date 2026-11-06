@@ -1,0 +1,113 @@
+"""No production writes: guard exact first SCORPIO-1 MasterBias selection."""
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+
+import numpy as np
+import pytest
+import yaml
+from astropy.io import fits
+
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "qa" / "sc1_first_masterbias_gate.py"
+
+
+def module():
+    spec = importlib.util.spec_from_file_location("sc1_first_bias_gate", SCRIPT)
+    assert spec and spec.loader
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    m.EXPECTED_SHAPE = (6, 8)
+    return m
+
+
+def case(tmp_path):
+    run = tmp_path / "run"
+    data = tmp_path / "raw"
+    run.mkdir()
+    data.mkdir()
+    selected = {}
+    for role, count in (("bias", 20), ("obj", 7), ("flat", 3), ("neon", 2)):
+        selected[role] = []
+        for j in range(1, count+1):
+            name = (f"s228001{j:02d}.fts" if role == "bias"
+                    else f"{role}_{j:02d}.fts")
+            p = data / name
+            hdu = fits.PrimaryHDU(np.full((6, 8), 999, dtype=np.float32))
+            hdu.header["RATE"] = 145 if role in ("bias", "obj") else 225
+            hdu.header["GAIN"] = 0.9 if role in ("bias", "obj") else 3.5
+            hdu.header["NODE"] = "A"
+            hdu.header["BINNING"] = "1x2"
+            hdu.writeto(p)
+            selected[role].append(name)
+    c = {
+        "work_dir": str(run),
+        "data_dir": str(data),
+        "calib": {"bias_policy": "strict"},
+        "flatfield": {"enabled": False},
+        "superneon": {"bias_sub": False},
+        "frames": selected,
+    }
+    config = run / "config.yaml"
+    config.write_text(yaml.safe_dump(c, sort_keys=False), encoding="utf-8")
+    return config, c, data
+
+
+def test_gate_selftest():
+    module().selftest()
+
+
+def test_valid_exact_night_header_gate_is_readonly(tmp_path):
+    m = module()
+    conf, cfg, data = case(tmp_path)
+    all_files = [conf] + list(data.iterdir())
+    baseline = {p: p.read_bytes() for p in all_files}
+    report, paths = m.collect(conf)
+    assert len(paths) == 32
+    assert report["input_counts"] == {"bias": 20, "obj": 7, "flat": 3, "neon": 2}
+    assert report["audited_early20_bias_confirmed"] is True
+    assert report["status"] == "PRECHECK_PASSED_NOT_SCIENCE_VALIDATION"
+    assert "RATE" not in report["readout_modes"]["bias"]  # tokenized readout
+    out = tmp_path / "qa" / "precheck.json"
+    m.run(conf, out, execute=False)
+    assert out.exists()
+    for p in all_files:
+        assert p.read_bytes() == baseline[p]
+    assert len(list(conf.parent.glob("??_*"))) == 0
+
+
+def test_invalid_science_bias_mode_fails_closed(tmp_path):
+    m = module()
+    conf, cfg, data = case(tmp_path)
+    target = data / cfg["frames"]["obj"][0]
+    with fits.open(target, mode="update") as hdu:
+        hdu[0].header["GAIN"] = 0.92
+    with pytest.raises(RuntimeError, match="Unexpected readout"):
+        m.collect(conf)
+
+
+def test_missing_frame_and_wrong_bias_cohort_fail_closed(tmp_path):
+    m = module()
+    conf, cfg, data = case(tmp_path)
+    (data / cfg["frames"]["neon"][0]).unlink()
+    with pytest.raises(FileNotFoundError):
+        m.collect(conf)
+    conf, cfg, data = case(tmp_path / "new")
+    cfg["frames"]["bias"][-1] = cfg["frames"]["bias"][0]
+    conf.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="audited early20 cohort"):
+        m.collect(conf)
+
+
+def test_fatal_policy_and_prior_calibration_products(tmp_path):
+    m = module()
+    conf, cfg, data = case(tmp_path)
+    cfg["calib"]["bias_policy"] = "degraded"
+    conf.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="strict"):
+        m.collect(conf)
+    cfg["calib"]["bias_policy"] = "strict"
+    conf.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    (conf.parent / "02_superbias").mkdir()
+    with pytest.raises(RuntimeError, match="Prior stage products"):
+        m.collect(conf)
