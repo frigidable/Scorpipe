@@ -124,6 +124,14 @@ def master_bias_estimator_variance(
     individual_var = np.var(data, axis=0, ddof=1)
     invalid = np.zeros(data.shape[1:], dtype=bool)
 
+    if method == "median" and sigma_clip > 0:
+        raise ValueError(
+            "MasterBias bias_sigma_clip>0 is not implemented for "
+            "bias_combine=median: refusing to silently ignore clipping. "
+            "Use median with zero clipping or choose a scientifically "
+            "validated robust estimator."
+        )
+
     if method == "median":
         sci = np.median(data, axis=0)
         factor = normal_median_variance_factor(n)

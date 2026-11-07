@@ -162,3 +162,27 @@ def test_masterbias_pipeline_writes_estimator_var_and_provenance(
     # of the *median master* is RN_e^2/gain^2 times finite-N factor.
     model = (3.0 / 0.62)**2 * normal_median_variance_factor(3)
     assert np.mean(var) == pytest.approx(model, rel=0.07)
+
+
+@pytest.mark.parametrize("bad_clip", [2.0, 3.5, 5.0])
+def test_median_sigma_clip_is_not_silently_ignored(bad_clip: float) -> None:
+    arr = np.zeros((20, 2, 3))
+    arr[-1, 0, 0] = 1.0e4
+    with pytest.raises(ValueError, match="refusing to silently ignore clipping"):
+        master_bias_estimator_variance(
+            arr, combine="median", sigma_clip=bad_clip,
+        )
+
+
+def test_default_unclipped_median_remains_bitwise_identical() -> None:
+    rng = np.random.default_rng(17122026)
+    arr = 1000.0 + rng.normal(0, 3.0, (20, 4, 7))
+    a, va, ma = master_bias_estimator_variance(
+        arr, combine="median", sigma_clip=0.0,
+    )
+    b, vb, mb = master_bias_estimator_variance(
+        arr, combine="median",
+    )
+    assert np.array_equal(a, b)
+    assert np.array_equal(va, vb)
+    assert ma == mb
