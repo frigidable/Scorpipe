@@ -32,12 +32,13 @@ SCENARIOS = {"clean":0.0, "row_559":559.0, "transient_17166":17166.0}
 
 def simulate(rn_adu: float, *, n_replicates: int=REPLICATES,
              threshold_adu: float=THRESHOLD_ADU,
-             seed: int=SEED) -> dict:
+             seed: int=SEED, bias_offset_adu: float=OFFSET_ADU) -> dict:
     if not (np.isfinite(rn_adu) and rn_adu>0 and 100<=n_replicates<=2_000_000
-            and np.isfinite(threshold_adu) and threshold_adu>0):
+            and np.isfinite(threshold_adu) and threshold_adu>0
+            and np.isfinite(bias_offset_adu)):
         raise ValueError("Invalid simulation scale, realization count or threshold")
     rng=np.random.default_rng(seed)
-    clean=np.rint(OFFSET_ADU+rng.normal(0,rn_adu,size=(n_replicates,NBIAS)))
+    clean=np.rint(bias_offset_adu+rng.normal(0,rn_adu,size=(n_replicates,NBIAS)))
     factors=np.asarray([np.nan if n<2 else normal_median_variance_factor(n)
                         for n in range(NBIAS+1)])
     results={}
@@ -68,14 +69,14 @@ def simulate(rn_adu: float, *, n_replicates: int=REPLICATES,
             empirical_var=float(np.var(median,ddof=1))
             mean_reported=float(np.mean(var))
             sigma=np.sqrt(var)
-            residual=np.abs(median-OFFSET_ADU)
+            residual=np.abs(median-bias_offset_adu)
             return {
                 "empirical_estimator_variance_adu2":empirical_var,
                 "mean_reported_variance_adu2":mean_reported,
                 "reported_to_empirical_variance_ratio":mean_reported/empirical_var,
                 "coverage_abs_err_le_reported_1sigma":float(np.mean(residual<=sigma)),
                 "coverage_abs_err_le_reported_1p96sigma":float(np.mean(residual<=1.96*sigma)),
-                "mean_absolute_bias_adu":float(np.mean(median-OFFSET_ADU)),
+                "mean_signed_estimator_bias_adu":float(np.mean(median-bias_offset_adu)),
             }
 
         results[label]={
@@ -94,7 +95,7 @@ def simulate(rn_adu: float, *, n_replicates: int=REPLICATES,
             "n_bias":NBIAS,"readnoise_sigma_adu":float(rn_adu),
             "adc_rounding_to_integer_adu":True,
             "gross_rejection_threshold_adu":float(threshold_adu),
-            "true_bias_offset_adu":OFFSET_ADU,
+            "true_bias_offset_adu":float(bias_offset_adu),
             "finite_n_factor_20":float(factors[20]),
             "finite_n_factor_19":float(factors[19]),
         },
@@ -104,6 +105,7 @@ def simulate(rn_adu: float, *, n_replicates: int=REPLICATES,
         "caveats":[
             "All contaminated scenarios force an outlier into each replicate; these are stress tests, not an estimated observational rate.",
             "Noise is IID rounded Gaussian with a uniform true bias pedestal, not an empirical SCORPIO detector noise distribution.",
+            "Coverage depends on the unknown sub-ADU phase of each pixel's true electronic pedestal; the phase-sensitivity table is essential.",
             "Data-dependent clipping, finite n and integer quantization can yield undercoverage of Gaussian plug-in intervals.",
             "Real validated error bars must be benchmarked against held-out observations or physically grounded injection/recovery.",
             "No source FITS or MasterBias files are read or modified except the input index JSON.",
@@ -127,6 +129,23 @@ def run(index_path:Path,report_path:Path):
     if rn is None or not np.isfinite(float(rn)) or float(rn)<=0:
         raise RuntimeError("Missing positive independent-readnoise estimate in index")
     payload=simulate(float(rn))
+    # ADC phase is unknown for real pixels; show sensitivity rather than
+    # treating a rounded-integer true pedestal as representative of all phases.
+    phase_coverage={}
+    for frac in (0.0,0.25,0.5,0.75):
+        phase=simulate(float(rn),n_replicates=25000,seed=SEED,
+                       bias_offset_adu=OFFSET_ADU+frac)
+        phase_coverage[str(frac)]={
+            label:{
+                "old_1sigma":case["old_estimator"]["coverage_abs_err_le_reported_1sigma"],
+                "candidate_1sigma":case["candidate_clipped_estimator"]["coverage_abs_err_le_reported_1sigma"],
+                "old_1p96sigma":case["old_estimator"]["coverage_abs_err_le_reported_1p96sigma"],
+                "candidate_1p96sigma":case["candidate_clipped_estimator"]["coverage_abs_err_le_reported_1p96sigma"],
+                "candidate_reported_to_empirical_variance_ratio":
+                    case["candidate_clipped_estimator"]["reported_to_empirical_variance_ratio"],
+            } for label,case in phase["conditional_scenarios"].items()
+        }
+    payload["quantization_phase_sensitivity"]=phase_coverage
     payload["source_index"]=str(index_path)
     payload["source_group_gid"]=groups[0]["gid"]
     report_path.parent.mkdir(parents=True,exist_ok=True)
