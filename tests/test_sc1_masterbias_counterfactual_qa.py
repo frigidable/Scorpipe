@@ -80,7 +80,9 @@ def test_threshold_sensitivity_and_invalid_support_not_zeroed():
     high=m.candidate(a,100)
     assert low["n"][0,0]==19 and high["n"][0,0]==20
     a[:,1,1]=np.arange(20)*1000.0
-    # all but the two middle order statistics are outliers at 100 ADU
+    a[9,1,1]=9500.0
+    a[10,1,1]=9500.0
+    # all but the two central measurements are outliers at 100 ADU
     out=m.candidate(a,100)
     assert out["n"][1,1]==2
     assert out["valid"][1,1]
