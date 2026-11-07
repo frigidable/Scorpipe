@@ -89,7 +89,8 @@ def run(config: Path, out: Path):
     if int(np.count_nonzero(saved_dq)) != 0:
         raise RuntimeError("Diagnostic expects original zero-DQ MasterBias")
     params = {thr:_new_accumulator() for thr in THRESHOLDS_ADU}
-    originals_verified=0
+    verified_chunks=0
+    verified_rows=0
     with ExitStack() as cleanup:
         hdus=[cleanup.enter_context(fits.open(p, memmap=False)) for p in paths]
         heads=[h[0].header for h in hdus]
@@ -153,7 +154,8 @@ def run(config: Path, out: Path):
                     acc["active_oldvar_medians"].append(float(np.median(old_var[roi_mask])))
                     acc["active_newvar_medians"].append(float(np.median(new_var[roi_mask])))
                     acc["active_sci_change_medians"].append(float(np.median(delta[roi_mask])))
-            originals_verified+=1
+            verified_chunks+=1
+            verified_rows+=ystop-ystart
             print(f"RECOMPUTE {ystop}/{EXPECTED_SHAPE[0]} rows",flush=True)
     results={}
     for thr,acc in params.items():
@@ -177,7 +179,8 @@ def run(config: Path, out: Path):
         "input_config":str(config), "index_gid":group["gid"],
         "model":"Reject |BIAS_ij - median_j| > fixed ADU threshold; median retained samples; candidate var = s_inlier^2 * Gaussian c_(n_retained). This is a plugin sensitivity proxy, not calibrated after data-dependent rejection.",
         "thresholds_adu":results,
-        "original_full_frame_verified_rows":int(originals_verified),
+        "original_full_frame_verified_rows":int(verified_rows),
+        "original_full_frame_verified_chunks":int(verified_chunks),
         "original_fits_sha256":{p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in products},
         "warnings":[
             "The 30/50/100 ADU cuts are intentionally extreme diagnostic thresholds, not validated cosmic-ray detection settings.",
