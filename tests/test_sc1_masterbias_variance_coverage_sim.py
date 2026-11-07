@@ -49,3 +49,14 @@ def test_quantized_normal_clean_and_row_glitch_reproducible():
 def test_invalid_simulation_parameters_fail_closed(rn,reps,threshold):
     with pytest.raises(ValueError,match="Invalid"):
         load().simulate(rn,n_replicates=reps,threshold_adu=threshold)
+
+
+def test_coverage_depends_on_sub_adu_bias_phase():
+    m=load()
+    s0=m.simulate(3.145,n_replicates=6000,seed=71,bias_offset_adu=999.0)
+    s5=m.simulate(3.145,n_replicates=6000,seed=71,bias_offset_adu=999.5)
+    c0=s0["conditional_scenarios"]["clean"]["candidate_clipped_estimator"]
+    c5=s5["conditional_scenarios"]["clean"]["candidate_clipped_estimator"]
+    assert abs(c0["coverage_abs_err_le_reported_1sigma"]
+               -c5["coverage_abs_err_le_reported_1sigma"]) > 0.03
+    assert s5["parameters"]["true_bias_offset_adu"]==999.5
