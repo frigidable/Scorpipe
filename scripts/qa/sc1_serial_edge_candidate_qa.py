@@ -50,17 +50,18 @@ def robust_sample_metrics(sample):
     median = float(np.median(x))
     inlier = np.abs(x - median) <= 30.0
     fraction_rejected = float(np.mean(~inlier))
-    if not np.any(inlier):
-        raise ValueError("No values remain within 30 ADU of sample median")
     v = x[inlier]
     _, counts = np.unique(x, return_counts=True)
-    variability = bool(np.std(v) >= 0.25 and np.unique(v).size >= 2)
+    variability = bool(
+        v.size >= 2 and np.std(v) >= 0.25 and np.unique(v).size >= 2
+    )
     passes_rejection = fraction_rejected <= 0.01
     return {
         "sample_pixel_count": int(x.size),
         "median_adu": median,
-        "trimmed_mean_adu": float(np.mean(v)),
-        "trimmed_std_adu": float(np.std(v)),
+        "trimmed_mean_adu": float(np.mean(v)) if v.size else None,
+        "trimmed_std_adu": float(np.std(v)) if v.size else None,
+        "empty_30adu_inlier_subset": bool(v.size == 0),
         "untrimmed_mean_adu": float(np.mean(x)),
         "untrimmed_std_adu": float(np.std(x)),
         "trimmed_pixel_count": int(v.size),
@@ -343,6 +344,7 @@ def run(config_file, report_file):
             "Candidate strips are 0:16 and 2064:2080; Y32:992 is arbitrary.",
             "The medians and robust means are descriptive, NOT approved overscan.",
             "Illuminated neighbor bands may have >1% outside +/-30 ADU; retain their full descriptive distributions rather than abort.",
+            "Bimodal illuminated bands may have zero pixels within +/-30 ADU of their median; trimmed stats are then null, untrimmed stats and quality flags remain available.",
             "Candidate regions must pass the provisional 1% screen AND have measurable nonconstant pixel variability (>=0.25 ADU std and >=2 unique levels).",
             "A failed candidate quality screen withholds its electronic offset (null), never applying a correction. This quality screen is NOT overscan certification.",
             "Per-side early20 reference requires >=16 passing early BIAS frames; this remains an uncalibrated screen, not science approval.",
