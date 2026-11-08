@@ -65,7 +65,8 @@ class AutoConfig:
                 **(self.calib or {}),
                 # Bias is best combined with a median to suppress rare outliers.
                 "bias_combine": "median",  # or: mean
-                "bias_sigma_clip": 0.0,  # set to e.g. 5.0 to suppress cosmics
+                "bias_sigma_clip": 0.0,  # sigma-clipped mean only; median clipping fails closed
+                "bias_gross_reject_adu": 0.0,  # opt-in experimental median rejection; never enabled automatically
             },
             cosmics={
                 "enabled": True,
