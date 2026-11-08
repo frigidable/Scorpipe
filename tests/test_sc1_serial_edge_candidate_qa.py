@@ -36,6 +36,7 @@ def test_trimmed_candidate_distributions_preserve_real_read_noise():
     assert r["trimmed_pixel_count"] == 1100
     assert r["fraction_rejected_at_30adu"] == pytest.approx(1/1101)
     assert r["trimmed_std_adu"] > 0
+    assert r["passes_provisional_candidate_quality_screen"] is True
     assert r["modal_value_fraction"] < .1
 
 
@@ -47,7 +48,10 @@ def test_candidate_profiles_show_optical_nonresponse_but_no_certification():
     r = m.characterize(a)
     assert r["candidate_overscan_certified"] is False
     assert r["x_illuminated_section_certified"] is False
-    assert r["right_minus_left_candidate_trimmed_mean_adu"] == 1
+    # Perfectly constant edges could be software padding, not real overscan.
+    assert r["right_minus_left_candidate_trimmed_mean_adu"] is None
+    assert r["candidate"]["left"]["shows_minimum_pixel_variability"] is False
+    assert r["candidate"]["right"]["passes_provisional_candidate_quality_screen"] is False
     assert r["neighbor_minus_candidate_adu"] == {"left": 9001, "right": 9000}
     assert len(r["candidate"]["left"]["column_medians_adu"]) == 16
     assert len(r["candidate"]["right"]["y_segment_trimmed_mean_adu"]) == 3
@@ -93,7 +97,9 @@ def test_realistic_illuminated_neighbor_gradient_is_descriptive_not_fatal():
         assert result["neighbor"][side]["fraction_rejected_at_30adu"] > 0.5
         assert result["candidate"][side][
             "passes_provisional_30adu_1pct_quality_screen"] is True
-    assert result["candidate_both_sides_pass_provisional_quality_screen"]
+    # Both fixed 999-ADU bands are intentionally disqualified.
+    assert result["candidate_both_sides_pass_provisional_quality_screen"] is False
+    assert result["candidate"]["left"]["shows_minimum_pixel_variability"] is False
     assert result["neighbor_minus_candidate_adu"]["left"] > 100
 
 
@@ -107,9 +113,9 @@ def test_same_mode_bias_obj_gate_rejects_other_gain():
             },
             "statistics": {"candidate": {
                 "left":{"trimmed_mean_adu":999.0,
-                        "passes_provisional_30adu_1pct_quality_screen":True},
+                        "passes_provisional_candidate_quality_screen":True},
                 "right":{"trimmed_mean_adu":1000.0,
-                         "passes_provisional_30adu_1pct_quality_screen":True},
+                         "passes_provisional_candidate_quality_screen":True},
             }},
         }
     rs = {k: [] for k in m.REQUIRED_COUNTS}
@@ -149,9 +155,9 @@ def test_unqualified_candidate_is_retained_but_offset_withheld():
                       "BINNING":"1x2","DATE":"2024-12-06"},
             "statistics":{"candidate":{
                 "left":{"trimmed_mean_adu":999.2,
-                        "passes_provisional_30adu_1pct_quality_screen":quality_left},
+                        "passes_provisional_candidate_quality_screen":quality_left},
                 "right":{"trimmed_mean_adu":999.5,
-                         "passes_provisional_30adu_1pct_quality_screen":quality_right},
+                         "passes_provisional_candidate_quality_screen":quality_right},
             }},
         }
     r={k:[] for k in m.REQUIRED_COUNTS}
@@ -176,7 +182,7 @@ def test_too_few_quality_early_biases_withhold_reference_and_all_offsets():
                       "BINNING":"1x2","DATE":"2024-12-06"},
             "statistics":{"candidate":{
                 side:{"trimmed_mean_adu":999.0,
-                      "passes_provisional_30adu_1pct_quality_screen":ok}
+                      "passes_provisional_candidate_quality_screen":ok}
                 for side in ("left","right")
             }}
         }
@@ -189,3 +195,17 @@ def test_too_few_quality_early_biases_withhold_reference_and_all_offsets():
     assert s["reference_early20_edge_trimmed_means_adu"]["right"] is None
     assert s["same_readout_temporal_candidate_edge_diagnostics"][-1][
         "delta_left_against_early20_median_adu"] is None
+
+
+def test_variable_readout_like_candidate_passes_provisional_screen():
+    m = load()
+    rng = np.random.default_rng(173)
+    a = np.full(m.EXPECTED_SHAPE, 2400, dtype=np.int16)
+    for x0,x1 in m.EDGE.values():
+        a[:,x0:x1] = np.rint(rng.normal(999, 3.0, (1032,16))).astype(np.int16)
+    stats = m.characterize(a)
+    assert stats["candidate_both_sides_pass_provisional_quality_screen"] is True
+    assert stats["candidate"]["left"]["trimmed_std_adu"] > 2.0
+    assert stats["candidate"]["right"]["trimmed_std_adu"] > 2.0
+    assert stats["right_minus_left_candidate_trimmed_mean_adu"] is not None
+    assert stats["candidate_overscan_certified"] is False
