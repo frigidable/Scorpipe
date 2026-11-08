@@ -67,11 +67,34 @@ def test_input_guards_nonfinite_and_wrong_shape():
         m.robust_sample_metrics([1,np.inf,3])
 
 
-def test_reject_if_edge_pixel_outlier_fraction_too_high():
+def test_high_rejection_fraction_reports_failed_provisional_screen_not_error():
     m = load()
     vals = np.concatenate((np.zeros(900), np.ones(100)*1000))
-    with pytest.raises(ValueError, match="Excessive candidate edge"):
-        m.robust_sample_metrics(vals)
+    result = m.robust_sample_metrics(vals)
+    assert result["fraction_rejected_at_30adu"] == pytest.approx(0.1)
+    assert result["passes_provisional_30adu_1pct_quality_screen"] is False
+    assert result["trimmed_pixel_count"] == 900
+    assert result["untrimmed_mean_adu"] == pytest.approx(100.0)
+    assert result["trimmed_mean_adu"] == pytest.approx(0.0)
+
+
+def test_realistic_illuminated_neighbor_gradient_is_descriptive_not_fatal():
+    m = load()
+    arr = np.full(m.EXPECTED_SHAPE, 999, dtype=np.int16)
+    # During a science exposure the band bordering a non-illuminated
+    # candidate strip may contain a strong illumination gradient.
+    y = np.arange(m.EXPECTED_SHAPE[0], dtype=np.int16)
+    arr[:, 16:32] = 1100 + (y // 2)[:, None]
+    arr[:, 2048:2064] = 1200 + (y // 2)[:, None]
+    result = m.characterize(arr)
+    for side in ("left", "right"):
+        assert result["neighbor"][side][
+            "passes_provisional_30adu_1pct_quality_screen"] is False
+        assert result["neighbor"][side]["fraction_rejected_at_30adu"] > 0.5
+        assert result["candidate"][side][
+            "passes_provisional_30adu_1pct_quality_screen"] is True
+    assert result["candidate_both_sides_pass_provisional_quality_screen"]
+    assert result["neighbor_minus_candidate_adu"]["left"] > 100
 
 
 def test_same_mode_bias_obj_gate_rejects_other_gain():
@@ -83,12 +106,14 @@ def test_same_mode_bias_obj_gate_rejects_other_gain():
                 "GAIN": str(gain), "BINNING":"1x2", "DATE":"2024-12-06"
             },
             "statistics": {"candidate": {
-                "left":{"trimmed_mean_adu":999.0},
-                "right":{"trimmed_mean_adu":1000.0},
+                "left":{"trimmed_mean_adu":999.0,
+                        "passes_provisional_30adu_1pct_quality_screen":True},
+                "right":{"trimmed_mean_adu":1000.0,
+                         "passes_provisional_30adu_1pct_quality_screen":True},
             }},
         }
     rs = {k: [] for k in m.REQUIRED_COUNTS}
-    rs["bias_early20"] = [rec("bias",.9)]
+    rs["bias_early20"] = [rec("bias",.9) for _ in range(20)]
     rs["obj_selected7"] = [rec("obj",.9)]
     rs["flat_selected3"] = [rec("flat",3.5)]
     rs["neon_selected2"] = [rec("neon",3.5)]
@@ -96,7 +121,9 @@ def test_same_mode_bias_obj_gate_rejects_other_gain():
     assert result["science_epoch_offset_established"] is False
     assert result["physical_overscan_certified"] is False
     assert result["cross_mode_zero_subtraction_performed"] is False
-    assert result["same_readout_temporal_candidate_edge_diagnostics"][1][
+    assert result["reference_quality_by_side"]["left"]["qualifying_frames"] == 20
+    assert result["reference_quality_by_side"]["right"]["reference_available"]
+    assert result["same_readout_temporal_candidate_edge_diagnostics"][-1][
         "left_minus_right_delta_disagreement_adu"] == 0
     rs["obj_selected7"][0]["header"]["GAIN"] = "3.5"
     with pytest.raises(RuntimeError, match="Incompatible BIAS / OBJ"):
@@ -111,3 +138,54 @@ def test_script_emits_only_external_report_and_never_applies_bias():
     assert "SCIENCE E2E HOLD" in source
     assert "from sc1_bias_night_timeline_qa import" in source
     assert "corrected.fits" not in source
+
+
+def test_unqualified_candidate_is_retained_but_offset_withheld():
+    m = load()
+    def frame(name, quality_left, quality_right):
+        return {
+            "filename": name,
+            "header":{"NODE":"A","RATE":"145","GAIN":"0.9",
+                      "BINNING":"1x2","DATE":"2024-12-06"},
+            "statistics":{"candidate":{
+                "left":{"trimmed_mean_adu":999.2,
+                        "passes_provisional_30adu_1pct_quality_screen":quality_left},
+                "right":{"trimmed_mean_adu":999.5,
+                         "passes_provisional_30adu_1pct_quality_screen":quality_right},
+            }},
+        }
+    r={k:[] for k in m.REQUIRED_COUNTS}
+    r["bias_early20"]=[frame("bias",True,True) for _ in range(20)]
+    r["obj_selected7"]=[frame("obj",False,True)]
+    s=m.summarize_modes(r)
+    obs=s["same_readout_temporal_candidate_edge_diagnostics"][-1]
+    assert obs["provisional_quality_left"] is False
+    assert obs["provisional_quality_right"] is True
+    assert obs["delta_left_against_early20_median_adu"] is None
+    assert obs["delta_right_against_early20_median_adu"] == pytest.approx(0.0)
+    assert obs["left_minus_right_delta_disagreement_adu"] is None
+    assert obs["frame_candidate_status"] == "ONE_OR_BOTH_EDGES_UNQUALIFIED"
+
+
+def test_too_few_quality_early_biases_withhold_reference_and_all_offsets():
+    m = load()
+    def frame(ok):
+        return {
+            "filename":"test.fts",
+            "header":{"NODE":"A","RATE":"145","GAIN":"0.9",
+                      "BINNING":"1x2","DATE":"2024-12-06"},
+            "statistics":{"candidate":{
+                side:{"trimmed_mean_adu":999.0,
+                      "passes_provisional_30adu_1pct_quality_screen":ok}
+                for side in ("left","right")
+            }}
+        }
+    r={k:[] for k in m.REQUIRED_COUNTS}
+    r["bias_early20"]=[frame(i < 15) for i in range(20)]
+    r["obj_selected7"]=[frame(True)]
+    s=m.summarize_modes(r)
+    assert s["reference_quality_by_side"]["left"]["qualifying_frames"] == 15
+    assert s["reference_early20_edge_trimmed_means_adu"]["left"] is None
+    assert s["reference_early20_edge_trimmed_means_adu"]["right"] is None
+    assert s["same_readout_temporal_candidate_edge_diagnostics"][-1][
+        "delta_left_against_early20_median_adu"] is None
