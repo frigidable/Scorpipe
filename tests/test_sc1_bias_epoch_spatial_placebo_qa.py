@@ -92,3 +92,54 @@ def test_partial_roi_coverage_fails_closed():
     m.add_block(a,np.zeros((32,2080)),32)
     with pytest.raises(RuntimeError,match="Not all"):
         m.finish(a)
+
+
+def test_disjoint_early_late_cohorts_and_fixed_partition_order():
+    m=load()
+    p=m.partitions()
+    a_late,a_early=p["between_epoch_disjoint_A"]
+    b_late,b_early=p["between_epoch_disjoint_B"]
+    assert len(a_late)==10 and len(b_late)==9
+    assert len(a_early)==len(b_early)==10
+    assert not set(a_late)&set(b_late)
+    assert not set(a_early)&set(b_early)
+    assert set(a_late)|set(b_late)==set(range(20,39))
+    assert set(a_early)|set(b_early)==set(range(20))
+
+
+def test_disjoint_epoch_tile_maps_identical_pattern_differing_global_zero():
+    m=load()
+    y,x=np.indices((15,31))
+    map_a=0.02*y - 0.005*x
+    map_b=map_a + 3.0
+    a=m.independent_epoch_spatial_repeatability(map_a,map_b)
+    assert a["n_tiles"]==465
+    assert a["centered_spatial_correlation"]==pytest.approx(1.0,abs=1e-12)
+    assert a["same_sign_centered_tiles_fraction"]==1.0
+    assert a["mean_map_B_adu"]-a["mean_map_A_adu"]==pytest.approx(3.0)
+    assert a["planar_slopes"]["map_A"]["slope_per_64px_tile_y_adu"]==pytest.approx(0.02)
+    assert a["planar_slopes"]["map_B"]["slope_per_64px_tile_x_adu"]==pytest.approx(-0.005)
+    assert a["calibrated_significance_test"] is False
+
+
+def test_uncorrelated_spatial_maps_do_not_produce_spurious_strong_correlation():
+    m=load()
+    rng=np.random.default_rng(20261108)
+    map_a=rng.normal(0,.05,size=(15,31))
+    map_b=rng.normal(0,.05,size=(15,31))
+    a=m.independent_epoch_spatial_repeatability(map_a,map_b)
+    assert abs(a["centered_spatial_correlation"])<0.15
+    assert a["n_tiles"]==465
+
+
+def test_split_epoch_repeatability_invalid_geometry_fails_closed():
+    m=load()
+    a=np.zeros((15,31))
+    b=np.ones((15,30))
+    with pytest.raises(ValueError,match="Expected two"):
+        m.independent_epoch_spatial_repeatability(a,b)
+    b=np.ones((15,31));b[0,0]=np.nan
+    with pytest.raises(ValueError,match="Non-finite"):
+        m.independent_epoch_spatial_repeatability(a,b)
+    with pytest.raises(ValueError,match="constant tile"):
+        m.independent_epoch_spatial_repeatability(a,np.ones((15,31)))
