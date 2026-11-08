@@ -102,9 +102,25 @@ def characterize(data):
             - out["candidate"][side]["median_adu"]
         ) for side in ("left", "right")
     }
-    out["central_reference_y128_896_x256_1792_median_adu"] = float(
-        np.median(a[128:896, 256:1792])
-    )
+    central = np.asarray(a[128:896, 256:1792], dtype=np.float64)
+    if not np.isfinite(central).all():
+        raise ValueError("Nonfinite central sample")
+    central_reference = float(np.median(central))
+    out["central_reference_y128_896_x256_1792_median_adu"] = central_reference
+    out["vertical_extreme_row_profile_unverified"] = {}
+    for label, lo, hi in (("top_0_23", 0, 24),
+                          ("bottom_1008_1031", 1008, 1032)):
+        slab = np.asarray(a[lo:hi, 256:1792], dtype=np.float64)
+        if not np.isfinite(slab).all():
+            raise ValueError("Nonfinite vertical edge sample")
+        medians = np.median(slab, axis=1)
+        out["vertical_extreme_row_profile_unverified"][label] = {
+            "y0_y1": [lo, hi],
+            "row_median_adu": medians.tolist(),
+            "row_minus_middle_reference_adu":
+                (medians - central_reference).tolist(),
+            "physical_parallel_overscan_certified": False,
+        }
     return out
 
 
