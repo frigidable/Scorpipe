@@ -222,3 +222,71 @@ def test_bimodal_illuminated_neighbor_empty_inlier_subset_is_reported():
     assert r["trimmed_std_adu"] is None
     assert r["untrimmed_mean_adu"] == 500
     assert r["passes_provisional_candidate_quality_screen"] is False
+
+
+def test_obj_gap_envelope_rejects_all_seven_outside_39_normal_biases():
+    m = load()
+
+    def sample(name, left, right):
+        return {
+            "filename": name,
+            "header": {"NODE": "A", "RATE": "145", "GAIN": "0.9",
+                       "BINNING": "1x2", "DATE": "2024-12-06"},
+            "statistics": {"candidate": {
+                "left": {"trimmed_mean_adu": left,
+                         "passes_provisional_candidate_quality_screen": True},
+                "right": {"trimmed_mean_adu": right,
+                          "passes_provisional_candidate_quality_screen": True},
+            }},
+        }
+
+    groups = {name: [] for name in m.REQUIRED_COUNTS}
+    groups["bias_early20"] = [
+        sample("early", 999.0 + i * 0.001, 998.5)
+        for i in range(20)
+    ]
+    groups["bias_late19"] = [
+        sample("late", 999.0 + i * 0.001, 998.5)
+        for i in range(19)
+    ]
+    groups["obj_selected7"] = [
+        sample("obj", 999.2 + i * 0.01, 998.5)
+        for i in range(7)
+    ]
+    result = m.summarize_modes(groups)
+    gate = result["obj_vs_normal_bias_edge_gap_gate"]
+    assert gate["normal_bias_left_minus_right_observed_envelope"][
+        "n_qualified_normal_biases"] == 39
+    assert gate["n_obj"] == 7
+    assert gate["n_obj_outside_normal_bias_observed_range"] == 7
+    assert gate["all_obj_outside_normal_bias_observed_range"] is True
+    assert gate["science_epoch_zero_approved"] is False
+    for frame in result["same_readout_temporal_candidate_edge_diagnostics"][-7:]:
+        assert frame["outside_normal_bias_observed_gap_range"] is True
+        assert frame["observed_left_minus_right_adu"] > 0.5
+
+
+def test_gap_envelope_is_withheld_when_normal_bias_support_is_insufficient():
+    m = load()
+    def sample(side_quality):
+        return {
+            "filename": "frame.fts",
+            "header": {"NODE": "A", "RATE": "145", "GAIN": "0.9",
+                       "BINNING": "1x2", "DATE": "2024-12-06"},
+            "statistics": {"candidate": {
+                side: {"trimmed_mean_adu": 999.0,
+                       "passes_provisional_candidate_quality_screen": side_quality}
+                for side in ("left", "right")
+            }},
+        }
+    groups = {name: [] for name in m.REQUIRED_COUNTS}
+    groups["bias_early20"] = [sample(True) for _ in range(20)]
+    groups["bias_late19"] = [sample(False) for _ in range(19)]
+    groups["obj_selected7"] = [sample(True)]
+    result = m.summarize_modes(groups)
+    gate = result["obj_vs_normal_bias_edge_gap_gate"]
+    assert gate["normal_bias_left_minus_right_observed_envelope"] is None
+    assert gate["all_obj_outside_normal_bias_observed_range"] is None
+    assert result["same_readout_temporal_candidate_edge_diagnostics"][-1][
+        "outside_normal_bias_observed_gap_range"] is None
+    assert gate["science_epoch_zero_approved"] is False
