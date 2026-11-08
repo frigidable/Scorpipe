@@ -209,3 +209,16 @@ def test_variable_readout_like_candidate_passes_provisional_screen():
     assert stats["candidate"]["right"]["trimmed_std_adu"] > 2.0
     assert stats["right_minus_left_candidate_trimmed_mean_adu"] is not None
     assert stats["candidate_overscan_certified"] is False
+
+
+def test_bimodal_illuminated_neighbor_empty_inlier_subset_is_reported():
+    m = load()
+    levels = np.r_[np.zeros(500), np.ones(500) * 1000]
+    r = m.robust_sample_metrics(levels)
+    assert r["median_adu"] == 500
+    assert r["trimmed_pixel_count"] == 0
+    assert r["empty_30adu_inlier_subset"] is True
+    assert r["trimmed_mean_adu"] is None
+    assert r["trimmed_std_adu"] is None
+    assert r["untrimmed_mean_adu"] == 500
+    assert r["passes_provisional_candidate_quality_screen"] is False
