@@ -54,6 +54,8 @@ def robust_sample_metrics(sample):
         raise ValueError("No values remain within 30 ADU of sample median")
     v = x[inlier]
     _, counts = np.unique(x, return_counts=True)
+    variability = bool(np.std(v) >= 0.25 and np.unique(v).size >= 2)
+    passes_rejection = fraction_rejected <= 0.01
     return {
         "sample_pixel_count": int(x.size),
         "median_adu": median,
@@ -64,7 +66,11 @@ def robust_sample_metrics(sample):
         "trimmed_pixel_count": int(v.size),
         "fraction_rejected_at_30adu": fraction_rejected,
         "passes_provisional_30adu_1pct_quality_screen": bool(
-            fraction_rejected <= 0.01
+            passes_rejection
+        ),
+        "shows_minimum_pixel_variability": variability,
+        "passes_provisional_candidate_quality_screen": bool(
+            passes_rejection and variability
         ),
         "unique_integer_level_count": int(np.unique(x).size),
         "modal_value_fraction": float(counts.max() / x.size),
@@ -105,9 +111,9 @@ def characterize(data):
             ]
             out[label][side] = met
     candidate_left_good = out["candidate"]["left"][
-        "passes_provisional_30adu_1pct_quality_screen"]
+        "passes_provisional_candidate_quality_screen"]
     candidate_right_good = out["candidate"]["right"][
-        "passes_provisional_30adu_1pct_quality_screen"]
+        "passes_provisional_candidate_quality_screen"]
     out["candidate_both_sides_pass_provisional_quality_screen"] = bool(
         candidate_left_good and candidate_right_good
     )
@@ -170,7 +176,7 @@ def summarize_modes(results):
             f["statistics"]["candidate"][side]["trimmed_mean_adu"]
             for f in results["bias_early20"]
             if f["statistics"]["candidate"][side].get(
-                "passes_provisional_30adu_1pct_quality_screen", False)
+                "passes_provisional_candidate_quality_screen", False)
         ]
         reference_quality[side] = {
             "qualifying_frames": len(clean),
@@ -190,7 +196,7 @@ def summarize_modes(results):
                 side: (
                     ref[side] is not None
                     and edges[side].get(
-                        "passes_provisional_30adu_1pct_quality_screen", False
+                        "passes_provisional_candidate_quality_screen", False
                     )
                 )
                 for side in ("left", "right")
@@ -337,7 +343,8 @@ def run(config_file, report_file):
             "Candidate strips are 0:16 and 2064:2080; Y32:992 is arbitrary.",
             "The medians and robust means are descriptive, NOT approved overscan.",
             "Illuminated neighbor bands may have >1% outside +/-30 ADU; retain their full descriptive distributions rather than abort.",
-            "If a candidate band exceeds the provisional 1% screen, its offset is withheld (null) rather than silently used.",
+            "Candidate regions must pass the provisional 1% screen AND have measurable nonconstant pixel variability (>=0.25 ADU std and >=2 unique levels).",
+            "A failed candidate quality screen withholds its electronic offset (null), never applying a correction. This quality screen is NOT overscan certification.",
             "Per-side early20 reference requires >=16 passing early BIAS frames; this remains an uncalibrated screen, not science approval.",
             "Entire source images are only READ, never changed.",
             "Do NOT use flat/neon (rate225/gain3.5) zero against normal rate145/gain0.9.",
