@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -150,7 +150,10 @@ def date_value(raw):
         return None
     try:
         # Do not parse the ambiguous DATE-OBS 2024/06/12.
-        return datetime.fromisoformat(str(raw))
+        value=datetime.fromisoformat(str(raw))
+        if value.tzinfo is not None:
+            return value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value
     except ValueError:
         return None
 
