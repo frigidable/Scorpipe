@@ -1,0 +1,150 @@
+"""Scoped gross-transient MasterBias variance fix; default remains unchanged.
+
+This is engineering validation of an opt-in finite-N Gaussian approximation.
+It is not a claim of publication-grade ADC-quantization coverage or overscan.
+"""
+from __future__ import annotations
+
+import json
+
+import numpy as np
+import pytest
+
+from scorpio_pipe.bias_uncertainty import (
+    master_bias_estimator_variance,
+    normal_median_variance_factor,
+)
+
+
+def test_clean_opt_in_median_matches_default_science_and_variance():
+    rng = np.random.default_rng(198224)
+    raw = 999.0 + rng.normal(0.0, 3.0, (20, 5, 9))
+    sci_old, var_old, m_old = master_bias_estimator_variance(
+        raw, combine="median"
+    )
+    sci_new, var_new, m_new = master_bias_estimator_variance(
+        raw, combine="median", gross_reject_adu=50.0
+    )
+    assert np.array_equal(sci_old, sci_new)
+    assert np.allclose(var_old, var_new, rtol=1e-6, atol=1e-7)
+    assert m_old["variance_model"] == "GAUSSMED"
+    assert m_new["variance_model"] == "GROSSMED"
+    assert m_new["gross_rejected_samples"] == 0
+    assert m_new["gross_affected_pixels"] == 0
+    assert m_new["n_effective_min"] == 20
+    assert not m_new["invalid_support"].any()
+
+
+def test_one_very_bright_outlier_no_longer_inflates_variance():
+    rng = np.random.default_rng(200615)
+    raw = 999.0 + rng.normal(0.0, 3.0, (20, 2, 3))
+    raw[0, 0, 0] += 17_166.0
+    _, old_var, _ = master_bias_estimator_variance(
+        raw, combine="median"
+    )
+    sci, var, meta = master_bias_estimator_variance(
+        raw, combine="median", gross_reject_adu=50.0
+    )
+    expected = np.median(raw[1:, 0, 0])
+    expected_var = (
+        np.var(raw[1:, 0, 0], ddof=1)
+        * normal_median_variance_factor(19)
+    )
+    assert sci[0, 0] == pytest.approx(expected, abs=1e-4)
+    assert var[0, 0] == pytest.approx(expected_var, rel=2e-6)
+    assert old_var[0, 0] > 1000.0
+    assert var[0, 0] < 10.0
+    assert meta["gross_rejected_samples"] == 1
+    assert meta["gross_affected_pixels"] == 1
+    assert meta["n_effective_min"] == 19
+    assert not meta["invalid_support"].any()
+
+
+def test_one_bad_first_row_rejects_just_anomalous_samples():
+    raw = np.full((20, 3, 4), 999., dtype=np.float64)
+    raw[0, 0, :] += 559
+    sci, var, meta = master_bias_estimator_variance(
+        raw, combine="median", gross_reject_adu=50.0
+    )
+    assert np.array_equal(sci, np.full((3, 4), 999., dtype=np.float32))
+    assert np.all(var == 0.0)
+    assert meta["gross_rejected_samples"] == 4
+    assert meta["gross_affected_pixels"] == 4
+    assert meta["n_effective_min"] == 19
+
+
+def test_bad_effective_support_is_explicitly_flagged():
+    raw = np.array([[[0.0]], [[1000.0]], [[2000.0]]])
+    sci, var, meta = master_bias_estimator_variance(
+        raw, combine="median", gross_reject_adu=50.0
+    )
+    assert sci[0, 0] == pytest.approx(0.0)
+    assert var[0, 0] == pytest.approx(0.0)
+    assert meta["invalid_support"][0, 0]
+    assert meta["n_effective_min"] == 1
+    assert meta["gross_rejected_samples"] == 2
+
+
+@pytest.mark.parametrize("bad", [-1.0, np.inf, np.nan])
+def test_gross_reject_invalid_threshold_fails_closed(bad):
+    with pytest.raises(ValueError, match="gross_reject_adu"):
+        master_bias_estimator_variance(
+            np.zeros((3, 2, 2)), combine="median", gross_reject_adu=bad
+        )
+
+
+@pytest.mark.parametrize("combine,sigma_clip", [
+    ("mean", 0.0), ("median", 3.0),
+])
+def test_gross_median_cannot_be_combined_with_other_estimator(combine, sigma_clip):
+    with pytest.raises(ValueError, match="median|clipping"):
+        master_bias_estimator_variance(
+            np.zeros((3, 2, 2)), combine=combine,
+            sigma_clip=sigma_clip, gross_reject_adu=50.0,
+        )
+
+
+def test_legacy_median_sigma_clip_fails_instead_of_being_silently_ignored():
+    with pytest.raises(ValueError, match="refusing to silently ignore"):
+        master_bias_estimator_variance(
+            np.zeros((20, 2, 3)), combine="median", sigma_clip=3.0,
+        )
+
+
+def test_median_quantized_integer_data_returns_finite_nonnegative_var():
+    rng = np.random.default_rng(18487)
+    raw = np.rint(999.0 + rng.normal(0, 3.0, (20, 4, 5)))
+    raw[7, 0, 0] += 559
+    sci, var, meta = master_bias_estimator_variance(
+        raw, combine="median", gross_reject_adu=50.0
+    )
+    assert np.isfinite(sci).all()
+    assert np.isfinite(var).all()
+    assert np.all(var >= 0.0)
+    assert meta["gross_rejected_samples"] == 1
+
+
+def test_stage_provenance_records_explicit_gross_mode(tmp_path):
+    fits = pytest.importorskip("astropy.io.fits")
+    from scorpio_pipe.stages.calib import build_superbias
+    from tests.golden.mini_night import make_mini_night
+
+    mn = make_mini_night(tmp_path)
+    mn.cfg.setdefault("calib", {})["bias_gross_reject_adu"] = 50.0
+    stage = mn.work_dir / "03_bias"
+    output = build_superbias(
+        mn.cfg, run_root=mn.work_dir, stage_dir=stage,
+        allow_legacy_mirrors=False,
+    )
+    assert output.is_file()
+    info = json.loads((stage / "master_bias_index.json").read_text(encoding="utf8"))
+    assert info["gross_reject_adu"] == pytest.approx(50.0)
+    assert info["groups"][0]["variance"]["model"] == "GROSSMED"
+    assert info["groups"][0]["variance"]["gross_reject_adu"] == pytest.approx(50.0)
+    assert "PROVISIONAL" in info["groups"][0]["variance"]["assumptions"]
+    vp = mn.work_dir / info["groups"][0]["files"]["var"]
+    with fits.open(vp) as hdu:
+        assert hdu[0].header["SB_VMOD"] == "GROSSMED"
+        assert hdu[0].header["SB_GROS"] == pytest.approx(50.0)
+        assert int(hdu[0].header["SB_GCNT"]) >= 0
+        assert np.isfinite(hdu[0].data).all()
