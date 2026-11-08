@@ -36,12 +36,59 @@ def partitions():
     scrambled_late = rng.permutation(late)
     return {
         "between_early20_late19": (late, early),
+        "between_epoch_disjoint_A": (late[::2], early[::2]),
+        "between_epoch_disjoint_B": (late[1::2], early[1::2]),
         "early_chronological_10v10": (early[:10], early[10:]),
         "early_odd_even_10v10": (early[::2], early[1::2]),
         "early_seeded_random_10v10": (scrambled_early[:10], scrambled_early[10:]),
         "late_chronological_9v10": (late[:9], late[9:]),
         "late_odd_even_10v9": (late[::2], late[1::2]),
         "late_seeded_random_9v10": (scrambled_late[:9], scrambled_late[9:]),
+    }
+
+
+def independent_epoch_spatial_repeatability(first_tile_means, second_tile_means):
+    """Compare tile maps from DISJOINT raw exposure sets.
+
+    The correlation is descriptive and is NOT a calibrated p value.
+    Nonzero frame-level shared readout systematics can correlate the maps.
+    """
+    a = np.asarray(first_tile_means, dtype=np.float64)
+    b = np.asarray(second_tile_means, dtype=np.float64)
+    if a.shape != (N_TILE_Y, N_TILE_X) or b.shape != a.shape:
+        raise ValueError("Expected two 15x31 independent epoch tile maps")
+    if not np.isfinite(a).all() or not np.isfinite(b).all():
+        raise ValueError("Non-finite split-map value")
+    ac = a - np.mean(a)
+    bc = b - np.mean(b)
+    std_a = float(np.std(ac))
+    std_b = float(np.std(bc))
+    if std_a <= 0 or std_b <= 0:
+        raise ValueError("Cannot assess correlation of constant tile map")
+    covariance = float(np.mean(ac*bc))
+    y, x = np.indices(a.shape, dtype=np.float64)
+    design = np.column_stack([np.ones(a.size), x.ravel(), y.ravel()])
+    slopes = []
+    for map_values in (a,b):
+        coefficients = np.linalg.lstsq(design, map_values.ravel(), rcond=None)[0]
+        slopes.append({
+            "slope_per_64px_tile_x_adu": float(coefficients[1]),
+            "slope_per_64px_tile_y_adu": float(coefficients[2]),
+        })
+    return {
+        "n_tiles": int(a.size),
+        "mean_map_A_adu": float(np.mean(a)),
+        "mean_map_B_adu": float(np.mean(b)),
+        "spatial_rms_map_A_adu": std_a,
+        "spatial_rms_map_B_adu": std_b,
+        "centered_spatial_correlation": float(covariance/(std_a*std_b)),
+        "centered_spatial_covariance_adu2": covariance,
+        "heuristic_shared_spatial_rms_adu":
+            float(np.sqrt(max(covariance,0.0))),
+        "same_sign_centered_tiles_fraction": float(np.mean(ac*bc>0)),
+        "planar_slopes": {"map_A":slopes[0],"map_B":slopes[1]},
+        "calibrated_significance_test": False,
+        "exposures_disjoint_between_maps": True,
     }
 
 
@@ -112,7 +159,7 @@ def finish(acc):
 
 def selftest():
     p = partitions()
-    assert len(p) == 7
+    assert len(p) == 9
     for a,b in p.values():
         assert not (set(a) & set(b))
         assert len(set(a)) == len(a) and len(set(b)) == len(b)
@@ -129,6 +176,10 @@ def selftest():
     assert abs(out["difference_pixel_mean_adu"]+0.11) < 0.01
     assert 0.7 < out["normalized_tile_variance_factor"] < 1.3
     assert len(out["all_tile_means_adu_15_by_31"])==15
+    grid=np.arange(N_TILE_Y*N_TILE_X,dtype=float).reshape(N_TILE_Y,N_TILE_X)
+    positive=independent_epoch_spatial_repeatability(grid,grid+10)
+    assert abs(positive["centered_spatial_correlation"]-1)<1e-12
+    assert positive["exposures_disjoint_between_maps"]
     print("SELFTEST PASSED")
 
 
@@ -199,8 +250,13 @@ def run(config_file, report_file):
     results={name:finish(a) for name,a in accum.items()}
     between=results["between_early20_late19"]
     placebo=[x["normalized_tile_variance_factor"]
-             for k,x in results.items() if k!="between_early20_late19"]
+             for k,x in results.items()
+             if k.startswith("early_") or k.startswith("late_")]
     normalized_median=float(np.median(placebo))
+    repeated = independent_epoch_spatial_repeatability(
+        results["between_epoch_disjoint_A"]["all_tile_means_adu_15_by_31"],
+        results["between_epoch_disjoint_B"]["all_tile_means_adu_15_by_31"],
+    )
     report={
         "status":"READ_ONLY_WITHIN_EPOCH_SPATIAL_PLACEBO_SCIENCE_HOLD",
         "source_masterbias_gid":group["gid"],
@@ -216,11 +272,14 @@ def run(config_file, report_file):
                   **results[name]}
             for name,(aa,bb) in maps.items()
         },
+        "independent_cross_epoch_spatial_repeatability":repeated,
         "heuristic_cross_over_median_placebo_normalized_variance_factor":
             float(between["normalized_tile_variance_factor"]/normalized_median),
         "warnings":[
             "Normalization by pixel variance uses an independent-pixel reference; CCD noise correlations can change its interpretation.",
             "The six within-epoch partitions overlap and are NOT independent placebo replicates.",
+            "Independent cross-epoch A/B maps are built from disjoint source exposures within this split; their spatial correlation is descriptive, not a calibrated p-value.",
+            "The two halves have unequal late-cohort sizes 10 and 9; quantized median noise is not identically distributed.",
             "Different epoch group sizes 20/19 versus 10/10, 9/10 change quantized-median statistics.",
             "Subtracting one global scalar from tile means does not correct spatially varying bias.",
             "A low cross/placebo ratio does NOT prove identical spatial patterns or validate absolute bias at OBJ times.",
@@ -233,6 +292,10 @@ def run(config_file, report_file):
     print("BETWEEN-EPOCH TILE STD =",round(between["spatial_tile_rms_after_scalar_removal_adu"],6),"ADU")
     print("BETWEEN-EPOCH NORMALIZED TILE FACTOR =",round(between["normalized_tile_variance_factor"],6))
     print("MEDIAN WITHIN-EPOCH PLACEBO NORMALIZED FACTOR =",round(normalized_median,6))
+    print("DISJOINT CROSS-EPOCH TILE CORRELATION =",
+          round(repeated["centered_spatial_correlation"],6))
+    print("DISJOINT CROSS-EPOCH SPATIAL COVARIANCE =",
+          round(repeated["centered_spatial_covariance_adu2"],8),"ADU^2")
     print("HEURISTIC BETWEEN / PLACEBO =",round(report[
         "heuristic_cross_over_median_placebo_normalized_variance_factor"],6))
     print("REPORT:",report_file)
