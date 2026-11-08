@@ -37,14 +37,21 @@ SCHEMA = "SC1_SERIAL_EDGE_CANDIDATE_READ_ONLY_V1"
 
 
 def robust_sample_metrics(sample):
-    """Trim 30-ADU transients, return robust mean AND untrimmed distribution."""
+    """Describe the full distribution and a 30-ADU-restricted sub-sample.
+
+    Excess scatter is a measured diagnostic, NOT a fatal exception. Bright
+    illuminated neighboring columns can legitimately have broad distributions,
+    and candidate strips that fail this screen must be flagged and must NOT
+    contribute to any inferred time-dependent electronic offset.
+    """
     x = np.asarray(sample, dtype=np.float64).ravel()
     if not x.size or not np.all(np.isfinite(x)):
         raise ValueError("Invalid candidate stripe pixel sample")
     median = float(np.median(x))
     inlier = np.abs(x - median) <= 30.0
-    if np.mean(inlier) < .99:
-        raise ValueError("Excessive candidate edge outlier fraction")
+    fraction_rejected = float(np.mean(~inlier))
+    if not np.any(inlier):
+        raise ValueError("No values remain within 30 ADU of sample median")
     v = x[inlier]
     _, counts = np.unique(x, return_counts=True)
     return {
@@ -52,8 +59,13 @@ def robust_sample_metrics(sample):
         "median_adu": median,
         "trimmed_mean_adu": float(np.mean(v)),
         "trimmed_std_adu": float(np.std(v)),
+        "untrimmed_mean_adu": float(np.mean(x)),
+        "untrimmed_std_adu": float(np.std(x)),
         "trimmed_pixel_count": int(v.size),
-        "fraction_rejected_at_30adu": float(1 - v.size / x.size),
+        "fraction_rejected_at_30adu": fraction_rejected,
+        "passes_provisional_30adu_1pct_quality_screen": bool(
+            fraction_rejected <= 0.01
+        ),
         "unique_integer_level_count": int(np.unique(x).size),
         "modal_value_fraction": float(counts.max() / x.size),
         "min_adu": float(np.min(x)),
@@ -92,9 +104,17 @@ def characterize(data):
                 for ya, yb in Y_SEGMENTS
             ]
             out[label][side] = met
-    out["right_minus_left_candidate_trimmed_mean_adu"] = float(
-        out["candidate"]["right"]["trimmed_mean_adu"]
-        - out["candidate"]["left"]["trimmed_mean_adu"]
+    candidate_left_good = out["candidate"]["left"][
+        "passes_provisional_30adu_1pct_quality_screen"]
+    candidate_right_good = out["candidate"]["right"][
+        "passes_provisional_30adu_1pct_quality_screen"]
+    out["candidate_both_sides_pass_provisional_quality_screen"] = bool(
+        candidate_left_good and candidate_right_good
+    )
+    out["right_minus_left_candidate_trimmed_mean_adu"] = (
+        float(out["candidate"]["right"]["trimmed_mean_adu"]
+              - out["candidate"]["left"]["trimmed_mean_adu"])
+        if candidate_left_good and candidate_right_good else None
     )
     out["neighbor_minus_candidate_adu"] = {
         side: float(
@@ -142,32 +162,68 @@ def summarize_modes(results):
                     float(header["GAIN"]), header["BINNING"]) != (
                         "A", 225.0, 3.5, "1x2"):
                 raise RuntimeError("Unexpected lamp CCD readout")
-    ref = {
-        side: float(np.median([
+    minimum_reference_frames = 16
+    reference_quality = {}
+    ref = {}
+    for side in ("left", "right"):
+        clean = [
             f["statistics"]["candidate"][side]["trimmed_mean_adu"]
             for f in results["bias_early20"]
-        ]))
-        for side in ("left", "right")
-    }
+            if f["statistics"]["candidate"][side].get(
+                "passes_provisional_30adu_1pct_quality_screen", False)
+        ]
+        reference_quality[side] = {
+            "qualifying_frames": len(clean),
+            "required_qualifying_frames": minimum_reference_frames,
+            "reference_available": len(clean) >= minimum_reference_frames,
+        }
+        ref[side] = (
+            float(np.median(clean))
+            if len(clean) >= minimum_reference_frames else None
+        )
     diagnostic = []
     for kind in ("bias_early20", "bias_late19", "bias_flagged2",
                  "obj_selected7"):
         for f in results[kind]:
             edges = f["statistics"]["candidate"]
+            valid = {
+                side: (
+                    ref[side] is not None
+                    and edges[side].get(
+                        "passes_provisional_30adu_1pct_quality_screen", False
+                    )
+                )
+                for side in ("left", "right")
+            }
+            delta = {
+                side: (
+                    float(edges[side]["trimmed_mean_adu"] - ref[side])
+                    if valid[side] else None
+                )
+                for side in ("left", "right")
+            }
             row = {
                 "group": kind, "filename": f["filename"],
                 "DATE": f["header"]["DATE"],
-                "delta_left_against_early20_median_adu": float(
-                    edges["left"]["trimmed_mean_adu"] - ref["left"]),
-                "delta_right_against_early20_median_adu": float(
-                    edges["right"]["trimmed_mean_adu"] - ref["right"]),
-                "left_minus_right_delta_disagreement_adu": float(
-                    edges["left"]["trimmed_mean_adu"] - ref["left"]
-                    - edges["right"]["trimmed_mean_adu"] + ref["right"]),
+                "provisional_quality_left": bool(valid["left"]),
+                "provisional_quality_right": bool(valid["right"]),
+                "delta_left_against_early20_median_adu": delta["left"],
+                "delta_right_against_early20_median_adu": delta["right"],
+                "left_minus_right_delta_disagreement_adu": (
+                    float(delta["left"] - delta["right"])
+                    if all(valid.values()) else None
+                ),
+                "frame_candidate_status": (
+                    "TWO_SIDES_PASS_PROVISIONAL_SCREEN"
+                    if all(valid.values()) else
+                    "ONE_OR_BOTH_EDGES_UNQUALIFIED"
+                ),
             }
             diagnostic.append(row)
     return {
         "reference_early20_edge_trimmed_means_adu": ref,
+        "reference_quality_by_side": reference_quality,
+        "raw_diagnostic_rejects_illumination_as_electronic_zero": True,
         "same_readout_temporal_candidate_edge_diagnostics": diagnostic,
         "science_epoch_offset_established": False,
         "physical_overscan_certified": False,
@@ -280,6 +336,9 @@ def run(config_file, report_file):
             "Geometry is a hypothesis; no DATASEC/BIASSEC/overscan was certified.",
             "Candidate strips are 0:16 and 2064:2080; Y32:992 is arbitrary.",
             "The medians and robust means are descriptive, NOT approved overscan.",
+            "Illuminated neighbor bands may have >1% outside +/-30 ADU; retain their full descriptive distributions rather than abort.",
+            "If a candidate band exceeds the provisional 1% screen, its offset is withheld (null) rather than silently used.",
+            "Per-side early20 reference requires >=16 passing early BIAS frames; this remains an uncalibrated screen, not science approval.",
             "Entire source images are only READ, never changed.",
             "Do NOT use flat/neon (rate225/gain3.5) zero against normal rate145/gain0.9.",
             "The delta_left/right values do NOT authorize science epoch bias correction.",
