@@ -1357,6 +1357,7 @@ def build_superbias(
     calib_cfg = c.get("calib", {}) or {}
     combine = str(calib_cfg.get("bias_combine", "median")).strip().lower() or "median"
     sigma_clip = float(calib_cfg.get("bias_sigma_clip", 0.0) or 0.0)
+    gross_reject_adu = float(calib_cfg.get("bias_gross_reject_adu", 0.0) or 0.0)
 
     groups: dict[BiasGroupKey, list[Path]] = {}
     bad_key = 0
@@ -1423,6 +1424,7 @@ def build_superbias(
 
         sci, var, var_meta = master_bias_estimator_variance(
             arr, combine=combine, sigma_clip=sigma_clip,
+            gross_reject_adu=gross_reject_adu,
         )
 
         # Fewer than two accepted samples after sigma clipping cannot
@@ -1450,6 +1452,9 @@ def build_superbias(
             "variance_factor": var_meta["variance_factor"],
             "min_effective_n": int(var_meta["n_effective_min"]),
             "bad_support_pixels": int(np.count_nonzero(var_meta["invalid_support"])),
+            "gross_reject_adu": float(gross_reject_adu),
+            "gross_rejected_samples": int(var_meta["gross_rejected_samples"]),
+            "gross_affected_pixels": int(var_meta["gross_affected_pixels"]),
             "rn_est_adu": (float(rn_est_adu) if rn_est_adu is not None else None),
             "rn_pairs": int((rn_diag or {}).get('pairs_used') or 0),
             "rn_diag": (rn_diag or {}),
@@ -1462,6 +1467,7 @@ def build_superbias(
         "schema_version": 3,
         "combine": str(combine),
         "sigma_clip": float(sigma_clip),
+        "gross_reject_adu": float(gross_reject_adu),
         "groups": [],
         "default_gid": "",
         "bad_key": int(bad_key),
@@ -1489,6 +1495,8 @@ def build_superbias(
             h["SB_BAD"] = (int(st["bad_read"] + st["bad_shape"]), "Bias frames skipped")
             h["SB_METH"] = (str(combine), "Combine method")
             h["SB_CLIP"] = (float(sigma_clip), "Sigma clip (0=disabled)")
+            h["SB_GROS"] = (float(gross_reject_adu), "Gross reject threshold ADU (0=off)")
+            h["SB_GCNT"] = (int(st["gross_rejected_samples"]), "Raw BIAS samples rejected")
             h["SB_VMOD"] = (str(st["variance_model"]), "Bias estimator VAR model")
             h["SB_NMIN"] = (int(st["min_effective_n"]), "Minimum accepted samples")
             if st["variance_factor"] is not None:
@@ -1584,7 +1592,16 @@ def build_superbias(
                     "factor": st["variance_factor"],
                     "min_effective_n": int(st["min_effective_n"]),
                     "bad_support_pixels": int(st["bad_support_pixels"]),
-                    "assumptions": "independent_gaussian_read_noise",
+                    "gross_reject_adu": float(st["gross_reject_adu"]),
+                    "gross_rejected_samples": int(st["gross_rejected_samples"]),
+                    "gross_affected_pixels": int(st["gross_affected_pixels"]),
+                    "assumptions": (
+                        "independent_gaussian_read_noise; "
+                        "gross-rejection variance PROVISIONAL and quantization "
+                        "coverage not calibrated"
+                        if gross_reject_adu > 0 else
+                        "independent_gaussian_read_noise"
+                    ),
                 },
                 "files": {
                     "sci": str(sci_f.relative_to(work_dir)),
