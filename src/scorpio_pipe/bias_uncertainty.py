@@ -12,6 +12,9 @@ Assumptions:
 * An un-clipped Gaussian sample median has estimator variance
   s**2 * c_N where c_N is the exact finite-N normal order-statistic
   variance for N <= 64; for larger N use pi/(2N) asymptotically.
+* Optional gross-rejected median (explicit cutoff in ADU, default disabled)
+  recalculates SCI and approximate VAR on the same accepted samples; assumes
+  the cutoff is far above read-noise and does not calibrate ADC quantization.
 * A sigma-clipped mean is nonlinear. We retain the *unclipped* sample
   variance to avoid hiding contaminated pixels, divide by the number of
   accepted samples, and label this an APPROXIMATION. Fewer than two retained
@@ -96,6 +99,7 @@ def master_bias_estimator_variance(
     *,
     combine: str,
     sigma_clip: float = 0.0,
+    gross_reject_adu: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     """Build MasterBias SCI/VAR from a same-readout CCD stack.
 
@@ -118,13 +122,70 @@ def master_bias_estimator_variance(
         raise ValueError(f"Unknown MasterBias combination method: {combine!r}")
     if not np.isfinite(sigma_clip) or sigma_clip < 0:
         raise ValueError("MasterBias sigma_clip must be finite and nonnegative")
+    if not np.isfinite(gross_reject_adu) or gross_reject_adu < 0:
+        raise ValueError("MasterBias gross_reject_adu must be finite and nonnegative")
+    if method == "median" and sigma_clip > 0:
+        raise ValueError(
+            "MasterBias bias_sigma_clip>0 is not implemented for "
+            "bias_combine=median: refusing to silently ignore clipping"
+        )
+    if gross_reject_adu > 0 and (method != "median" or sigma_clip > 0):
+        raise ValueError(
+            "MasterBias gross_reject_adu>0 is supported only with "
+            "unclipped median; do not mix rejection rules"
+        )
 
     # ddof=1 is unbiased for the individual-exposure noise variance under
     # independent, equal-variance normal read-noise samples.
     individual_var = np.var(data, axis=0, ddof=1)
     invalid = np.zeros(data.shape[1:], dtype=bool)
+    rejected_samples = 0
+    affected_pixels = 0
 
-    if method == "median":
+    if method == "median" and gross_reject_adu > 0:
+        # This mode is deliberately opt-in. A generous absolute cutoff removes
+        # gross transients, *not* ordinary Gaussian read-noise fluctuations.
+        # Recalculate both SCI and estimator VAR on the SAME accepted samples.
+        centre = np.median(data, axis=0)
+        accepted = np.abs(data - centre) <= float(gross_reject_adu)
+        counts = accepted.sum(axis=0).astype(np.int32)
+        invalid = counts < 2
+        rejected_samples = int(np.count_nonzero(~accepted))
+        affected_pixels = int(np.count_nonzero(counts < n))
+
+        # NaN/inf sentinel is never allowed into a retained median.
+        # Sorting places inf after valid values, so middle retained order
+        # statistics are accessed directly without masked-array warnings.
+        ordered = np.sort(np.where(accepted, data, np.inf), axis=0)
+        idx_lo = np.maximum((counts - 1) // 2, 0)
+        idx_hi = np.maximum(counts // 2, 0)
+        lower = np.take_along_axis(ordered, idx_lo[None], axis=0)[0]
+        upper = np.take_along_axis(ordered, idx_hi[None], axis=0)[0]
+        sci = 0.5 * (lower + upper)
+        sci[invalid] = 0.0
+
+        # Compute the retained sample variance about its own mean. Center
+        # at the per-pixel original median for numerical stability, then
+        # apply finite-N Gaussian order-statistic factors at each n_eff.
+        centred = np.where(accepted, data - centre, 0.0)
+        shifted_mean = np.sum(centred, axis=0) / np.maximum(counts, 1)
+        ss = np.sum(
+            np.where(accepted, (centred - shifted_mean) ** 2, 0.0),
+            axis=0,
+        )
+        sample_var = ss / np.maximum(counts - 1, 1)
+        factors = np.zeros(counts.shape, dtype=np.float64)
+        for n_eff in np.unique(counts):
+            if n_eff >= 2:
+                factors[counts == n_eff] = normal_median_variance_factor(
+                    int(n_eff)
+                )
+        var = sample_var * factors
+        var[invalid] = 0.0
+        factor = None
+        model = "GROSSMED"
+        n_eff_min = int(counts.min())
+    elif method == "median":
         sci = np.median(data, axis=0)
         factor = normal_median_variance_factor(n)
         var = individual_var * factor
@@ -161,5 +222,13 @@ def master_bias_estimator_variance(
             "n_effective_min": int(n_eff_min),
             "invalid_support": invalid,
             "independent_gaussian_assumption": True,
+            "gross_reject_adu": float(gross_reject_adu),
+            "gross_rejected_samples": int(rejected_samples),
+            "gross_affected_pixels": int(affected_pixels),
+            "gross_var_assumption": (
+                "provisional Gaussian finite-N approximation after removing "
+                "gross contaminants; quantized-ADC coverage not calibrated"
+                if gross_reject_adu > 0 else None
+            ),
         },
     )
