@@ -291,7 +291,7 @@ def selftest():
     assert not (EARLY_NAMES & LATE_NAMES)
     fake=[{"mean_roi_residual_adu":float(i),
            "std_tile_residual_adu":0.05} for i in range(3)]
-    assert linear_summary(fake)["slope_adu_per_frame_index"]==1
+    assert abs(linear_summary(fake)["slope_adu_per_frame_index"]-1.0)<1e-12
     assert date_value("2024-12-06T12:24:12") is not None
     assert date_value("2024/06/12") is None
     print("SELFTEST PASSED")
