@@ -185,4 +185,10 @@ def test_default_unclipped_median_remains_bitwise_identical() -> None:
     )
     assert np.array_equal(a, b)
     assert np.array_equal(va, vb)
-    assert ma == mb
+    assert set(ma) == set(mb)
+    for key in ma:
+        if isinstance(ma[key], np.ndarray):
+            assert isinstance(mb[key], np.ndarray)
+            assert np.array_equal(ma[key], mb[key])
+        else:
+            assert ma[key] == mb[key]
