@@ -51,6 +51,10 @@ def test_candidate_profiles_show_optical_nonresponse_but_no_certification():
     assert r["neighbor_minus_candidate_adu"] == {"left": 9001, "right": 9000}
     assert len(r["candidate"]["left"]["column_medians_adu"]) == 16
     assert len(r["candidate"]["right"]["y_segment_trimmed_mean_adu"]) == 3
+    assert r["vertical_extreme_row_profile_unverified"]["top_0_23"][
+        "physical_parallel_overscan_certified"] is False
+    assert len(r["vertical_extreme_row_profile_unverified"][
+        "bottom_1008_1031"]["row_median_adu"]) == 24
 
 
 def test_input_guards_nonfinite_and_wrong_shape():
