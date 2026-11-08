@@ -188,6 +188,27 @@ def summarize_modes(results):
             float(np.median(clean))
             if len(clean) >= minimum_reference_frames else None
         )
+    # 39 normal same-readout BIAS, NOT the two pre-flagged exclusions.
+    # This empirical envelope is descriptive, not a confidence interval.
+    normal = results["bias_early20"] + results["bias_late19"]
+    normal_qualified_gaps = [
+        float(frame["statistics"]["candidate"]["left"]["trimmed_mean_adu"]
+              - frame["statistics"]["candidate"]["right"]["trimmed_mean_adu"])
+        for frame in normal
+        if frame["statistics"]["candidate"]["left"].get(
+            "passes_provisional_candidate_quality_screen", False)
+        and frame["statistics"]["candidate"]["right"].get(
+            "passes_provisional_candidate_quality_screen", False)
+    ]
+    normal_envelope = (
+        {
+            "n_qualified_normal_biases": len(normal_qualified_gaps),
+            "min_left_minus_right_adu": min(normal_qualified_gaps),
+            "max_left_minus_right_adu": max(normal_qualified_gaps),
+            "physical_overscan_certified": False,
+            "statistical_confidence_interval": False,
+        } if len(normal_qualified_gaps) >= 32 else None
+    )
     diagnostic = []
     for kind in ("bias_early20", "bias_late19", "bias_flagged2",
                  "obj_selected7"):
@@ -226,8 +247,42 @@ def summarize_modes(results):
                     "ONE_OR_BOTH_EDGES_UNQUALIFIED"
                 ),
             }
+            if kind == "obj_selected7":
+                gap = (
+                    float(edges["left"]["trimmed_mean_adu"]
+                          - edges["right"]["trimmed_mean_adu"])
+                    if all(valid.values()) else None
+                )
+                row["observed_left_minus_right_adu"] = gap
+                row["outside_normal_bias_observed_gap_range"] = (
+                    bool(gap < normal_envelope["min_left_minus_right_adu"]
+                         or gap > normal_envelope["max_left_minus_right_adu"])
+                    if gap is not None and normal_envelope is not None
+                    else None
+                )
             diagnostic.append(row)
+    obj_rows = [row for row in diagnostic if row["group"] == "obj_selected7"]
+    n_outside = sum(
+        1 for row in obj_rows
+        if row["outside_normal_bias_observed_gap_range"] is True
+    )
+    obj_gap_gate = {
+        "normal_bias_left_minus_right_observed_envelope": normal_envelope,
+        "n_obj": len(obj_rows),
+        "n_obj_outside_normal_bias_observed_range": n_outside,
+        "all_obj_outside_normal_bias_observed_range": (
+            bool(n_outside == len(obj_rows))
+            if normal_envelope is not None and len(obj_rows) > 0 else None
+        ),
+        "science_epoch_zero_approved": False,
+        "disclaimer": (
+            "Empirical minimum/maximum from normal BIAS is neither a calibrated "
+            "confidence interval nor proof of optically clean electronic overscan. "
+            "OBJ outside the envelope demands follow-up and blocks zero approval."
+        ),
+    }
     return {
+        "obj_vs_normal_bias_edge_gap_gate": obj_gap_gate,
         "reference_early20_edge_trimmed_means_adu": ref,
         "reference_quality_by_side": reference_quality,
         "raw_diagnostic_rejects_illumination_as_electronic_zero": True,
@@ -351,6 +406,7 @@ def run(config_file, report_file):
             "Entire source images are only READ, never changed.",
             "Do NOT use flat/neon (rate225/gain3.5) zero against normal rate145/gain0.9.",
             "The delta_left/right values do NOT authorize science epoch bias correction.",
+            "OBJ versus normal BIAS left-right gap comparison is a descriptive rejection gate, not an overscan certification or calibrated statistical confidence interval.",
             "SCIENCE E2E HOLD until optical+electronic interpretation and VAR fixed.",
         ],
     }
