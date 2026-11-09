@@ -104,3 +104,45 @@ def test_lsf_stage_has_no_silent_science_approval():
     assert 'science_lsf_validated": False' in code
     assert "fit_half_window_px\", 12" in code
     assert "rejected_blends" in code
+
+
+
+def test_lsf_stage_refuses_nominal_fallback_without_explicit_optin(tmp_path):
+    fits=pytest.importorskip("astropy.io.fits")
+    from scorpio_pipe.stages.lsf_model import run_lsf_model
+    from scorpio_pipe.workspace_paths import stage_dir
+    from pathlib import Path
+    import json
+
+    work_dir=tmp_path/"night"
+    wave_dir=stage_dir(work_dir,"wavesol")
+    wave_dir.mkdir(parents=True)
+    ny,nx=40,180
+    wave=np.broadcast_to(
+        5000.0+0.87*np.arange(nx,dtype=float),
+        (ny,nx),
+    ).copy()
+    # No actual ARC emission, so a nominal width would be fictional.
+    arc=np.full((ny,nx),1000.0)
+    fits.PrimaryHDU(
+        wave.astype(np.float32),
+        header=fits.Header({"WAVEREF":"air","WAVEUNIT":"Angstrom"}),
+    ).writeto(wave_dir/"lambda_map.fits")
+    fits.PrimaryHDU(
+        arc.astype(np.float32),
+        header=fits.Header({"DISPERSE":"VPHG1200B","SLITWID":1.2}),
+    ).writeto(wave_dir/"superneon.fits")
+    (wave_dir/"hand_pairs.txt").write_text(
+        "20 5017.4\n60 5052.2\n100 5087.0\n140 5121.8\n",
+        encoding="utf-8",
+    )
+    cfg={"work_dir":str(work_dir),"lsf_model":{"min_line_snr":4.0}}
+    out_dir=work_dir/"lsf_model"
+    with pytest.raises(RuntimeError, match="LSF ARC_PROFILE_QC REJECT"):
+        run_lsf_model(cfg,out_dir=out_dir)
+    rejected=out_dir/"lsf_profile_qc_reject.json"
+    assert rejected.is_file()
+    diag=json.loads(rejected.read_text(encoding="utf-8"))
+    assert diag["status"]=="REJECT"
+    assert diag["manual_fallback_allowed"] is False
+    assert not (out_dir/"lsf_map.fits").exists()
