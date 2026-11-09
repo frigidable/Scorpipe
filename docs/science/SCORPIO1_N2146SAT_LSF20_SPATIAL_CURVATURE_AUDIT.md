@@ -72,8 +72,9 @@ and independent original lamp frames/nights.
 
 New pure src/scorpio_pipe/lsf_spatial_curvature_audit.py checks
 per-lamp quadratic FWHM(y) and compares each laboratory pair
-to the original v18 shared-y² model; only DIAGNOSTIC_ONLY
-or individual REJECT results permitted. Seven new synthetic
+to the original v18 shared-y² model; reports DIAGNOSTIC_ONLY only when all four original-ARC pairs
+have sufficient matched spatial coverage; otherwise global REJECT,
+with per-pair failure reasons. No science-ready result is possible. Seven new synthetic
 regression tests check sign reversal, two distinct lamps,
 duplicate samples, insufficient common spatial rows,
 provenance status, non-finite widths and non-adoption by
