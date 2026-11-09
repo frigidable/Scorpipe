@@ -1,0 +1,109 @@
+# SCORPIO-1 N2146sat v20: pair-dependent spatial LSF curvature
+
+**Status: DIAGNOSTIC_ONLY / SCIENCE HOLD.** Original _95 Wave2D and
+_96 isolated LSF maps remain immutable; NO SCIENCE FITS are written.
+Prior Windows v19 completed 135/135 PASS + engineering selftest,
+and re-fitted two source-sha-locked original NEON06/NEON13 lamps:
+2425/2640 numerically valid hypothesis fits.
+
+## Scientific diagnosis
+
+The v18 smooth five-term FWHM(lambda,y) model uses
+u=(lambda_air-4600 Å)/1000 Å and v=(y-515.5)/515.5, with a
+**shared** quadratic spatial term coefficient +1.3753 Å
+across ALL wavelengths. The real original-ARC profiles instead
+show strongly wavelength/line-dependent quadratic spatial shape.
+
+Using solely original-ARC joint-Gaussian/linear-background
+profile fits (spectral half window 16 px; 21 spatial rows
+per sample, step 27; y from 74 to 938), independent quadratic
+fit to EACH original lamp and each laboratory pair gives:
+
+| Lab pair air A | NEON06 v² coefficient A | NEON13 v² coefficient A |
+|---|---:|---:|
+| 4181.88 + 4190.71 | +2.0281 | +2.1388 |
+| 4333.56 + 4345.17 | +2.2643 | +2.3245 |
+| 5037.75 + 5047.74 | +0.1278 | +0.2692 |
+| **5330.78 + 5341.60** | **-0.4383** | **-0.3554** |
+
+Red curvature sign is OPPOSITE to v18's shared +1.3753.
+Source raw pair at y=506 gives FWHM 6.2138/6.1843 Å,
+where the existing v18 candidate predicts only 5.7928 Å.
+The old v18 smooth model has central-region positive residuals
+(+~0.37 Å) but opposite negative residuals near y extremes
+(-~0.55 Å). This morphology cannot be solved by simply shifting
+the model up or down globally. Source lamp repeatability
+does not imply scientific LSF-model accuracy.
+
+## Diagnostic alternative model comparison
+
+On ten earlier v18-selected features (not a blind independent
+sample), five robust low-order surfaces were compared in
+leave-one-WHOLE-FEATURE-out cross-validation. The two extreme
+lines were excluded from score because their removal demands
+unconstrained extrapolation. Eight interior features yielded
+equal-feature RMS of medians of |prediction error|:
+
+| Basis extension relative to v18 five-term model | RMS A |
+|---|---:|
+| Baseline (5 terms) | 0.285 |
+| + u² | 0.274 |
+| + u v² | 0.266 |
+| + u v² + u²v² | **0.257** |
+| + u² + u v² + u²v² | 0.270 |
+
+The u v² interaction allows the curvature along the slit
+to vary with wavelength. Full-fit red-pair prediction at
+y=506 improves from ~5.735 A (a separately refitted v18
+five-term baseline) to ~6.013 A (with u v² + u²v²).
+The original v18 coefficient vector predicts 5.793 A;
+do not mistake the separately refit five-term baseline
+for the unmodified original v18 stored model.
+
+This reduction in score and improvement at red y=506
+are **not a model selection approval**: feature selection,
+thresholds and family comparison all used the same
+N2146sat data. Curvature may be line-specific contamination,
+not a smooth physical wavelength trend. Model complexity
+must be externally validated against independent setups
+and independent original lamp frames/nights.
+
+## Code boundary (PR #178)
+
+New pure src/scorpio_pipe/lsf_spatial_curvature_audit.py checks
+per-lamp quadratic FWHM(y) and compares each laboratory pair
+to the original v18 shared-y² model; only DIAGNOSTIC_ONLY
+or individual REJECT results permitted. Seven new synthetic
+regression tests check sign reversal, two distinct lamps,
+duplicate samples, insufficient common spatial rows,
+provenance status, non-finite widths and non-adoption by
+production LSF. No production model is changed.
+
+New read-only scripts/qa/lsf20_spatial_curvature_probe.py:
+- SHA256-verifies BOTH original source ARC FITS and original _95/_96
+  wavelength map using their canonical exact digests.
+- Requires existing independent JSON audit v18 and JSON+CSV
+  profile results from the successfully run v19 original-ARC audit;
+  checks source provenance and total trial counts.
+- Fits spatial quadratic to existing original-ARC v19 profiles,
+  writes an *exclusive new JSON* outside any source directory;
+  does not refit raw pixels in this follow-on run.
+- Reports repeated lamp profile shapes separately and never
+  emits approved science LSF, sky zero-points or FITS products.
+
+See SCORPIO source grism specifications:
+https://www.sao.ru/hq/lsfvo/devices/scorpio/grisms/grisms.html
+Nominal VPHG1200B FWHM ~5.5 Å is not a guarantee of
+width for these particular observations or a point source.
+
+## Next decision gate
+
+**Do not create a science _97 LSF or combine N2146sat spectra yet.**
+The immediate decision is not which polynomial yields smallest
+training residual, but whether the observed pair-dependent
+spatial curvature represents the instrumental LSF, real
+unlisted ARC blends, spectrum tilt, or spatially-dependent
+profile/background/systematics. Require independent
+line-by-line profile evidence and external-night checks.
+The true science-source LSF and wavelength zero point
+remain SCIENCE HOLD.
