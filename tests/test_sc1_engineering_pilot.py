@@ -62,7 +62,7 @@ def test_copied_config_rebuilds_derived_manifest_metadata(tmp_path):
 
     original_manifest = old / "project_manifest.yaml"
     original_manifest.write_text(
-        "schema: scorpio-pipe.project-manifest.v1.2\\nroles: {}\\n",
+        "schema: scorpio-pipe.project-manifest.v1.2\nroles: {}\n",
         encoding="utf-8",
     )
     obj = str(raw_data / "science.fts")
