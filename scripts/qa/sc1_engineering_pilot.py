@@ -29,7 +29,7 @@ from pathlib import Path
 EXPECTED = {"bias": 20, "obj": 7, "flat": 3, "neon": 2}
 STAGES = (
     "manifest", "superbias", "cosmics", "superneon",
-    "lineid_prepare", "arclineid", "wavesolution", "lsf_model",
+    "lineid_prepare", "wavesolution", "lsf_model",
     "sky", "sky_refine", "linearize", "stack2d", "extract1d",
     "qc_report",
 )
@@ -331,9 +331,10 @@ def selftest() -> None:
         else:
             raise AssertionError("Accepted existing run directory")
         assert fingerprint_sources(cfg)[str(cfg)] == checksum(cfg)
-        assert len(STAGES) == 14
+        assert len(STAGES) == 13
         assert "cosmics" in STAGES
         assert "biascorr" not in STAGES
+        assert "arclineid" not in STAGES  # Alias for lineid_prepare, not a separate task
     print("SELFTEST PASSED")
 
 
