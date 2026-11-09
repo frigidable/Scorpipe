@@ -144,3 +144,25 @@ def test_all_failed_lines_do_not_become_a_candidate():
     assert qc["status"]=="REJECT"
     assert qc["n_repeatable_features"] if "n_repeatable_features" in qc else True
     assert qc["science_lsf_validated"] is False
+
+
+
+def test_disjoint_spatial_support_cannot_be_promoted_to_2d_candidate():
+    rows=synthetic_records()
+    for row in rows:
+        j=int(row["feature_id"].split("-")[1])
+        old_y=row["y_pix"]
+        y=(
+            50.0+(old_y-50.0)*0.25
+            if j<3 else 700.0+(old_y-50.0)*0.25
+        )
+        row["y_pix"]=float(y)
+        row["fwhm_A"]=float(
+            5.8+0.00028*(row["wavelength_A"]-4600)
+            +0.35*((y-516)/516)**2
+            +(0.025 if row["arc_id"]=="ARC_B" else 0.0)
+        )
+    qc=validate_lsf_multiline(rows,**KW)
+    assert qc["status"]=="REJECT"
+    assert qc["reason"]=="insufficient_common_spatial_coverage"
+    assert qc["science_lsf_validated"] is False
