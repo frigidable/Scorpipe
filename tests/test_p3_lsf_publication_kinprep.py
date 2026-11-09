@@ -81,8 +81,11 @@ def test_p3_lsf_publication_ready_and_kinprep_pipeline() -> None:
         # be inferred from merely inspecting isfinite(lsf_map).
         lsf_support_path = work_dir / "lsf_model" / "lsf_span_support.fits"
         assert lsf_support_path.is_file()
-        with fits.open(lsf_support_path) as support_hdu:
-            support = np.asarray(support_hdu[0].data, dtype=np.uint8)
+        # On Windows, np.asarray of a FITS memmap can preserve a view that
+        # keeps the temporary file locked even after HDUList.close().
+        # Both disable memmap and detach the array before leaving the block.
+        with fits.open(lsf_support_path, memmap=False) as support_hdu:
+            support = np.array(support_hdu[0].data, dtype=np.uint8, copy=True)
             assert support.shape == lam_map.shape
             assert set(np.unique(support)).issubset({0, 1})
             assert support_hdu[0].header["LSFSUP"] == "SPAN_ONLY"
