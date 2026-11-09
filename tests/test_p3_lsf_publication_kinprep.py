@@ -86,6 +86,9 @@ def test_p3_lsf_publication_ready_and_kinprep_pipeline() -> None:
         # Both disable memmap and detach the array before leaving the block.
         with fits.open(lsf_support_path, memmap=False) as support_hdu:
             support = np.array(support_hdu[0].data, dtype=np.uint8, copy=True)
+            # The data must own its buffer after the FITS HDU is closed;
+            # otherwise Windows refuses TemporaryDirectory cleanup.
+            assert support.flags.owndata and support.base is None
             assert support.shape == lam_map.shape
             assert set(np.unique(support)).issubset({0, 1})
             assert support_hdu[0].header["LSFSUP"] == "SPAN_ONLY"
