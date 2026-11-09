@@ -318,21 +318,41 @@ def prepare_lineid(cfg: dict[str, Any], *, run_root: str | Path | None = None) -
     auto_path = outdir / "manual_pairs_auto.csv"
     rep_path = outdir / "lineid_report.txt"
 
-    x_pairs, lam_pairs, d_pairs, meta = _suggest_linear_pairs(
-        px, amp, lam_lab, w_lab, tol_A, top_peaks, top_lines
-    )
+    # LineID preparation must remain usable when the automatic pattern
+    # matching is inconclusive. This is NOT approval of a wavelength
+    # solution: wavesolution still requires independently reviewed
+    # hand_pairs.txt. Do not raise the matching tolerance to force matches.
+    auto_failure = None
+    try:
+        x_pairs, lam_pairs, d_pairs, meta = _suggest_linear_pairs(
+            px, amp, lam_lab, w_lab, tol_A, top_peaks, top_lines
+        )
+    except RuntimeError as exc:
+        auto_failure = str(exc)
+        x_pairs = lam_pairs = d_pairs = np.array([], dtype=float)
+        meta = {}
+        print(
+            "LINEID AUTO: no reliable matching; manual pairs required: "
+            + auto_failure,
+            flush=True,
+        )
 
-    idx_near = np.argmin(np.abs(px[None, :] - x_pairs[:, None]), axis=1)
     with auto_path.open("w", encoding="utf-8", newline="") as f:
         f.write("use,x_pix,lambda_A,delta_A,amp,fwhm_pix,comment\n")
-        for k in range(len(x_pairs)):
-            i = int(idx_near[k])
-            f.write(
-                f"1,{x_pairs[k]:.6f},{lam_pairs[k]:.6f},{d_pairs[k]:.6f},{amp[i]:.6f},{fwhm[i]:.6f},auto\n"
-            )
+        if auto_failure is None:
+            idx_near = np.argmin(np.abs(px[None, :] - x_pairs[:, None]), axis=1)
+            for k in range(len(x_pairs)):
+                i = int(idx_near[k])
+                f.write(
+                    f"1,{x_pairs[k]:.6f},{lam_pairs[k]:.6f},{d_pairs[k]:.6f},{amp[i]:.6f},{fwhm[i]:.6f},auto\n"
+                )
 
     with rep_path.open("w", encoding="utf-8") as f:
-        f.write("LINE-ID (auto) report\n")
+        f.write(
+            "LINE-ID: MANUAL_ONLY_NO_RELIABLE_AUTO_PAIRS\n"
+            if auto_failure is not None else
+            "LINE-ID: AUTO_SUGGESTIONS_UNVERIFIED\n"
+        )
         f.write(f"lines_csv: {lines_path}\n")
         if long_prior_meta.get("applied"):
             cov = long_prior_meta.get("coverage_A") or []
@@ -344,9 +364,16 @@ def prepare_lineid(cfg: dict[str, Any], *, run_root: str | Path | None = None) -
                 f"dispersion={float(disp):.4f} A/px kept={int(long_prior_meta.get('kept_n_lines') or 0)}\n"
             )
         f.write(f"tol_A: {tol_A}\n")
+        f.write(f"peaks_detected: {int(px.size)}\n")
+        f.write(f"laboratory_lines_loaded: {int(lam_lab.size)}\n")
         f.write(f"pairs_auto: {len(x_pairs)}\n")
-        f.write(f"linear_guess: a={meta['a']:.6f} A/px, b={meta['b']:.3f} A\n")
-        f.write(f"linear_rms_A: {meta['rms_A']:.3f}\n")
+        if auto_failure is not None:
+            f.write(f"auto_failure: {auto_failure}\n")
+            f.write("No automatic pairs are scientifically accepted. "
+                    "Create and review hand_pairs.txt manually.\n")
+        else:
+            f.write(f"linear_guess: a={meta['a']:.6f} A/px, b={meta['b']:.3f} A\n")
+            f.write(f"linear_rms_A: {meta['rms_A']:.3f}\n")
 
     if long_prior_meta.get("applied"):
         try:
