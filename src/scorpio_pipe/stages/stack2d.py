@@ -1055,6 +1055,42 @@ def run_stack2d(
     try:
         # First exposure defines reference shape, WCS/grid, and base unit.
         hdr0 = _get_primary_header(hduls[0]).copy()
+        # Header-level spatial admission is independent of a matching
+        # spectral wavelength grid. The N2146sat _95 audit found science
+        # exposures separated by ~109 arcsec and with ROTANGLE differing
+        # by ~27 deg. They must never be stacked as identical spatial rows.
+        from scorpio_pipe.stack_pointing_qc import check_stack_pointing
+
+        geom_cfg = st_cfg.get("pointing_qc") or {}
+        if not isinstance(geom_cfg, dict):
+            raise ValueError("stack2d.pointing_qc must be a mapping")
+        pointing_qc = check_stack_pointing(
+            [_get_primary_header(h).copy() for h in hduls],
+            names=[p.name for p in files],
+            max_pointing_sep_arcsec=float(
+                geom_cfg.get("max_pointing_sep_arcsec", 5.0)
+            ),
+            max_rotator_diff_deg=float(
+                geom_cfg.get("max_rotator_diff_deg", 1.0)
+            ),
+            require_complete_metadata=bool(
+                geom_cfg.get("require_complete_metadata", False)
+            ),
+        )
+        pointing_qc_path = out_dir / "stack_pointing_qc.json"
+        pointing_qc_path.write_text(
+            json.dumps(pointing_qc, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        report["stack_pointing_qc"] = pointing_qc
+        if pointing_qc["status"] == "REJECT":
+            raise RuntimeError(
+                "Stack2D POINTING_QC REJECT: "
+                + " | ".join(pointing_qc["issues"][:6])
+                + f"; see {pointing_qc_path}. "
+                "Split pointings or provide independently verified slit "
+                "registration; matching wavelength grids do not justify stacking."
+            )
         spectral_contract = read_spectral_axis_contract(
             hdr0, source=files[0].name,
         )
