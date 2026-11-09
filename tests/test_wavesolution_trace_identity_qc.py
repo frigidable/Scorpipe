@@ -142,3 +142,32 @@ def test_cv_rejects_rank_deficient_line_geometry():
     x = y.copy()   # No independent spectral coordinate!
     with pytest.raises(ValueError, match="rank deficient"):
         leave_one_line_out_cv(x,y,lam)
+
+
+def test_missing_manual_line_is_not_silently_ignored():
+    y = np.arange(20, dtype=float)
+    report = trace_identity_qc(
+        np.r_[np.full(20, 50.), np.full(20, 65.)],
+        np.r_[y,y],
+        np.r_[np.full(20, 4000.), np.full(20, 4100.)],
+        np.array([50., 65., 80.]),
+        np.array([4000., 4100., 4200.]),
+    )
+    assert report["status"] == "REJECT"
+    assert any("4200.000 A has no usable" in s for s in report["issues"])
+
+
+def test_failed_science_2d_gate_precedes_lambda_map_fits_writer():
+    from pathlib import Path
+    from scorpio_pipe.stages import wavesolution as ws
+
+    source = Path(ws.__file__).read_text(encoding="utf-8")
+    routine = source[source.index("def build_wavesolution("):]
+    assert routine.index('if trace_qc["status"] != "PASS"') < routine.index(
+        "robust_polyfit_2d_power("
+    )
+    assert routine.index('if science_qc["status"] != "PASS"') < routine.index(
+        "atomic_write_fits(\n        lambda_map_fits"
+    )
+    assert "SCIENCE_2D_QC FAILED" in routine
+    assert "TRACE_IDENTITY_QC FAILED" in routine
