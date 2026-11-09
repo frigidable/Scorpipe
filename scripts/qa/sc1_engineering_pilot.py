@@ -92,7 +92,10 @@ def check_pilot_destination(source_cfg: Path, new_dir: Path) -> None:
 # These keys are generated afresh by scorpio_pipe.config.load_config().
 # Persisting their OLD values into a copied YAML config risks routing outputs
 # or provenance back to the original workspace.
-LOADER_DERIVED_ROOT_KEYS = ("project_root", "config_path", "config_dir", "work_dir_abs")
+LOADER_DERIVED_ROOT_KEYS = (
+    "project_root", "config_path", "config_dir", "work_dir_abs",
+    "_project_manifest",
+)
 
 
 def strip_loader_derived_root_keys(raw: dict) -> None:
@@ -165,27 +168,45 @@ def prepare(config_path: str, new_directory: str) -> None:
     raw_data = str(Path(str(raw["data_dir"])).resolve()).lower()
     if source_work_string == raw_data:
         raise RuntimeError("Raw data_dir unexpectedly equals source work_dir")
-    def reject_old_run_product_refs(value: object, location: str = "") -> None:
+    unsafe_locations: list[str] = []
+
+    def collect_old_run_product_refs(value: object, location: str = "") -> None:
         if isinstance(value, dict):
             for key, child in value.items():
                 # Existing RAW exposures may legitimately live under the
                 # source run; they are only ever opened for reading.
                 if not location and key == "frames":
                     continue
-                reject_old_run_product_refs(child, f"{location}.{key}" if location else str(key))
+                collect_old_run_product_refs(child, f"{location}.{key}" if location else str(key))
         elif isinstance(value, list):
             for index, child in enumerate(value):
-                reject_old_run_product_refs(child, f"{location}[{index}]")
+                collect_old_run_product_refs(child, f"{location}[{index}]")
         elif isinstance(value, str) and source_work_string in value.lower():
-            raise RuntimeError(f"Unsafe original-run reference: {location}")
+            unsafe_locations.append(location)
 
-    reject_old_run_product_refs(raw)
+    collect_old_run_product_refs(raw)
+    if unsafe_locations:
+        raise RuntimeError(
+            "Unsafe original-run reference(s): " + ", ".join(unsafe_locations)
+        )
 
     before = fingerprint_sources(source)
     new_dir.mkdir(parents=False)
     new_config = new_dir / "config.yaml"
     with new_config.open("x", encoding="utf-8") as stream:
         yaml.safe_dump(raw, stream, sort_keys=False, allow_unicode=True)
+
+    # Verify the actual config loader against the prepared RAW selection before
+    # declaring this pilot usable. In particular, manifest role overrides must
+    # not silently change the 20-BIAS cohort or the seven science frames.
+    loaded_pilot = load_config(new_config)
+    if Path(str(loaded_pilot.get("work_dir") or "")).resolve() != new_dir:
+        raise RuntimeError("Prepared pilot loader resolved work_dir outside pilot")
+    check_expected_frames(loaded_pilot)
+    for kind in EXPECTED:
+        if loaded_pilot["frames"][kind] != cfg["frames"][kind]:
+            raise RuntimeError(f"Prepared pilot changed selected {kind} RAW frames")
+
     record = {
         "status": "PREPARED_ENGINEERING_ONLY_SCIENCE_HOLD",
         "source_config": str(source),
