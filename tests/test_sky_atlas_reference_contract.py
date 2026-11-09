@@ -120,3 +120,28 @@ def test_reject_malformed_catalogue_and_invalid_noise(tmp_path):
             wave,sky,np.full(wave.size,-1.0),_lab_doublet(),
             wavelength_frame="air",instrument_fwhm_A=3.1,
         )
+
+
+def test_mixed_observed_and_laboratory_reference_is_rejected():
+    wave, sky = _synthetic_spectrum()
+    mixed = _lab_doublet() + [
+        SkyReference(5202.979, "uves_observed_centroid", "UVES_2003")
+    ]
+    with pytest.raises(ValueError, match="Cannot mix laboratory"):
+        fit_blended_sky_shift(
+            wave, sky, 0.7, mixed,
+            wavelength_frame="air", instrument_fwhm_A=3.1,
+        )
+
+
+def test_dense_unresolved_catalogue_is_not_used_as_nine_independent_anchors():
+    wave,sky = _synthetic_spectrum()
+    dense = [
+        SkyReference(5195.0 + i*0.35, "uves_observed_centroid", "UVES_2003")
+        for i in range(9)
+    ]
+    with pytest.raises(ValueError,match="eight components"):
+        fit_blended_sky_shift(
+            wave,sky,0.7,dense,
+            wavelength_frame="air",instrument_fwhm_A=3.1,
+        )
