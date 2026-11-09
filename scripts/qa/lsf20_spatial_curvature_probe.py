@@ -9,6 +9,8 @@ import argparse
 import csv
 import hashlib
 import json
+import math
+from statistics import median
 from pathlib import Path
 
 from scorpio_pipe.lsf_spatial_curvature_audit import audit_neon_spatial_curvature
@@ -30,6 +32,69 @@ def sha(path: Path) -> str:
         for chunk in iter(lambda:src.read(4*1024*1024),b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def validate_v19_csv_against_summary(records: list[dict], v19: dict) -> None:
+    """Verify line-by-line, background-by-background summary, not just row count.
+
+    The v19 JSON and CSV were produced by the same original-FITS run.
+    Their agreement detects accidental mixing of different run outputs.
+    """
+    summaries = v19.get("group_summary")
+    if not isinstance(summaries, list) or len(summaries) != 4:
+        raise ValueError("v19 original-ARC summary must have four laboratory pairs")
+    if set(int(g["pair"]) for g in summaries) != set(range(4)):
+        raise ValueError("v19 original-ARC group labels are inconsistent")
+    for group in summaries:
+        pid = int(group["pair"])
+        accepted = [
+            row for row in records
+            if int(row["pair"]) == pid and row["status"] == "DIAGNOSTIC_FIT"
+        ]
+        if len(accepted) != int(group["n_accepted"]):
+            raise ValueError("v19 line-profile summary per-pair counts mismatch")
+        for degree in (1, 2):
+            expected = group.get(
+                f"median_fwhm_continuum_degree_{degree}_by_window_A"
+            )
+            if not isinstance(expected, dict) or set(expected) != {
+                "11", "13", "16", "20", "24"
+            }:
+                raise ValueError("v19 summary continuum/window grid mismatch")
+            for window in (11, 13, 16, 20, 24):
+                values = [
+                    float(row["fwhm_A"]) for row in accepted
+                    if int(row["continuum_degree"]) == degree
+                    and int(row["half_window_px"]) == window
+                ]
+                reference = expected[str(window)]
+                if not values:
+                    if reference is not None:
+                        raise ValueError("v19 absent profile hypothesis has non-null median")
+                    continue
+                estimate = median(values)
+                if (
+                    reference is None or not math.isfinite(float(reference))
+                    or not math.isclose(estimate,float(reference),
+                                        rel_tol=1e-9,abs_tol=1e-8)
+                ):
+                    raise ValueError("v19 original-ARC median differs from its CSV")
+    original = v19.get("red_pair_y506",{}).get("observed_fwhm_A")
+    if not isinstance(original,dict) or set(original)!={"arc06","arc13"}:
+        raise ValueError("v19 red pair original lamp comparison missing")
+    for arc in ("arc06","arc13"):
+        matches = [
+            float(row["fwhm_A"]) for row in records
+            if row["status"] == "DIAGNOSTIC_FIT"
+            and row["arc_id"] == arc and int(row["pair"]) == 3
+            and float(row["y_pix"]) == 506
+            and int(row["continuum_degree"]) == 1
+            and int(row["half_window_px"]) == 16
+        ]
+        if len(matches) != 1 or not math.isclose(
+            matches[0], float(original[arc]), rel_tol=1e-9, abs_tol=1e-8
+        ):
+            raise ValueError("v19 red pair FITS profile and summary disagree")
 
 
 def main() -> None:
@@ -65,7 +130,7 @@ def main() -> None:
     if (v19.get("status")!="DIAGNOSTIC_ONLY"
             or v19.get("science_lsf_validated") is not False
             or v19.get("auto_apply_allowed") is not False
-            or v19.get("original_source_sha256")!=ORIGINAL_SHA
+            or v19.get("source_files_sha256")!=ORIGINAL_SHA
             or v19.get("n_attempts")!=2640
             or v19.get("n_numerically_accepted")!=2425):
         raise RuntimeError("Previous original-ARC v19 profile diagnostic not verified")
@@ -77,6 +142,9 @@ def main() -> None:
         row["status"]=="DIAGNOSTIC_FIT" for row in records
     )!=v19["n_numerically_accepted"]:
         raise ValueError("Original-ARC CSV inconsistent with v19 JSON counts")
+    if sha(inputs["v18_json"]) != v19.get("v18_report_sha256"):
+        raise ValueError("v19 JSON was not generated from this exact v18 report")
+    validate_v19_csv_against_summary(records, v19)
     result=audit_neon_spatial_curvature(records,previous)
     result["source_sha256"]={
         key:sha(value) for key,value in inputs.items()
