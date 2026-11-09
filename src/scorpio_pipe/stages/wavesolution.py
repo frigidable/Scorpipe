@@ -2284,7 +2284,8 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
         (rms2d_A, wave_thresholds.wavesol_2d_rms_bad, "2D_RMS"),
         (resid2d_p95_A, wave_thresholds.resid_2d_p95_bad, "2D_P95"),
     ):
-        if not np.isfinite(value) or float(value) >= float(threshold):
+        if (not np.isfinite(value) or not np.isfinite(threshold)
+                or float(threshold) <= 0 or float(value) >= float(threshold)):
             science_qc["issues"].append(
                 f"Existing wavesolution {label} ERROR: "
                 f"{float(value):.4g} A >= {float(threshold):.4g} A"
@@ -2778,13 +2779,14 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
 
     # ERROR flags must not be downgraded to an operationally successful
     # StageResult. Do not allow downstream stages to consume such a solution.
-    if sev == "ERROR":
+    if sev in {"ERROR", "FATAL"}:
         raise RuntimeError(
-            "Wavesolution produced QC ERROR flags: "
+            "Wavesolution produced QC ERROR/FATAL flags: "
             + ", ".join(
                 str(flag.get("code") or "?")
                 for flag in flags
-                if str(flag.get("severity") or "").upper() == "ERROR"
+                if isinstance(flag, dict)
+                and str(flag.get("severity") or "").upper() in {"ERROR", "FATAL"}
             )
         )
 
