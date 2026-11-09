@@ -28,7 +28,7 @@ from pathlib import Path
 
 EXPECTED = {"bias": 20, "obj": 7, "flat": 3, "neon": 2}
 STAGES = (
-    "manifest", "superbias", "superneon",
+    "manifest", "superbias", "cosmics", "superneon",
     "lineid_prepare", "arclineid", "wavesolution", "lsf_model",
     "sky", "sky_refine", "linearize", "stack2d", "extract1d",
     "qc_report",
@@ -134,6 +134,14 @@ def prepare(config_path: str, new_directory: str) -> None:
         calib["superflat_path"] = "04_flat/superflat.fits"
     raw.setdefault("flatfield", {})["enabled"] = False
     raw.setdefault("superneon", {})["bias_sub"] = False
+    # Sky requires BIASSUB=True for instrument-identified SCORPIO frames.
+    # Cosmics provides bias-corrected OBJ products without touching fast-readout
+    # FLAT/NEON, which have no compatible MasterBias in this data set.
+    cosmics = raw.setdefault("cosmics", {})
+    cosmics["enabled"] = True
+    cosmics["apply_to"] = ["obj"]
+    cosmics["bias_subtract"] = True
+    cosmics["method"] = "auto"  # Seven OBJ => stack_mad; engineering, NOT certified
 
     # Do not carry path strings to original science PRODUCTS into the new run.
     # Reading raw FITS at their unchanged absolute paths is allowed.
@@ -176,6 +184,9 @@ def prepare(config_path: str, new_directory: str) -> None:
         },
         "flatfield_enabled": False,
         "superneon_bias_sub": False,
+        "cosmics_apply_to": ["obj"],
+        "cosmics_bias_subtract": True,
+        "cosmics_method": "auto",
         "science_e2e_approved": False,
     }
     with (new_dir / MANIFEST).open("x", encoding="utf-8") as output:
@@ -219,6 +230,12 @@ def run(pilot_config: str) -> None:
         raise RuntimeError("Pilot flatfield must remain disabled")
     if bool((cfg.get("superneon") or {}).get("bias_sub", True)):
         raise RuntimeError("Pilot superneon bias_sub must remain disabled")
+    cosmic = cfg.get("cosmics") or {}
+    if (not bool(cosmic.get("enabled", False))
+            or cosmic.get("apply_to") != ["obj"]
+            or not bool(cosmic.get("bias_subtract", False))
+            or str(cosmic.get("method") or "").lower() != "auto"):
+        raise RuntimeError("Pilot Cosmics must bias-correct only OBJ frames in auto mode")
     if (cfg.get("calib") or {}).get("bias_gross_reject_adu") != 50.0:
         raise RuntimeError("Pilot gross rejection no longer matches manifest")
     if not all(
@@ -308,7 +325,8 @@ def selftest() -> None:
         else:
             raise AssertionError("Accepted existing run directory")
         assert fingerprint_sources(cfg)[str(cfg)] == checksum(cfg)
-        assert len(STAGES) == 13
+        assert len(STAGES) == 14
+        assert "cosmics" in STAGES
         assert "biascorr" not in STAGES
     print("SELFTEST PASSED")
 
