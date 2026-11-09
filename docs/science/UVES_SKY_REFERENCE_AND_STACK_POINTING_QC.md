@@ -65,7 +65,7 @@ registration remains a separate science acceptance test.
 
 ## Acceptance before science use
 
-1. Execute fourteen new targeted regressions plus existing Golden and
+1. Execute seventeen new targeted regressions plus existing Golden and
    wavesolution tests in a fresh detached worktree pinned to PR #178 HEAD.
    Verify tests for ~109-arcsec mismatch, RA wrapping, missing metadata,
    UVES observed-centroid provenance, mixed-reference/overcomplete-blend rejection, air-vacuum mismatch, and free-amplitude
@@ -85,3 +85,46 @@ registration remains a separate science acceptance test.
 **Implementation boundary:** PR adds a provenance-safe, diagnostic-only sky
 reference and a geometry admission screen. It does not automatically alter
 sky subtraction, lambda_map, science wavelengths or downstream data.
+
+
+## Independent v11 original-science experiment: LSF is the limiting nuisance
+
+A diagnostic re-fit of **frozen** N2146sat _95 raw OBJ04/OBJ12 and the
+same untouched _95 lambda_map used 40 non-overlapping 19-row spectra
+per input. The [N I] laboratory air components at 5197.902 and
+5200.257 Å are only 2.355 Å apart. A common shift plus *freely fit*
+line amplitudes at different **assumed fixed Gaussian FWHM values**
+has the following **median** outcomes:
+
+| Assumed FWHM Å | OBJ04 shift Å | OBJ12 shift Å | Difference Å |
+|---:|---:|---:|---:|
+| 3.1 | −0.188 | 0.000 | +0.188 |
+| 4.5 | −0.125 | +0.063 | +0.188 |
+| 5.6 | +0.250 | +0.388 | +0.138 |
+| 6.5 | +0.900 | +0.975 | +0.075 |
+
+These FWHM values are **not independently measured SCORPIO LSF** and
+the extraction bins were not verified as uncontaminated sky. The exercise
+tests numerical sensitivity, NOT a physical sequence of wavelength
+solutions. The previous ~0.2 Å temporal drift was robust among the
+previous blend models, but is **not** robust to all reasonable
+unconstrained-FWHM/free-amplitude assumptions.
+
+The old free-width [N I] fit gave effective Gaussian σ~2.4 Å
+(FWHM~5.6 Å), but because two components separated by 2.355 Å are
+partly unresolved, that best-fit width **cannot itself certify**
+instrumental LSF. The new probe now reports
+unresolved_reference_blend and
+absolute_shift_deblend_identifiability instead of relying on a
+high line-detection Δχ² to imply a trustworthy zero point.
+The supplementary evaluate_lsf_sensitivity() runs >=3
+independently justified candidate widths and reports the inferred
+shift spread; any high spread or an unreliable individual fit
+is UNSTABLE, but even PROVISIONAL always keeps auto_apply_allowed=false.
+
+Follow-on science acceptance requires an LSF constrained by
+isolated ARC features, sky extraction free from object emission,
+at least two independent air-wavelength nightglow complexes and
+per-exposure, per-row uncertainty evaluation. Reference source:
+NIST N I air wavelengths in
+https://nvlpubs.nist.gov/nistpubs/Legacy/NSRDS/nbsnsrds3sec5.pdf.
