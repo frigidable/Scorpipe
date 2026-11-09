@@ -417,6 +417,7 @@ def _trace_one_line_xcorr(
     search_rad: int = 12,
     y_step: int = 1,
     amp_thresh: float = 20.0,
+    max_step_px: float = 3.0,
 ) -> tuple[list[float], list[float], list[float]]:
     """Trace one emission line in a 2D image by local X-correlation.
 
@@ -424,6 +425,9 @@ def _trace_one_line_xcorr(
     """
     H, W = img.shape
     y0 = int(np.clip(y0, 0, H - 1))
+    if (not np.isfinite(max_step_px) or max_step_px <= 0
+            or search_rad < 1 or y_step < 1):
+        raise ValueError("Trace requires finite positive max_step_px, search_rad and y_step")
 
     # template from several rows around y0
     x1 = int(max(0, np.floor(x0 - template_hw)))
@@ -440,7 +444,9 @@ def _trace_one_line_xcorr(
     # go in two directions from y0
     xs: list[float] = [float(x0)]
     ys: list[float] = [float(y0)]
-    scores: list[float] = [float(np.nanmax(template))]
+    # Seed must have the same correlation-score scale as all other rows.
+    # A raw amplitude here was O(1e3) while dot products were O(1e6).
+    scores: list[float] = [float(np.dot(template, template))]
 
     def _walk(direction: int) -> None:
         nonlocal xs, ys, scores
@@ -462,14 +468,29 @@ def _trace_one_line_xcorr(
             if corr.size == 0:
                 y += direction * y_step
                 continue
-            i_max = int(np.argmax(corr))
+            # A large correlation window is NOT permission to jump to
+            # another physical line. Evaluate only candidates consistent
+            # with the previous row (or y_step rows). This fixes the
+            # observed 4181/4190, 4333/4345, 5037/5047 and 5330/5341
+            # track collisions in the N2146sat VPHG1200B pilot.
+            candidate_x = (
+                c1 + np.arange(corr.size, dtype=float)
+                + (len(template) - 1) / 2.0
+            )
+            max_jump = float(max_step_px) * float(y_step)
+            allowed = np.abs(candidate_x - x_prev) <= max_jump
+            if not np.any(allowed):
+                break
+            i_max = int(np.argmax(np.where(allowed, corr, -np.inf)))
             cmax = float(corr[i_max])
-            if cmax < amp_thresh:
+            if not np.isfinite(cmax) or cmax < amp_thresh:
                 y += direction * y_step
                 continue
 
-            sub = _parabolic_subpix(corr, i_max)
+            sub = float(np.clip(_parabolic_subpix(corr, i_max), -0.5, 0.5))
             x_found = (c1 + i_max + sub) + (len(template) - 1) / 2.0
+            if abs(x_found - x_prev) > max_jump + 0.5:
+                break
 
             xs.append(float(x_found))
             ys.append(float(y))
@@ -493,6 +514,7 @@ def trace_lines_2d_cc(
     search_rad: int = 12,
     y_step: int = 1,
     amp_thresh: float = 20.0,
+    max_step_px: float = 3.0,
     y0: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Trace multiple lines; returns control points (x,y,lambda,score)."""
@@ -514,6 +536,7 @@ def trace_lines_2d_cc(
             search_rad=search_rad,
             y_step=y_step,
             amp_thresh=amp_thresh,
+            max_step_px=max_step_px,
         )
         if len(xs) == 0:
             continue
@@ -1772,6 +1795,7 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
             search_rad=int(wcfg.get("trace_search_rad", 12)),
             y_step=int(wcfg.get("trace_y_step", 1)),
             amp_thresh=float(wcfg.get("trace_amp_thresh", 20.0)),
+            max_step_px=float(wcfg.get("trace_max_step_px", 3.0)),
             y0=(None if y0 is None else int(y0)),
         )
 
