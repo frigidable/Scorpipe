@@ -1419,6 +1419,10 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
         arc_list = [Path(x) for x in (cfg.get("frames", {}) or {}).get("neon", [])]  # type: ignore[union-attr]
 
     # Safety-net exclude application (absolute policy).
+    # Defined even if the exclusion policy is empty. Previously this
+    # provenance object was referenced only at final QC serialization,
+    # causing NameError that an overbroad except silently suppressed.
+    excluded_summary: dict[str, Any] | None = None
     try:
         from scorpio_pipe.exclude_policy import filter_paths_by_exclude, resolve_exclude_set
         from scorpio_pipe.qc.flags import make_flag
@@ -1427,6 +1431,13 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
         if ex.excluded_abs:
             obj_list, obj_dropped = filter_paths_by_exclude(obj_list, ex.excluded_abs)
             arc_list, arc_dropped = filter_paths_by_exclude(arc_list, ex.excluded_abs)
+            excluded_summary = {
+                "policy_path_count": int(len(ex.excluded_abs)),
+                "n_obj_dropped": int(len(obj_dropped)),
+                "n_arc_dropped": int(len(arc_dropped)),
+                "obj_dropped": [str(p) for p in obj_dropped],
+                "arc_dropped": [str(p) for p in arc_dropped],
+            }
             if obj_dropped or arc_dropped:
                 pre_flags.append(
                     make_flag(
