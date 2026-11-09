@@ -135,3 +135,40 @@ diagnostic JSON files exist. Use a fresh r9 detached worktree pinned to the
 new reviewed HEAD; preserve failed r8 test evidence, all original _01 files
 and earlier _91/_92/_93 pilot outputs. Never bypass or relax Wave2D QC to
 make tests pass.
+
+### 2026-11-09 v9 real _94 Wave2D: QC fail closed as intended
+
+Windows targeted regression 74/74 PASS, selftest PASS. Prepared isolated _94;
+all five pre-LineID stages passed. The 19 reviewed Moiseev anchors were copied
+from _93 with matching SHA256
+2d88b6948d9225326bcbf16125dfa844544da6a44ec1e5e8af6438975433d623.
+Wave-only stage failed with SCIENCE_2D_QC before emitting lambda_map.fits;
+source protected hashes and hand_pairs remain unchanged. Per-line sample
+retention: 4713.00 A = 1/1008 (0.1%), 4863.96 A = 0/1008,
+5221.80 A = 203/1008 (20.1%). Preserve _94 failure products and
+sc1_wavesolution_only_v9_result.json as immutable science evidence.
+Do not repeat the same wave-only script or run legacy Resume.
+
+Offline reproduction on the archived _93 superneon.fits using the new
+row-local (3 px) tracer and unchanged 19 manual anchors reproduces
+the rejected sample counts **exactly**, including the selected
+Power degree-5 model. Its training RMS is ~0.214 A on only 16327/19152
+rows, but complete lines have been discarded. It is an inappropriate
+wavelength solution despite deceptively small training RMS.
+
+Independent all-line, un-clipped (no global sigma clipping) Chebyshev 3x2
+fits on the same full traced control points give ~0.316 A RMS
+and whole-line held-out CV ~0.406 A. Full-line un-clipped Power5 / Cheb5x3
+also have low residuals (~0.27 A), but higher complexity.
+These are diagnostic offline calculations, not validated science products.
+
+Provisional source fix: when auto-selected high-order fit discards a
+laboratory anchor below 65% per-line retention, build an explicitly marked
+low-order Chebyshev (3,2) candidate with equal *group* weight per laboratory
+line and NO global sigma clipping; choose it only if all per-line and
+whole-line-CV science gates, plus existing instrument thresholds, pass.
+Record the rejected high-order model, trigger lines, fallback review
+and selection in wavesolution_model_selection.json. Forced models remain
+forced and fail closed. This is an engineering fallback, not permission to
+discard arc/sky-line zero-point validation or to relax thresholds.
+Next new isolated pilot is _95, pinned to newly updated PR HEAD.
