@@ -164,3 +164,83 @@ def test_more_than_ten_percent_gross_outliers_invalidates_pixel():
     assert sci[0, 0] == 0.0
     assert var[0, 0] == 0.0
     assert meta["gross_rejected_samples"] == 3
+
+
+@pytest.fixture
+def gross_indexed_masterbias(tmp_path):
+    """The real producer's v3 index and FITS products, not a mocked schema."""
+    fits = pytest.importorskip("astropy.io.fits")
+    from scorpio_pipe.stages.calib import build_superbias
+    from tests.golden.mini_night import make_mini_night
+
+    mn = make_mini_night(tmp_path)
+    mn.cfg.setdefault("calib", {})["bias_gross_reject_adu"] = 50.0
+    stage = mn.work_dir / "03_bias"
+    build_superbias(
+        mn.cfg, run_root=mn.work_dir, stage_dir=stage,
+        allow_legacy_mirrors=False,
+    )
+    index = json.loads((stage / "master_bias_index.json").read_text(encoding="utf8"))
+    group = index["groups"][0]
+    var_file = mn.work_dir / group["files"]["var"]
+    return index, group, var_file, mn.work_dir
+
+
+def test_grossmed_consumer_accepts_producer_estimator_provenance(
+    gross_indexed_masterbias,
+):
+    from scorpio_pipe.stages.calib import _require_estimator_masterbias_index
+
+    index, group, var_file, work_dir = gross_indexed_masterbias
+    fits = pytest.importorskip("astropy.io.fits")
+    with fits.open(var_file) as hdu:
+        assert hdu[0].header["SB_VMOD"] == "GROSSMED"
+        assert "SB_VFAC" not in hdu[0].header  # Per-pixel finite-N factors
+    _require_estimator_masterbias_index(index, group, work_dir)
+
+
+@pytest.mark.parametrize("mutate", [
+    "missing_gross_cutoff",
+    "incorrect_index_minimum",
+    "fake_fixed_factor",
+    "missing_provisional_assumption",
+    "insufficient_support",
+])
+def test_grossmed_consumer_rejects_inconsistent_or_unsafe_provenance(
+    gross_indexed_masterbias, mutate,
+):
+    from scorpio_pipe.stages.calib import _require_estimator_masterbias_index
+
+    index, group, _, work_dir = gross_indexed_masterbias
+    if mutate == "missing_gross_cutoff":
+        del group["variance"]["gross_reject_adu"]
+    elif mutate == "incorrect_index_minimum":
+        group["variance"]["min_effective_n"] -= 1
+    elif mutate == "fake_fixed_factor":
+        group["variance"]["factor"] = 0.1
+    elif mutate == "missing_provisional_assumption":
+        group["variance"]["assumptions"] = "independent_gaussian_read_noise"
+    elif mutate == "insufficient_support":
+        group["variance"]["bad_support_pixels"] = 1
+
+    with pytest.raises(RuntimeError, match="Gross-rejected"):
+        _require_estimator_masterbias_index(index, group, work_dir)
+
+
+@pytest.mark.parametrize("card,new_value", [
+    ("SB_GROS", 999.0),
+    ("SB_NMIN", 1),
+    ("SB_GCNT", 999),
+    ("SB_METH", "mean"),
+])
+def test_grossmed_consumer_rejects_fits_header_mismatch(
+    gross_indexed_masterbias, card, new_value,
+):
+    from scorpio_pipe.stages.calib import _require_estimator_masterbias_index
+
+    index, group, var_file, work_dir = gross_indexed_masterbias
+    fits = pytest.importorskip("astropy.io.fits")
+    with fits.open(var_file, mode="update") as hdu:
+        hdu[0].header[card] = new_value
+    with pytest.raises(RuntimeError, match="Gross-rejected|sample-count"):
+        _require_estimator_masterbias_index(index, group, work_dir)
