@@ -148,3 +148,19 @@ def test_stage_provenance_records_explicit_gross_mode(tmp_path):
         assert hdu[0].header["SB_GROS"] == pytest.approx(50.0)
         assert int(hdu[0].header["SB_GCNT"]) >= 0
         assert np.isfinite(hdu[0].data).all()
+
+
+def test_more_than_ten_percent_gross_outliers_invalidates_pixel():
+    # With N=20, 1-2 gross transients are supported; 3 are no longer
+    # safely characterized as a rare contamination episode.
+    raw = np.full((20, 1, 2), 999.0)
+    raw[0:3, 0, 0] = 16000.0
+    sci, var, meta = master_bias_estimator_variance(
+        raw, combine="median", gross_reject_adu=50.0
+    )
+    assert meta["gross_min_required_support"] == 18
+    assert meta["invalid_support"][0, 0]
+    assert not meta["invalid_support"][0, 1]
+    assert sci[0, 0] == 0.0
+    assert var[0, 0] == 0.0
+    assert meta["gross_rejected_samples"] == 3
