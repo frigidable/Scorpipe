@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from scorpio_pipe.sky_atlas_reference import (
-    SkyReference, fit_blended_sky_shift, group_blended_lines,
+    SkyReference, fit_blended_sky_shift, group_blended_lines, evaluate_lsf_sensitivity,
     read_uves_airglow_csv,
 )
 
@@ -144,4 +144,49 @@ def test_dense_unresolved_catalogue_is_not_used_as_nine_independent_anchors():
         fit_blended_sky_shift(
             wave,sky,0.7,dense,
             wavelength_frame="air",instrument_fwhm_A=3.1,
+        )
+
+
+
+def test_unresolved_ni_doublet_is_not_absolute_wavelength_certification():
+    w, f = _synthetic_spectrum()
+    result = fit_blended_sky_shift(
+        w, f, 0.7, _lab_doublet(),
+        wavelength_frame="air", instrument_fwhm_A=5.6,
+    )
+    assert result["unresolved_reference_blend"] is True
+    assert result["nearest_reference_separation_A"] == pytest.approx(2.355)
+    assert result["absolute_shift_deblend_identifiability"] == (
+        "UNRESOLVED_COMPONENT_AMPLITUDE_DEGENERACY"
+    )
+    assert result["science_wavelength_zero_point_approved"] is False
+    assert result["auto_apply_allowed"] is False
+
+
+def test_lsf_sensitivity_runs_three_models_without_approving_correction():
+    w, f = _synthetic_spectrum(shift=0.24)
+    summary = evaluate_lsf_sensitivity(
+        w, f, 0.7, _lab_doublet(), wavelength_frame="air",
+        instrumental_fwhm_trials_A=[2.8, 3.1, 3.4],
+        max_shift_spread_A=0.2,
+    )
+    assert summary["n_fwhm_trials"] == 3
+    assert len(summary["shift_trial_values_A"]) == 3
+    assert np.isfinite(summary["shift_spread_A"])
+    assert summary["status"] in {"UNSTABLE", "PROVISIONAL"}
+    assert summary["science_wavelength_zero_point_approved"] is False
+    assert summary["auto_apply_allowed"] is False
+
+
+def test_lsf_uncertainty_budget_cannot_be_skipped_with_one_width():
+    w, f = _synthetic_spectrum()
+    with pytest.raises(ValueError, match=">=3 distinct"):
+        evaluate_lsf_sensitivity(
+            w, f, 0.7, _lab_doublet(), wavelength_frame="air",
+            instrumental_fwhm_trials_A=[3.1],
+        )
+    with pytest.raises(ValueError, match=">=3 distinct"):
+        evaluate_lsf_sensitivity(
+            w, f, 0.7, _lab_doublet(), wavelength_frame="air",
+            instrumental_fwhm_trials_A=[3.1, 3.1, 3.1],
         )
