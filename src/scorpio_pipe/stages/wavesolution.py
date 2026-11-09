@@ -2267,6 +2267,30 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
         dispersion_A_per_px=disp2d_A_per_px,
     )
     science_qc["trace_identity_qc"] = str(trace_qc_path)
+    # Existing setup-dependent QC ERROR limits must also be fatal before a
+    # consumable lambda map is written. The historical implementation only
+    # recorded flags in done.json while the StageResult still returned OK.
+    from scorpio_pipe.qc_thresholds import compute_thresholds
+
+    wave_thresholds, wave_threshold_meta = compute_thresholds(cfg)
+    science_qc["existing_thresholds_A"] = {
+        "wavesol_1d_rms_bad": float(wave_thresholds.wavesol_1d_rms_bad),
+        "wavesol_2d_rms_bad": float(wave_thresholds.wavesol_2d_rms_bad),
+        "resid_2d_p95_bad": float(wave_thresholds.resid_2d_p95_bad),
+        "metadata": wave_threshold_meta,
+    }
+    for value, threshold, label in (
+        (rms1d, wave_thresholds.wavesol_1d_rms_bad, "1D_RMS"),
+        (rms2d_A, wave_thresholds.wavesol_2d_rms_bad, "2D_RMS"),
+        (resid2d_p95_A, wave_thresholds.resid_2d_p95_bad, "2D_P95"),
+    ):
+        if not np.isfinite(value) or float(value) >= float(threshold):
+            science_qc["issues"].append(
+                f"Existing wavesolution {label} ERROR: "
+                f"{float(value):.4g} A >= {float(threshold):.4g} A"
+            )
+    if science_qc["issues"]:
+        science_qc["status"] = "REJECT"
     science_qc_file = outdir / "wavesolution_science_qc.json"
     science_qc_file.write_text(
         json.dumps(science_qc, indent=2, ensure_ascii=False),
@@ -2746,8 +2770,23 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
             },
         }
         (outdir / "wave_done.json").write_text(json.dumps(wave_done, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as exc:
+        raise RuntimeError(
+            "Wavesolution QC flags/provenance could not be written: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+
+    # ERROR flags must not be downgraded to an operationally successful
+    # StageResult. Do not allow downstream stages to consume such a solution.
+    if sev == "ERROR":
+        raise RuntimeError(
+            "Wavesolution produced QC ERROR flags: "
+            + ", ".join(
+                str(flag.get("code") or "?")
+                for flag in flags
+                if str(flag.get("severity") or "").upper() == "ERROR"
+            )
+        )
 
     return WaveSolutionResult(
         wavesol_dir=outdir,
