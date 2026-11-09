@@ -202,6 +202,7 @@ class CalibBlock(BaseModel):
 
     bias_combine: str = "median"  # median|mean
     bias_sigma_clip: float = 0.0
+    bias_gross_reject_adu: float = Field(default=0.0, ge=0.0, allow_inf_nan=False)
 
     # P0-C1: how strictly to enforce MasterBias readout matching.
     # - strict: raise if no exact (geometry+readout) match exists.
