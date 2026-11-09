@@ -232,3 +232,57 @@ def test_automatic_fallback_does_not_override_forced_model_or_hide_failure():
     assert routine.index("wavesolution_model_selection.json") < routine.index(
         "wavesolution_2d.json"
     )
+
+
+def test_mini_night_auto_fallback_is_executed_and_recorded(
+    tmp_path, monkeypatch,
+):
+    """Integration: both nominal models lose one line, but fallback retains it."""
+    from pathlib import Path
+    import json
+    from scorpio_pipe.stages import wavesolution as ws
+    from scorpio_pipe.stages.superneon import build_superneon
+    from tests.golden.mini_night import make_mini_night
+
+    mini = make_mini_night(tmp_path)
+    cfg = mini.cfg.copy()
+    cfg["superneon"] = {**mini.cfg["superneon"], "bias_sub": False}
+    cfg["wavesol"] = {**mini.cfg["wavesol"], "model2d": "auto"}
+    build_superneon(cfg, run_root=mini.work_dir)
+    power_orig = ws.robust_polyfit_2d_power
+    cheb_orig = ws.robust_polyfit_2d_cheb
+
+    def remove_midline(fitter, *args, **kwargs):
+        coeff, meta, used = fitter(*args, **kwargs)
+        if kwargs.get("maxiter") == 0:
+            return coeff, meta, used  # preserve the no-clipping fallback
+        lambdas = np.asarray(args[2], float)
+        mark = np.unique(lambdas)[len(np.unique(lambdas)) // 2]
+        altered = used.copy()
+        altered[np.isclose(lambdas, mark, rtol=0.0, atol=1e-5)] = False
+        return coeff, meta, altered
+
+    monkeypatch.setattr(
+        ws, "robust_polyfit_2d_power",
+        lambda *a, **kw: remove_midline(power_orig, *a, **kw),
+    )
+    monkeypatch.setattr(
+        ws, "robust_polyfit_2d_cheb",
+        lambda *a, **kw: remove_midline(cheb_orig, *a, **kw),
+    )
+    wave = ws.build_wavesolution(cfg, run_root=mini.work_dir)
+    selector = json.loads(
+        (wave.wavesol_dir / "wavesolution_model_selection.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert selector["fallback_attempted"] is True
+    assert selector["fallback_selected"] is True
+    assert len(selector["trigger_lines_A"]) == 1
+    assert selector["fallback_science_qc"]["status"] == "PASS"
+    result = json.loads(wave.wavesolution_2d_json.read_text(encoding="utf-8"))
+    assert result["kind"] == "chebyshev"
+    assert result["chebyshev"]["degx"] == 3
+    assert result["chebyshev"]["degy"] == 2
+    assert result["n_used"] == result["n_points"]
+    assert wave.lambda_map_fits.exists()
