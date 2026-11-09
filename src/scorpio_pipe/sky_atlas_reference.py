@@ -127,6 +127,7 @@ def fit_blended_sky_shift(
     noise_sigma: np.ndarray | float,
     refs: Sequence[SkyReference],
     *,
+    wavelength_frame: Literal["air", "vacuum"],
     instrument_fwhm_A: float,
     max_abs_shift_A: float = 1.5,
     shift_step_A: float = 0.04,
@@ -140,6 +141,11 @@ def fit_blended_sky_shift(
     a formal curvature uncertainty nor UVES airglow centroids are a
     certificate that a correction is safe to apply.
     """
+    if wavelength_frame != "air":
+        raise ValueError(
+            "Sky reference wavelengths are air Angstrom; explicitly "
+            "convert any vacuum wavelength array before fitting"
+        )
     if not refs:
         raise ValueError("At least one external sky line is required")
     if any(r.reference_kind not in {"uves_observed_centroid","laboratory_air"} for r in refs):
