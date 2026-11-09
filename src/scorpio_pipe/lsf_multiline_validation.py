@@ -227,6 +227,14 @@ def validate_lsf_multiline(
     lam_ok=np.sort(np.array([gdata[g][2] for g in accepted]))
     y_min=max(float(min(gdata[g][0])) for g in accepted)
     y_max=min(float(max(gdata[g][0])) for g in accepted)
+    if y_max-y_min < 100.0:
+        return {
+            "status":"REJECT",
+            "reason":"insufficient_common_spatial_coverage",
+            "features":screening,
+            "science_lsf_validated":False,
+            "auto_replace_production_lsf":False,
+        }
     accepted_cv=[row for row in screening if row["accepted_for_candidate"]]
     equal_feature_lolo_rms=float(np.sqrt(np.mean([
         row["lolo_median_abs_A"]**2 for row in accepted_cv
