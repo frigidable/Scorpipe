@@ -61,14 +61,46 @@ Candidate line-center range: **3888.65–5336.19 Å**; maximum
 internal accepted-line gap ~392.48 Å. Common supported y rows:
 **74–911**. On frozen _95 wavelength map, this is 79.195%
 wavelength-only bracketing (previous _96: 65.676%).
-A candidate is rejected if accepted features share fewer than 100 CCD rows.\nApplying BOTH spectral and shared spatial support leaves
+A candidate is rejected if accepted features share fewer than 100 CCD rows.
+Applying BOTH spectral and shared spatial support leaves
 **64.222%** of all pixels. Remaining 35.778% explicitly
 unsupported. The preview function returns NaN there.
 
-Candidate FWHM at ~5200 Å, central y: ~5.996 Å, versus
-old _96's ~6.046 Å edge-extrapolated value. On mutually supported
-pixels median abs model difference 0.128 Å, p90 0.297 Å.
-These measure inter-model agreement, NOT physical accuracy.
+At ~5200 Å, the spatial-bin median across shared slit rows is
+~5.996 Å for v18 versus ~6.046 Å for _96; this is **not** the
+central-row prediction. At detector row y=516 and the closest
+wavelength pixel (~5200.453 Å), the candidate is **5.762 Å**
+and the frozen _96 value is **5.881 Å**. On mutually supported
+pixels, median absolute model difference is 0.128 Å, p90 0.297 Å.
+
+A second, more demanding model check compares original ARC
+measurement to the *full model*, not just two-ARC repeatability.
+The red pair near 5336 Å, y=506, yields **6.225/6.193 Å**
+on original NEON06/13, while the fitted v18 smooth surface gives
+~**5.793 Å** at the same wavelength and row, a **0.400–0.433 Å**
+systematic model discrepancy. These two lamps agree with each
+other, yet the fitted smooth model does not reproduce their
+local profile at that y. Good LOFO criteria alone therefore
+cannot be treated as red-pair scientific validation.
+
+The post-selection model is sensitive to preliminary LOFO gates:
+with median/p90 gates (0.40/0.85 Å), the red pair is excluded
+and central y=516/5200 Å model predicts 5.52 Å **outside
+the resulting line-bracketed range**; with (0.45/0.90)
+the red pair is included and model predicts ~5.71 Å;
+with default (0.50/0.95) ~5.76 Å, and with
+(0.60/1.10) ~5.63 Å. These comparisons do not represent
+a calibrated CI; they demonstrate selection sensitivity.
+
+Keeping the default ten accepted features fixed, a whole-feature
+leave-one-out *refit* predicts FWHM at 5200 Å and y=516 in
+the range **5.627–5.854 Å** (spread 0.226 Å). This is an
+internal influence measure, NOT an independent systematic
+or formal measurement uncertainty.
+
+The model is a diagnostic candidate only. Do not replace the
+measured 5336 Å pair width with its smooth prediction or
+use the v18 FWHM for science until the discrepancy is understood.
 
 ## Requirements for science-ready LSF
 
