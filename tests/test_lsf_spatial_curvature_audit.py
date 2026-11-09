@@ -63,8 +63,11 @@ def test_duplicate_y_lamp_pair_sample_fails():
 
 def test_too_few_common_rows_rejected_for_each_line():
     qc=audit_neon_spatial_curvature(_records(n=7),REPORT)
+    assert qc["status"]=="REJECT"
+    assert qc["reason"]=="incomplete_independent_pair_spatial_coverage"
     assert qc["n_pairs_with_sufficient_repeatable_y"]==0
     assert all(row["status"]=="REJECT" for row in qc["pair_diagnostics"])
+    assert qc["science_lsf_validated"] is False
 
 
 def test_diagnostic_only_v18_report_required():
