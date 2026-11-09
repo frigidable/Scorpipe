@@ -76,6 +76,25 @@ def test_p3_lsf_publication_ready_and_kinprep_pipeline() -> None:
         lsf_map = fits.getdata(out_lsf["lsf_map"], ext=1).astype(float)
         assert np.isfinite(lsf_map[:, 8:-8]).any()
         assert float(np.nanmedian(lsf_map[:, 8:-8])) > 0.2
+        # A finite extrapolated numerical LSF value is not a measured
+        # laboratory-line bracket. The explicit support product cannot
+        # be inferred from merely inspecting isfinite(lsf_map).
+        lsf_support_path = work_dir / "lsf_model" / "lsf_span_support.fits"
+        assert lsf_support_path.is_file()
+        with fits.open(lsf_support_path) as support_hdu:
+            support = np.asarray(support_hdu[0].data, dtype=np.uint8)
+            assert support.shape == lam_map.shape
+            assert set(np.unique(support)).issubset({0, 1})
+            assert support_hdu[0].header["LSFSUP"] == "SPAN_ONLY"
+            assert support_hdu[0].header["LSFSCI"] is False
+        assert np.all(support[~np.isfinite(lam_map)] == 0)
+        assert np.any(support == 1) and np.any(support == 0)
+        qc = json.loads(
+            (work_dir / "lsf_model" / "lsf_qc.json").read_text(encoding="utf-8")
+        )
+        assert qc["numerically_finite_coverage_only"] is True
+        assert 0 < qc["empirical_span_support_fraction"] < 1
+        assert qc["science_lsf_validated"] is False
 
         grid = WaveGrid(lambda0=5002.0, dlambda=0.9, nlam=160, unit="Angstrom", wave_ref="air")
         sci = 10.0 + 20.0 * np.exp(-0.5 * ((np.arange(ny)[:, None] - ny / 2.0) / 3.0) ** 2)
