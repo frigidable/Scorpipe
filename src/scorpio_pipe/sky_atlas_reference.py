@@ -150,6 +150,18 @@ def fit_blended_sky_shift(
         raise ValueError("At least one external sky line is required")
     if any(r.reference_kind not in {"uves_observed_centroid","laboratory_air"} for r in refs):
         raise ValueError("Unsupported sky reference type")
+    # Observed UVES centroids and atomic laboratory wavelengths need not
+    # share an identical absolute origin. Reject mixed fits rather than
+    # disguising their different provenance behind a single delta.
+    if len({r.reference_kind for r in refs}) != 1:
+        raise ValueError(
+            "Cannot mix laboratory rest wavelengths with observed UVES sky centroids"
+        )
+    if len(refs) > 8:
+        raise ValueError(
+            "Sky-line fit exceeds eight components; split/review the unresolved "
+            "blend instead of fitting an under-constrained catalogue segment"
+        )
     if not (np.isfinite(instrument_fwhm_A) and instrument_fwhm_A > 0):
         raise ValueError("An independently measured finite instrumental FWHM is required")
     if not (np.isfinite(max_abs_shift_A) and max_abs_shift_A > 0
