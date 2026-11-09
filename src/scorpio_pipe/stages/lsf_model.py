@@ -268,7 +268,7 @@ def _build_measured_lsf_map(
             }
         )
 
-    if len(per_line) < 2:
+    if len(per_line) < 3:
         return None, {
             "status": "insufficient_lines",
             "fit_method": "gaussian_plus_linear_background_isolated",
@@ -418,6 +418,22 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
     )
 
     if measured_map is None:
+        # An invented nominal FWHM may make a pretty LSF FITS but cannot be
+        # presented as an empirical ARC measurement. Disallow by default.
+        failure = {
+            "stage": "lsf_model", "status": "REJECT",
+            "reason": "insufficient_independent_arc_profile_measurements",
+            "diagnostics": fit_meta,
+            "manual_fallback_allowed": bool(lcfg.get("allow_manual_fallback", False)),
+        }
+        atomic_write_json(out_dir / "lsf_profile_qc_reject.json", failure)
+        if not bool(lcfg.get("allow_manual_fallback", False)):
+            raise RuntimeError(
+                "LSF ARC_PROFILE_QC REJECT: cannot measure at least three "
+                "independent isolated ARC lines with supported profile wings. "
+                f"Inspect {out_dir / 'lsf_profile_qc_reject.json'}. "
+                "No science LSF was written."
+            )
         lsf_map, source_meta = _manual_fallback_map(lam_map, arc_hdr_effective)
         fit_source = "manual_fallback"
     else:
@@ -427,6 +443,27 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
 
     lsf_map = np.asarray(lsf_map, dtype=float)
     lsf_map[~np.isfinite(lam_map)] = np.nan
+    # Even if an engineering map is populated by edge-value extrapolation,
+    # the science-supported part only spans independently fitted lamp lines.
+    modeled_lams = np.asarray(source_meta.get("line_lambdas_A", []), dtype=float)
+    if modeled_lams.size >= 2:
+        supported = (
+            np.isfinite(lam_map)
+            & (lam_map >= float(np.min(modeled_lams)))
+            & (lam_map <= float(np.max(modeled_lams)))
+        )
+        extrapolated_frac = float(
+            np.count_nonzero(np.isfinite(lsf_map) & ~supported)
+            / max(1, np.count_nonzero(np.isfinite(lsf_map)))
+        )
+        source_meta["support_range_A"] = [
+            float(np.min(modeled_lams)), float(np.max(modeled_lams))
+        ]
+        source_meta["extrapolated_fraction"] = extrapolated_frac
+    else:
+        extrapolated_frac = 1.0
+        source_meta["support_range_A"] = None
+        source_meta["extrapolated_fraction"] = extrapolated_frac
     grid = _approx_linear_grid_from_lambda_map(lam_map, lam_hdr)
 
     primary_hdr = fits.Header(lam_hdr)
@@ -485,6 +522,8 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
         "source": fit_source,
         "science_lsf_validated": False,
         "arc_profile_fit_method": "gaussian_plus_linear_background_isolated",
+        "support_range_A": source_meta.get("support_range_A"),
+        "extrapolated_fraction": float(extrapolated_frac),
         "n_finite": int(finite.size),
         "sigma_A_median": float(np.nanmedian(finite)) if finite.size else None,
         "sigma_A_p16": float(np.nanpercentile(finite, 16)) if finite.size else None,
