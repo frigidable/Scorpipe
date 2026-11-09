@@ -74,8 +74,7 @@ New pure src/scorpio_pipe/lsf_spatial_curvature_audit.py checks
 per-lamp quadratic FWHM(y) and compares each laboratory pair
 to the original v18 shared-y² model; reports DIAGNOSTIC_ONLY only when all four original-ARC pairs
 have sufficient matched spatial coverage; otherwise global REJECT,
-with per-pair failure reasons. No science-ready result is possible. Seven new synthetic
-regression tests check sign reversal, two distinct lamps,
+with per-pair failure reasons. No science-ready result is possible. Seven spatial-shape synthetic regression tests check sign reversal, two distinct lamps,
 duplicate samples, insufficient common spatial rows,
 provenance status, non-finite widths and non-adoption by
 production LSF. No production model is changed.
@@ -85,7 +84,12 @@ New read-only scripts/qa/lsf20_spatial_curvature_probe.py:
   wavelength map using their canonical exact digests.
 - Requires existing independent JSON audit v18 and JSON+CSV
   profile results from the successfully run v19 original-ARC audit;
-  checks source provenance and total trial counts.
+  checks original source provenance and trial counts, verifies
+  the complete SHA of the v18 report embedded in v19 JSON,
+  and cross-checks every per-line/window/continuum summary
+  median against the original profile CSV, including the red
+  pair y=506 from both lamps. Four additional QA tests enforce
+  this provenance contract and the canonical 64-digit map SHA.
 - Fits spatial quadratic to existing original-ARC v19 profiles,
   writes an *exclusive new JSON* outside any source directory;
   does not refit raw pixels in this follow-on run.
