@@ -89,6 +89,18 @@ def check_pilot_destination(source_cfg: Path, new_dir: Path) -> None:
         raise ValueError("Refusing original run as engineering pilot")
 
 
+# These keys are generated afresh by scorpio_pipe.config.load_config().
+# Persisting their OLD values into a copied YAML config risks routing outputs
+# or provenance back to the original workspace.
+LOADER_DERIVED_ROOT_KEYS = ("project_root", "config_path", "config_dir", "work_dir_abs")
+
+
+def strip_loader_derived_root_keys(raw: dict) -> None:
+    """Drop cached original-run metadata; the loader reconstructs it for the pilot."""
+    for key in LOADER_DERIVED_ROOT_KEYS:
+        raw.pop(key, None)
+
+
 def prepare(config_path: str, new_directory: str) -> None:
     import yaml
     from scorpio_pipe.config import load_config
@@ -114,6 +126,7 @@ def prepare(config_path: str, new_directory: str) -> None:
     raw = yaml.safe_load(source.read_text(encoding="utf-8-sig"))
     if not isinstance(raw, dict):
         raise TypeError("Source config is not a mapping")
+    strip_loader_derived_root_keys(raw)
     raw["work_dir"] = str(new_dir)
     raw["data_dir"] = str(cfg.get("data_dir") or "")
     for key, vals in (cfg.get("frames") or {}).items():
