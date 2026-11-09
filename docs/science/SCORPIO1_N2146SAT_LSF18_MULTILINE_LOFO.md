@@ -61,7 +61,7 @@ Candidate line-center range: **3888.65–5336.19 Å**; maximum
 internal accepted-line gap ~392.48 Å. Common supported y rows:
 **74–911**. On frozen _95 wavelength map, this is 79.195%
 wavelength-only bracketing (previous _96: 65.676%).
-Applying BOTH spectral and shared spatial support leaves
+A candidate is rejected if accepted features share fewer than 100 CCD rows.\nApplying BOTH spectral and shared spatial support leaves
 **64.222%** of all pixels. Remaining 35.778% explicitly
 unsupported. The preview function returns NaN there.
 
