@@ -42,6 +42,22 @@ def test_rectification_model_records_science_signature_separately_from_arc(
     wave = build_wavesolution(cfg, run_root=mn.work_dir)
     assert wave.lambda_map_fits.exists()
 
+    # Regression: QC serialization previously referenced an undefined
+    # excluded_summary; a broad except used to suppress the NameError,
+    # incorrectly returning a successful StageResult without QC products.
+    done = json.loads(
+        (wave.wavesol_dir / "done.json").read_text(encoding="utf-8")
+    )
+    wave_done = json.loads(
+        (wave.wavesol_dir / "wave_done.json").read_text(encoding="utf-8")
+    )
+    assert done["stage"] == "wavesolution"
+    assert done["compat"]["excluded_summary"] is None
+    assert done["ok"] is True
+    assert wave_done["status"] in {"ok", "warn"}
+    assert (wave.wavesol_dir / "wavesolution_science_qc.json").is_file()
+    assert (wave.wavesol_dir / "trace_identity_qc.json").is_file()
+
     # The production 1D report has top-level RMS/pair-count fields. Guard
     # the schema consumed by Golden and the independent numerical QC report.
     ws1 = json.loads(wave.wavesolution_1d_json.read_text(encoding="utf-8"))
