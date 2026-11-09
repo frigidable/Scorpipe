@@ -40,16 +40,18 @@ superneon:
 
 ### Task sequence
 
-`manifest → superbias → biascorr → superneon → lineid_prepare → arclineid → wavesolution → lsf_model → sky → sky_refine → linearize → stack2d → extract1d → qc_report`.
+`manifest → superbias → superneon → lineid_prepare → arclineid → wavesolution → lsf_model → sky → sky_refine → linearize → stack2d → extract1d → qc_report` (13 distinct canonical tasks).
 
 No superflat/flatfield/cosmics in this *engineering* subset: fast-mode FLAT/NEON (RATE 225 GAIN 3.5) cannot be bias-subtracted with the slow-mode BIAS (RATE 145 GAIN 0.9), and flatfield is explicitly disabled. Failure to satisfy a real prerequisite is a **useful stop**, not permission to bypass preflight or use cross-mode calibration.
+
+`biascorr` is **not** an independent engine task: it is an alias for `superbias`. Including both caused a deterministic duplicate/skip failure in the previous pilot plan. The harness now verifies that every planned task is canonical and that RAW selections and required pilot flags remain unchanged between preparation and run.
 
 For each task the canonical `run_sequence_locked` engine is invoked with `force=false`, `qc_override=false`, `preflight_override=false`. On the first failed/not-OK task stop and inspect `sc1_engineering_pilot_result.json`; retain the entire isolated run.
 
 ### Acceptance levels
 
 1. **Code regression:** all targeted tests pass on the Windows Python venv.
-2. **Engineering E2E:** all planned 14 tasks complete with `status=ok`, original protected hashes unchanged; inspect produced products.
+2. **Engineering E2E:** all planned 13 tasks complete with `status=ok`, original protected hashes unchanged; inspect produced products.
 3. **Science:** **HOLD regardless of 1 or 2** until reliable bias uncertainty (including quantized ADC and time-dependent zero), wave/sky residuals, flux fidelity and spatial geometry are evaluated against the final extracted science product.
 
 The 50 ADU gross threshold is from the audited N2146sat bias cohort, **not** an instrument-wide universal calibration. The finite-N Gaussian factor after gross rejection is provisional. Original MasterBias SCI/VAR/DQ must remain untouched.
