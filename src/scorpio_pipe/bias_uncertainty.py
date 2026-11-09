@@ -137,7 +137,11 @@ def master_bias_estimator_variance(
 
     # ddof=1 is unbiased for the individual-exposure noise variance under
     # independent, equal-variance normal read-noise samples.
-    individual_var = np.var(data, axis=0, ddof=1)
+    individual_var = (
+        np.var(data, axis=0, ddof=1)
+        if not (method == "median" and gross_reject_adu > 0)
+        else None
+    )
     invalid = np.zeros(data.shape[1:], dtype=bool)
     rejected_samples = 0
     affected_pixels = 0
