@@ -24,6 +24,9 @@ $pilot = "C:\Users\frigi\Documents\PhD\ScorpipeWork\06_12_2024\N2146sat_VPHG1200
 & $py scripts/qa/sc1_engineering_pilot.py prepare $source $pilot
 # Inspect $pilot/config.yaml before the explicit engine run.
 & $py scripts/qa/sc1_engineering_pilot.py run (Join-Path $pilot "config.yaml")
+# Stop after lineid_prepare; inspect manual_pairs_auto.csv and curate hand_pairs.txt.
+# Only AFTER scientific review of the line matches:
+& $py scripts/qa/sc1_engineering_pilot.py resume (Join-Path $pilot "config.yaml") --lineid-reviewed
 ```
 
 The pilot config activates only here:
@@ -51,6 +54,8 @@ superneon:
 
 `manifest → superbias → cosmics → superneon → lineid_prepare → wavesolution → lsf_model → sky → sky_refine → linearize → stack2d → extract1d → qc_report` (13 distinct canonical tasks).
 
+**Manual LineID gate:** this plan is executed in two parts. Phase `run` executes only the first five tasks, including `lineid_prepare`, and writes `sc1_engineering_pilot_lineid_phase.json` with status `ENGINEERING_PAUSED_FOR_LINEID_SCIENCE_HOLD`. The preparation step writes `manual_pairs_auto.csv`, *not* the `hand_pairs.txt` demanded by `wavesolution`. Review the physical line identifications and curate `hand_pairs.txt` in the same isolated wavesol directory; do not blindly convert/accept auto suggestions. Phase `resume --lineid-reviewed` checks five or more active unique pairs, broad pixel coverage, nominal wavelength coverage, and the SHA256 of the curated file before executing the remaining eight tasks. It refuses a changed config, incomplete phase-one report, or original protected-file mutation. A phase failure is final for that phase's report; do not silently retry without investigation.
+
 No `superflat` or `flatfield` in this *engineering* subset: fast-mode FLAT/NEON (RATE 225 GAIN 3.5) cannot be bias-subtracted with slow-mode BIAS (RATE 145 GAIN 0.9). **Cosmics is required**: Sky refuses SCORPIO RAW frames without `BIASSUB=True`. The pilot runs `cosmics` only for the seven compatible slow-readout OBJ frames, with bias subtraction enabled. `method=auto` uses `stack_mad` for seven frames, which must be inspected for loss of astrophysical signal; a completed engineering run does not validate the resulting cosmic masks. `sky.failure_policy=strict` prohibits a soft-failure pass-through that would preserve an unsubtracted sky frame while reporting a completed stage. Failure to satisfy a real prerequisite is a **useful stop**, not permission to bypass preflight or use cross-mode calibration.
 
 `biascorr` is **not** an independent engine task: it is an alias for `superbias`. Likewise, `arclineid` is an alias for `lineid_prepare`, and attempting to run both would skip the second invocation. Each must appear only once, under its canonical name. The harness now verifies that every planned task is canonical and that RAW selections and required pilot flags remain unchanged between preparation and run.
@@ -60,7 +65,7 @@ For each task the canonical `run_sequence_locked` engine is invoked with `force=
 ### Acceptance levels
 
 1. **Code regression:** all targeted tests pass on the Windows Python venv (41 passed on previous HEAD; loader-root fix awaits the new-head rerun).
-2. **Engineering E2E:** all planned 13 tasks complete with `status=ok`, original protected hashes unchanged; inspect produced products.
+2. **Engineering E2E:** phase one completes its five tasks and pauses for reviewed LineID; phase two completes its remaining eight tasks with `status=ok`; original protected hashes unchanged; inspect all produced products.
 3. **Science:** **HOLD regardless of 1 or 2** until reliable bias uncertainty (including quantized ADC and time-dependent zero), wave/sky residuals, flux fidelity and spatial geometry are evaluated against the final extracted science product.
 
 The 50 ADU gross threshold is from the audited N2146sat bias cohort, **not** an instrument-wide universal calibration. The finite-N Gaussian factor after gross rejection is provisional. Original MasterBias SCI/VAR/DQ must remain untouched.
