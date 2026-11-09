@@ -105,36 +105,19 @@ def _robust_sigma(arr: np.ndarray) -> float | None:
 
 
 def _estimate_sigma_px(profile: np.ndarray, x0: int, half_window: int, snr_thresh: float) -> tuple[float | None, dict[str, float]]:
-    nx = int(profile.size)
-    lo = max(0, int(x0) - int(half_window))
-    hi = min(nx, int(x0) + int(half_window) + 1)
-    if hi - lo < 5:
-        return None, {"reason": "window_too_small"}
-    xx = np.arange(lo, hi, dtype=float)
-    yy = np.asarray(profile[lo:hi], dtype=float)
-    if not np.isfinite(yy).any():
-        return None, {"reason": "nonfinite"}
-    edge = max(1, min(3, yy.size // 4))
-    baseline = float(np.nanmedian(np.r_[yy[:edge], yy[-edge:]]))
-    resid = yy - baseline
-    noise = _robust_sigma(np.r_[yy[:edge], yy[-edge:]])
-    if noise is None or not np.isfinite(noise) or noise <= 0:
-        noise = float(np.nanstd(np.r_[yy[:edge], yy[-edge:]])) if np.isfinite(yy).any() else 0.0
-    amp = float(np.nanmax(resid)) if np.isfinite(resid).any() else 0.0
-    if not np.isfinite(amp) or amp <= 0 or (noise > 0 and amp / max(noise, 1e-6) < float(snr_thresh)):
-        return None, {"reason": "low_snr", "amp": float(amp), "noise": float(noise)}
-    resid = np.clip(resid, 0.0, None)
-    s = float(np.sum(resid))
-    if not (s > 0):
-        return None, {"reason": "zero_signal"}
-    xc = float(np.sum(xx * resid) / s)
-    var = float(np.sum(((xx - xc) ** 2) * resid) / s)
-    if not np.isfinite(var) or var <= 0:
-        return None, {"reason": "bad_moment", "xc": float(xc)}
-    sigma_px = float(np.sqrt(var))
-    if not np.isfinite(sigma_px) or sigma_px <= 0:
-        return None, {"reason": "bad_sigma", "xc": float(xc)}
-    return sigma_px, {"xc": float(xc), "amp": float(amp), "noise": float(noise)}
+    """Robust Gaussian-equivalent ARC LSF; do not use truncated second moments.
+
+    In particular, a +/-6 pixel window with an actual ~6.5 pixel FWHM
+    artificially returns ~4A instead of ~5.8A for SCORPIO-1 VPHG1200B.
+    """
+    from scorpio_pipe.lsf_arc_profile import fit_gaussian_arc_profile
+
+    return fit_gaussian_arc_profile(
+        profile,
+        center_guess_px=float(x0),
+        half_window_px=int(half_window),
+        min_snr=float(snr_thresh),
+    )
 
 
 def _manual_fallback_map(lam_map: np.ndarray, hdr: fits.Header) -> tuple[np.ndarray, dict[str, Any]]:
@@ -191,30 +174,62 @@ def _build_measured_lsf_map(
     min_snr: float,
     poly_order_y: int,
     min_line_measures: int,
+    expected_arc_fwhm_A: float | None = None,
 ) -> tuple[np.ndarray | None, dict[str, Any]]:
     ny, nx = arc.shape
     y_all = np.arange(ny, dtype=float)
     measurements: list[dict[str, Any]] = []
     per_line: list[dict[str, Any]] = []
+    rejected_blends = 0
+    rejected_profiles = 0
+    # Fit medians of non-overlapping spatial strips, not thousands of
+    # noisy individual rows. With tiny synthetic frames keep sufficient
+    # independent y nodes for the Golden test's min_line_measures.
+    row_step = max(1, min(20, ny // max(2 * int(min_line_measures), 1)))
+    strip_half = min(10, row_step // 2)
+    all_wavelengths = np.asarray(line_centers, dtype=float)
 
-    for lam0 in np.asarray(line_centers, dtype=float):
+    for lam0 in all_wavelengths:
         rows = []
         vals = []
         amps = []
-        for iy in range(ny):
+        for iy in range(0, ny, row_step):
             row_lam = lam_map[iy]
             if not np.isfinite(row_lam).any():
                 continue
             ix = int(np.nanargmin(np.abs(row_lam - lam0)))
             if not np.isfinite(row_lam[ix]) or abs(float(row_lam[ix]) - float(lam0)) > 4.0:
                 continue
-            sigma_px, meta = _estimate_sigma_px(arc[iy], ix, fit_half_window_px, min_snr)
-            if sigma_px is None:
-                continue
-            left = max(0, ix - 1)
-            right = min(nx - 1, ix + 1)
+            left = max(0, ix - 2)
+            right = min(nx - 1, ix + 2)
             disp = float(np.nanmedian(np.abs(np.diff(row_lam[left:right + 1]))))
             if not np.isfinite(disp) or disp <= 0:
+                continue
+            # The nominal LSF is used only to select a physically adequate
+            # fit window; it is never substituted for measured line width.
+            half_width = int(fit_half_window_px)
+            if (expected_arc_fwhm_A is not None and
+                    np.isfinite(expected_arc_fwhm_A) and expected_arc_fwhm_A > 0):
+                sigma_guess_px = float(expected_arc_fwhm_A) / (2.354820045 * disp)
+                half_width = min(half_width, max(5, int(np.ceil(4.0 * sigma_guess_px))))
+            if half_width < 5:
+                raise ValueError("LSF fit_half_window_px must be at least 5")
+            # An isolated-line fit must never include a listed neighbour.
+            # The current LINEID list is independent of fit decisions.
+            known_other = all_wavelengths[all_wavelengths != lam0]
+            if known_other.size:
+                nearest_pix = min(
+                    abs(ix - int(np.nanargmin(np.abs(row_lam - other))))
+                    for other in known_other
+                )
+                if nearest_pix < 2 * half_width + 2:
+                    rejected_blends += 1
+                    continue
+            y0, y1 = max(0, iy-strip_half), min(ny, iy+strip_half+1)
+            profile = np.nanmedian(arc[y0:y1], axis=0)
+            sigma_px, meta = _estimate_sigma_px(profile, ix, half_width, min_snr)
+            if sigma_px is None:
+                rejected_profiles += 1
                 continue
             sigma_a = float(sigma_px * disp)
             if not np.isfinite(sigma_a) or sigma_a <= 0:
@@ -231,6 +246,9 @@ def _build_measured_lsf_map(
                     "sigma_A": float(sigma_a),
                     "amp": float(meta.get("amp", np.nan)),
                     "noise": float(meta.get("noise", np.nan)),
+                    "fit_kind": str(meta.get("fit_kind", "unknown")),
+                    "window_half_px": int(half_width),
+                    "norm_rmse": float(meta.get("norm_rmse", np.nan)),
                 }
             )
         if len(rows) < int(min_line_measures):
@@ -253,6 +271,9 @@ def _build_measured_lsf_map(
     if len(per_line) < 2:
         return None, {
             "status": "insufficient_lines",
+            "fit_method": "gaussian_plus_linear_background_isolated",
+            "n_known_blend_rejections": int(rejected_blends),
+            "n_rejected_profiles": int(rejected_profiles),
             "n_lines_modeled": int(len(per_line)),
             "n_measurements": int(len(measurements)),
             "measurements_preview": measurements[:64],
@@ -274,6 +295,11 @@ def _build_measured_lsf_map(
 
     meta = {
         "status": "measured",
+        "fit_method": "gaussian_plus_linear_background_isolated",
+        "n_known_blend_rejections": int(rejected_blends),
+        "n_rejected_profiles": int(rejected_profiles),
+        "row_step_px": int(row_step),
+        "spatial_half_strip_px": int(strip_half),
         "n_lines_modeled": int(len(per_line)),
         "n_measurements": int(len(measurements)),
         "line_models": [
@@ -346,14 +372,29 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
 
     lcfg = cfg.get("lsf_model") if isinstance(cfg.get("lsf_model"), dict) else {}
     line_centers = _load_line_centers(wdir)
+    setup = ((cfg.get("frames") or {}).get("__setup__") or {})
+    disperser = str(
+        setup.get("disperser") or setup.get("disperse") or
+        arc_hdr.get("DISPERSE") or ""
+    ).strip().upper()
+    prior = _MANUAL_GRISM_PRIORS.get(disperser)
+    prior_fwhm = (
+        float(prior["resolution_fwhm_A_1arcsec"]) if prior is not None
+        else None
+    )
+    expected_fwhm = lcfg.get("expected_arc_fwhm_A", prior_fwhm)
+    expected_fwhm = float(expected_fwhm) if expected_fwhm is not None else None
+    if expected_fwhm is not None and not (
+        np.isfinite(expected_fwhm) and expected_fwhm > 0
+    ):
+        raise ValueError("Invalid expected_arc_fwhm_A")
     measured_map, fit_meta = _build_measured_lsf_map(
-        arc,
-        lam_map,
-        line_centers,
-        fit_half_window_px=int(lcfg.get("fit_half_window_px", 6) or 6),
+        arc, lam_map, line_centers,
+        fit_half_window_px=int(lcfg.get("fit_half_window_px", 12) or 12),
         min_snr=float(lcfg.get("min_line_snr", 4.0) or 4.0),
         poly_order_y=int(lcfg.get("poly_order_y", 2) or 2),
         min_line_measures=int(lcfg.get("min_line_measures", 8) or 8),
+        expected_arc_fwhm_A=expected_fwhm,
     )
 
     if measured_map is None:
@@ -396,6 +437,8 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
         "stage": "lsf_model",
         "pipeline_version": str(PIPELINE_VERSION),
         "source": fit_source,
+        "science_lsf_validated": False,
+        "arc_profile_fit_method": "gaussian_plus_linear_background_isolated",
         "inputs": {
             "lambda_map": str(lam_map_path),
             "superneon": str(arc_path),
@@ -420,6 +463,8 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
     qc_payload = {
         "ok": bool(finite.size > 0),
         "source": fit_source,
+        "science_lsf_validated": False,
+        "arc_profile_fit_method": "gaussian_plus_linear_background_isolated",
         "n_finite": int(finite.size),
         "sigma_A_median": float(np.nanmedian(finite)) if finite.size else None,
         "sigma_A_p16": float(np.nanpercentile(finite, 16)) if finite.size else None,
@@ -435,6 +480,7 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
     done = {
         "ok": bool(finite.size > 0),
         "source": fit_source,
+        "science_lsf_validated": False,
         "lsf_map": str(lsf_path),
         "lsf_model_json": str(mpath),
         "lsf_qc_json": str(qpath),
