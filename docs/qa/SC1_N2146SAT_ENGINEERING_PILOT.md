@@ -79,3 +79,39 @@ The 50 ADU gross threshold is from the audited N2146sat bias cohort, **not** an 
 The packaged `neon_lines.csv` starts with `# waveref: air` and `# unit: angstrom` followed by its `lambda` column. The old `_load_neon_lines_csv` used `np.genfromtxt(names=True)` on the unfiltered input; NumPy consumed the first metadata comment as the names row, then coerced the actual `lambda` line to `NaN`. NumPy emitted `All-NaN slice encountered`, and automatic line matching failed without examining valid wavelengths. The new loader separates comment metadata from actual CSV rows before parsing, validates finite positive wavelengths, respects explicitly declared units, and refuses ambiguous malformed catalogues. It does **not** expand `pair_tol_A` or auto-accept any assignments.
 
 If automatic pattern matching is inconclusive after a valid catalogue is loaded, `lineid_prepare` now writes the candidate peak template plus an explicit `MANUAL_ONLY_NO_RELIABLE_AUTO_PAIRS` report and a header-only auto-suggestions CSV. The stage can therefore complete **preparation** and stop at the mandatory manual LineID gate. This does not assert a valid wavelength solution; users must manually verify line identities and write `hand_pairs.txt` before `resume --lineid-reviewed`.
+
+### 2026-11-09 Wave2D _93 physical failure: HOLD
+
+The first five _93 stages passed; the reviewed Moiseev LineID list contains
+19 pairs (SHA256 2d88b6948d9225326bcbf16125dfa844544da6a44ec1e5e8af6438975433d623).
+The isolated wavesolution stage returned operational status ok, but the 2D
+solution was scientifically wrong: 4.345 Å (4.99 px) RMS, 10.404 Å residual
+P95, and four adjacent-line pairs merged for 94-100% of spatial rows.
+Preserve the original _93 workdir as immutable evidence.
+
+Root cause: _trace_one_line_xcorr used a broad 12 px search radius without a
+row-to-row displacement limit, permitting jumps to brighter neighbours
+10-13 px away. Its seed score was in raw-amplitude units while subsequent
+scores were cross-correlation dot-products.
+
+Fix: constrain candidate centres to at most 3 pixels per row by default,
+while retaining the outer search window and allowing an explicitly configured
+trace_max_step_px. The seed score is now correlation power. The separate
+wave_trace_qc.py detects collapsed/reordered neighbouring trajectories,
+missing manual seeds, and per-line support/bias failures. Whole-line
+leave-one-line-out CV (Chebyshev 3x2) is an independent diagnostic; per-row
+random CV would leak nearly identical samples from the same arc line.
+
+Provisional fail-closed engineering limits (all in detector pixels):
+2D RMS <= 1.0, residual absolute P95 <= 2.0, per-line median bias <= 1.5,
+per-line used-sample fraction >= 0.65, whole-line CV RMS <= 1.25, and
+whole-line CV worst median line bias <= 2.0. Reject any adjacent-line
+collision fraction > 1% within 1.5 pixels. Store diagnostic JSON before
+raising. A failed solution is rejected before lambda_map.fits is emitted.
+These engineering checks are not publication-grade wavelength validation.
+
+Next attempt: use new isolated N2146sat_VPHG1200B_94. Run regression tests
+(including Golden wavesolution), prepare and run the five initial stages,
+install the SHA-verified 19 manual pairs, and execute wavesolution alone.
+Do not run LSF/Sky/Linearize or the legacy multi-stage Resume before a
+scientific review of the new 2D solution and a sky-line zero-point check.
