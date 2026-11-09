@@ -42,6 +42,12 @@ def trace_identity_qc(
 
     pairs = []
     issues = []
+    for wave in sorted(set(seed_positions).difference(float(t) for t in groups)):
+        issues.append(
+            f"Manual anchor {wave:.3f} A has no usable 2D trace"
+        )
+    if groups.size < 2:
+        issues.append("Fewer than two independently traced laboratory lines")
     for a, b in zip(groups[:-1], groups[1:]):
         la, lb = float(a), float(b)
         if la not in seed_positions or lb not in seed_positions:
