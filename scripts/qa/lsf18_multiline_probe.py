@@ -23,6 +23,16 @@ HASHES = {
     "pairs": "85c967f8d697498c30484f987db543d882f9378fc4a2dc5560bcb3d836cad7ac",
 }
 
+# The original v18 PowerShell wrapper accidentally omitted one hex digit
+# from the correct map digest. Reject malformed manifest entries BEFORE IO.
+if any(
+    len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value)
+    for value in HASHES.values()
+):
+    raise ValueError(
+        "Malformed audit manifest: SHA256 must contain exactly 64 hex characters"
+    )
+
 
 def digest(path: Path) -> str:
     result = hashlib.sha256()
