@@ -9,6 +9,7 @@ overscan correction, or a replacement of the existing `03_bias`.
 - Original run: `ScorpipeWork/06_12_2024/N2146sat_VPHG1200B_01`.
 - Exactly 7 OBJ, early 20 BIAS, 3 FLAT, 2 NEON; original `calib.bias_policy=strict`, `flatfield.enabled=false`, `superneon.bias_sub=false`.
 - The original source configuration and original `03_bias/master_bias*.fits` / index are SHA256-guarded before and after. The pilot **never** writes them.
+- Copying the source YAML deliberately **drops loader-derived root metadata** (`project_root`, `config_path`, `config_dir`, `work_dir_abs`): Scorpipe reconstructs these from the pilot config path. This prevents false original-run references and stale path provenance. `work_dir` is explicitly set to the new pilot; RAW exposure paths remain immutable.
 - Create a fresh run named e.g. `N2146sat_VPHG1200B_91` beside the original. Never reuse a previous pilot root.
 - Tests first: `tests/test_masterbias_estimator_uncertainty.py`, `tests/test_masterbias_gross_reject_optin.py`, `tests/test_sc1_engineering_pilot.py`. On Windows, use `pytest --basetemp` pointing to a fresh dedicated directory in the isolated worktree if the default `%TEMP%/pytest-of-<user>` is not readable.
 
@@ -57,7 +58,7 @@ For each task the canonical `run_sequence_locked` engine is invoked with `force=
 
 ### Acceptance levels
 
-1. **Code regression:** all targeted tests pass on the Windows Python venv.
+1. **Code regression:** all targeted tests pass on the Windows Python venv (41 passed on previous HEAD; loader-root fix awaits the new-head rerun).
 2. **Engineering E2E:** all planned 13 tasks complete with `status=ok`, original protected hashes unchanged; inspect produced products.
 3. **Science:** **HOLD regardless of 1 or 2** until reliable bias uncertainty (including quantized ADC and time-dependent zero), wave/sky residuals, flux fidelity and spatial geometry are evaluated against the final extracted science product.
 
