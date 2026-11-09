@@ -245,6 +245,12 @@ def run(pilot_config: str) -> None:
         output["original_files_unchanged"] = (
             now == manifest["original_protected_sha256"]
         )
+        if not output["original_files_unchanged"]:
+            output["status"] = "SOURCE_INTEGRITY_FAILURE_SCIENCE_HOLD"
+            output["error"] = (
+                str(output.get("error") or "") +
+                " | ORIGINAL PROTECTED FILES CHANGED"
+            ).strip(" |")
         output["finished_utc"] = datetime.now(timezone.utc).isoformat()
         with (work / REPORT).open("x", encoding="utf-8") as handle:
             json.dump(output, handle, indent=2, ensure_ascii=False)
@@ -252,6 +258,8 @@ def run(pilot_config: str) -> None:
         print("ORIGINAL FILES UNCHANGED:",
               output["original_files_unchanged"])
         print("SCIENCE E2E: HOLD")
+    if output["original_files_unchanged"] is False:
+        raise RuntimeError("Original protected files changed during engineering run")
 
 
 def selftest() -> None:
