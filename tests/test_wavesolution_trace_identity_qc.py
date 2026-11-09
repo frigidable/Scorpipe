@@ -171,3 +171,64 @@ def test_failed_science_2d_gate_precedes_lambda_map_fits_writer():
     )
     assert "SCIENCE_2D_QC FAILED" in routine
     assert "TRACE_IDENTITY_QC FAILED" in routine
+
+
+def test_line_preserving_recovery_has_independent_cv_and_keeps_all_anchors():
+    """19 laboratory anchors are independent; spatial rows are not."""
+    from scorpio_pipe.stages.wavesolution import (
+        robust_polyfit_2d_cheb, polyval2d_cheb,
+    )
+
+    anchors = np.array([
+        [400.176298, 3888.65], [473.380668, 3948.98],
+        [588.619268, 4044.42], [751.382565, 4181.88],
+        [761.594648, 4190.71], [841.297918, 4259.36],
+        [927.492923, 4333.56], [940.576356, 4345.17],
+        [1084.128231, 4471.48], [1355.173277, 4713.00],
+        [1523.345819, 4863.96], [1586.839180, 4921.93],
+        [1690.314344, 5015.68], [1714.459619, 5037.75],
+        [1725.428199, 5047.74], [1761.235524, 5080.38],
+        [1916.558676, 5221.80], [2035.670268, 5330.78],
+        [2047.665238, 5341.60],
+    ])
+    ys = np.arange(16.0, 1020.0, 20.0)
+    xx = np.tile(anchors[:, 0], ys.size)
+    yy = np.repeat(ys, anchors.shape[0])
+    ll = np.tile(anchors[:, 1], ys.size)
+    # Smooth SCORPIO-like curvature; each spectral line remains distinct.
+    x = xx + (0.02 * (yy-516.0) + 0.00003*(yy-516.0)**2) * (
+        1.0 + 0.00005*(xx - 1100.0)
+    )
+    weights = np.ones_like(ll)
+    for line in np.unique(ll):
+        indices = ll == line
+        weights[indices] = 1.0 / np.sqrt(indices.sum())
+
+    coeff, meta, used = robust_polyfit_2d_cheb(
+        x, yy, ll, 3, 2, weights=weights, maxiter=0,
+    )
+    assert np.all(used), "No manually identified line may disappear"
+    delta = polyval2d_cheb(x, yy, coeff, meta) - ll
+    report = evaluate_solution_2d(
+        x, yy, ll, delta, used, dispersion_A_per_px=0.87,
+    )
+    assert report["status"] == "PASS", report["issues"]
+    assert report["line_level_cv_rms_px"] < 1.25
+    assert all(row["used_fraction"] == 1.0 for row in report["per_line"])
+
+
+def test_automatic_fallback_does_not_override_forced_model_or_hide_failure():
+    from pathlib import Path
+    from scorpio_pipe.stages import wavesolution as ws
+
+    source = Path(ws.__file__).read_text(encoding="utf-8")
+    routine = source[source.index("def build_wavesolution("):]
+    assert "model_selection_diagnostic" in routine
+    assert "maxiter=0,  # no line may disappear through global clipping" in routine
+    assert 'model2d not in ("cheb", "chebyshev", "pow", "power", "poly")' in routine
+    assert 'fallback_review["status"] == "PASS"' in routine
+    assert 'model_selection_diagnostic["fallback_selected"] = True' in routine
+    assert 'if science_qc["status"] != "PASS"' in routine
+    assert routine.index("wavesolution_model_selection.json") < routine.index(
+        "wavesolution_2d.json"
+    )
