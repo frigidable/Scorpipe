@@ -141,6 +141,7 @@ def master_bias_estimator_variance(
     invalid = np.zeros(data.shape[1:], dtype=bool)
     rejected_samples = 0
     affected_pixels = 0
+    min_required_support = 2
 
     if method == "median" and gross_reject_adu > 0:
         # This mode is deliberately opt-in. A generous absolute cutoff removes
@@ -149,7 +150,10 @@ def master_bias_estimator_variance(
         centre = np.median(data, axis=0)
         accepted = np.abs(data - centre) <= float(gross_reject_adu)
         counts = accepted.sum(axis=0).astype(np.int32)
-        invalid = counts < 2
+        # This option is for *rare* gross transients, not a majority vote
+        # among unrelated exposure levels. Reject unstable pixels outright.
+        min_required_support = max(2, n - max(1, n // 10))
+        invalid = counts < min_required_support
         rejected_samples = int(np.count_nonzero(~accepted))
         affected_pixels = int(np.count_nonzero(counts < n))
 
@@ -225,6 +229,7 @@ def master_bias_estimator_variance(
             "gross_reject_adu": float(gross_reject_adu),
             "gross_rejected_samples": int(rejected_samples),
             "gross_affected_pixels": int(affected_pixels),
+            "gross_min_required_support": int(min_required_support),
             "gross_var_assumption": (
                 "provisional Gaussian finite-N approximation after removing "
                 "gross contaminants; quantized-ADC coverage not calibrated"
