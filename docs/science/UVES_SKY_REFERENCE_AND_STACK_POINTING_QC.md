@@ -65,10 +65,10 @@ registration remains a separate science acceptance test.
 
 ## Acceptance before science use
 
-1. Execute twelve new targeted regressions plus existing Golden and
+1. Execute fourteen new targeted regressions plus existing Golden and
    wavesolution tests in a fresh detached worktree pinned to PR #178 HEAD.
    Verify tests for ~109-arcsec mismatch, RA wrapping, missing metadata,
-   UVES observed centroid provenance, air-vacuum mismatch, and free-amplitude
+   UVES observed-centroid provenance, mixed-reference/overcomplete-blend rejection, air-vacuum mismatch, and free-amplitude
    5200-A blend fitting.
 2. For isolated future science data, preserve per-science ARC associations.
    Independently measure ARC shift across detector x and y; independently
