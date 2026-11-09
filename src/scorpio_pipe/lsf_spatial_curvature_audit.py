@@ -156,14 +156,22 @@ def audit_neon_spatial_curvature(
             ),
             "model_fit_uncertainty": "NOT_CALIBRATED",
         })
+    n_complete = sum(
+        row["status"] == "DIAGNOSTIC_ONLY" for row in result
+    )
     return {
-        "status": "DIAGNOSTIC_ONLY",
+        "status": (
+            "DIAGNOSTIC_ONLY" if n_complete == len(FWHM_PAIRS_A)
+            else "REJECT"
+        ),
+        "reason": (
+            None if n_complete == len(FWHM_PAIRS_A)
+            else "incomplete_independent_pair_spatial_coverage"
+        ),
         "method": "independent_2arc_pair_y_quadratic_vs_shared_v18_y2",
         "n_input_hypotheses": n_input,
         "n_selected_hypotheses": n_accepted,
-        "n_pairs_with_sufficient_repeatable_y": sum(
-            row["status"] == "DIAGNOSTIC_ONLY" for row in result
-        ),
+        "n_pairs_with_sufficient_repeatable_y": n_complete,
         "pair_diagnostics": result,
         "shared_map_caution": (
             "Both original lamps share the _95 wavelength map and may share "
