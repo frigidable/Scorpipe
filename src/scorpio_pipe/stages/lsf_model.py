@@ -384,6 +384,26 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
     )
     expected_fwhm = lcfg.get("expected_arc_fwhm_A", prior_fwhm)
     expected_fwhm = float(expected_fwhm) if expected_fwhm is not None else None
+    # SuperNeon is an intermediate product and may not copy original
+    # DISPERSER/SLITWID cards. Resolve physical setup from the immutable
+    # config rather than silently reporting an empty grism and 1 arcsec.
+    setup = setup if isinstance(setup, dict) else {}
+    slit_raw = (
+        setup.get("slit") or setup.get("slit_width_arcsec") or
+        (cfg.get("instrument") or {}).get("slit") or
+        arc_hdr.get("SLITWID")
+    )
+    try:
+        slit_arcsec = float(slit_raw) if slit_raw is not None else None
+    except (TypeError, ValueError):
+        slit_arcsec = None
+    if slit_arcsec is not None and not (np.isfinite(slit_arcsec) and slit_arcsec > 0):
+        raise ValueError("Invalid configured slit width for ARC LSF")
+    arc_hdr_effective = fits.Header(arc_hdr)
+    if disperser:
+        arc_hdr_effective["DISPERSE"] = disperser
+    if slit_arcsec is not None:
+        arc_hdr_effective["SLITWID"] = slit_arcsec
     if expected_fwhm is not None and not (
         np.isfinite(expected_fwhm) and expected_fwhm > 0
     ):
@@ -398,7 +418,7 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
     )
 
     if measured_map is None:
-        lsf_map, source_meta = _manual_fallback_map(lam_map, arc_hdr)
+        lsf_map, source_meta = _manual_fallback_map(lam_map, arc_hdr_effective)
         fit_source = "manual_fallback"
     else:
         lsf_map = measured_map
@@ -446,8 +466,8 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
             "manual_pairs_auto": str(wdir / "manual_pairs_auto.csv"),
         },
         "instrument": {
-            "disperser": str(arc_hdr.get("DISPERSE", "") or ""),
-            "slit_arcsec": float(arc_hdr.get("SLITWID", np.nan)) if arc_hdr.get("SLITWID") is not None else None,
+            "disperser": disperser,
+            "slit_arcsec": slit_arcsec,
             "wave_ref": str(lam_hdr.get("WAVEREF", "unknown") or "unknown"),
             "wave_unit": str(lam_hdr.get("WAVEUNIT", "Angstrom") or "Angstrom"),
         },
@@ -473,7 +493,11 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
         "shape": [int(v) for v in lsf_map.shape],
         "coverage_frac": float(np.isfinite(lsf_map).sum() / max(1, lsf_map.size)),
         "model": source_meta,
-        "warnings": [] if finite.size else ["empty_lsf_map"],
+        "warnings": (
+            ["manual_fallback_is_not_empirically_measured"]
+            if fit_source == "manual_fallback"
+            else ([] if finite.size else ["empty_lsf_map"])
+        ),
     }
     atomic_write_json(qpath, qc_payload)
 
