@@ -186,6 +186,35 @@ def gross_indexed_masterbias(tmp_path):
     return index, group, var_file, mn.work_dir
 
 
+def test_grossmed_consumer_accepts_variable_n_from_one_gross_transient(tmp_path):
+    """Production writer and reader agree when a pixel uses N-1 BIAS frames."""
+    fits = pytest.importorskip("astropy.io.fits")
+    from scorpio_pipe.stages.calib import (
+        _require_estimator_masterbias_index,
+        build_superbias,
+    )
+    from tests.golden.mini_night import make_mini_night
+
+    mn = make_mini_night(tmp_path)
+    raw_path = mn.cfg["frames"]["bias"][0]
+    with fits.open(raw_path, mode="update") as hdu:
+        hdu[0].data[0, 0] += 550.0
+    mn.cfg.setdefault("calib", {})["bias_gross_reject_adu"] = 50.0
+    stage = mn.work_dir / "03_bias"
+    build_superbias(
+        mn.cfg, run_root=mn.work_dir, stage_dir=stage,
+        allow_legacy_mirrors=False,
+    )
+    index = json.loads((stage / "master_bias_index.json").read_text(encoding="utf-8"))
+    group = index["groups"][0]
+    assert group["n_used"] == 3
+    assert group["variance"]["model"] == "GROSSMED"
+    assert group["variance"]["min_effective_n"] == 2
+    assert group["variance"]["gross_rejected_samples"] >= 1
+    assert group["variance"]["bad_support_pixels"] == 0
+    _require_estimator_masterbias_index(index, group, mn.work_dir)
+
+
 def test_grossmed_consumer_accepts_producer_estimator_provenance(
     gross_indexed_masterbias,
 ):
