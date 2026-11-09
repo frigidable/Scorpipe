@@ -108,6 +108,52 @@ def test_pilot_stage_plan_uses_only_distinct_canonical_tasks():
     assert all(CATALOG.canonical_task_name(task) == task for task in tasks)
 
 
+def test_phase_plan_stops_before_manual_wavelength_identification():
+    m = load_module()
+    assert m.phase_tasks("lineid") == (
+        "manifest", "superbias", "cosmics", "superneon", "lineid_prepare",
+    )
+    assert m.phase_tasks("resume")[0] == "wavesolution"
+    assert m.phase_tasks("lineid") + m.phase_tasks("resume") == m.STAGES
+    with pytest.raises(ValueError, match="Unknown"):
+        m.phase_tasks("unknown")
+
+
+def test_manual_lineid_review_requires_five_wide_spaced_curated_pairs(tmp_path):
+    m = load_module()
+    from scorpio_pipe.wavesol_paths import wavesol_dir
+
+    work = tmp_path / "pilot_91"
+    work.mkdir()
+    cfg = {
+        "work_dir": str(work),
+        "frames": {"__setup__": {"disperser": "VPHG1200B"}},
+        "wavesol": {
+            "hand_pairs_path": "",
+            "poly_deg_1d": 4,
+            "expected_coverage_A": [3888.0, 5341.0],
+        },
+    }
+    hand = wavesol_dir(cfg, run_root=work) / "hand_pairs.txt"
+    with pytest.raises(FileNotFoundError, match="reviewed"):
+        m.review_lineid_pairs(cfg, work)
+
+    hand.parent.mkdir(parents=True)
+    hand.write_text(
+        "# manually reviewed\n"
+        "100 4000\n450 4300\n800 4600\n1200 5000\n1600 5290\n",
+        encoding="utf-8",
+    )
+    info = m.review_lineid_pairs(cfg, work)
+    assert info["active_pairs"] == 5
+    assert info["manual_pairs_sha256"] == m.checksum(hand)
+    assert info["user_review_confirmed"] is True
+
+    hand.write_text("100 4000\n450 4300\n800 4600\n1200 5000\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="active hand pairs"):
+        m.review_lineid_pairs(cfg, work)
+
+
 def test_pilot_must_be_new_sibling_and_canonical_run(tmp_path):
     m = load_module()
     orig = tmp_path / "source_01"
@@ -191,4 +237,6 @@ def test_pilot_does_not_use_engine_overrides_or_modify_original_calibration():
     assert "Pilot flatfield must remain disabled" in source
     assert "Pilot Cosmics must bias-correct only OBJ frames" in source
     assert "Pilot Sky failure_policy must remain strict" in source
+    assert "ENGINEERING_PAUSED_FOR_LINEID_SCIENCE_HOLD" in source
+    assert "lineid_reviewed" in source
     assert 'out_path.open("w"' not in source
