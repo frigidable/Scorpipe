@@ -32,6 +32,11 @@ def test_copied_config_discards_original_loader_derived_roots():
         "config_path": r"C:\\old\\run_01\\config.yaml",
         "config_dir": r"C:\\old\\run_01",
         "work_dir_abs": r"C:\\old\\run_01",
+        "_project_manifest": {
+            "path": r"C:\\old\\run_01\\project_manifest.yaml",
+            "has_manifest": True,
+            "frames_source": "manifest",
+        },
         "work_dir": r"C:\\old\\run_01",
         "data_dir": r"C:\\raw\\exposures",
         "frames": {"obj": [r"C:\\raw\\exposures\\s001.fts"]},
@@ -41,6 +46,52 @@ def test_copied_config_discards_original_loader_derived_roots():
     assert raw["data_dir"] == r"C:\\raw\\exposures"
     assert raw["frames"]["obj"] == [r"C:\\raw\\exposures\\s001.fts"]
     assert raw["work_dir"] == r"C:\\old\\run_01"  # caller rehomes separately
+
+
+def test_copied_config_rebuilds_derived_manifest_metadata(tmp_path):
+    import yaml
+    from scorpio_pipe.config import load_config
+
+    pilot = load_module()
+    old = tmp_path / "source_01"
+    new = tmp_path / "source_91"
+    raw_data = tmp_path / "raw"
+    old.mkdir()
+    new.mkdir()
+    raw_data.mkdir()
+
+    original_manifest = old / "project_manifest.yaml"
+    original_manifest.write_text(
+        "schema: scorpio-pipe.project-manifest.v1.2\\nroles: {}\\n",
+        encoding="utf-8",
+    )
+    obj = str(raw_data / "science.fts")
+    original = {
+        "work_dir": str(old),
+        "data_dir": str(raw_data),
+        "project_root": str(old),
+        "_project_manifest": {
+            "path": str(original_manifest),
+            "has_manifest": True,
+            "frames_source": "manifest",
+        },
+        "frames": {"obj": [obj]},
+    }
+
+    pilot.strip_loader_derived_root_keys(original)
+    original["work_dir"] = str(new)
+    assert "_project_manifest" not in original
+    pilot_config = new / "config.yaml"
+    pilot_config.write_text(
+        yaml.safe_dump(original, sort_keys=False), encoding="utf-8"
+    )
+    loaded = load_config(pilot_config)
+    assert loaded["frames"]["obj"] == [obj]
+    assert loaded["_project_manifest"]["path"] == str(
+        (new / "project_manifest.yaml").resolve()
+    )
+    assert str(old) not in str(loaded["_project_manifest"])
+    assert original_manifest.read_text(encoding="utf-8").startswith("schema:")
 
 
 def test_pilot_stage_plan_uses_only_distinct_canonical_tasks():
