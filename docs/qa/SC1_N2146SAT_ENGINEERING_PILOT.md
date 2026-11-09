@@ -115,3 +115,23 @@ Next attempt: use new isolated N2146sat_VPHG1200B_94. Run regression tests
 install the SHA-verified 19 manual pairs, and execute wavesolution alone.
 Do not run LSF/Sky/Linearize or the legacy multi-stage Resume before a
 scientific review of the new 2D solution and a sky-line zero-point check.
+
+### 2026-11-09 v8 Windows regression check: 73 PASS, 1 FAIL (pre-run)
+
+Pinned HEAD f15d032f5a6dba12677f3e58d5ae3f9b72468c80, isolated
+r8 worktree. Targeted pytest completed 73/74 tests; only
+test_rectification_model_records_science_signature_separately_from_arc failed.
+The stage's final QC JSON referenced excluded_summary without defining it.
+The old broad exception handler hid this pre-existing NameError; the new
+fail-closed QC wrapper surfaced it. Because Check failed, no _94 directory
+was prepared and no FITS reduction was attempted.
+
+Correction: define exclusion provenance before applying the global exclude
+policy, populate counts and dropped OBJ/ARC file paths only when exclusions
+are present, and preserve null when no policy exclusions apply. The Golden
+mini-night regression now asserts both done.json and wave_done.json are
+written, the excluded_summary key is well-defined, and both 2D science
+diagnostic JSON files exist. Use a fresh r9 detached worktree pinned to the
+new reviewed HEAD; preserve failed r8 test evidence, all original _01 files
+and earlier _91/_92/_93 pilot outputs. Never bypass or relax Wave2D QC to
+make tests pass.
