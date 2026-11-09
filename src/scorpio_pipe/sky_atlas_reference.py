@@ -204,6 +204,12 @@ def fit_blended_sky_shift(
     status = "PROVISIONAL" if (
         detected >= min_detection_delta_chi2 and not near_boundary and not ambiguous
     ) else "UNRELIABLE"
+    nearest_sep = (
+        float(np.min(np.diff(np.sort(rest)))) if rest.size > 1 else None
+    )
+    unresolved_blend = bool(
+        nearest_sep is not None and nearest_sep < float(instrument_fwhm_A)
+    )
     return {
         "status": status,
         "wavelength_frame": "air",
@@ -223,6 +229,12 @@ def fit_blended_sky_shift(
         "reference_is_lab_standard": bool(all(
             r.reference_kind == "laboratory_air" for r in refs
         )),
+        "nearest_reference_separation_A": nearest_sep,
+        "unresolved_reference_blend": unresolved_blend,
+        "absolute_shift_deblend_identifiability": (
+            "UNRESOLVED_COMPONENT_AMPLITUDE_DEGENERACY"
+            if unresolved_blend else "LSF_SENSITIVITY_NOT_TESTED"
+        ),
         "auto_apply_allowed": False,
         "science_wavelength_zero_point_approved": False,
         "reason": (
@@ -230,4 +242,64 @@ def fit_blended_sky_shift(
             "wavelength/spatial/time-dependent flexure; source UVES intensities "
             "were not fixed and observed UVES centroids are not laboratory rest lines."
         ),
+    }
+
+
+
+def evaluate_lsf_sensitivity(
+    wavelength_air_A: np.ndarray,
+    signal: np.ndarray,
+    noise_sigma: np.ndarray | float,
+    refs: Sequence[SkyReference],
+    *,
+    wavelength_frame: Literal["air", "vacuum"],
+    instrumental_fwhm_trials_A: Sequence[float],
+    max_shift_spread_A: float = 0.2,
+    max_abs_shift_A: float = 1.5,
+    shift_step_A: float = 0.04,
+) -> dict:
+    """Check whether the inferred sky shift survives plausible LSF changes.
+
+    All FWHM values must come from a justified independent LSF uncertainty
+    budget. This helper does not decide whether a chosen trial range is
+    scientifically defensible, and it never authorizes correction.
+    """
+    fwhm = np.asarray(instrumental_fwhm_trials_A, dtype=float)
+    if (fwhm.ndim != 1 or fwhm.size < 3
+            or not np.isfinite(fwhm).all()
+            or np.any(fwhm <= 0)
+            or len(np.unique(fwhm)) != fwhm.size):
+        raise ValueError("LSF sensitivity requires >=3 distinct finite positive FWHM trials")
+    if not np.isfinite(max_shift_spread_A) or max_shift_spread_A <= 0:
+        raise ValueError("Invalid LSF sensitivity tolerance")
+    rows = [
+        fit_blended_sky_shift(
+            wavelength_air_A, signal, noise_sigma, refs,
+            wavelength_frame=wavelength_frame,
+            instrument_fwhm_A=float(width),
+            max_abs_shift_A=max_abs_shift_A,
+            shift_step_A=shift_step_A,
+        )
+        for width in fwhm
+    ]
+    shifts = np.asarray([r["shift_A"] for r in rows], dtype=float)
+    spread = float(np.ptp(shifts))
+    unreliable = [i for i,r in enumerate(rows) if r["status"] != "PROVISIONAL"]
+    uncertain = bool(spread > max_shift_spread_A or unreliable)
+    return {
+        "status": "UNSTABLE" if uncertain else "PROVISIONAL",
+        "n_fwhm_trials": int(fwhm.size),
+        "fwhm_trial_values_A": [float(v) for v in fwhm],
+        "shift_trial_values_A": [float(v) for v in shifts],
+        "shift_spread_A": spread,
+        "max_allowed_shift_spread_A": float(max_shift_spread_A),
+        "unreliable_trial_indices": unreliable,
+        "source_types": sorted(set(r.reference_kind for r in refs)),
+        "auto_apply_allowed": False,
+        "science_wavelength_zero_point_approved": False,
+        "limits": [
+            "Trial FWHM values must originate from independently justified LSF bounds",
+            "A small spread cannot establish correct LSF, source wavelengths or blend membership",
+            "Single-complex shift does not establish global wavelength zero point",
+        ],
     }
