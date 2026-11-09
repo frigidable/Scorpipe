@@ -166,3 +166,37 @@ def test_disjoint_spatial_support_cannot_be_promoted_to_2d_candidate():
     assert qc["status"]=="REJECT"
     assert qc["reason"]=="insufficient_common_spatial_coverage"
     assert qc["science_lsf_validated"] is False
+
+
+
+def test_lsf18_external_source_digest_manifest_has_complete_sha256():
+    """Never accept the 63-character map hash typo from Windows v18 wrapper."""
+    import ast
+    import re
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[1] / (
+        "scripts/qa/lsf18_multiline_probe.py"
+    )
+    module = ast.parse(script.read_text(encoding="utf-8"))
+    manifests = [
+        ast.literal_eval(node.value)
+        for node in module.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "HASHES"
+            for target in node.targets
+        )
+    ]
+    assert len(manifests) == 1
+    hashes = manifests[0]
+    assert set(hashes) == {
+        "neon06", "neon13", "map", "lineid", "singles", "pairs"
+    }
+    assert all(
+        re.fullmatch(r"[0-9a-f]{64}", value)
+        for value in hashes.values()
+    )
+    assert hashes["map"] == (
+        "37808e73c00279ced67ea520e2245767427bd71dc7edec9af22177fbc8df07ab"
+    )
