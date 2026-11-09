@@ -25,6 +25,16 @@ def test_pilot_selftest():
     load_module().selftest()
 
 
+def test_pilot_stage_plan_uses_only_distinct_canonical_tasks():
+    from scorpio_pipe.catalog.stages import CATALOG
+
+    tasks = load_module().STAGES
+    assert len(tasks) == 13
+    assert len(set(tasks)) == len(tasks)
+    assert "biascorr" not in tasks  # alias for superbias, not an independent stage
+    assert all(CATALOG.canonical_task_name(task) == task for task in tasks)
+
+
 def test_pilot_must_be_new_sibling_and_canonical_run(tmp_path):
     m = load_module()
     orig = tmp_path / "source_01"
@@ -103,4 +113,7 @@ def test_pilot_does_not_use_engine_overrides_or_modify_original_calibration():
     assert "original_files_unchanged" in source
     assert "SCIENCE E2E: HOLD" in source
     assert "bias_gross_reject_adu" in source
+    assert "selected_raw_paths" in source
+    assert "Noncanonical/aliased pilot task" in source
+    assert "Pilot flatfield must remain disabled" in source
     assert 'out_path.open("w"' not in source
