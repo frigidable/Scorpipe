@@ -11,14 +11,16 @@ overscan correction, or a replacement of the existing `03_bias`.
 - The original source configuration and original `03_bias/master_bias*.fits` / index are SHA256-guarded before and after. The pilot **never** writes them.
 - After writing the isolated config, the pilot immediately reloads it using the real Scorpipe loader and checks that the resolved run root and **every selected RAW file** match the originally audited selection. Any mismatch prevents the preparation manifest from being issued.
 - Copying the source YAML deliberately **drops loader-derived root metadata** (`project_root`, `config_path`, `config_dir`, `work_dir_abs`, `_project_manifest`): Scorpipe reconstructs these from the pilot config path and its selected project manifest. This prevents false original-run references and stale path provenance. `work_dir` is explicitly set to the new pilot; RAW exposure paths remain immutable.
-- `N2146sat_VPHG1200B_91` is retained as a failed engineering run: on 2026-11-09, manifest and superbias completed, then cosmics refused the new `GROSSMED` variance provenance. The recorded original-file fingerprint was unchanged. **Never rerun or delete `_91`.** Use the fresh sibling `N2146sat_VPHG1200B_92` for the corrected pilot.
-- Tests first: `tests/test_masterbias_estimator_uncertainty.py`, `tests/test_masterbias_gross_reject_optin.py`, `tests/test_sc1_engineering_pilot.py`. On Windows, use `pytest --basetemp` pointing to a fresh dedicated directory in the isolated worktree if the default `%TEMP%/pytest-of-<user>` is not readable.
+- `_91` (2026-11-09) is a retained failed engineering run: `manifest` and `superbias` passed, `cosmics` rejected `GROSSMED`; source hashes unchanged.
+- `_92` (2026-11-09) is another retained failed engineering run: `manifest`, `superbias`, `cosmics`, `superneon` passed; `lineid_prepare` failed because the legacy CSV loader interpreted `# waveref: air` as the table header and produced NaN wavelengths; source hashes unchanged.
+- **Never rerun or delete `_91`/`_92`.** Use the fresh sibling `N2146sat_VPHG1200B_93` after testing the LineID parser correction.
+- Tests first: `tests/test_masterbias_estimator_uncertainty.py`, `tests/test_masterbias_gross_reject_optin.py`, `tests/test_sc1_engineering_pilot.py`, `tests/test_p5_lineid_long_filter.py`. On Windows, use `pytest --basetemp` pointing to a fresh dedicated directory in the isolated worktree if the default `%TEMP%/pytest-of-<user>` is not readable.
 
 ### Exact commands (from PR checkout, with `PYTHONPATH=<checkout>/src`)
 
 ```powershell
 $source = "C:\Users\frigi\Documents\PhD\ScorpipeWork\06_12_2024\N2146sat_VPHG1200B_01\config.yaml"
-$pilot = "C:\Users\frigi\Documents\PhD\ScorpipeWork\06_12_2024\N2146sat_VPHG1200B_92"
+$pilot = "C:\Users\frigi\Documents\PhD\ScorpipeWork\06_12_2024\N2146sat_VPHG1200B_93"
 
 & $py scripts/qa/sc1_engineering_pilot.py --selftest
 & $py scripts/qa/sc1_engineering_pilot.py prepare $source $pilot
@@ -64,10 +66,16 @@ For each task the canonical `run_sequence_locked` engine is invoked with `force=
 
 ### Acceptance levels
 
-1. **Code regression:** 45/45 targeted tests and pilot self-test passed on Windows at `63469183`; expanded GROSSMED producer/consumer tests on subsequent HEAD must pass before preparing `_92`.
+1. **Code regression:** 56/56 targeted tests and pilot self-test passed on Windows at `d3bb0f4`; the newer LineID parser and manual-only preparation tests must pass before preparing `_93`.
 2. **Engineering E2E:** phase one completes its five tasks and pauses for reviewed LineID; phase two completes its remaining eight tasks with `status=ok`; original protected hashes unchanged; inspect all produced products.
 3. **Science:** **HOLD regardless of 1 or 2** until reliable bias uncertainty (including quantized ADC and time-dependent zero), wave/sky residuals, flux fidelity and spatial geometry are evaluated against the final extracted science product.
 
 **GROSSMED contract (fix after `_91` stop):** The producer labels per-pixel retained-sample median uncertainty `GROSSMED`, with no global `SB_VFAC`. The consumer now recognizes this model with distinct sample-support checks, an exact comparison of index and FITS model/cutoff/rejection counts, provisional-estimator provenance and strict readout matching. It refuses gross-rejected bias groups with any unsupported pixels because Cosmics currently does not propagate MasterBias DQ. This is not a validation of uncertainty coverage. If `_92` reports insufficient support, stop and inspect the pixels; do not disable checks.
 
 The 50 ADU gross threshold is from the audited N2146sat bias cohort, **not** an instrument-wide universal calibration. The finite-N Gaussian factor after gross rejection is provisional. Original MasterBias SCI/VAR/DQ must remain untouched.
+
+### LineID CSV metadata parser and manual-only gate (fix after `_92`)
+
+The packaged `neon_lines.csv` starts with `# waveref: air` and `# unit: angstrom` followed by its `lambda` column. The old `_load_neon_lines_csv` used `np.genfromtxt(names=True)` on the unfiltered input; NumPy consumed the first metadata comment as the names row, then coerced the actual `lambda` line to `NaN`. NumPy emitted `All-NaN slice encountered`, and automatic line matching failed without examining valid wavelengths. The new loader separates comment metadata from actual CSV rows before parsing, validates finite positive wavelengths, respects explicitly declared units, and refuses ambiguous malformed catalogues. It does **not** expand `pair_tol_A` or auto-accept any assignments.
+
+If automatic pattern matching is inconclusive after a valid catalogue is loaded, `lineid_prepare` now writes the candidate peak template plus an explicit `MANUAL_ONLY_NO_RELIABLE_AUTO_PAIRS` report and a header-only auto-suggestions CSV. The stage can therefore complete **preparation** and stop at the mandatory manual LineID gate. This does not assert a valid wavelength solution; users must manually verify line identities and write `hand_pairs.txt` before `resume --lineid-reviewed`.
