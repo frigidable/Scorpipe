@@ -85,3 +85,40 @@ def test_lineid_parser_fails_closed_on_empty_nan_or_unsafe_catalogue(tmp_path):
         file.write_text(source, encoding="utf-8")
         with pytest.raises(ValueError):
             _load_neon_lines_csv(file)
+
+
+def test_lineid_preparation_falls_back_to_manual_when_automatic_fit_is_impossible(tmp_path):
+    from scorpio_pipe.stages.lineid_auto_backup import prepare_lineid
+    from scorpio_pipe.wavesol_paths import wavesol_dir
+
+    cfg = {
+        "work_dir": str(tmp_path),
+        "frames": {"__setup__": {"disperser": "VPHG1200B"}},
+        "wavesol": {
+            "neon_lines_csv": str(tmp_path / "lab.csv"),
+            "pair_tol_A": 2.5,
+        },
+    }
+    (tmp_path / "lab.csv").write_text(
+        "# waveref: air\n# unit: angstrom\n"
+        "lambda\n4000\n4200\n4500\n4800\n",
+        encoding="utf-8",
+    )
+    wdir = wavesol_dir(cfg, run_root=tmp_path)
+    wdir.mkdir(parents=True)
+    (wdir / "superneon.fits").write_bytes(b"mock: existence only")
+    (wdir / "peaks_candidates.csv").write_text(
+        "x_pix,amp,fwhm_pix\n100,100,2\n350,80,2\n700,90,2\n",
+        encoding="utf-8",
+    )
+    result = prepare_lineid(cfg, run_root=tmp_path)
+    template = result["template"].read_text(encoding="utf-8")
+    report = result["report"].read_text(encoding="utf-8")
+    auto = result["auto"].read_text(encoding="utf-8")
+    assert len(template.splitlines()) == 4
+    assert "MANUAL_ONLY_NO_RELIABLE_AUTO_PAIRS" in report
+    assert "pairs_auto: 0" in report
+    assert "laboratory_lines_loaded: 4" in report
+    assert "auto_failure:" in report
+    assert len(auto.splitlines()) == 1
+    assert not (wdir / "hand_pairs.txt").exists()
