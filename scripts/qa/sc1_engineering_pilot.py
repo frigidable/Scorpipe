@@ -233,9 +233,72 @@ def prepare(config_path: str, new_directory: str) -> None:
     print("NO PIPELINE STAGES RUN; SCIENCE E2E HOLD", flush=True)
 
 
-def run(pilot_config: str) -> None:
+LINEID_PHASE_REPORT = "sc1_engineering_pilot_lineid_phase.json"
+LINEID_BOUNDARY = STAGES.index("wavesolution")
+
+
+def phase_tasks(phase: str) -> tuple[str, ...]:
+    if phase == "lineid":
+        return STAGES[:LINEID_BOUNDARY]
+    if phase == "resume":
+        return STAGES[LINEID_BOUNDARY:]
+    raise ValueError(f"Unknown engineering pilot phase: {phase}")
+
+
+def review_lineid_pairs(cfg: dict, work: Path) -> dict[str, object]:
+    """Check a manually reviewed hand_pairs.txt, never auto-accept CSV proposals."""
+    import numpy as np
+    from scorpio_pipe.wavesol_paths import wavesol_dir
+    from scorpio_pipe.stages.wavesolution import _read_hand_pairs
+
+    wcfg = cfg.get("wavesol") or {}
+    outdir = wavesol_dir(cfg, run_root=work)
+    hp = outdir / "hand_pairs.txt"
+    hp_raw = str(wcfg.get("hand_pairs_path") or "").strip()
+    if hp_raw:
+        explicit = Path(hp_raw)
+        explicit = (explicit if explicit.is_absolute() else work / explicit).resolve()
+        if explicit != hp.resolve():
+            raise RuntimeError("Manual LineID file must be in the isolated pilot wavesol directory")
+    if not hp.is_file():
+        raise FileNotFoundError(
+            f"Manually reviewed LineID required before resuming: {hp}. "
+            "lineid_prepare outputs are suggestions, not hand_pairs.txt."
+        )
+    x, lam, _, disabled = _read_hand_pairs(hp)
+    keep = ~disabled
+    xs, ls = x[keep], lam[keep]
+    required = max(5, int(wcfg.get("poly_deg_1d", 4)) + 1)
+    if xs.size < required:
+        raise RuntimeError(f"LineID needs >={required} active hand pairs, found {xs.size}")
+    if not np.isfinite(xs).all() or not np.isfinite(ls).all():
+        raise RuntimeError("LineID contains nonfinite active pairs")
+    if len({round(float(v), 3) for v in xs}) != xs.size:
+        raise RuntimeError("LineID has duplicate active pixel positions")
+    if len({round(float(v), 3) for v in ls}) != ls.size:
+        raise RuntimeError("LineID has duplicate active laboratory wavelengths")
+    coverage = wcfg.get("expected_coverage_A")
+    if isinstance(coverage, (tuple, list)) and len(coverage) == 2:
+        lower, upper = map(float, coverage)
+        if (np.any(ls < lower - 20.0) or np.any(ls > upper + 20.0)):
+            raise RuntimeError("LineID wavelengths outside setup prior coverage")
+    if float(np.ptp(xs)) < 300.0:
+        raise RuntimeError("LineID pixel coverage <300 px; review lamp identifications")
+    return {
+        "manual_pairs_path": str(hp),
+        "manual_pairs_sha256": checksum(hp),
+        "active_pairs": int(xs.size),
+        "pixel_span": float(np.ptp(xs)),
+        "wavelength_span_A": float(np.ptp(ls)),
+        "user_review_confirmed": True,
+    }
+
+
+def run(pilot_config: str, *, phase: str = "lineid", lineid_reviewed: bool = False) -> None:
+    """Run to the manual LineID gate, then explicitly resume after review."""
     from scorpio_pipe.pipeline.public_api import run_sequence_locked, canonical_task_name
 
+    tasks = phase_tasks(phase)
     config = Path(pilot_config).expanduser().resolve(strict=True)
     if config.name != "config.yaml":
         raise ValueError("Expected isolated config.yaml")
@@ -284,13 +347,40 @@ def run(pilot_config: str) -> None:
         for p, digest in manifest["original_protected_sha256"].items()
     ):
         raise RuntimeError("Original files changed since pilot preparation")
-    if (work / REPORT).exists():
-        raise FileExistsError("Pilot report exists; refusing second execution")
+
+    phase1_file = work / LINEID_PHASE_REPORT
+    final_file = work / REPORT
+    if final_file.exists():
+        raise FileExistsError("Final engineering result exists; refusing another execution")
+    review_info = None
+    if phase == "lineid":
+        if phase1_file.exists():
+            raise FileExistsError("LineID phase already attempted; refusing another execution")
+        if lineid_reviewed:
+            raise RuntimeError("LineID review cannot be asserted before phase one")
+        report_file = phase1_file
+    else:
+        if not lineid_reviewed:
+            raise RuntimeError("Resume requires explicit --lineid-reviewed confirmation")
+        if not phase1_file.is_file():
+            raise FileNotFoundError("No completed LineID phase report; run first phase")
+        phase1 = json.loads(phase1_file.read_text(encoding="utf-8"))
+        if (phase1.get("status") != "ENGINEERING_PAUSED_FOR_LINEID_SCIENCE_HOLD"
+                or phase1.get("completed_stages") != list(phase_tasks("lineid"))
+                or phase1.get("original_files_unchanged") is not True):
+            raise RuntimeError("LineID phase did not complete cleanly; resume forbidden")
+        if phase1.get("pilot_config_sha256") != checksum(config):
+            raise RuntimeError("Pilot config changed after LineID phase; resume forbidden")
+        review_info = review_lineid_pairs(cfg, work)
+        report_file = final_file
 
     output = {
         "status": "ENGINEERING_RUN_INCOMPLETE_SCIENCE_HOLD",
+        "phase": phase,
         "config": str(config),
+        "pilot_config_sha256": checksum(config),
         "stage_plan": list(STAGES),
+        "phase_stages": list(tasks),
         "completed_stages": [],
         "stopped_at": None,
         "error": None,
@@ -298,10 +388,11 @@ def run(pilot_config: str) -> None:
         "preflight_override": False,
         "force": False,
         "original_files_unchanged": None,
+        "lineid_review": review_info,
         "started_utc": datetime.now(timezone.utc).isoformat(),
     }
     try:
-        for name in STAGES:
+        for name in tasks:
             print("ENGINEERING STAGE:", name, flush=True)
             outcome = run_sequence_locked(
                 config, [name], resume=True, force=False,
@@ -309,18 +400,23 @@ def run(pilot_config: str) -> None:
                 config_path=config,
             )
             task_result = outcome.get(name, {}) if isinstance(outcome, dict) else {}
-            status = str(task_result.get("status", "")).lower()
+            status = str(task_result.get("status", "")).lower() if isinstance(task_result, dict) else ""
             if status != "ok":
                 raise RuntimeError(
                     f"Stage {name} returned status={status!r}: "
                     + str(task_result.get("error_message") or task_result)[:600]
+                    if isinstance(task_result, dict) else f"Stage {name} has no valid result"
                 )
             output["completed_stages"].append(name)
-        output["status"] = "ENGINEERING_STAGES_COMPLETED_NOT_SCIENCE_APPROVED"
+        if phase == "lineid":
+            output["status"] = "ENGINEERING_PAUSED_FOR_LINEID_SCIENCE_HOLD"
+            output["stopped_at"] = "MANUAL_LINEID_REVIEW_REQUIRED"
+        else:
+            output["status"] = "ENGINEERING_STAGES_COMPLETED_NOT_SCIENCE_APPROVED"
     except Exception as exc:
         output["stopped_at"] = (
-            STAGES[len(output["completed_stages"])]
-            if len(output["completed_stages"]) < len(STAGES)
+            tasks[len(output["completed_stages"])]
+            if len(output["completed_stages"]) < len(tasks)
             else "postrun"
         )
         output["error"] = f"{type(exc).__name__}: {exc}"
@@ -338,14 +434,17 @@ def run(pilot_config: str) -> None:
                 " | ORIGINAL PROTECTED FILES CHANGED"
             ).strip(" |")
         output["finished_utc"] = datetime.now(timezone.utc).isoformat()
-        with (work / REPORT).open("x", encoding="utf-8") as handle:
+        with report_file.open("x", encoding="utf-8") as handle:
             json.dump(output, handle, indent=2, ensure_ascii=False)
-        print("PILOT REPORT:", work / REPORT)
-        print("ORIGINAL FILES UNCHANGED:",
-              output["original_files_unchanged"])
+        print("PILOT REPORT:", report_file)
+        print("ORIGINAL FILES UNCHANGED:", output["original_files_unchanged"])
         print("SCIENCE E2E: HOLD")
     if output["original_files_unchanged"] is False:
         raise RuntimeError("Original protected files changed during engineering run")
+    if phase == "lineid":
+        print("PAUSED: inspect manual_pairs_auto.csv, curate hand_pairs.txt in the pilot wave directory.")
+        print("Do NOT auto-approve the suggested lamp matches.")
+
 
 
 def selftest() -> None:
@@ -369,6 +468,9 @@ def selftest() -> None:
         assert "cosmics" in STAGES
         assert "biascorr" not in STAGES
         assert "arclineid" not in STAGES  # Alias for lineid_prepare, not a separate task
+        assert phase_tasks("lineid")[-1] == "lineid_prepare"
+        assert phase_tasks("resume")[0] == "wavesolution"
+        assert phase_tasks("lineid") + phase_tasks("resume") == STAGES
     print("SELFTEST PASSED")
 
 
@@ -378,9 +480,11 @@ if __name__ == "__main__":
     elif len(sys.argv) == 4 and sys.argv[1] == "prepare":
         prepare(sys.argv[2], sys.argv[3])
     elif len(sys.argv) == 3 and sys.argv[1] == "run":
-        run(sys.argv[2])
+        run(sys.argv[2], phase="lineid")
+    elif len(sys.argv) == 4 and sys.argv[1] == "resume" and sys.argv[3] == "--lineid-reviewed":
+        run(sys.argv[2], phase="resume", lineid_reviewed=True)
     else:
         raise SystemExit(
             "Usage: script.py --selftest | prepare original/config.yaml NEW_dir | "
-            "run NEW_dir/config.yaml"
+            "run NEW_dir/config.yaml | resume NEW_dir/config.yaml --lineid-reviewed"
         )
