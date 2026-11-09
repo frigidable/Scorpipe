@@ -106,3 +106,41 @@ def isolated_arc_centers_in_pixels(
     sep = np.abs(positions[:,None]-positions[None,:])
     np.fill_diagonal(sep,np.inf)
     return np.min(sep,axis=1) >= 2.0*half_window_px+separation_extra_px
+
+
+
+def bracketed_arc_wavelength_support(
+    wavelength_map_air_A: np.ndarray,
+    empirically_fitted_line_wavelengths_A: np.ndarray,
+) -> tuple[np.ndarray, dict[str, float | list[float] | None]]:
+    """Conservative wavelength-span marker for *measured* ARC LSF.
+
+    This mask asserts only that a pixel is between the extreme fitted
+    laboratory lines. It does NOT assert adequate density of lines, a
+    validated line profile, or a verified LSF for the science object.
+    """
+    wave = np.asarray(wavelength_map_air_A, dtype=float)
+    lines = np.sort(np.unique(np.asarray(
+        empirically_fitted_line_wavelengths_A, dtype=float
+    )))
+    if wave.ndim != 2 or lines.ndim != 1 or lines.size < 3:
+        raise ValueError(
+            "ARC LSF support needs a 2D wavelength map and at least three "
+            "independently modeled line centers"
+        )
+    if not np.all(np.isfinite(lines)) or np.any(lines <= 0):
+        raise ValueError("ARC LSF line centers must be finite and positive")
+    lo, hi = float(lines[0]), float(lines[-1])
+    support = np.isfinite(wave) & (wave >= lo) & (wave <= hi)
+    valid = np.isfinite(wave)
+    frac = float(np.count_nonzero(support)/max(np.count_nonzero(valid),1))
+    return support, {
+        "measured_line_span_A": [lo,hi],
+        "empirical_span_fraction_of_finite_wave_map": frac,
+        "extrapolated_fraction_of_finite_wave_map": 1.0 - frac,
+        "maximum_gap_between_modeled_lines_A": float(np.max(np.diff(lines))),
+        "interpretation": (
+            "Line-span bracketing only; no verified LSF shape, gap "
+            "interpolation quality, point-source illumination or sky flexure"
+        ),
+    }
