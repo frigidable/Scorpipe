@@ -443,6 +443,26 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
 
     lsf_map = np.asarray(lsf_map, dtype=float)
     lsf_map[~np.isfinite(lam_map)] = np.nan
+    from scorpio_pipe.lsf_arc_profile import bracketed_arc_wavelength_support
+    modeled_line_centers = np.asarray(
+        source_meta.get("line_lambdas_A", []), dtype=float
+    )
+    if fit_source == "arc_measured":
+        span_support, span_report = bracketed_arc_wavelength_support(
+            lam_map, modeled_line_centers
+        )
+    else:
+        # Manual priors never have empirical ARC-line support.
+        span_support = np.zeros_like(lam_map, dtype=bool)
+        span_report = {
+            "measured_line_span_A": None,
+            "empirical_span_fraction_of_finite_wave_map": 0.0,
+            "extrapolated_fraction_of_finite_wave_map": 1.0,
+            "maximum_gap_between_modeled_lines_A": None,
+            "interpretation": "No empirically fitted ARC line centers",
+        }
+    span_report["science_lsf_validated"] = False
+    span_report["support_kind"] = "BRACKETED_LINE_SPAN_ONLY"
     # Even if an engineering map is populated by edge-value extrapolation,
     # the science-supported part only spans independently fitted lamp lines.
     modeled_lams = np.asarray(source_meta.get("line_lambdas_A", []), dtype=float)
@@ -470,11 +490,31 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
     primary_hdr["BUNIT"] = ("Angstrom", "Instrumental sigma unit")
     primary_hdr["LSFUNIT"] = ("sigma_A", "LSF map quantity")
     primary_hdr["LSFSRC"] = (str(fit_source), "LSF source")
+    primary_hdr["LSFSPAN"] = (
+        float(span_report["empirical_span_fraction_of_finite_wave_map"]),
+        "Fraction bracketed by fitted ARC lines",
+    )
+    primary_hdr["LSFSCI"] = (False, "No science LSF validation")
     primary_hdr["PIPEVER"] = (str(PIPELINE_VERSION), "Pipeline version")
     primary_hdr = add_provenance(primary_hdr, cfg, stage="lsf_model")
 
     lsf_path = out_dir / "lsf_map.fits"
     write_sci_var_mask(lsf_path, lsf_map.astype(np.float32), header=primary_hdr, grid=grid, primary_data=lsf_map.astype(np.float32))
+
+    # A finite interpolated/extrapolated FWHM is not necessarily observed.
+    # Preserve a separate *binary* map; never silently advertise 100% science
+    # LSF coverage just because np.interp filled all detector columns.
+    support_path = out_dir / "lsf_span_support.fits"
+    support_hdr = fits.Header()
+    support_hdr["BUNIT"] = ("1", "Binary line-bracketed span mask")
+    support_hdr["LSFSUP"] = ("SPAN_ONLY", "Not science validation")
+    support_hdr["LSFSCI"] = (False, "No science LSF validation")
+    support_hdr = add_provenance(support_hdr, cfg, stage="lsf_model")
+    atomic_write_fits(
+        support_path, span_support.astype(np.uint8), header=support_hdr,
+        overwrite=False,
+    )
+    source_meta["empirical_wavelength_support"] = span_report
 
     finite = lsf_map[np.isfinite(lsf_map)]
     qpath = out_dir / "lsf_qc.json"
@@ -512,6 +552,7 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
         "summary_1d": summary_1d,
         "outputs": {
             "lsf_map": str(lsf_path),
+            "lsf_span_support": str(support_path),
             "lsf_qc": str(qpath),
         },
     }
@@ -524,6 +565,14 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
         "arc_profile_fit_method": "gaussian_plus_linear_background_isolated",
         "support_range_A": source_meta.get("support_range_A"),
         "extrapolated_fraction": float(extrapolated_frac),
+        "empirical_span_support_fraction": float(
+            span_report["empirical_span_fraction_of_finite_wave_map"]
+        ),
+        "numerically_finite_coverage_only": True,
+        "maximum_line_gap_A": span_report[
+            "maximum_gap_between_modeled_lines_A"
+        ],
+        "support_map_fits": str(support_path),
         "n_finite": int(finite.size),
         "sigma_A_median": float(np.nanmedian(finite)) if finite.size else None,
         "sigma_A_p16": float(np.nanpercentile(finite, 16)) if finite.size else None,
@@ -533,9 +582,11 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
         "coverage_frac": float(np.isfinite(lsf_map).sum() / max(1, lsf_map.size)),
         "model": source_meta,
         "warnings": (
-            ["manual_fallback_is_not_empirically_measured"]
-            if fit_source == "manual_fallback"
-            else ([] if finite.size else ["empty_lsf_map"])
+            (["manual_fallback_is_not_empirically_measured"]
+             if fit_source == "manual_fallback" else [])
+            + (["lsf_contains_unbracketed_wavelength_pixels"]
+               if np.any(~span_support & np.isfinite(lam_map)) else [])
+            + ([] if finite.size else ["empty_lsf_map"])
         ),
     }
     atomic_write_json(qpath, qc_payload)
@@ -545,6 +596,7 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
         "source": fit_source,
         "science_lsf_validated": False,
         "lsf_map": str(lsf_path),
+        "lsf_span_support": str(support_path),
         "lsf_model_json": str(mpath),
         "lsf_qc_json": str(qpath),
     }
