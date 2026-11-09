@@ -1850,6 +1850,30 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
             except Exception:
                 pass
 
+    # Line identity must be checked before any 2D fit. A correlation walker
+    # may silently lock onto another strong line: the resulting smooth
+    # polynomial could then be internally self-consistent but physically wrong.
+    from scorpio_pipe.wave_trace_qc import trace_identity_qc
+
+    trace_qc = trace_identity_qc(
+        xs_cp, ys_cp, lams_cp, x_fit, lam_fit,
+        collision_px=float(wcfg.get("trace_collision_px", 1.5)),
+        max_collision_fraction=float(
+            wcfg.get("trace_max_collision_fraction", 0.01)
+        ),
+    )
+    trace_qc_path = outdir / "trace_identity_qc.json"
+    trace_qc_path.write_text(
+        json.dumps(trace_qc, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    if trace_qc["status"] != "PASS":
+        raise RuntimeError(
+            "Wavesolution TRACE_IDENTITY_QC FAILED: "
+            + " | ".join(trace_qc["issues"][:8])
+            + f". Inspect {trace_qc_path}"
+        )
+
     # Save control points for QC / interactive cleanup (after all basic filtering).
     # This file is the *single source of truth* for the interactive 2D cleaner.
     # Always write it so that the GUI and the final stage outputs stay in lockstep.
@@ -2230,6 +2254,30 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
             f"  {lam0:.3f}  {'REJECT' if is_rej else 'OK':6s}  {int(np.sum(m_used))}/{int(np.sum(m_line))}  {med:+.3g}  {rms_line:.3g}"
         )
     report_txt.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    # A stage may not report success with a physically unusable 2D solution.
+    # In particular, a good 1D fit does not certify trace identities across
+    # the slit. Run independent whole-line (not per-row) cross-validation and
+    # per-line support/bias tests BEFORE writing a consumable lambda_map.fits.
+    from scorpio_pipe.wave_trace_qc import evaluate_solution_2d
+
+    science_qc = evaluate_solution_2d(
+        xs_cp[fit_mask], ys_cp[fit_mask], lams_cp[fit_mask],
+        resid2d[fit_mask], used2d[fit_mask],
+        dispersion_A_per_px=disp2d_A_per_px,
+    )
+    science_qc["trace_identity_qc"] = str(trace_qc_path)
+    science_qc_file = outdir / "wavesolution_science_qc.json"
+    science_qc_file.write_text(
+        json.dumps(science_qc, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    if science_qc["status"] != "PASS":
+        raise RuntimeError(
+            "Wavesolution SCIENCE_2D_QC FAILED: "
+            + " | ".join(science_qc["issues"][:8])
+            + f". Inspect {science_qc_file}"
+        )
 
     # finalize counts / robust stats for 2D
     n_lines_total = int(n_lines)
