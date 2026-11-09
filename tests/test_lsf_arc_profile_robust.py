@@ -146,3 +146,48 @@ def test_lsf_stage_refuses_nominal_fallback_without_explicit_optin(tmp_path):
     assert diag["status"]=="REJECT"
     assert diag["manual_fallback_allowed"] is False
     assert not (out_dir/"lsf_map.fits").exists()
+
+
+
+def test_line_bracketing_mask_distinguishes_numerical_coverage_from_support():
+    from scorpio_pipe.lsf_arc_profile import bracketed_arc_wavelength_support
+
+    wave=np.array([[3800., 3888.65, 4200., 5080.38, 5200.],
+                   [np.nan, 3888.64, 4500., 5080.39, 5385.]])
+    supported,meta=bracketed_arc_wavelength_support(
+        wave,np.asarray([3888.65,4471.48,5080.38])
+    )
+    assert supported.dtype == bool
+    assert supported.tolist() == [
+        [False,True,True,True,False],
+        [False,False,True,False,False],
+    ]
+    assert meta["measured_line_span_A"]==[3888.65,5080.38]
+    assert meta["empirical_span_fraction_of_finite_wave_map"]==pytest.approx(4/9)
+    assert meta["maximum_gap_between_modeled_lines_A"]==pytest.approx(608.90)
+
+
+def test_line_span_mask_requires_at_least_three_measured_references():
+    from scorpio_pipe.lsf_arc_profile import bracketed_arc_wavelength_support
+
+    with pytest.raises(ValueError,match="at least three"):
+        bracketed_arc_wavelength_support(
+            np.ones((2,7)),np.asarray([5015.68,5080.38]),
+        )
+    with pytest.raises(ValueError,match="finite"):
+        bracketed_arc_wavelength_support(
+            np.ones((2,7)),np.asarray([4880.,np.nan,5300.]),
+        )
+
+
+def test_lsf_stage_reports_binary_support_separately_from_finite_map():
+    from pathlib import Path
+    from scorpio_pipe.stages import lsf_model
+
+    source=Path(lsf_model.__file__).read_text(encoding="utf-8")
+    body=source[source.index("def run_lsf_model("):]
+    assert "lsf_span_support.fits" in body
+    assert "empirical_span_support_fraction" in body
+    assert "numerically_finite_coverage_only" in body
+    assert "lsf_contains_unbracketed_wavelength_pixels" in body
+    assert "science_lsf_validated\": False" in body
