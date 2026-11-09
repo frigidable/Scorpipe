@@ -25,6 +25,24 @@ def test_pilot_selftest():
     load_module().selftest()
 
 
+def test_copied_config_discards_original_loader_derived_roots():
+    pilot = load_module()
+    raw = {
+        "project_root": r"C:\\old\\run_01",
+        "config_path": r"C:\\old\\run_01\\config.yaml",
+        "config_dir": r"C:\\old\\run_01",
+        "work_dir_abs": r"C:\\old\\run_01",
+        "work_dir": r"C:\\old\\run_01",
+        "data_dir": r"C:\\raw\\exposures",
+        "frames": {"obj": [r"C:\\raw\\exposures\\s001.fts"]},
+    }
+    pilot.strip_loader_derived_root_keys(raw)
+    assert all(k not in raw for k in pilot.LOADER_DERIVED_ROOT_KEYS)
+    assert raw["data_dir"] == r"C:\\raw\\exposures"
+    assert raw["frames"]["obj"] == [r"C:\\raw\\exposures\\s001.fts"]
+    assert raw["work_dir"] == r"C:\\old\\run_01"  # caller rehomes separately
+
+
 def test_pilot_stage_plan_uses_only_distinct_canonical_tasks():
     from scorpio_pipe.catalog.stages import CATALOG
 
