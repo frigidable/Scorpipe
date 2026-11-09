@@ -28,7 +28,7 @@ from pathlib import Path
 
 EXPECTED = {"bias": 20, "obj": 7, "flat": 3, "neon": 2}
 STAGES = (
-    "manifest", "superbias", "biascorr", "superneon",
+    "manifest", "superbias", "superneon",
     "lineid_prepare", "arclineid", "wavesolution", "lsf_model",
     "sky", "sky_refine", "linearize", "stack2d", "extract1d",
     "qc_report",
@@ -141,12 +141,21 @@ def prepare(config_path: str, new_directory: str) -> None:
     raw_data = str(Path(str(raw["data_dir"])).resolve()).lower()
     if source_work_string == raw_data:
         raise RuntimeError("Raw data_dir unexpectedly equals source work_dir")
-    for key in ("calib", "output", "products"):
-        block = raw.get(key)
-        if isinstance(block, dict):
-            for subkey, val in block.items():
-                if isinstance(val, str) and source_work_string in val.lower():
-                    raise RuntimeError(f"Unsafe source-work reference {key}.{subkey}")
+    def reject_old_run_product_refs(value: object, location: str = "") -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                # Existing RAW exposures may legitimately live under the
+                # source run; they are only ever opened for reading.
+                if not location and key == "frames":
+                    continue
+                reject_old_run_product_refs(child, f"{location}.{key}" if location else str(key))
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                reject_old_run_product_refs(child, f"{location}[{index}]")
+        elif isinstance(value, str) and source_work_string in value.lower():
+            raise RuntimeError(f"Unsafe original-run reference: {location}")
+
+    reject_old_run_product_refs(raw)
 
     before = fingerprint_sources(source)
     new_dir.mkdir(parents=False)
@@ -161,6 +170,10 @@ def prepare(config_path: str, new_directory: str) -> None:
         "work_dir": str(new_dir),
         "optional_gross_reject_adu": 50.0,
         "stage_plan": list(STAGES),
+        "selected_raw_paths": {
+            kind: [str(p) for p in cfg["frames"][kind]]
+            for kind in EXPECTED
+        },
         "flatfield_enabled": False,
         "superneon_bias_sub": False,
         "science_e2e_approved": False,
@@ -172,7 +185,7 @@ def prepare(config_path: str, new_directory: str) -> None:
 
 
 def run(pilot_config: str) -> None:
-    from scorpio_pipe.pipeline.public_api import run_sequence_locked
+    from scorpio_pipe.pipeline.public_api import run_sequence_locked, canonical_task_name
 
     config = Path(pilot_config).expanduser().resolve(strict=True)
     if config.name != "config.yaml":
@@ -190,6 +203,22 @@ def run(pilot_config: str) -> None:
     if Path(str(cfg["work_dir"])).resolve() != work:
         raise RuntimeError("Pilot work_dir does not match config location")
     check_expected_frames(cfg)
+    if tuple(manifest.get("stage_plan") or ()) != STAGES:
+        raise RuntimeError("Pilot stage plan differs from the prepared manifest")
+    for task in STAGES:
+        if canonical_task_name(task) != task:
+            raise RuntimeError(f"Noncanonical/aliased pilot task: {task}")
+    for kind in EXPECTED:
+        prepared = manifest.get("selected_raw_paths", {}).get(kind)
+        current = [str(p) for p in cfg["frames"][kind]]
+        if current != prepared:
+            raise RuntimeError(f"Selected {kind} RAW files changed after preparation")
+    if (cfg.get("calib") or {}).get("bias_policy") != "strict":
+        raise RuntimeError("Pilot bias_policy must remain strict")
+    if bool((cfg.get("flatfield") or {}).get("enabled", False)):
+        raise RuntimeError("Pilot flatfield must remain disabled")
+    if bool((cfg.get("superneon") or {}).get("bias_sub", True)):
+        raise RuntimeError("Pilot superneon bias_sub must remain disabled")
     if (cfg.get("calib") or {}).get("bias_gross_reject_adu") != 50.0:
         raise RuntimeError("Pilot gross rejection no longer matches manifest")
     if not all(
@@ -279,7 +308,8 @@ def selftest() -> None:
         else:
             raise AssertionError("Accepted existing run directory")
         assert fingerprint_sources(cfg)[str(cfg)] == checksum(cfg)
-        assert len(STAGES) == 14
+        assert len(STAGES) == 13
+        assert "biascorr" not in STAGES
     print("SELFTEST PASSED")
 
 
