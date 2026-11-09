@@ -142,6 +142,9 @@ def prepare(config_path: str, new_directory: str) -> None:
     cosmics["apply_to"] = ["obj"]
     cosmics["bias_subtract"] = True
     cosmics["method"] = "auto"  # Seven OBJ => stack_mad; engineering, NOT certified
+    # Disallow the Sky pass-through fallback from masquerading as a completed
+    # engineering reduction when sky fitting actually failed.
+    raw.setdefault("sky", {})["failure_policy"] = "strict"
 
     # Do not carry path strings to original science PRODUCTS into the new run.
     # Reading raw FITS at their unchanged absolute paths is allowed.
@@ -187,6 +190,7 @@ def prepare(config_path: str, new_directory: str) -> None:
         "cosmics_apply_to": ["obj"],
         "cosmics_bias_subtract": True,
         "cosmics_method": "auto",
+        "sky_failure_policy": "strict",
         "science_e2e_approved": False,
     }
     with (new_dir / MANIFEST).open("x", encoding="utf-8") as output:
@@ -236,6 +240,8 @@ def run(pilot_config: str) -> None:
             or not bool(cosmic.get("bias_subtract", False))
             or str(cosmic.get("method") or "").lower() != "auto"):
         raise RuntimeError("Pilot Cosmics must bias-correct only OBJ frames in auto mode")
+    if str((cfg.get("sky") or {}).get("failure_policy") or "").lower() != "strict":
+        raise RuntimeError("Pilot Sky failure_policy must remain strict")
     if (cfg.get("calib") or {}).get("bias_gross_reject_adu") != 50.0:
         raise RuntimeError("Pilot gross rejection no longer matches manifest")
     if not all(
