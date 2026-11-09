@@ -448,7 +448,7 @@ def _require_estimator_masterbias_index(
             "MasterBias index lacks combined-estimator variance provenance"
         )
     model = str(info.get("model") or "")
-    if model not in {"MEANSEM", "GAUSSMED", "MEDASYMP", "CLIPAPPX"}:
+    if model not in {"MEANSEM", "GAUSSMED", "MEDASYMP", "CLIPAPPX", "GROSSMED"}:
         raise RuntimeError(f"MasterBias estimator variance model invalid: {model}")
 
     files = group.get("files") or {}
@@ -478,7 +478,7 @@ def _require_estimator_masterbias_index(
         raise RuntimeError(
             "MasterBias estimator variance has invalid sample-count metadata"
         )
-    if model != "CLIPAPPX" and n_min != n_used:
+    if model not in {"CLIPAPPX", "GROSSMED"} and n_min != n_used:
         raise RuntimeError(
             "Unclipped MasterBias estimator has inconsistent sample counts"
         )
@@ -487,7 +487,58 @@ def _require_estimator_masterbias_index(
             "Clipped MasterBias has insufficient per-pixel samples; "
             "mask or regenerate before science usage"
         )
-    if model != "CLIPAPPX":
+
+    if model == "GROSSMED":
+        # Gross-rejected sample medians use *per-pixel* Gaussian finite-N
+        # factors. There is intentionally no universal SB_VFAC. The producer
+        # recalculates SCI and VAR from each pixel's accepted exposure subset.
+        # The current Cosmics consumer does not propagate MasterBias DQ, so
+        # even one pixel with insufficient support must fail closed.
+        try:
+            cutoff = float(info["gross_reject_adu"])
+            index_cutoff = float(index["gross_reject_adu"])
+            header_cutoff = float(header["SB_GROS"])
+            header_clip = float(header["SB_CLIP"])
+            min_index = int(info["min_effective_n"])
+            bad_support = int(info["bad_support_pixels"])
+            n_rejected = int(info["gross_rejected_samples"])
+            n_affected = int(info["gross_affected_pixels"])
+            n_rejected_hdr = int(header["SB_GCNT"])
+            index_sigma = float(index["sigma_clip"])
+        except (KeyError, ValueError, TypeError) as exc:
+            raise RuntimeError(
+                "Gross-rejected MasterBias lacks estimator provenance"
+            ) from exc
+        if (
+            str(index.get("combine") or "").lower() != "median"
+            or str(header.get("SB_METH") or "").lower() != "median"
+            or not np.isfinite(index_sigma) or index_sigma != 0.0
+            or not np.isfinite(header_clip) or header_clip != 0.0
+            or not (np.isfinite(cutoff) and cutoff > 0)
+            or not np.isclose(cutoff, index_cutoff, rtol=1e-6)
+            or not np.isclose(cutoff, header_cutoff, rtol=1e-6)
+            or info.get("factor") is not None
+            or "SB_VFAC" in header
+            or min_index != n_min
+            or n_rejected < 0 or n_affected < 0
+            or n_rejected_hdr != n_rejected
+            or (n_rejected == 0) != (n_affected == 0)
+            or (n_rejected == 0) != (n_min == n_used)
+            or n_affected > n_rejected
+            or "PROVISIONAL" not in str(info.get("assumptions") or "")
+        ):
+            raise RuntimeError(
+                "Gross-rejected MasterBias index/FITS estimator provenance "
+                "is inconsistent"
+            )
+        required = max(2, n_used - max(1, n_used // 10))
+        if bad_support != 0 or n_min < required:
+            raise RuntimeError(
+                "Gross-rejected MasterBias has pixels with insufficient "
+                "support; Cosmics does not yet propagate MasterBias DQ. "
+                "Regenerate or implement DQ propagation before use."
+            )
+    elif model != "CLIPAPPX":
         try:
             factor = float(info["factor"])
             factor_hdr = float(header["SB_VFAC"])
@@ -500,7 +551,6 @@ def _require_estimator_masterbias_index(
             raise RuntimeError(
                 "MasterBias estimator variance factor conflicts with FITS"
             )
-
 
 def _bias_key_from_header(hdr: fits.Header, *, fallback_shape: tuple[int, int] | None = None) -> BiasGroupKey:
     """Build BiasGroupKey from a science/calib header."""
