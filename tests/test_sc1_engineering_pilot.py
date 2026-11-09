@@ -119,4 +119,5 @@ def test_pilot_does_not_use_engine_overrides_or_modify_original_calibration():
     assert "Noncanonical/aliased pilot task" in source
     assert "Pilot flatfield must remain disabled" in source
     assert "Pilot Cosmics must bias-correct only OBJ frames" in source
+    assert "Pilot Sky failure_policy must remain strict" in source
     assert 'out_path.open("w"' not in source
