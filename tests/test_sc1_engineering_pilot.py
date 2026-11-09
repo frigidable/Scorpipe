@@ -29,11 +29,13 @@ def test_pilot_stage_plan_uses_only_distinct_canonical_tasks():
     from scorpio_pipe.catalog.stages import CATALOG
 
     tasks = load_module().STAGES
-    assert len(tasks) == 14
+    assert len(tasks) == 13
     assert len(set(tasks)) == len(tasks)
     assert "biascorr" not in tasks
+    assert "arclineid" not in tasks
+    assert CATALOG.canonical_task_name("arclineid") == "lineid_prepare"
     assert "cosmics" in tasks
-    assert tasks.index("cosmics") < tasks.index("sky")  # alias for superbias, not an independent stage
+    assert tasks.index("cosmics") < tasks.index("sky")
     assert all(CATALOG.canonical_task_name(task) == task for task in tasks)
 
 
