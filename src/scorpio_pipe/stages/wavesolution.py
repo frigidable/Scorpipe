@@ -2042,6 +2042,119 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
         YY, XX = np.mgrid[0:H, 0:W]
         lam_map = polyval2d_cheb(XX, YY, cheb_C, cheb_meta).astype(np.float32)
 
+
+    # A tiny in-sample RMS is not evidence of a good line-based fit if
+    # global per-row sigma clipping has discarded almost an entire
+    # independent laboratory line. In auto mode, recover with a low-order
+    # all-line, line-balanced model; *never* auto-delete laboratory anchors.
+    # This fallback is accepted only when independent whole-line CV and
+    # per-line residual gates pass. Explicit forced model choices remain
+    # fail-closed and are never silently replaced.
+    model_selection_diagnostic: dict[str, Any] = {
+        "policy": "line_preserving_fallback_v1",
+        "original_kind": kind,
+        "original_training_rms_A": float(
+            pow_rms if kind == "power" else cheb_rms
+        ),
+        "mode": model2d,
+        "line_retention": {},
+        "fallback_attempted": False,
+        "fallback_selected": False,
+    }
+    insufficient_lines: list[float] = []
+    for line in np.unique(lams_fit):
+        lm = np.isclose(lams_fit, line, rtol=0.0, atol=1e-5)
+        n_original = int(np.count_nonzero(lm))
+        n_kept = int(np.count_nonzero(used2d[fit_mask][lm]))
+        fraction = float(n_kept / n_original)
+        model_selection_diagnostic["line_retention"][f"{float(line):.3f}"] = {
+            "n_total": n_original, "n_used": n_kept,
+            "fraction": fraction,
+        }
+        if fraction < 0.65:
+            insufficient_lines.append(float(line))
+
+    if insufficient_lines and model2d not in ("cheb", "chebyshev", "pow", "power", "poly"):
+        model_selection_diagnostic["fallback_attempted"] = True
+        model_selection_diagnostic["trigger_lines_A"] = insufficient_lines
+        # The input wavelengths are 19 independent LineID anchors for the
+        # pilot, not 19,000 independent points. Unit *group* weight per line
+        # prevents brighter lines from dominating the entire least squares
+        # problem by several orders of magnitude.
+        try:
+            fallback_weights = np.ones_like(lams_fit, dtype=float)
+            for line in np.unique(lams_fit):
+                mask = np.isclose(lams_fit, line, rtol=0.0, atol=1e-5)
+                fallback_weights[mask] = 1.0 / np.sqrt(float(mask.sum()))
+            fallback_C, fallback_meta, fallback_used = robust_polyfit_2d_cheb(
+                xs_fit, ys_fit, lams_fit, 3, 2,
+                weights=fallback_weights,
+                maxiter=0,  # no line may disappear through global clipping
+            )
+            if not np.all(fallback_used):
+                raise RuntimeError("All-line fallback unexpectedly rejected control points")
+            fallback_resid = (
+                polyval2d_cheb(xs_fit, ys_fit, fallback_C, fallback_meta)
+                - lams_fit
+            )
+            from scorpio_pipe.wave_trace_qc import evaluate_solution_2d
+            from scorpio_pipe.qc_thresholds import compute_thresholds
+            fallback_review = evaluate_solution_2d(
+                xs_fit, ys_fit, lams_fit,
+                fallback_resid, np.ones_like(fallback_used, dtype=bool),
+                dispersion_A_per_px=dlamdx_med,
+            )
+            thresh, _ = compute_thresholds(cfg)
+            fallback_rms = float(np.sqrt(np.mean(fallback_resid ** 2)))
+            fallback_p95 = float(np.percentile(np.abs(fallback_resid), 95))
+            fallback_ok = (
+                fallback_review["status"] == "PASS"
+                and np.isfinite(fallback_rms)
+                and np.isfinite(fallback_p95)
+                and fallback_rms < float(thresh.wavesol_2d_rms_bad)
+                and fallback_p95 < float(thresh.resid_2d_p95_bad)
+            )
+            model_selection_diagnostic["fallback_science_qc"] = fallback_review
+            model_selection_diagnostic["fallback_rms_A"] = fallback_rms
+            model_selection_diagnostic["fallback_p95_abs_A"] = fallback_p95
+            if fallback_ok:
+                kind = "chebyshev"
+                cheb_C, cheb_meta = fallback_C, fallback_meta
+                cheb_rms = fallback_rms
+                cheb_used_fit = fallback_used
+                cheb_used = np.zeros_like(xs_cp, dtype=bool)
+                cheb_used[fit_mask] = fallback_used
+                cheb_resid = polyval2d_cheb(
+                    xs_cp, ys_cp, fallback_C, fallback_meta
+                ) - lams_cp
+                used2d = cheb_used
+                resid2d = cheb_resid
+                lam_map = polyval2d_cheb(
+                    XX, YY, fallback_C, fallback_meta
+                ).astype(np.float32)
+                model_payload["kind"] = "chebyshev"
+                model_payload["chebyshev"] = {
+                    "degx": 3, "degy": 2,
+                    "C": fallback_C.tolist(),
+                    "meta": fallback_meta,
+                    "rms_A": fallback_rms,
+                    "n_used": int(fallback_used.sum()),
+                }
+                model_selection_diagnostic["fallback_selected"] = True
+        except Exception as exc:
+            # Keep the original bad model so the existing quantitative QC
+            # writes a rejection report; do NOT downgrade this exception to
+            # an acceptance or disable the downstream science gate.
+            model_selection_diagnostic["fallback_error"] = (
+                f"{type(exc).__name__}: {exc}"
+            )
+    model_selection_path = outdir / "wavesolution_model_selection.json"
+    model_selection_path.write_text(
+        json.dumps(model_selection_diagnostic, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    model_payload["model_selection_diagnostic"] = str(model_selection_path)
+
     wavesol2d_json = outdir / "wavesolution_2d.json"
     wavesol2d_json.write_text(
         json.dumps(
