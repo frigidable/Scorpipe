@@ -114,7 +114,7 @@ def main() -> None:
     report["atlas_matching_method"]=(
         "Curated air-wavelength NIST abbreviated Strong Lines screen, "
         "supplemented with independent 5080.38 Ne I line studies and "
-        "provisional 5221.27 Ar I candidate; complete ASD export not yet obtained"
+        "provisional 5221.27 Ar I candidate; full ASD export not yet obtained"
     )
     report["blend_diagnostics"]={
         "Ar_I_4190_713_plus_4191_029":gaussian_component_identifiability(
