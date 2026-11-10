@@ -52,7 +52,7 @@ def fit_original_arc_multiplet(
     f=np.asarray(profile,float)
     lines=np.asarray(line_centers_air_A,float)
     if (w.ndim!=1 or w.shape!=f.shape or w.size<80
-        or not np.isfinite(w).all() or not np.isfinite(f).all()
+        or not np.isfinite(w).all()
         or not np.all(np.diff(w)>0)):
         raise ValueError("Multiplet requires finite 1D increasing air wavelength map")
     if (lines.ndim!=1 or not 2<=lines.size<=6
@@ -69,6 +69,8 @@ def fit_original_arc_multiplet(
         return {"status":"REJECT","reason":"insufficient_detector_sidebands"}
     x=np.arange(lo,hi,dtype=float)
     y=f[lo:hi]
+    if not np.isfinite(y).all():
+        return {"status":"REJECT","reason":"nonfinite_original_fit_window"}
     centers=np.interp(lines,w,np.arange(w.size,dtype=float))
     t=x-float(np.mean(x))
     bg=float(np.median(np.r_[y[:5],y[-5:]]))
