@@ -101,6 +101,35 @@ https://www.sao.ru/hq/lsfvo/devices/scorpio/grisms/grisms.html
 Nominal VPHG1200B FWHM ~5.5 Å is not a guarantee of
 width for these particular observations or a point source.
 
+## v20b schema-reconciliation and Windows packaging correction
+
+Original v20 launcher was placed in the main repository working directory,
+where another copy already existed: Expand-Archive without -Force therefore
+refused to extract it. Subsequent pytest startup was interrupted
+(KeyboardInterrupt before test collection, no scientific failure established).
+
+More seriously, the original v20 real-data QA reader expected synthetic
+v19 fields source_files_sha256, group_summary, n_accepted and
+observed_fwhm_A. Actual source-controlled Windows v19 diagnostic JSON
+uses original_source_sha256 (with wavelength_map key),
+feature_summaries / pair_A / n_good,
+median_fwhm_by_hypothesis_A keys degree1_window11, etc.,
+and original_lamp_fwhm_A. This mismatch would have rejected the
+valid original-ARC input at RealData. Updated
+scripts/qa/lsf20_spatial_curvature_probe.py to validate these **exact**
+recorded v19 field names and all 40 reported per-pair spectral-window
+medians from the 2640-row CSV. New regression fixtures reproduce actual
+v19 JSON shape and test rejected fake field aliases, wrong laboratory
+pair identities and altered width medians. The actual supplied Windows
+v19 CSV/JSON was checked independently: accepted per-pair counts
+659/632/476/658, all available 40 medians match, and red pair y=506
+matches NEON06 6.2138312453 A / NEON13 6.1843358131 A.
+
+v20b has its own fresh pinned r20b worktree and a separate extracted
+PowerShell filename. It does not resume or modify the interrupted
+r20 worktree, _95/_96 input archives or previous v18/v19 diagnostic
+outputs. v20b Windows tests and RealData remain pending.
+
 ## Next decision gate
 
 **Do not create a science _97 LSF or combine N2146sat spectra yet.**
