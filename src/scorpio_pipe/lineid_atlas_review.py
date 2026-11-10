@@ -50,7 +50,7 @@ _REFS = (
     (5015.68, "He I", 5015.678, "CATALOG_MATCH"),
     (5037.75, "Ne I", 5037.7512, "MIXED_SPECIES_PAIR"),
     (5047.74, "He I", 5047.74, "MIXED_SPECIES_PAIR"),
-    (5080.38, "Ne I", 5080.38, "INDEPENDENT_NEI_REFERENCE"),
+    (5080.38, "Ne I", None, "INDEPENDENT_NEI_REFERENCE"),
     (5221.80, "UNKNOWN", None, "LABORATORY_ID_UNKNOWN"),
     (5330.78, "Ne I", 5330.7775, "NEIGHBOR_REVIEW"),
     (5341.60, "Ne I candidates", None, "EFFECTIVE_CENTROID_REVIEW"),
@@ -65,7 +65,6 @@ _NEIGHBORS = {
     4345.17: ((4348.064, "Ar II"),),
     4471.48: ((4471.68, "He I"),),
     4713.00: ((4713.38, "He I"),),
-    5221.80: ((5221.27, "Ar I PROVISIONAL: experimental Stark paper"),),
     5330.78: ((5326.3968, "Ne I, historic lab study"),),
     5341.60: ((5341.0938, "Ne I"),(5343.2834, "Ne I")),
 }
@@ -225,6 +224,14 @@ def review_sc1_original_lineid(
         },
         "arity_and_line_id_risks":{
             "unresolved_atomic_identifications_air_A":[4863.96,5221.80],
+            "provisional_Ar_I_522127_nm_candidate":{
+                "reported_nm":522.127,
+                "numeric_A":5221.27,
+                "reported_medium":"UNVERIFIED_AIR_VACUUM",
+                "historic_anchor_A":5221.80,
+                "wavelength_difference_physically_interpretable":False,
+                "reference":SOURCES["AR_522"],
+            },
             "independently_supported_nei_air_A":[5080.38],
             "mixed_species_pair_air_A":[5037.75,5047.74],
             "unresolved_sub_fwhm_nearby_lines_air_A":[4190.713,4191.029],
