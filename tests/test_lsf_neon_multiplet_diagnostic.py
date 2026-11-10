@@ -93,3 +93,20 @@ def test_production_stages_do_not_use_unreviewed_nist_multiplet():
         source=Path(stage.__file__).read_text(encoding="utf-8")
         assert "lsf_neon_multiplet_diagnostic" not in source
     assert red_lineid_review()["auto_replace_production_lsf"] is False
+
+
+
+def test_trace_alignment_keeps_nan_edges_without_silent_extrapolation():
+    wave,signal=_three_neon()
+    signal[:7]=np.nan
+    signal[-7:]=np.nan
+    fit=fit_original_arc_multiplet(
+        wave,signal,(5330.7775,5341.0938,5343.2834)
+    )
+    assert fit["status"]=="DIAGNOSTIC_ONLY"
+    signal[74]=np.nan
+    invalid=fit_original_arc_multiplet(
+        wave,signal,(5330.7775,5341.0938,5343.2834)
+    )
+    assert invalid["status"]=="REJECT"
+    assert invalid["reason"]=="nonfinite_original_fit_window"
