@@ -34,7 +34,80 @@ NIST Strong Lines tables for Helium, Argon and Neon have separate **AIR** wavele
 | 5330.78 | Ne I | 5330.7775 | near 5326.3968 weaker reported Ne I |
 | 5341.60 | candidate effective Ne I blend centroid | — | NIST Ne I 5341.0938 and 5343.2834: do not treat as isolated laboratory wavelength |
 
-Classifiable directly from NIST Strong Lines: 6 He I, 7 Ar I, 2 unambiguous Ne I, 1 reviewed Ne blend region; 3 require complete atomic-transition identification (4863.96, 5080.38, 5221.80). A direct catalog match **does not** establish that the observed profile is free of blended neighbors.
+Classifiable directly from NIST Strong Lines: 6 He I, 7 Ar I, 2 unambiguous Ne I, 1 reviewed Ne blend region; 2 remain without a defensible atomic assignment (4863.96 and
+5221.80); 5080.38 is independently established as Ne I but awaits
+complete ASD air-wavelength/blend verification. One reference
+5341.60 is a potential effective red blend rather than a known
+single laboratory transition. A direct catalog match **does not** establish that the observed profile is free of blended neighbors.
+
+## Follow-on independent evidence: laboratory identity and source-medium cautions
+
+The original SCORPIO-1 instrument description of Afanasiev & Moiseev
+states explicitly that the *SCORPIO-1* calibration illuminator uses a
+**He-Ne-Ar gas-filled lamp**, not just a SCORPIO-2-only convention.
+The BTA prime-focus adapter documentation likewise calls its
+calibration mode NEON a He-Ne-Ar lamp. The original N2146sat
+s22800606/s22800613 primary FITS headers state
+INSTRUME=SCORPIO-1, IMAGETYP=neon, DISPERSE=VPHG1200B
+and FILTERS=slit_1.2, but do not explicitly measure gas composition
+or verify unchanged physical hardware on 2024-12-06.
+
+Independent 2012 spectrograph commissioning dissertation classifies
+5080.38 Angstrom as Ne I with reference to the NIST ASD line
+database. A 2019 experimental gas-discharge spectroscopy paper
+also identifies Ne I at **508.038 nm** and gives an atomic level
+classification. Therefore **5080.38 is a supported Ne I historical
+assignment**, but the exact NIST ASD observed-vs-Ritz AIR
+wavelength and profile-blend purity have not yet been independently
+exported in the current audit. The short NIST Handbook Strong Lines
+table alone is NOT enough to refute the identification.
+
+An experimental study reports **Ar I 522.127 nm**, numerically
+5221.27 Angstrom. This could be near historic 5221.80 Angstrom,
+but the source's reported air/vacuum convention has **not**
+been established. Do not compute a physical residual between
+them or assume an identification. In the code the candidate
+is kept separate from all NIST-air laboratory transitions
+with wavelength_medium=UNVERIFIED.
+
+The 4863.96 Angstrom source anchor remains documentary only:
+present in Moiseev's reference illustration and the published
+SCORPIO-1 2013 user manual calibration plots, but the exact
+species and laboratory transition cannot be verified from
+the available full ASD output. We have **not** obtained a
+complete NIST ASD 5.12 machine-readable line export during
+this check, and should never label this search exhaustive.
+
+For the red Ne I doublet the historic effective center at
+5341.60 lies between NIST air 5341.0938 and 5343.2834.
+If exactly two identical symmetric profile kernels and
+nonnegative integrated line fluxes are assumed, producing
+5341.60 as a blend centroid requires the red component to
+contribute about **23.12% of total integrated flux**,
+or a red-to-blue component ratio of about **0.3007**.
+This is a **hypothetical necessary ratio**, not a measured
+He-Ne-Ar lamp ratio.
+
+At Gaussian FWHM=6 Angstrom the normalized line-shape
+overlap for Ar I 4190.713/4191.029 is ~0.9962
+(two-template Gram condition ~520), and for He I
+4713.146/4713.380 ~0.9979 (condition ~949).
+Independent free amplitudes are very poorly identified
+by these low-resolution spectra even when the global
+fit residual is small. The red 5341.0938/5343.2834
+components have shape overlap ~0.831 and condition ~10.9,
+but remain conditional on continuum, weak neighbors,
+relative intensities and instrumental profile.
+
+Source citations:
+- Original SCORPIO-1 paper: https://www.sao.ru/hq/lsfvo/devices/scorpio/BSAO_eng.pdf
+- BTA adapter: https://www.sao.ru/hq/lsfvo/adap/index-en.html
+- Fabricius 2012, VIRUS-W line table 3.3:
+  https://edoc.ub.uni-muenchen.de/14440/1/Fabricius_Maximilian.pdf
+- Ne I / Ar I laboratory discharge study:
+  https://www.mdpi.com/2218-2004/7/1/9
+- Original SCORPIO-1 2013 manual:
+  https://www.sao.ru/hq/lsfvo/devices/scorpio/manuals/scorpio_manual_2013.pdf
 
 ## Methodological consequences
 
