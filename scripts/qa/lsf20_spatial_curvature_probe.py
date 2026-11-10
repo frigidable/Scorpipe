@@ -34,40 +34,59 @@ def sha(path: Path) -> str:
     return digest.hexdigest()
 
 
-def validate_v19_csv_against_summary(records: list[dict], v19: dict) -> None:
-    """Verify line-by-line, background-by-background summary, not just row count.
+def validate_v19_source_metadata(v19: dict) -> None:
+    """Verify actual, committed v19 JSON schema and two-original-lamp hashes."""
+    expected = {
+        "arc06": ORIGINAL_SHA["arc06"],
+        "arc13": ORIGINAL_SHA["arc13"],
+        "wavelength_map": ORIGINAL_SHA["lambda_map"],
+    }
+    if (
+        v19.get("status") != "DIAGNOSTIC_ONLY"
+        or v19.get("science_lsf_validated") is not False
+        or v19.get("auto_apply_allowed") is not False
+        or v19.get("original_source_sha256") != expected
+        or v19.get("n_attempts") != 2640
+        or v19.get("n_numerically_accepted") != 2425
+    ):
+        raise RuntimeError("Original-ARC v19 source provenance or counts mismatch")
 
-    The v19 JSON and CSV were produced by the same original-FITS run.
-    Their agreement detects accidental mixing of different run outputs.
+
+def validate_v19_csv_against_summary(records: list[dict], v19: dict) -> None:
+    """Compare the REAL v19 original-FITS JSON schema to every CSV hypothesis.
+
+    The source version v19 reports feature_summaries, pair_A, n_good,
+    median_fwhm_by_hypothesis_A, and original_lamp_fwhm_A, not the
+    placeholder keys previously used by the v20 unit-test fixture.
     """
-    summaries = v19.get("group_summary")
-    if not isinstance(summaries, list) or len(summaries) != 4:
-        raise ValueError("v19 original-ARC summary must have four laboratory pairs")
-    if set(int(g["pair"]) for g in summaries) != set(range(4)):
-        raise ValueError("v19 original-ARC group labels are inconsistent")
-    for group in summaries:
-        pid = int(group["pair"])
+    from scorpio_pipe.lsf_spatial_curvature_audit import FWHM_PAIRS_A
+
+    summaries = v19.get("feature_summaries")
+    if not isinstance(summaries, list) or len(summaries) != len(FWHM_PAIRS_A):
+        raise ValueError("v19 must contain four original-ARC feature_summaries")
+    for pid, group in enumerate(summaries):
+        if group.get("pair_A") != list(FWHM_PAIRS_A[pid]):
+            raise ValueError("v19 laboratory pair identity differs from source LineID")
         accepted = [
             row for row in records
             if int(row["pair"]) == pid and row["status"] == "DIAGNOSTIC_FIT"
         ]
-        if len(accepted) != int(group["n_accepted"]):
-            raise ValueError("v19 line-profile summary per-pair counts mismatch")
+        if len(accepted) != int(group["n_good"]):
+            raise ValueError("v19 line-profile per-pair fit-count mismatch")
+        expected = group.get("median_fwhm_by_hypothesis_A")
+        if not isinstance(expected, dict) or set(expected) != {
+            f"degree{degree}_window{window}"
+            for degree in (1, 2) for window in (11, 13, 16, 20, 24)
+        }:
+            raise ValueError("v19 summary continuum/window grid mismatch")
         for degree in (1, 2):
-            expected = group.get(
-                f"median_fwhm_continuum_degree_{degree}_by_window_A"
-            )
-            if not isinstance(expected, dict) or set(expected) != {
-                "11", "13", "16", "20", "24"
-            }:
-                raise ValueError("v19 summary continuum/window grid mismatch")
             for window in (11, 13, 16, 20, 24):
                 values = [
                     float(row["fwhm_A"]) for row in accepted
                     if int(row["continuum_degree"]) == degree
                     and int(row["half_window_px"]) == window
                 ]
-                reference = expected[str(window)]
+                reference = expected[f"degree{degree}_window{window}"]
                 if not values:
                     if reference is not None:
                         raise ValueError("v19 absent profile hypothesis has non-null median")
@@ -75,14 +94,15 @@ def validate_v19_csv_against_summary(records: list[dict], v19: dict) -> None:
                 estimate = median(values)
                 if (
                     reference is None or not math.isfinite(float(reference))
-                    or not math.isclose(estimate,float(reference),
-                                        rel_tol=1e-9,abs_tol=1e-8)
+                    or not math.isclose(
+                        estimate, float(reference), rel_tol=1e-9, abs_tol=1e-8
+                    )
                 ):
                     raise ValueError("v19 original-ARC median differs from its CSV")
-    original = v19.get("red_pair_y506",{}).get("observed_fwhm_A")
-    if not isinstance(original,dict) or set(original)!={"arc06","arc13"}:
-        raise ValueError("v19 red pair original lamp comparison missing")
-    for arc in ("arc06","arc13"):
+    original = v19.get("red_pair_y506", {}).get("original_lamp_fwhm_A")
+    if not isinstance(original, dict) or set(original) != {"arc06", "arc13"}:
+        raise ValueError("v19 original-lamp red pair y506 comparison missing")
+    for arc in ("arc06", "arc13"):
         matches = [
             float(row["fwhm_A"]) for row in records
             if row["status"] == "DIAGNOSTIC_FIT"
@@ -127,13 +147,7 @@ def main() -> None:
             or previous.get("source_arc_sha256")!={"NEON06":ORIGINAL_SHA["arc06"],
                                                     "NEON13":ORIGINAL_SHA["arc13"]}):
         raise RuntimeError("Previous v18 diagnostic does not match original sources")
-    if (v19.get("status")!="DIAGNOSTIC_ONLY"
-            or v19.get("science_lsf_validated") is not False
-            or v19.get("auto_apply_allowed") is not False
-            or v19.get("source_files_sha256")!=ORIGINAL_SHA
-            or v19.get("n_attempts")!=2640
-            or v19.get("n_numerically_accepted")!=2425):
-        raise RuntimeError("Previous original-ARC v19 profile diagnostic not verified")
+    validate_v19_source_metadata(v19)
     records=[]
     with inputs["v19_csv"].open(encoding="utf-8-sig",newline="") as stream:
         for row in csv.DictReader(stream):
