@@ -125,10 +125,54 @@ v19 CSV/JSON was checked independently: accepted per-pair counts
 659/632/476/658, all available 40 medians match, and red pair y=506
 matches NEON06 6.2138312453 A / NEON13 6.1843358131 A.
 
-v20b has its own fresh pinned r20b worktree and a separate extracted
-PowerShell filename. It does not resume or modify the interrupted
-r20 worktree, _95/_96 input archives or previous v18/v19 diagnostic
-outputs. v20b Windows tests and RealData remain pending.
+v20b used a fresh pinned r20b worktree and a separate extracted
+PowerShell filename, without modifying r20, _95/_96 or the earlier
+diagnostic products. **User Windows v20b verification is now confirmed:
+149/149 targeted tests PASS, selftest PASS, RealData audit
+DIAGNOSTIC_ONLY with 4/4 pairs paired and source SHA256 verified.**
+The v20b RealData report records 2640 original v19 profile hypotheses,
+of which 262 correspond to the chosen common model (spectral
+half-window 16px, linear continuum, two lamps times 33 y nodes per pair,
+with 2 rejected fits). It is incorrect to describe 262 as the total
+number of scientifically independent line observations.
+
+## Post-v20b original-CSV robustness checks (read-only)
+
+On the uploaded 2640-row original-ARC v19 CSV, directly refitting a
+quadratic coefficient in v=(y-515.5)/515.5 for each original lamp:
+the red pair v² coefficient was NEGATIVE for **all 20** combinations
+of (2 raw lamps) x (5 spectral half-windows 11,13,16,20,24 px) x
+(2 continuum degrees 1,2). This exhaustive *tested grid*, not a
+confidence interval, gave coefficients from about -0.756 to
+-0.339 Angstrom. Both original NEON lamps display the same sign.
+For the fixed linear-background / 16px window, the coefficients
+were -0.4383 and -0.3554 Angstrom, versus the original v18 global
+positive shared +1.3753 Angstrom.
+
+Spatial-leverage test on the same original v19 CSV: removing
+the first and last 2,4,6,8 y bins and refitting at 16px/linear
+background preserves the negative red curvature in both originals.
+At most 17 of the original 33 spatial bins remain; both red
+coefficients are still negative (~ -1.607 / -1.521 Angstrom)
+when 8 bins are removed from each end. Coefficient magnitude
+is NOT stable under trimming. The 5037.75/5047.74 pair instead
+changes from weakly positive to negative after removing only
+2 edge bins from each lamp, demonstrating that **not every
+laboratory pair has an unambiguous quadratic curvature**.
+
+For the original red pair, v20b measured the median residual
+(ARC mean minus v18 smooth surface) as **+0.367 Angstrom**
+in central rows and **-0.565 Angstrom** at outer y. Their
+opposite signs and ~0.932 Angstrom contrast demonstrate a
+shape mismatch, not just a constant LSF offset.
+
+These evaluations are correlated (same arc profiles shared
+between windows/backgrounds), so 20/20 is **not** evidence
+of 20 independent detections, a frequentist p-value or
+science-valid source LSF. They do establish robust
+within-night model inconsistency and motivate a direct
+instrument/neighbor-line investigation.
+
 
 ## Next decision gate
 
