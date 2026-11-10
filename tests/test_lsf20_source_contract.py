@@ -7,6 +7,7 @@ from pathlib import Path
 from statistics import median
 
 import pytest
+from scorpio_pipe.lsf_spatial_curvature_audit import FWHM_PAIRS_A
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "qa" / (
@@ -39,16 +40,19 @@ def _sample():
     summary=[]
     for pair in range(4):
         sub=[row for row in rows if int(row["pair"])==pair]
-        d={"pair":pair,"n_accepted":len(sub)}
+        medians={}
         for degree in (1,2):
-            d[f"median_fwhm_continuum_degree_{degree}_by_window_A"]={
-                str(width):median(
+            for width in (11,13,16,20,24):
+                medians[f"degree{degree}_window{width}"]=median(
                     float(row["fwhm_A"]) for row in sub
                     if int(row["continuum_degree"])==degree
                     and int(row["half_window_px"])==width
-                ) for width in (11,13,16,20,24)
-            }
-        summary.append(d)
+                )
+        summary.append({
+            "pair_A":list(FWHM_PAIRS_A[pair]),
+            "n_good":len(sub),
+            "median_fwhm_by_hypothesis_A":medians,
+        })
     red={
         arc:next(
             float(row["fwhm_A"]) for row in rows
@@ -57,8 +61,10 @@ def _sample():
             and int(row["continuum_degree"])==1
         ) for arc in ("arc06","arc13")
     }
-    return rows, {"group_summary":summary,
-                  "red_pair_y506":{"observed_fwhm_A":red}}
+    return rows, {
+        "feature_summaries":summary,
+        "red_pair_y506":{"original_lamp_fwhm_A":red},
+    }
 
 
 def test_qa_v20_original_v19_per_feature_summary_consistency():
@@ -75,7 +81,7 @@ def test_qa_v20_must_reject_csv_with_altered_profile_width():
 
 def test_qa_v20_must_reject_original_red_pair_mismatch():
     rows,summary=_sample()
-    summary["red_pair_y506"]["observed_fwhm_A"]["arc06"]+=.1
+    summary["red_pair_y506"]["original_lamp_fwhm_A"]["arc06"]+=.1
     with pytest.raises(ValueError,match="red pair FITS profile"):
         _load().validate_v19_csv_against_summary(rows,summary)
 
@@ -95,3 +101,41 @@ def test_qa_v20_canonical_map_sha_manifest_format():
     assert h["lambda_map"]==(
         "37808e73c00279ced67ea520e2245767427bd71dc7edec9af22177fbc8df07ab"
     )
+
+
+
+def test_qa_v20_source_metadata_matches_original_v19_json_schema():
+    v19={
+        "status":"DIAGNOSTIC_ONLY",
+        "science_lsf_validated":False,
+        "auto_apply_allowed":False,
+        "n_attempts":2640,
+        "n_numerically_accepted":2425,
+        "original_source_sha256":{
+            "arc06":"54a6d638d2284b9bfd1d947df02399eaf0264f998667a830e144b1c437a61dac",
+            "arc13":"9e2c98f2d2ba1125e18f84722854099f73e435a1fd7810f0b4df84ea07ab0c05",
+            "wavelength_map":"37808e73c00279ced67ea520e2245767427bd71dc7edec9af22177fbc8df07ab",
+        },
+    }
+    _load().validate_v19_source_metadata(v19)
+    legacy=dict(v19)
+    legacy["source_files_sha256"]=legacy.pop("original_source_sha256")
+    with pytest.raises(RuntimeError,match="source provenance"):
+        _load().validate_v19_source_metadata(legacy)
+    forged=dict(v19,science_lsf_validated=True)
+    with pytest.raises(RuntimeError,match="source provenance"):
+        _load().validate_v19_source_metadata(forged)
+
+
+def test_qa_v20_rejects_wrong_reviewed_lab_pair_even_with_same_row_count():
+    rows,summary=_sample()
+    summary["feature_summaries"][3]["pair_A"]=[5330.78,5341.61]
+    with pytest.raises(ValueError,match="laboratory pair identity"):
+        _load().validate_v19_csv_against_summary(rows,summary)
+
+
+def test_qa_v20_rejects_changed_median_even_when_profile_counts_match():
+    rows,summary=_sample()
+    summary["feature_summaries"][1]["median_fwhm_by_hypothesis_A"]["degree1_window20"]+=0.015
+    with pytest.raises(ValueError,match="median differs"):
+        _load().validate_v19_csv_against_summary(rows,summary)
