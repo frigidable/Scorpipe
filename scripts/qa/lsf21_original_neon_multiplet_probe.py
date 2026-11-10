@@ -97,14 +97,8 @@ def main() -> None:
                 rows.append(record)
                 fitted[(y,arc_id,label)]=fit
             aligned=trace_registered_median(data,wave,int(y),half_strip=10)
-            # Model must not silently accept any NaNs introduced at detector edges.
-            # All fit windows lie well away from those edges on this setup.
-            if not np.isfinite(aligned).all():
-                valid=np.isfinite(aligned)
-                aligned=np.interp(
-                    np.arange(aligned.size),
-                    np.flatnonzero(valid),aligned[valid],
-                )
+            # Keep the unbracketed resampling edges as NaN. Fitting consumes
+            # only the fixed finite red interval, with no edge extrapolation.
             pair_fit=fit_original_arc_multiplet(
                 wave[y],aligned,pairs["historic_2"]
             )
