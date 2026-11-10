@@ -59,6 +59,11 @@ def test_ar_4191_unresolved_neighbors_ill_conditioned_at_observed_fwhm():
     assert q["ill_conditioned_gram_over_100"] is True
     assert q["two_component_gram_condition_number"] > 100
     assert q["science_model_approved"] is False
+    extremely_close=review.gaussian_component_identifiability(
+        4190.713,4190.713+1e-9,fwhm_A=6.0
+    )
+    assert np.isfinite(extremely_close["two_component_gram_condition_number"])
+    assert extremely_close["ill_conditioned_gram_over_100"] is True
 
 
 def test_red_ne_doublet_resolved_better_than_ar_but_not_science_approved():
