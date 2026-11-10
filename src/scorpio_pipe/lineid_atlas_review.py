@@ -112,7 +112,7 @@ def gaussian_component_identifiability(
     correlation=float(np.exp(-0.25*((b-a)/sigma)**2))
     # Condition number for symmetric two-column normalized Gram
     # matrix (without continuum or additional pixels).
-    condition=float((1+correlation)/(1-correlation))
+    condition=float((1+correlation)/max(1-correlation,np.finfo(float).eps))
     return {
         "component_spacing_A": b-a,
         "separation_in_fwhm": (b-a)/w,
