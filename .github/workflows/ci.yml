@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, integration/scorpipe-vnext-20261111]
   pull_request:
-    branches: [main]
+    branches: [main, integration/scorpipe-vnext-20261111]
   workflow_dispatch:
 
 concurrency:
