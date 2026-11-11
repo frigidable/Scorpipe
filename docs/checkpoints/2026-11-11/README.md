@@ -74,7 +74,7 @@ Existing source modules are retained, not reimplemented:
 
 - [Machine-readable checkpoint metadata](SOURCE_LOCKS.json), local configuration hashes, frozen FITS SHA256 and run-status matrix. This metadata was transcribed from observer-submitted read-only inventory and existing GitHub science reports; it is **not** an upload of the original 2024 FITS data.
 - [Recovery and unfinished work](RECOVERY.md) explains the safe local backup and recovery boundaries.
-- GitHub history: [PR #178](https://github.com/frigidable/Scorpipe/pull/178), [original pilot](../../qa/SC1_N2146SAT_ENGINEERING_PILOT.md), [LineID26f](../SCORPIO1_N2146SAT_LINEID26F_CONFIRMED_OFFSET_SKY_AND_BIAS_GATE.md), [LSF96](../SCORPIO1_N2146SAT_LSF96_UPLOAD_AUDIT.md).
+- GitHub history: [PR #178](https://github.com/frigidable/Scorpipe/pull/178), [original pilot](../../qa/SC1_N2146SAT_ENGINEERING_PILOT.md), [LineID26f](../../science/SCORPIO1_N2146SAT_LINEID26F_CONFIRMED_OFFSET_SKY_AND_BIAS_GATE.md), [LSF96](../../science/SCORPIO1_N2146SAT_LSF96_UPLOAD_AUDIT.md).
 - Observer's detailed local inventory file SHA256: `307fe97898e84f6f837bf9387719afb82a7f4ce0a8b9d25657ba4ec0e0c8ca25`; private attached evidence, **not** stored in this public GitHub tree.
 - The branch contains a **snapshot of committed source only**. Source 2024 FITS files, local work products, external NIST downloads and unstaged edits must be preserved independently, with hashes.
 
