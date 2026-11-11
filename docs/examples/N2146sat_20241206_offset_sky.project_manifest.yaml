@@ -1,0 +1,29 @@
+# N2146sat SCORPIO-1 2024-12-06 — OBSERVER CONFIRMED role override.
+# EXAMPLE ONLY: not loaded automatically from docs/examples.
+#
+# Use in a NEW isolated work directory with data_dir set to the original
+# s228006 night folder. Do not edit historical _01 / _91.._96 manifests.
+# These are *relative to data_dir*. For an alternative data_dir, update paths.
+#
+# Other roles (20 existing BIAS, two NEON, three FLAT) are deliberately
+# absent here so the source config selections remain unchanged.
+# Never put s22800604.fts in global exclude: it is required as SKY.
+#
+# This only declares observational roles. SKY subtraction, [N I]5199,
+# absolute wavelength/flexure correction, LSF, and coaddition remain HOLD.
+schema: scorpio-pipe.project-manifest.v1.2
+exclude:
+  files: []
+  globs: []
+roles:
+  OBJECT_FRAMES:
+    files:
+      - s22800607.fts
+      - s22800608.fts
+      - s22800609.fts
+      - s22800610.fts
+      - s22800611.fts
+      - s22800612.fts
+  SKY_FRAMES:
+    files:
+      - s22800604.fts
