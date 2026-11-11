@@ -234,8 +234,11 @@ def build_sensfunc(cfg: dict[str, Any], *, standard_spec_path: str | Path, stand
         np.asarray(frac_used, dtype=float) < 1.0 - 1e-6
         if frac_used is not None else np.zeros_like(wave, dtype=bool)
     )
-    finite = np.isfinite(flux) & np.isfinite(var) & np.isfinite(ref_flux) & (ref_flux > 0) & (flux > 0)
+    finite = np.isfinite(flux) & np.isfinite(var) & (var > 0) & np.isfinite(ref_flux) & (ref_flux > 0) & (flux > 0)
     fit_mask = finite & (~feature_mask) & (~telluric_mask) & (~low_sn) & (~bad_mask) & (~incomplete_aperture)
+    n_fit = int(np.count_nonzero(fit_mask))
+    if n_fit < 8:
+        raise ValueError(f"Sensfunc requires at least 8 valid, unmasked standard-star samples; got {n_fit}")
     raw_ratio = (flux * ext_corr) / ref_flux
     frac_unc = np.sqrt(np.clip(var, 0, np.inf)) / np.clip(np.abs(flux), 1e-12, np.inf)
     yfit = np.log(np.clip(raw_ratio, 1e-30, np.inf))
@@ -267,7 +270,10 @@ def build_sensfunc(cfg: dict[str, Any], *, standard_spec_path: str | Path, stand
         'reference_quality': 'validated',
         'reference_identity_confirmed': True,
         'airmass': (float(airmass) if airmass is not None else None),
-        'fit_points': int(np.count_nonzero(fit_mask)),
+        'fit_points': n_fit,
+        'model_evaluation_points': int(wave.size),
+        'fit_wavelength_min': float(np.min(wave[fit_mask])),
+        'fit_wavelength_max': float(np.max(wave[fit_mask])),
         'airmass_provenance': str(airmass_prov),
         'extinction_applied': bool(extinction_applied),
         'extinction_reference': safe_json(extinction_meta),
