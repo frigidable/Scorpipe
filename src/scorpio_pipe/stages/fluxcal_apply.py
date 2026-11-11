@@ -78,6 +78,21 @@ def _single_science_airmass_model(
     ext_path = reference_path(cfg, prefix="extinction_curve.")
     if ext_path is None or not ext_path.is_file():
         return None
+    # Never infer that a numerically shaped CSV is air-Angstrom or that its
+    # values are mag/airmass. The actual file declares its conventions in
+    # comments; reference-context defaults alone are insufficient proof.
+    file_meta: dict[str, str] = {}
+    with ext_path.open("r", encoding="utf-8", errors="replace") as stream:
+        for idx, line in enumerate(stream):
+            if idx >= 20 or not line.lstrip().startswith("#"):
+                break
+            item = line.lstrip().lstrip("#").strip()
+            if ":" in item:
+                key, value = item.split(":", 1)
+                file_meta[key.strip().lower()] = value.strip().lower()
+    if (file_meta.get("units") != "mag_per_airmass"
+            or file_meta.get("wavelength_convention") != "air"):
+        return None
     table = read_small_csv(ext_path)
     if "wavelength_A" not in table or "k_lambda" not in table:
         raise ValueError(
