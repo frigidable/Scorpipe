@@ -24,15 +24,20 @@ def test_shared_bias_uncertainty_suppresses_formal_line_detection():
     assert rows[0]["flux"] == 12.5 and rows[0]["snr_stat"] == 9.6
 
 
-def test_distinct_bias_groups_do_not_trigger_specific_shared_bias_gate():
+def test_distinct_groups_disable_shared_bias_gate_but_not_general_covariance_gate():
     h = fits.Header()
     h["SBGSTAT"] = "DISTINCT"
     h["SBCOVQ"] = "UNMODEL"
     rows, blocked = _qualify_lines_for_shared_bias_covariance([_line()], h)
+    # Distinct groups do not trigger the specific shared-MasterBias reason.
     assert not blocked
-    assert rows[0]["detected"] is True
-    assert rows[0]["uncertainty_qualified"] is False
     assert rows[0]["shared_bias_detection_gate_triggered"] is False
+    # Explicit unmodelled calibration covariance is nevertheless insufficient
+    # for a *formally qualified* detection. Keep the conditional candidate.
+    assert rows[0]["detected"] is False
+    assert rows[0]["conditional_detection_candidate"] is True
+    assert rows[0]["uncertainty_gate_triggered"] is True
+    assert rows[0]["uncertainty_qualified"] is False
 
 
 def test_missing_group_provenance_preserves_legacy_but_does_not_certify_it():
