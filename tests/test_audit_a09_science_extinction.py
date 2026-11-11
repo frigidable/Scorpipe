@@ -283,6 +283,7 @@ def test_written_2d_1d_products_have_consistent_atmospheric_transfer(tmp_path, m
         assert h[0].header["ATMCORR"] is True
         assert h[0].header["ATMXSCI"] == pytest.approx(1.4)
         assert h[0].header["ATMPROV"] == "header"
+        assert h[0].header["ATMLINE"] == "LOWLEVEL"
         np.testing.assert_allclose(
             h["SPEC_TRACE"].data["FLUX_TRACE"], physical, rtol=1e-6,
         )
@@ -301,3 +302,4 @@ def test_written_2d_1d_products_have_consistent_atmospheric_transfer(tmp_path, m
     assert qc["science_extinction_applied"] is True
     assert qc["science_airmass"] == pytest.approx(1.4)
     assert qc["status"] == "ABSOLUTE_APPROX"
+    assert qc["science_extinction_lineage_qualification"] == "LOWLEVEL_EXPLICIT_ONLY"
