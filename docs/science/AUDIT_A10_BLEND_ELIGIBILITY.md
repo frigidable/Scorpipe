@@ -18,7 +18,7 @@ An overlap diagnoses **potential contamination from another catalogue component*
 
 - `blend_partners`: names of potentially overlapping catalogue line windows;
 - `blend_flag`, `blend_warning` and `blend_window_overlap_free`: classifications of those integration windows;
-- `fit_method=continuum_subtracted_window_integral` and `flux_interpretation=BLENDED_DIAGNOSTIC_ONLY` for known overlaps or `ISOLATED_WINDOW_DIAGNOSTIC` otherwise;
+- `fit_method=continuum_subtracted_window_integral` and `flux_interpretation=BLENDED_DIAGNOSTIC_ONLY` for measured known overlaps or `ISOLATED_WINDOW_DIAGNOSTIC` otherwise; failed measurements explicitly have `fit_method=NOT_MEASURED` and `flux_interpretation=UNMEASURED`;
 - `component_flux_qualified=false` **even when no known window overlaps**. A simple window integral is not a validated LSF-aware, covariance-aware component fit. This avoids interpreting an empty catalogue overlap list as a scientific certification.
 - `flux_kind=window_integral_not_deblended` for any non-partial flagged blend, extending legacy Hα/[N II] protection to [S II]. Partial-window status remains a more severe independent limitation.
 
