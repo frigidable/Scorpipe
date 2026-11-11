@@ -110,6 +110,11 @@ def measure_line(
     var = np.asarray(var, dtype=float)
     if flux.shape != wave.shape or var.shape != wave.shape or wave.ndim != 1:
         raise ValueError("Line measurement expects same-length 1D wave/flux/var")
+    if (wave.size < 3 or not np.isfinite(wave).all()
+            or not np.all(np.diff(wave) > 0)):
+        raise ValueError(
+            "Line measurement requires finite strictly increasing wavelength samples"
+        )
     if mask is None:
         quality_ok = np.ones(wave.shape, dtype=bool)
     else:
@@ -138,6 +143,32 @@ def measure_line(
     tel = np.zeros_like(wave, dtype=float) if calsys_tell is None else np.asarray(calsys_tell, dtype=float)
     absu = np.zeros_like(wave, dtype=float) if calsys_abs is None else np.asarray(calsys_abs, dtype=float)
     center = rest * (1.0 + float(redshift))
+    # Both independent continuum sidebands need observed, usable samples.
+    # A one-sided or entirely absent continuum can invent a positive line
+    # excess from baseline drift. The internal continuum helper retains its
+    # historical diagnostic fallback, but that fallback cannot certify a
+    # science-level emission detection or a formal flux upper limit.
+    left = (
+        (wave >= center + float(spec.continuum_left[0]))
+        & (wave <= center + float(spec.continuum_left[1]))
+        & quality_ok
+    )
+    right = (
+        (wave >= center + float(spec.continuum_right[0]))
+        & (wave <= center + float(spec.continuum_right[1]))
+        & quality_ok
+    )
+    n_left = int(np.count_nonzero(left))
+    n_right = int(np.count_nonzero(right))
+    if n_left < 2 or n_right < 2:
+        return {
+            'name': spec.name,
+            'detected': False,
+            'reason': 'insufficient_unmasked_continuum',
+            'n_continuum_left': n_left,
+            'n_continuum_right': n_right,
+            'upper_limit_3sigma': None,
+        }
     # Masked/invalid pixels must not influence either continuum sidebands
     # or integrated emission-line flux, even when their SCI is finite.
     flux_for_continuum = np.where(quality_ok, flux, np.nan)
@@ -241,6 +272,8 @@ def measure_line(
         'upper_limit_3sigma': None if partial or detected else float(3.0 * err_stat),
         'n_samples': int(w.size),
         'n_masked_in_window': int(np.count_nonzero(~quality_ok[m])),
+        'n_continuum_left': n_left,
+        'n_continuum_right': n_right,
         **cont_meta,
     }
 
