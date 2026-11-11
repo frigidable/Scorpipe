@@ -93,10 +93,14 @@ def _science_extinction_factor(
             or not np.isfinite(wave_A).all() or np.any(wave_A <= 0)
             or not np.all(np.diff(wave_A) > 0)):
         raise ValueError("Invalid science extinction wavelengths")
-    ref_in_science_medium = convert_wavelength_convention(
-        ref_wave, from_ref="air", to_ref=medium,
+    # Interpolate in the curve's native AIR coordinates. Transforming the
+    # curve knots to VACUUM first and then linearly interpolating there is
+    # not equivalent: the air/vacuum conversion is slightly nonlinear.
+    # Mapping the science samples back to AIR preserves k(lambda_air).
+    science_wave_air_A = convert_wavelength_convention(
+        wave_A, from_ref=medium, to_ref="air",
     )
-    k = np.interp(wave_A, ref_in_science_medium, k_lambda, left=np.nan, right=np.nan)
+    k = np.interp(science_wave_air_A, ref_wave, k_lambda, left=np.nan, right=np.nan)
     if not np.isfinite(k).all():
         raise ValueError("Extinction curve does not cover entire science wavelength grid")
     factor = np.power(10.0, 0.4 * k * x)
@@ -297,7 +301,7 @@ def apply_fluxcal_to_spec1d(science_spec_path: str | Path, *, sensfunc_path: str
         'science_extinction_reason': (
             'single-science-airmass factor applied; absolute science qualification pending'
             if science_extinction_applied
-            else 'no verified single-exposure science atmospheric transfer'
+            else 'no verified per-exposure science atmospheric transfer'
         ),
         'science_extinction_factor': science_factor,
         'science_airmass': (
