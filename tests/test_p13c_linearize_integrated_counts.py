@@ -24,7 +24,8 @@ from scorpio_pipe.contracts.units import var_bunit_from_sci_bunit
 
 
 def _fixture(tmp_path, *, bunit="e-", gain=2.0, dw=1.0,
-             density=False, normalize=False, exptime=100.0):
+             density=False, normalize=False, exptime=100.0,
+             capture=False):
     ny, nx = 4, 12
     centers = 5000.0 + 2.0 * np.arange(nx, dtype=float)
     edge_out = 4999.0 + dw * np.arange(int(round(24.0 / dw)) + 1)
@@ -35,6 +36,8 @@ def _fixture(tmp_path, *, bunit="e-", gain=2.0, dw=1.0,
     mask = np.zeros((ny, nx), dtype="u2")
     hdr = fits.Header()
     hdr["BUNIT"] = bunit
+    if bunit == "e-":
+        hdr["SCORPUM"] = "ELECTRON"
     hdr["GAIN"] = gain
     hdr["RDNOISE"] = 3.0
     if exptime is not None:
@@ -52,7 +55,8 @@ def _fixture(tmp_path, *, bunit="e-", gain=2.0, dw=1.0,
         linearize_grid_plan=_build_linearize_grid_plan(lam_map, edge_out),
         ny=ny, nlam=len(edge_out)-1, y0=0, y1=ny,
         mask_dir=str(tmp_path / "masks_absent"),
-        lcfg={"post_sky_cleanup": "off", "mask_saturation": False},
+        lcfg={"post_sky_cleanup": "off", "mask_saturation": False,
+              "capture_count_v1_validity": bool(capture)},
         cfg={}, gain_override_f=None, rdnoise_override_f=None,
         scale_to_bin=not density, normalize_exptime=normalize,
         wave0=float(edge_out[0]), dw=float(dw), unit="Angstrom",
