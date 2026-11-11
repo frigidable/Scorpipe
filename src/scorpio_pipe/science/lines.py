@@ -143,6 +143,20 @@ def measure_line(
     tel = np.zeros_like(wave, dtype=float) if calsys_tell is None else np.asarray(calsys_tell, dtype=float)
     absu = np.zeros_like(wave, dtype=float) if calsys_abs is None else np.asarray(calsys_abs, dtype=float)
     center = rest * (1.0 + float(redshift))
+    # Keep the pre-existing failure precedence: a line with no usable
+    # in-window samples has insufficient spectral support, regardless of
+    # whether its sidebands happen to be masked as well.
+    m = (wave >= center - float(spec.window_half_width)) & (wave <= center + float(spec.window_half_width))
+    if np.count_nonzero(m) < 3:
+        return {'name': spec.name, 'detected': False, 'reason': 'insufficient_sampling'}
+    n_line_usable = int(np.count_nonzero(m & quality_ok))
+    if n_line_usable < 3:
+        return {
+            'name': spec.name, 'detected': False,
+            'reason': 'insufficient_valid_unmasked_pixels',
+            'n_unmasked': n_line_usable,
+            'upper_limit_3sigma': None,
+        }
     # Both independent continuum sidebands need observed, usable samples.
     # A one-sided or entirely absent continuum can invent a positive line
     # excess from baseline drift. The internal continuum helper retains its
@@ -172,9 +186,6 @@ def measure_line(
     # Masked/invalid pixels must not influence either continuum sidebands
     # or integrated emission-line flux, even when their SCI is finite.
     flux_for_continuum = np.where(quality_ok, flux, np.nan)
-    m = (wave >= center - float(spec.window_half_width)) & (wave <= center + float(spec.window_half_width))
-    if np.count_nonzero(m) < 3:
-        return {'name': spec.name, 'detected': False, 'reason': 'insufficient_sampling'}
     # V1 extraction's MASK reports usable 1D data, but losing a spatial
     # contributor can still remove unknown line flux from a boxcar aperture.
     # A *partial* line window is a measurement, NOT an automatically
