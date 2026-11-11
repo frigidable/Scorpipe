@@ -53,7 +53,59 @@ def _status_from_safe_for(safe_for: str | None, *, telluric_applied: bool) -> st
     return CalibrationStatus.RELATIVE.value
 
 
-def apply_fluxcal_to_spec1d(science_spec_path: str | Path, *, sensfunc_path: str | Path, telluric_path: str | Path | None = None, standard_qc: dict[str, Any] | None = None, sensfunc_qc: dict[str, Any] | None = None) -> dict[str, Any]:
+def _science_extinction_factor(
+    wave: np.ndarray, hdr: Any, model: dict[str, Any],
+) -> np.ndarray:
+    """Above-atmosphere extinction factor on an explicitly declared science axis.
+
+    Reference k(lambda) is magnitudes per airmass on an air-Angstrom grid.
+    A requested correction fails rather than extrapolating or silently
+    assuming that nm, Angstrom, air and vacuum grids are equivalent.
+    """
+    from scorpio_pipe.calib.common import convert_wavelength_convention
+
+    x = float(model["airmass"])
+    if not np.isfinite(x) or not (1.0 <= x <= 5.0):
+        raise ValueError("Science airmass must be finite and in [1, 5]")
+    ref_medium = str(model.get("wavelength_ref") or "").strip().lower()
+    if ref_medium != "air":
+        raise ValueError("Science extinction curve requires declared AIR wavelengths")
+    medium = str(hdr.get("WAVEREF") or "").strip().lower()
+    unit = str(hdr.get("WAVEUNIT") or hdr.get("CUNIT1") or "").strip().lower()
+    if medium not in {"air", "vacuum"}:
+        raise ValueError("Science extinction requires explicit air/vacuum wavelength medium")
+    if unit in {"a", "aa", "ang", "angstrom", "angstroms", "å", "ångström"}:
+        unit_factor = 1.0
+    elif unit in {"nm", "nanometer", "nanometers"}:
+        unit_factor = 10.0
+    else:
+        raise ValueError("Science extinction requires explicit Angstrom or nm WAVEUNIT")
+
+    ref_wave = np.asarray(model["wavelength_A"], dtype=float)
+    k_lambda = np.asarray(model["k_lambda"], dtype=float)
+    if (ref_wave.ndim != 1 or ref_wave.shape != k_lambda.shape
+            or ref_wave.size < 2 or not np.isfinite(ref_wave).all()
+            or not np.isfinite(k_lambda).all() or np.any(k_lambda < 0)
+            or not np.all(np.diff(ref_wave) > 0)):
+        raise ValueError("Invalid spectral samples in atmospheric extinction curve")
+    wave_A = np.asarray(wave, dtype=float) * unit_factor
+    if (wave_A.ndim != 1 or wave_A.size < 2
+            or not np.isfinite(wave_A).all() or np.any(wave_A <= 0)
+            or not np.all(np.diff(wave_A) > 0)):
+        raise ValueError("Invalid science extinction wavelengths")
+    ref_in_science_medium = convert_wavelength_convention(
+        ref_wave, from_ref="air", to_ref=medium,
+    )
+    k = np.interp(wave_A, ref_in_science_medium, k_lambda, left=np.nan, right=np.nan)
+    if not np.isfinite(k).all():
+        raise ValueError("Extinction curve does not cover entire science wavelength grid")
+    factor = np.power(10.0, 0.4 * k * x)
+    if not np.all(np.isfinite(factor) & (factor > 0)):
+        raise ValueError("Invalid science atmospheric extinction transfer")
+    return factor
+
+
+def apply_fluxcal_to_spec1d(science_spec_path: str | Path, *, sensfunc_path: str | Path, telluric_path: str | Path | None = None, standard_qc: dict[str, Any] | None = None, sensfunc_qc: dict[str, Any] | None = None, science_extinction: dict[str, Any] | None = None) -> dict[str, Any]:
     spec = read_spec1d(science_spec_path, mode='trace')
     # TRACE/FIXED are distinct physical extractions. Historical trace-only
     # inputs remain readable for the numerical calibration API, but may not
@@ -175,6 +227,21 @@ def apply_fluxcal_to_spec1d(science_spec_path: str | Path, *, sensfunc_path: str
         flux = flux / np.clip(transmission, 0.25, np.inf)
         var = var / np.clip(transmission, 0.25, np.inf) ** 2
         tell_applied = True
+    # Sensfunc already corrected the STANDARD for its own airmass.
+    # SCIENCE counts need an independent atmospheric transfer.
+    science_factor = np.ones_like(wave, dtype=float)
+    science_extinction_applied = False
+    if science_extinction is not None:
+        if not isinstance(sensfunc_qc, dict) or not bool(sensfunc_qc.get("extinction_applied")):
+            raise ValueError(
+                "Science extinction requires a separately corrected standard response"
+            )
+        science_factor = _science_extinction_factor(
+            wave, spec["header"], science_extinction
+        )
+        flux = flux * science_factor
+        var = var * science_factor ** 2
+        science_extinction_applied = True
     safe_for = None
     if isinstance(standard_qc, dict):
         safe_for = standard_qc.get('safe_for')
@@ -184,8 +251,11 @@ def apply_fluxcal_to_spec1d(science_spec_path: str | Path, *, sensfunc_path: str
     # observation (or its constituent exposures). A physically uncorrected
     # science spectrum must never be advertised as ABSOLUTE_TRUSTED, even
     # when the standard-star quality is excellent.
-    science_extinction_applied = False
     if status == CalibrationStatus.ABSOLUTE_TRUSTED.value:
+        # Even with a verified science airmass, the slit-loss correction,
+        # spectrophotometric validation and shared calibration covariance
+        # are still unqualified. The transfer is numerically applied, but
+        # this alone cannot promote a spectrum to ABSOLUTE_TRUSTED.
         status = CalibrationStatus.ABSOLUTE_APPROX.value
     # The response/transmission are shared deterministic calibrations of
     # two different extracted spectra. Preserve their independent content.
@@ -193,6 +263,7 @@ def apply_fluxcal_to_spec1d(science_spec_path: str | Path, *, sensfunc_path: str
     transfer = 1.0 / np.clip(resp, 1e-30, np.inf)
     if tell_applied:
         transfer = transfer / np.clip(transmission, 0.25, np.inf)
+    transfer = transfer * science_factor
     fixed_payload = None
     if fixed is not None:
         fixed_payload = {
@@ -223,7 +294,23 @@ def apply_fluxcal_to_spec1d(science_spec_path: str | Path, *, sensfunc_path: str
         'header': spec['header'],
         'status': status,
         'science_extinction_applied': science_extinction_applied,
-        'science_extinction_reason': 'per-exposure atmospheric transfer not yet modeled',
+        'science_extinction_reason': (
+            'single-science-airmass factor applied; absolute science qualification pending'
+            if science_extinction_applied
+            else 'no verified single-exposure science atmospheric transfer'
+        ),
+        'science_extinction_factor': science_factor,
+        'science_airmass': (
+            float(science_extinction['airmass']) if science_extinction_applied else None
+        ),
+        'science_airmass_provenance': (
+            str(science_extinction.get('provenance') or 'unspecified')
+            if science_extinction_applied else 'unavailable'
+        ),
+        'science_extinction_reference': (
+            str(science_extinction.get('extinction_reference') or '')
+            if science_extinction_applied else None
+        ),
         'transmission': transmission,
         'tell_conf': tell_conf,
         'calsys_rel': calsys_rel,
