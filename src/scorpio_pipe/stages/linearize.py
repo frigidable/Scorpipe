@@ -2840,12 +2840,14 @@ def run_linearize(
                         "status": "COUNT_V1_CAPTURE_FAILED",
                         "error": f"{type(exc).__name__}: {exc}",
                     }
-                    stage_flags.append(make_flag(
-                        "COUNT_V1_CAPTURE_FAILED", "WARN",
-                        "Optional actual-validity sidecar could not be saved",
-                        stem=base_for_mask,
-                        error=f"{type(exc).__name__}: {exc}",
-                    ))
+                    # exp_flags is constructed below; report any failure
+                    # through the per-exposure flag aggregation.
+                    frame_res["count_v1_capture_warning"] = {
+                        "code": "COUNT_V1_CAPTURE_FAILED",
+                        "severity": "WARN",
+                        "message": "Optional actual-validity sidecar could not be saved",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
 
             if bool(cleanup_diag.get("cleanup_executed")) and residual_model is not None:
                 model_out = np.asarray(residual_model, dtype=np.float32)
@@ -2914,6 +2916,8 @@ def run_linearize(
                     delta_policy_report = "not_applied_uncertain" if str(flexure_flag).upper() != "OK" else "missing"
 
             exp_flags: list[dict[str, Any]] = []
+            if frame_res.get("count_v1_capture_warning") is not None:
+                exp_flags.append(dict(frame_res["count_v1_capture_warning"]))
             try:
                 exp_flags.extend(list(roi_flags or []))
             except Exception:
@@ -2955,6 +2959,7 @@ def run_linearize(
                     },
                     "resampling": {
                         "no_coverage_frac": no_coverage_frac,
+                        "count_v1_actual_validity": frame_res.get("count_v1_capture"),
                     },
                     "delta_lambda": {
                         "value": float(delta_u) if delta_u is not None else None,
