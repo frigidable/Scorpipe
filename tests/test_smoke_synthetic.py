@@ -176,6 +176,9 @@ def test_smoke_synthetic_chain_golden():
                 "dlambda_A": "auto",
                 "save_per_exposure": True,
                 "save_preview": True,
+                # Exercise the opt-in production writer on a real
+                # synthetic stage, not only a direct worker fixture.
+                "capture_count_v1_validity": True,
             },
             "stack2d": {},
             "extract1d": {"mode": "boxcar", "aperture_half_width": 4},
@@ -207,6 +210,14 @@ def test_smoke_synthetic_chain_golden():
         lin_stage = stage_dir(work_dir, "linearize")
         rectified = sorted(lin_stage.rglob("*_rectified.fits"))
         assert rectified, "Expected per-exposure rectified FITS from linearize stage"
+        count_manifests = sorted(lin_stage.glob("*_count_v1_actual_validity_v1.json"))
+        assert len(count_manifests) == 1
+        from scorpio_pipe.calib.count_v1_capture import audit_count_v1_capture
+        count_audit = audit_count_v1_capture(count_manifests[0])
+        assert count_audit["hashes_verified"] is True
+        assert count_audit["science_uncertainty_qualified"] is False
+        assert count_audit["production_variance_release_allowed"] is False
+        assert count_audit["status"].startswith("HOLD_")
 
         st = run_stack2d(cfg, inputs=rectified)
         ex = run_extract1d(cfg, stacked_fits=st["stacked2d_fits"])
