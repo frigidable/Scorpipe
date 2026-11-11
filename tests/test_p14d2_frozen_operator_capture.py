@@ -174,6 +174,32 @@ def test_extract_stage_opt_in_writes_independently_replayable_sidecar(tmp_path, 
     np.testing.assert_allclose(np.sum(Et * signal, axis=0), ft, rtol=2e-6, atol=1e-3)
     np.testing.assert_allclose(np.sum(Ef * signal, axis=0), ff, rtol=2e-6, atol=1e-3)
 
+    # The diagnostic capture must not perturb any SCI/VAR/MASK/DQ/FRAC
+    # FITS columns; science reduction remains bitwise identical.
+    cfg["extract1d"]["capture_frozen_operators"] = False
+    plain_dir = tmp_path / ("extract_plain_" + method)
+    plain = ex.run_extract1d(cfg, in_fits=path, out_dir=plain_dir)
+    assert plain["covariance_operator_manifest"] is None
+    assert not list(plain_dir.glob("covariance_operator_extract_*"))
+    with fits.open(output["spec1d_fits"], memmap=False) as captured, fits.open(
+        plain["spec1d_fits"], memmap=False
+    ) as baseline:
+        for ext in ("SPEC_TRACE", "SPEC_FIXED"):
+            assert captured[ext].columns.names == baseline[ext].columns.names
+            for col in captured[ext].columns.names:
+                np.testing.assert_array_equal(
+                    captured[ext].data[col], baseline[ext].data[col]
+                )
+
+    # A local sky residual is an additive data-derived term, so the
+    # frozen-linear E@SCI model cannot claim to represent it.
+    cfg["extract1d"]["capture_frozen_operators"] = True
+    cfg["extract1d"]["local_sky_correction"] = True
+    with pytest.raises(ValueError, match="local sky correction"):
+        ex.run_extract1d(
+            cfg, in_fits=path, out_dir=tmp_path / ("extract_local_sky_" + method)
+        )
+
 
 def test_stack_capture_disk_budget_and_missing_rows_fail_closed(tmp_path):
     f = tmp_path / "input.fits"
