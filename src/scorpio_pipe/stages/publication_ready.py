@@ -53,7 +53,7 @@ def _write_nan_preserving_sci(path: Path, data: np.ndarray, *, header: fits.Head
                 shdr[k] = v
             except Exception:
                 pass
-    for k in ("BUNIT", "WAVEUNIT", "WAVEREF", "MAPTYPE", "LSFUNIT", "SCORPWCS", "PUBRDY", "EXPORTOK", "VALLEVEL", "SCIQPASS"):
+    for k in ("BUNIT", "WAVEUNIT", "WAVEREF", "MAPTYPE", "LSFUNIT", "SCORPWCS", "PUBRDY", "EXPORTOK", "VALLEVEL", "SCIQPASS", "PIXGEOM", "MAPALGN"):
         if k in phdr and k not in shdr:
             try:
                 shdr[k] = phdr[k]
@@ -78,6 +78,61 @@ def _approx_grid_from_row(arr: np.ndarray, hdr: fits.Header) -> WaveGrid | None:
     return WaveGrid(lambda0=float(np.polyval(coeffs, 0.0)), dlambda=float(coeffs[0]), nlam=int(nx), unit=str(hdr.get("WAVEUNIT", "Angstrom") or "Angstrom"), wave_ref=str(hdr.get("WAVEREF", "air") or "air"))
 
 
+def _validate_export_coordinate_provenance(
+    stack_hdr: fits.Header, wl_hdr: fits.Header, lsf_hdr: fits.Header,
+) -> dict[str, str]:
+    """Check declared spectral coordinate compatibility, not pixel co-registration.
+
+    The rectified stack and the detector maps are fundamentally different
+    pixel spaces. Even coincident array shapes do not certify co-registration.
+    An absent declaration is recorded as unknown, never inferred from shape.
+    """
+
+    def medium(hdr: fits.Header) -> str | None:
+        raw = str(hdr.get("WAVEREF") or "").strip().lower()
+        if not raw:
+            return None
+        if raw not in {"air", "vacuum"}:
+            raise ValueError(f"Publication input has unsupported WAVEREF={raw!r}")
+        return raw
+
+    def unit(hdr: fits.Header) -> str | None:
+        tokens = [
+            str(hdr.get(key) or "").strip().lower()
+            for key in ("WAVEUNIT", "CUNIT1")
+        ]
+        found: list[str] = []
+        for token in tokens:
+            if not token:
+                continue
+            if token in {"a", "aa", "ang", "angstrom", "angstroms", "ångström", "å"}:
+                found.append("Angstrom")
+            elif token in {"nm", "nanometer", "nanometers"}:
+                found.append("nm")
+            else:
+                raise ValueError(
+                    f"Publication input has unsupported wavelength unit={token!r}"
+                )
+        if len(set(found)) > 1:
+            raise ValueError("Publication input has inconsistent WAVEUNIT and CUNIT1")
+        return found[0] if found else None
+
+    refs = [medium(h) for h in (stack_hdr, wl_hdr, lsf_hdr)]
+    units = [unit(h) for h in (stack_hdr, wl_hdr, lsf_hdr)]
+    if len({r for r in refs if r is not None}) > 1:
+        raise ValueError(f"Publication inputs disagree on air/vacuum medium: {refs}")
+    if len({u for u in units if u is not None}) > 1:
+        raise ValueError(f"Publication inputs disagree on wavelength unit: {units}")
+    return {
+        "wave_ref": next((r for r in refs if r is not None), "unknown"),
+        "wave_unit": next((u for u in units if u is not None), "unknown"),
+        "coordinate_declarations": (
+            "COMPLETE" if all(r is not None for r in refs)
+            and all(u is not None for u in units) else "INCOMPLETE"
+        ),
+    }
+
+
 def run_publication_ready(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[str, Any]:
     work_dir = resolve_work_dir(cfg)
     out_dir = Path(out_dir) if out_dir is not None else (Path(work_dir) / "publication_ready")
@@ -91,6 +146,11 @@ def run_publication_ready(cfg: dict[str, Any], *, out_dir: Path | None = None) -
     lsf_map, lsf_hdr = _load_primary_or_sci(Path(work_dir) / "lsf_model" / "lsf_map.fits")
     if wl_map.shape != lsf_map.shape:
         raise ValueError(f"lambda_map shape {wl_map.shape} != lsf_map shape {lsf_map.shape}")
+    if sci.ndim != 2 or wl_map.ndim != 2:
+        raise ValueError("Publication requires 2D stack and 2D detector maps")
+    coordinate_provenance = _validate_export_coordinate_provenance(
+        shdr, wl_hdr, lsf_hdr
+    )
 
     # Never extrapolate dismap into areas where the authoritative wavelength map is undefined.
     dismap = np.asarray(lsf_map, dtype=float)
@@ -123,6 +183,8 @@ def run_publication_ready(cfg: dict[str, Any], *, out_dir: Path | None = None) -
     ph_spectrum = fits.Header(shdr)
     ph_spectrum["PIPEVER"] = (str(PIPELINE_VERSION), "Pipeline version")
     ph_spectrum = _stamp_export_status(ph_spectrum)
+    ph_spectrum["PIXGEOM"] = ("RECTIFIED", "Pixel coordinate system of SCI")
+    ph_spectrum["MAPALGN"] = (False, "Not pixel-aligned with detector maps")
     ph_spectrum["BUNIT"] = str(ph_spectrum.get("BUNIT", "adu/s") or "adu/s")
     ph_spectrum = add_provenance(ph_spectrum, cfg, stage="publication_ready")
 
@@ -132,6 +194,8 @@ def run_publication_ready(cfg: dict[str, Any], *, out_dir: Path | None = None) -
     ph_wl = fits.Header(wl_hdr)
     ph_wl["BUNIT"] = (str(wl_hdr.get("WAVEUNIT", "Angstrom") or "Angstrom"), "Wavelength unit")
     ph_wl["MAPTYPE"] = ("lambda", "Per-pixel wavelength map")
+    ph_wl["PIXGEOM"] = ("DETECTOR", "Original detector pixel coordinates")
+    ph_wl["MAPALGN"] = (False, "Not pixel-aligned with rectified Spectrum")
     ph_wl = _stamp_export_status(ph_wl)
     ph_wl["SCORPWCS"] = ("approx_central_row", "Primary WCS is approximate; SCI pixels are authoritative")
     ph_wl = add_provenance(ph_wl, cfg, stage="publication_ready")
@@ -142,6 +206,8 @@ def run_publication_ready(cfg: dict[str, Any], *, out_dir: Path | None = None) -
     ph_dis["BUNIT"] = ("Angstrom", "Instrumental sigma")
     ph_dis["LSFUNIT"] = ("sigma_A", "Instrumental resolution quantity")
     ph_dis["MAPTYPE"] = ("dismap", "Per-pixel instrumental sigma map")
+    ph_dis["PIXGEOM"] = ("DETECTOR", "Original detector pixel coordinates")
+    ph_dis["MAPALGN"] = (False, "Not pixel-aligned with rectified Spectrum")
     ph_dis = _stamp_export_status(ph_dis)
     ph_dis["SCORPWCS"] = ("approx_central_row", "Primary WCS is approximate; SCI pixels are authoritative")
     ph_dis = add_provenance(ph_dis, cfg, stage="publication_ready")
@@ -150,6 +216,20 @@ def run_publication_ready(cfg: dict[str, Any], *, out_dir: Path | None = None) -
 
     sidecar = {
         "stage": "publication_ready",
+        "geometry_contract_version": 1,
+        "pixel_alignment": {
+            "spectrum": "RECTIFIED",
+            "wl": "DETECTOR",
+            "dismap": "DETECTOR",
+            "spectrum_detector_maps_coregistered": False,
+            # Equal image shapes and detector labels are not independent
+            # proof of alignment between maps built by separate stages.
+            "wl_dismap_coregistered": None,
+            "detector_map_alignment_qualification": "NOT_INDEPENDENTLY_VERIFIED",
+            "direct_pixelwise_comparison_allowed": False,
+            "same_shape_does_not_imply_alignment": True,
+        },
+        "coordinate_provenance": coordinate_provenance,
         "pipeline_version": str(PIPELINE_VERSION),
         "export_ok": True,
         "science_qc_pass": False,
@@ -167,8 +247,8 @@ def run_publication_ready(cfg: dict[str, Any], *, out_dir: Path | None = None) -
         },
         "semantics": {
             "Spectrum.fts": "linearized stacked science frame on exact linear wavelength WCS",
-            "wl.fts": "authoritative per-pixel wavelength map in detector geometry; data values are authoritative, WCS is approximate helper",
-            "dismap.fts": "authoritative per-pixel instrumental sigma map in detector geometry; no values are extrapolated outside finite wavelength support",
+            "wl.fts": "authoritative per-pixel wavelength map in DETECTOR geometry; NOT aligned with rectified Spectrum.fts, WCS approximate",
+            "dismap.fts": "detector-geometry instrumental sigma; NOT effective rectified/stacked 1D LSF; invalid where wavelength map undefined",
         },
         "shapes": {
             "spectrum": [int(v) for v in sci.shape],
