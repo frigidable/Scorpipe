@@ -18,6 +18,7 @@ from tests.test_p13c_linearize_integrated_counts import _fixture
 
 
 def _captured(tmp_path: Path, *, density=False, normalize=False, cleanup=False):
+    tmp_path.mkdir(parents=True, exist_ok=True)
     output = _fixture(
         tmp_path, bunit="e-", gain=2., dw=.5 if density else 1.,
         density=density, normalize=normalize, capture=True,
