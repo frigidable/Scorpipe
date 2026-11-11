@@ -32,35 +32,51 @@ def _read_calsys(path: str | Path | None, nlam: int) -> dict[str, np.ndarray]:
 def _qualify_lines_for_shared_bias_covariance(
     rows: list[dict[str, Any]], header: Any,
 ) -> tuple[list[dict[str, Any]], bool]:
-    """Withhold formal detections when shared MasterBias VAR is unmodelled.
+    """Withhold formal detections for explicitly unqualified variance.
 
-    The line flux estimate remains diagnostic. Its reported conditional
-    S/N and errors are not calibrated for the correlated shared bias.
+    Fixed-weight Stack2D VAR omits data-driven weight-selection uncertainty
+    and cross-pixel/cross-exposure covariance. Its S/N can remain useful as a
+    *conditional diagnostic*, but cannot certify a line detection or upper
+    limit. Keep the old shared-MasterBias return flag for API compatibility.
     """
-    shared = (
-        str(header.get("SBGSTAT") or "").strip().upper() == "SHARED"
-        and str(header.get("SBCOVQ") or "").strip().upper() == "UNMODEL"
-    )
-    model_unqualified = (
-        str(header.get("STKVARQ") or "").strip().upper() == "COND_ONLY"
-        or str(header.get("STKXCVQ") or "").strip().upper() == "UNMODEL"
-        or str(header.get("SBCOVQ") or "").strip().upper() == "UNMODEL"
-    )
+    status = {
+        key: str(header.get(key) or "").strip().upper()
+        for key in ("SBGSTAT", "SBCOVQ", "STKVARQ", "STKXCVQ", "STKYCVQ")
+    }
+    shared = status["SBGSTAT"] == "SHARED" and status["SBCOVQ"] == "UNMODEL"
+    causes = [
+        label for label, present in (
+            ("STACK_FIXED_WEIGHT_CONDITIONAL_VAR", status["STKVARQ"] == "COND_ONLY"),
+            ("STACK_SHARED_COVARIANCE_UNMODELLED", status["STKXCVQ"] == "UNMODEL"),
+            ("STACK_SPATIAL_COVARIANCE_UNMODELLED", status["STKYCVQ"] == "UNMODEL"),
+            ("MASTERBIAS_COVARIANCE_UNMODELLED", status["SBCOVQ"] == "UNMODEL"),
+        ) if present
+    ]
+    model_unqualified = bool(causes)
     qualified: list[dict[str, Any]] = []
     for entry in rows:
         row = dict(entry)
-        # Never assert science-level uncertainty qualification merely
-        # because this ONE known shared-bias trigger was absent.
+        # No explicit negative flags does not independently prove scientific
+        # uncertainty qualification: preserve the existing unknown (None).
         row["uncertainty_qualified"] = False if model_unqualified else None
         row["shared_bias_detection_gate_triggered"] = bool(shared)
-        if shared:
+        row["uncertainty_gate_triggered"] = model_unqualified
+        row["unqualified_uncertainty_causes"] = list(causes)
+        if model_unqualified:
             row["conditional_detection_candidate"] = bool(row.get("detected"))
             row["detected"] = False
             row["upper_limit_3sigma"] = None
-            row["uncertainty_status"] = "SHARED_MASTERBIAS_COVARIANCE_UNMODELLED"
-            # Existing partial-window reasons and mask diagnoses remain.
+            row["uncertainty_status"] = (
+                "SHARED_MASTERBIAS_COVARIANCE_UNMODELLED"
+                if shared else "STACK_OR_CALIBRATION_COVARIANCE_UNMODELLED"
+            )
+            # Retain more specific reasons such as partial aperture; never
+            # convert a conditional 3-sigma error into a formal upper limit.
             if not row.get("reason"):
-                row["reason"] = "uncertified_shared_masterbias_uncertainty"
+                row["reason"] = (
+                    "uncertified_shared_masterbias_uncertainty"
+                    if shared else "uncertified_stack_or_calibration_uncertainty"
+                )
         qualified.append(row)
     return qualified, shared
 
@@ -136,6 +152,11 @@ def run_line_measure(cfg: dict[str, Any], *, run_root: Path, stage_dir_path: Pat
     rows, shared_bias_unqualified = _qualify_lines_for_shared_bias_covariance(
         rows, spec["header"]
     )
+    uncertainty_gate_triggered = any(bool(row.get("uncertainty_gate_triggered")) for row in rows)
+    n_conditional_candidates = sum(
+        bool(row.get("conditional_detection_candidate", row.get("detected")))
+        for row in rows
+    )
     lines_by_name = {str(r.get('name')): r for r in rows if isinstance(r, dict)}
     redd = balmer_decrement_summary(lines_by_name)
     csv_path = write_lines_csv(stage_dir_path / 'science_lines.csv', rows)
@@ -154,6 +175,8 @@ def run_line_measure(cfg: dict[str, Any], *, run_root: Path, stage_dir_path: Pat
             1 for row in rows if row.get('reason') == 'partial_aperture_or_spectral_coverage'
         )),
         'shared_bias_variance_unqualified': bool(shared_bias_unqualified),
+        'uncertainty_detection_gate_triggered': bool(uncertainty_gate_triggered),
+        'n_conditional_detection_candidates': int(n_conditional_candidates),
         'calibration_status': json.loads(fluxcal_qc_path.read_text(encoding='utf-8')).get('status') if fluxcal_qc_path.exists() else None,
         'calibration_uncertainty_summary': {
             'median_rel': float(np.nanmedian(calsys['rel'])) if calsys['rel'].size else 0.0,
@@ -170,6 +193,8 @@ def run_line_measure(cfg: dict[str, Any], *, run_root: Path, stage_dir_path: Pat
         'stage': 'line_measure',
         'n_lines_total': int(len(rows)),
         'n_lines_detected': n_det,
+        'n_conditional_detection_candidates': int(n_conditional_candidates),
+        'uncertainty_detection_gate_triggered': bool(uncertainty_gate_triggered),
         'wavelength_medium': waveref,
         'input_wavelength_unit': input_waveunit,
         'measurement_wavelength_unit': 'Angstrom',
