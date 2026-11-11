@@ -477,7 +477,9 @@ def _write_mef(
 
     # Spectral frame bookkeeping (external-friendly defaults).
     hdr.setdefault("SPECSYS", str(hdr.get("SPECSYS", "TOPOCENT") or "TOPOCENT"))
-    hdr.setdefault("SSYSOBS", str(hdr.get("SPECSYS", "TOPOCENT") or "TOPOCENT"))
+    # Observer's frame is independent of the corrected spectral frame.
+    # FITS WCS Paper III: SSYSOBS defaults to TOPOCENT for ground observations.
+    hdr.setdefault("SSYSOBS", "TOPOCENT")
     grid = None
     if wave0 is not None and dw is not None:
         # The common MEF writer stamps WaveGrid cards over the given header.
