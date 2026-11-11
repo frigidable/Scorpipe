@@ -17,11 +17,13 @@ from scorpio_pipe.stages.linearize import _write_mef
 from tests.test_p13c_linearize_integrated_counts import _fixture
 
 
-def _captured(tmp_path: Path, *, density=False, normalize=False, cleanup=False):
+def _captured(tmp_path: Path, *, density=False, normalize=False, cleanup=False,
+              mask_bad_column=None):
     tmp_path.mkdir(parents=True, exist_ok=True)
     output = _fixture(
         tmp_path, bunit="e-", gain=2., dw=.5 if density else 1.,
         density=density, normalize=normalize, capture=True,
+        mask_bad_column=mask_bad_column,
     )
     assert output["count_v1_actual_valid"] is not None
     source = tmp_path / "electron.fits"
@@ -125,3 +127,14 @@ def test_invalid_budget_and_mask_dtypes_are_rejected_before_output(tmp_path):
             normalize_exptime=False, exptime_s=100.,
             cleanup_executed=False,
         )
+
+
+def test_original_worker_masked_pixel_is_captured_not_inferred(tmp_path):
+    _source, _output, manifest = _captured(tmp_path, mask_bad_column=5)
+    record = json.loads(manifest.read_text(encoding="utf-8"))
+    with np.load(record["archive"]["path"], allow_pickle=False) as data:
+        assert np.all(~data["valid"][:, 5])
+        assert np.all(data["valid"][:, :5])
+    report = audit_count_v1_capture(manifest)
+    assert report["count_v1_replayed"]
+    assert report["status"] == "HOLD_REPLAYED_COUNT_V1_WITHOUT_SKY_TO_1D_ADMISSION"
