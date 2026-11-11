@@ -51,7 +51,12 @@ checks that:
 5. Both TRACE and FIXED coefficient maps match that grid and have no
    nonzero coefficient where the recorded Stack2D weights provide
    **no support at the exact spatial/spectral pixel**;
-6. Explicit disk/memory byte ceilings are respected; manifests cannot
+6. The stack manifest explicitly identifies `COUNT_V1` spectral
+   resampling and finite per-exposure spatial shifts and positive SCI/VAR
+   scaling; the extraction manifest identifies `input_mode=stack2d`
+   and `apply_local_sky=false` (an additive data-derived correction
+   cannot be silently represented by the frozen spatial maps);
+7. Explicit disk/memory byte ceilings are respected; manifests cannot
    redirect sidecar paths outside their own capture directory.
 
 A successful audit returns
