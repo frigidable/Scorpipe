@@ -1,11 +1,13 @@
 # P1.4e2 — synthetic data-adaptive Stack2D and Extract1D coverage
 
 **Status:** separate, read-only scientific diagnostic, ported onto vNext
-as an independent Monte Carlo ablation. It is motivated by the earlier
-P1.4e1 grouped-covariance research in [PR #161](https://github.com/frigidable/Scorpipe/pull/161),
-but **that PR is still open and its full operator chain is NOT integrated
-or validated by this change**. No observational inputs or production
-science changes.
+as an independent Monte Carlo ablation. P1.4e1 grouped-covariance code,
+tests and scientific specification **already exist in vNext as byte-identical
+Git blobs** from historical [PR #161](https://github.com/frigidable/Scorpipe/pull/161).
+That original PR's administrative open/merged status must not be conflated
+with file presence. Neither P1.4e1 nor P1.4e2 is automatically bound to the
+actual production CCD-to-1D provenance or scientifically validated on
+observational FITS. No observational inputs or production science changes.
 
 ## Motivation
 
@@ -105,12 +107,36 @@ Readout- and instrument-specific validation is explicitly deferred.
   and bias, so **conditional Gaussian 95% intervals are diagnostic only**,
   even if one simulation happens to show nominal coverage. No correction
   factors are exported for scientific spectra.
-- **P1.4d2** saved final linear weights and extraction operator maps in
-  vNext; **P1.4e2** estimates sampling behavior of adaptive weights/profiles
-  in a small controlled ensemble. Combining them with the still-separate
-  P1.4e1 end-to-end frozen-operator covariance is a distinct, future gate.
+- **P1.4d2** saves final linear weights and extraction operator maps in
+  vNext; **P1.4e1** already implements the conditional grouped
+  SkySub-to-1D covariance functional; **P1.4e2** estimates the sampling
+  behavior of adaptive weights/profiles in a small controlled ensemble.
+  **Their joint, provenance-verified application to the same real reduction
+  is NOT yet implemented**: the upstream frozen sky-fit, per-row COUNT_V1
+  plans, native pre-sky variance, MasterBias group response and calibrated
+  wavelength transfer are not reassembled from P1.4d2 sidecars.
 - The output must always declare
   `science_uncertainty_qualified=false` and
   `production_variance_release_allowed=false`. **SCIENCE HOLD remains**
   until actual SCORPIO instrument geometry, sky model, detector, resampling,
   and LSF uncertainties are independently validated.
+
+
+## Audited P1.4e1 code-parity correction — 2026-11-12
+
+The original [PR #161](https://github.com/frigidable/Scorpipe/pull/161)
+may be administratively open, but the actual files
+`src/scorpio_pipe/calib/sky_chain_grouped_covariance.py`,
+`tests/test_p14e1_frozen_sky_to_1d_group_covariance.py`, and
+`docs/science/P14E1_FROZEN_SKY_1D_GROUPED_COVARIANCE.md`
+are **byte-identical in the vNext integration branch**. Earlier text
+incorrectly inferred missing implementation from the PR state; this
+revision corrects that inference without declaring scientific acceptance.
+
+P1.4e1 is a **conditional mathematical oracle**. It requires the
+observer to provide exact WLS sky support and design, all native
+COUNT_V1 plans, complete pre-sky detector variance, signed shared-bias
+sensitivity, group lineage, frozen stack/extraction coefficients and
+the spectral transfer. P1.4d2 sidecars alone do not supply those
+inputs. Even a numerically valid composition cannot account for
+selection instability or unknown calibration/LSF systematics.
