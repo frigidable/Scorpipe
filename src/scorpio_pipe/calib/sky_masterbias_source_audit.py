@@ -51,7 +51,9 @@ def _component_source(path: Path, *, max_pixels: int) -> tuple[dict[str, Any], n
         if (type(hdr.get("VCMPVER")) is not int or hdr["VCMPVER"] != 1
                 or str(hdr.get("VCMPQ") or "").strip() != "LOCAL"
                 or not bool(hdr.get("BIASSUB", False))
+                or not bool(hdr.get("FLATCOR", False))
                 or not bool(hdr.get("BVARINC", False))
+                or str(hdr.get("BUNIT") or "").strip() != "e-"
                 or str(hdr.get("SCORPUM") or "").strip().upper() != "ELECTRON"
                 or not group or group != str(hdr.get("VCMPGID") or "").strip()):
             raise ValueError("Unqualified source variance unit, MasterBias group, or calibration state")
