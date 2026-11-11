@@ -160,3 +160,26 @@ def test_invalid_or_misdeclared_metadata_fails_closed(linked_pair):
     ))
     with pytest.raises(ValueError, match="schema"):
         audit_frozen_operator_sidecar_pair(stack_manifest, extract_manifest)
+
+
+def test_spatial_gap_cannot_be_hidden_by_support_elsewhere_in_column(linked_pair):
+    stack_manifest, extract_manifest, _ = linked_pair
+    metadata = json.loads(stack_manifest.read_text(encoding="utf-8"))
+    # Only TRACE row 1 loses support at wavelength 2; rows 0 and 2 are
+    # still covered. A wavelength-only mask would miss this invalid map.
+    for item in metadata["inputs"]:
+        file = stack_manifest.parent / item["weights_file"]
+        arr = np.load(file, allow_pickle=False).copy()
+        arr[1, 2] = 0.
+        np.save(file, arr)
+        item["weights_sha256"] = sha256_file(file)
+    stack_manifest.write_text(json.dumps(metadata), encoding="utf-8")
+    with pytest.raises(ValueError, match="spatial/spectral pixel with no stack support"):
+        audit_frozen_operator_sidecar_pair(stack_manifest, extract_manifest)
+
+
+def test_rebound_capture_input_index_is_rejected(linked_pair):
+    stack_manifest, extract_manifest, _ = linked_pair
+    _update_manifest(stack_manifest, lambda obj: obj["inputs"][0].update({"index": 1}))
+    with pytest.raises(ValueError, match="input order"):
+        audit_frozen_operator_sidecar_pair(stack_manifest, extract_manifest)
