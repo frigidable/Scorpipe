@@ -11,7 +11,7 @@ The previous Sensfunc code sampled the BTA atmosphere curve as `np.interp(wave, 
 
 The correction evaluates the standard's native unit-grid wavelengths in **air Angstrom** and performs interpolation in the reference's *original air coordinates*, not on knots transformed nonlinearly to vacuum. When the response is de-extincted, the reference must have strictly increasing, finite positive wavelengths, finite nonnegative k(lambda), coverage of **every standard wavelength sample**, and actual source-file comment declarations `units: mag_per_airmass` and `wavelength_convention: air`. Reference-context fallback defaults cannot substitute for declarations in the input file.
 
-If no validated standard-star airmass is available, the normal relative-calibration behavior remains; the numerical standard extinction factor is not applied. This patch does not try to guess an uncalibrated missing reference.
+A parser-accepted standard-star airmass is also required to be finite and in [1,5]; nonphysical values fail closed before fitting the response. If no validated standard-star airmass is available, the normal relative-calibration behavior remains; the numerical standard extinction factor is not applied. This patch does not try to guess an uncalibrated missing reference.
 
 The current A09 science correction uses the same native-air interpolation policy, with its own exposure airmass. Both separate corrections are required to interpret the response physically, as described in PypeIt's fluxing documentation (https://pypeit.readthedocs.io/en/stable/fluxing.html).
 
