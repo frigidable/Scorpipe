@@ -1742,6 +1742,12 @@ def _process_linearize_frame(task: Dict[str, Any]) -> Dict[str, Any]:
     rect_var = np.zeros((ny, nlam), dtype=np.float32)
     rect_mask = np.zeros((ny, nlam), dtype=np.uint16)
     rect_cov = np.zeros((ny, nlam), dtype=np.float32)
+    # Capture the ACTUAL input validity after all source and external
+    # DQ masks have been combined; never infer it from output MASK alone.
+    count_valid = (
+        np.zeros((ny, data.shape[1]), dtype=bool)
+        if bool(lcfg.get("capture_count_v1_validity", False)) else None
+    )
 
     for yy in range(ny):
         row_plan = linearize_grid_plan.rows[yy]
@@ -1754,6 +1760,8 @@ def _process_linearize_frame(task: Dict[str, Any]) -> Dict[str, Any]:
             # Their missing flux reduces effective output-bin coverage.
             valid &= ((mask[yy] & (BADPIX | NO_COVERAGE | INVALID_WAVELENGTH | SATURATED)) == 0)
 
+        if count_valid is not None:
+            count_valid[yy] = valid
         v_row, cov = _apply_linearize_row_plan(
             data[yy],
             row_plan,
@@ -1951,6 +1959,7 @@ def _process_linearize_frame(task: Dict[str, Any]) -> Dict[str, Any]:
         "rect_var": rect_var,
         "rect_mask": rect_mask,
         "rect_cov": rect_cov,
+        "count_v1_actual_valid": count_valid,
         "mask_sky_y": mask_sky_y,
         "roi_report": roi_report,
         "roi_flags": roi_flags,
@@ -2796,6 +2805,47 @@ def run_linearize(
                 wave_ref=waveref,
             )
             rect_paths.append(out_skysub)
+
+            # Optional COUNT_V1 coefficient/validity evidence. This runs
+            # after science FITS are written and cannot modify SCI/VAR/MASK.
+            # Sidecars are a frozen numerical replay, not a covariance claim.
+            if bool(lcfg.get("capture_count_v1_validity", False)):
+                capture_path = out_dir / f"{base_for_mask}_count_v1_actual_validity_v1.json"
+                try:
+                    from scorpio_pipe.calib.count_v1_capture import (
+                        write_count_v1_capture,
+                    )
+                    if frame_res.get("count_v1_actual_valid") is None:
+                        raise ValueError("Worker omitted actual COUNT_V1 mask")
+                    saved = write_count_v1_capture(
+                        manifest_path=capture_path,
+                        source_fits=p, output_fits=out_skysub,
+                        actual_valid_mask=frame_res["count_v1_actual_valid"],
+                        effective_lambda_map=lam_map,
+                        wave0=float(wave0), dw=float(dw), nlam=int(nlam),
+                        output_density=bool(not scale_to_bin),
+                        normalize_exptime=bool(normalize_exptime),
+                        exptime_s=float(exptime_s),
+                        cleanup_executed=bool(cleanup_diag.get("cleanup_executed")),
+                        max_bytes=int(lcfg.get("capture_count_v1_max_bytes", 536_870_912)),
+                    )
+                    frame_res["count_v1_capture"] = {
+                        "manifest": str(saved),
+                        "status": "FROZEN_REPLAY_ONLY",
+                    }
+                except Exception as exc:
+                    capture_path.unlink(missing_ok=True)
+                    capture_path.with_suffix(".npz").unlink(missing_ok=True)
+                    frame_res["count_v1_capture"] = {
+                        "status": "COUNT_V1_CAPTURE_FAILED",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                    stage_flags.append(make_flag(
+                        "COUNT_V1_CAPTURE_FAILED", "WARN",
+                        "Optional actual-validity sidecar could not be saved",
+                        stem=base_for_mask,
+                        error=f"{type(exc).__name__}: {exc}",
+                    ))
 
             if bool(cleanup_diag.get("cleanup_executed")) and residual_model is not None:
                 model_out = np.asarray(residual_model, dtype=np.float32)
