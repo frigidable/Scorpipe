@@ -280,10 +280,18 @@ def build_sensfunc(cfg: dict[str, Any], *, standard_spec_path: str | Path, stand
             airmass = float(raw_meta.airmass)
     extinction_applied = bool(airmass is not None and ext_path is not None and ext_path.exists())
     if extinction_applied:
-        if (str(extinction_meta.get('wavelength_convention') or '').strip().lower() != 'air'
+        from scorpio_pipe.refs.context import _parse_text_header_metadata
+
+        # The context layer can supply defaults for missing file metadata.
+        # A physical extinction transfer needs assertions from the source
+        # curve itself, not merely those fallback defaults.
+        declared = _parse_text_header_metadata(ext_path)
+        if (str(declared.get('wavelength_convention') or '').strip().lower() != 'air'
+                or str(declared.get('units') or '').strip().lower() != 'mag_per_airmass'
+                or str(extinction_meta.get('wavelength_convention') or '').strip().lower() != 'air'
                 or str(extinction_meta.get('units') or '').strip().lower() != 'mag_per_airmass'):
             raise ValueError(
-                'Standard atmospheric extinction reference must declare air / mag_per_airmass'
+                'Standard atmospheric extinction reference must declare air / mag_per_airmass in source file'
             )
         extinction = _interpolate_standard_extinction_air(
             wave, wave_unit=spectral_unit,
