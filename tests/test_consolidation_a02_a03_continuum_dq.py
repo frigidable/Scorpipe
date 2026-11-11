@@ -99,3 +99,15 @@ def test_nonmonotonic_or_nonfinite_wavelengths_fail_closed(values):
     with pytest.raises(ValueError, match="strictly increasing"):
         _measure(wave, np.ones_like(wave), np.ones_like(wave),
                  np.zeros_like(wave, dtype=np.uint16))
+
+
+
+def test_no_valid_line_samples_preserves_spectral_failure_reason():
+    wave, flux, var, mask = _spectrum()
+    var[:] = 0.0
+    flux[wave == 5000.0] = 10000.0
+    result = _measure(wave, flux, var, mask)
+    assert result["detected"] is False
+    assert result["reason"] == "insufficient_valid_unmasked_pixels"
+    assert result["n_unmasked"] == 0
+    assert result["upper_limit_3sigma"] is None
