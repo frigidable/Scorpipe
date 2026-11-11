@@ -278,6 +278,10 @@ def build_sensfunc(cfg: dict[str, Any], *, standard_spec_path: str | Path, stand
             airmass_prov = 'missing'
         if raw_meta.airmass is not None and getattr(raw_meta, 'provenance_class', lambda _f: 'missing')('airmass') in {'header', 'derived'}:
             airmass = float(raw_meta.airmass)
+    if airmass is not None and (
+        not np.isfinite(airmass) or not (1.0 <= float(airmass) <= 5.0)
+    ):
+        raise ValueError("Standard airmass must be finite and in [1, 5]")
     extinction_applied = bool(airmass is not None and ext_path is not None and ext_path.exists())
     if extinction_applied:
         from scorpio_pipe.refs.context import _parse_text_header_metadata
