@@ -388,7 +388,8 @@ def measure_lines(
             ("BLENDED_DIAGNOSTIC_ONLY" if partners
              else "ISOLATED_WINDOW_DIAGNOSTIC")
         )
-        if partners and row.get("flux_kind") != "partial_window_integral_unqualified":
+        if (has_integral and partners
+                and row.get("flux_kind") != "partial_window_integral_unqualified"):
             row["flux_kind"] = "window_integral_not_deblended"
         rows.append(row)
     return rows
