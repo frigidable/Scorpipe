@@ -1235,6 +1235,26 @@ class WaveSolutionResult:
         }
 
 
+def _validated_wavesol_medium(wcfg: dict[str, Any]) -> str:
+    """Require explicitly valid air/vacuum wave medium before stage execution.
+
+    Only an omitted setting uses the historical air default; an explicitly
+    invalid or null medium must never be silently relabelled as air.
+    """
+    if "wave_ref" in wcfg:
+        requested = wcfg["wave_ref"]
+    elif "waveref" in wcfg:
+        requested = wcfg["waveref"]
+    else:
+        requested = "air"
+    medium = str(requested).strip().lower()
+    if medium not in {"air", "vacuum"}:
+        raise ValueError(
+            f"wavesol.wave_ref must be explicitly 'air' or 'vacuum'; got {requested!r}"
+        )
+    return medium
+
+
 def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> WaveSolutionResult:
     """Build 1D and 2D dispersion solution from superneon + hand_pairs.
 
@@ -1244,6 +1264,7 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
     Outputs are also written to work_dir/wavesol.
     """
     wcfg = cfg.get("wavesol", {}) if isinstance(cfg.get("wavesol"), dict) else {}
+    waveref = _validated_wavesol_medium(wcfg)
     # Engine-owned run root (P0-ARCH-02.1): do not let the stage choose its own.
     from scorpio_pipe.paths import resolve_work_dir
 
@@ -2445,11 +2466,6 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
         wave_unit = "nm"
     else:
         wave_unit = wave_unit_raw
-
-    waveref = str(wcfg.get("wave_ref", wcfg.get("waveref", "air")) or "air").strip().lower()
-    if waveref not in {"air", "vacuum"}:
-        # keep but normalise to a safe default
-        waveref = "air"
 
     # Convert internally-Angstrom lambda_map to requested output unit if needed
     unit_scale = 1.0
