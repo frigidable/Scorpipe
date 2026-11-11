@@ -148,3 +148,82 @@ def test_invalid_redshift_refused_in_blend_catalogue(z):
     halpha = next(s for s in DEFAULT_LINES if s.name == "Halpha")
     with pytest.raises(ValueError, match="redshift"):
         _window_overlap_partners(halpha, DEFAULT_LINES, redshift=z, waveref="air")
+
+
+def test_unmeasurable_line_has_overlap_diagnostic_but_no_claim_of_integral():
+    select = (next(s for s in DEFAULT_LINES if s.name == "Halpha"),)
+    wave = np.arange(4820.0, 4910.0, 0.5)
+    flux = np.ones_like(wave)
+    var = np.ones_like(wave)
+    row = measure_lines(
+        wave, flux, var,
+        calsys_rel=None, calsys_tell=None, calsys_abs=None,
+        lines=select,
+    )[0]
+    assert row["detected"] is False
+    assert row["reason"] == "insufficient_sampling"
+    assert row["fit_method"] == "NOT_MEASURED"
+    assert row["flux_interpretation"] == "UNMEASURED"
+    assert "[NII]6583" in row["blend_partners"]
+
+
+def test_real_stage_keeps_blended_candidates_separate_from_formal_detections(
+    tmp_path, monkeypatch,
+):
+    import json
+    from pathlib import Path
+    from types import SimpleNamespace
+    from astropy.io import fits
+    from scorpio_pipe.stages import line_measure as stage
+
+    wave, flux, var = _data()
+    spec = {
+        "wave": wave, "flux": flux, "var": var,
+        "mask": np.zeros(wave.size, dtype=np.uint16),
+        "header": fits.Header({
+            "WAVEREF": "air", "WAVEUNIT": "Angstrom",
+            "REBNORM": "COUNT_V1", "STKVARQ": "COND_ONLY",
+        }),
+        "dq1d_version": None,
+    }
+    paths = {
+        "fluxcal_spec1d_fits": tmp_path / "science.fits",
+        "calibration_systematics_fits": tmp_path / "sys.fits",
+        "fluxcal_qc_json": tmp_path / "fluxcal.json",
+    }
+    monkeypatch.setattr(
+        stage, "PRODUCT_CATALOG",
+        SimpleNamespace(best_path=lambda _cfg, key, **_kw: paths[key]),
+    )
+    monkeypatch.setattr(stage, "read_spec1d", lambda *_a, **_kw: spec)
+    z = np.zeros_like(wave)
+    monkeypatch.setattr(
+        stage, "_read_calsys",
+        lambda *_a, **_kw: {"rel": z, "tell": z, "abs": z},
+    )
+
+    def preview(path, *_args, **_kwargs):
+        p = Path(path)
+        p.write_bytes(b"synthetic")
+        return p
+
+    monkeypatch.setattr(stage, "plot_line_measurements_png", preview)
+    monkeypatch.setattr(stage, "write_done_json", lambda **_kw: None)
+
+    out = tmp_path / "line_measure"
+    stage.run_line_measure({}, run_root=tmp_path, stage_dir_path=out)
+    payload = json.loads((out / "science_lines.json").read_text(encoding="utf-8"))
+    qc = json.loads((out / "line_measure_plan.json").read_text(encoding="utf-8"))["qc"]
+    rows = {x["name"]: x for x in payload["lines"]}
+
+    assert payload["window_flux_qualification"] == "DIAGNOSTIC_ONLY_NOT_DEBLENDED"
+    assert payload["n_blended_window_candidates"] >= 5
+    assert payload["n_overlap_free_window_candidates"] >= 1
+    assert rows["Halpha"]["conditional_detection_candidate"] is True
+    assert rows["Halpha"]["detected"] is False
+    assert rows["Halpha"]["component_flux_qualified"] is False
+    assert rows["[SII]6716"]["blend_flag"] is True
+    assert qc["n_blended_window_detections"] == 0
+    assert qc["n_blended_window_candidates"] >= 5
+    assert qc["n_lines_detected"] == 0
+    assert qc["window_flux_qualification"] == "DIAGNOSTIC_ONLY_NOT_DEBLENDED"
