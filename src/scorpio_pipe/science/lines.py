@@ -371,7 +371,11 @@ def measure_lines(
         partners = _window_overlap_partners(
             spec, catalogue, redshift=redshift, waveref=waveref,
         )
-        row["fit_method"] = "continuum_subtracted_window_integral"
+        has_integral = "flux" in row
+        row["fit_method"] = (
+            "continuum_subtracted_window_integral"
+            if has_integral else "NOT_MEASURED"
+        )
         row["blend_partners"] = partners
         row["blend_flag"] = bool(partners)
         row["blend_warning"] = bool(row.get("blend_warning") or partners)
@@ -380,8 +384,9 @@ def measure_lines(
         # line-profile fit, even if no known catalogue windows overlap.
         row["component_flux_qualified"] = False
         row["flux_interpretation"] = (
-            "BLENDED_DIAGNOSTIC_ONLY" if partners
-            else "ISOLATED_WINDOW_DIAGNOSTIC"
+            "UNMEASURED" if not has_integral else
+            ("BLENDED_DIAGNOSTIC_ONLY" if partners
+             else "ISOLATED_WINDOW_DIAGNOSTIC")
         )
         if partners and row.get("flux_kind") != "partial_window_integral_unqualified":
             row["flux_kind"] = "window_integral_not_deblended"
