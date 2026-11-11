@@ -40,6 +40,7 @@ def _night(work: Path, *, gid="NIGHT_BIAS_GROUP", bvar=4.0, components=True):
         header["SCORPUM"] = "ELECTRON"
         header["BUNIT"] = "e-"
         header["BIASSUB"] = True
+        header["FLATCOR"] = True
         header["BVARINC"] = True
         header["SB_GID"] = gid
         header["VCMPGID"] = gid
@@ -138,6 +139,8 @@ def test_missing_flatfield_components_yield_explicit_hold(tmp_path):
     ("vrest", "VBIAS \\+ VREST"),
     ("bias_response", "Signed BSENS"),
     ("group_id", "group"),
+    ("units", "unit"),
+    ("flatcor", "calibration state"),
     ("version", "Unqualified source"),
     ("missing_component", "Incomplete declared"),
 ])
@@ -155,6 +158,10 @@ def test_component_schema_fails_closed_on_invalid_physics(tmp_path, damage, mess
             hdul["BSENS"].data[2, 3] *= 2.
         elif damage == "group_id":
             hdul[0].header["VCMPGID"] = "OTHER"
+        elif damage == "units":
+            hdul[0].header["BUNIT"] = "ADU"
+        elif damage == "flatcor":
+            hdul[0].header["FLATCOR"] = False
         elif damage == "version":
             hdul[0].header["VCMPVER"] = 9
         elif damage == "missing_component":
