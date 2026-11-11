@@ -167,11 +167,24 @@ def build_sensfunc(cfg: dict[str, Any], *, standard_spec_path: str | Path, stand
     var = spec['var']
     mask = np.asarray(spec['mask'])
     hdr0 = spec['header']
-    if str(hdr0.get('REBNORM') or '').strip() == 'COUNT_V1':
+    # Reference standards, atmospheric extinction and line-mask windows use
+    # Angstrom coordinates, while a valid extracted standard may use nm.
+    raw_unit = str(hdr0.get('WAVEUNIT') or hdr0.get('CUNIT1') or '').strip().lower()
+    norm = str(hdr0.get('REBNORM') or '').strip()
+    if raw_unit in {'a', 'aa', 'ang', 'angstrom', 'angstroms', 'å', 'ångström'}:
+        spectral_unit, reference_to_spectral = 'Angstrom', 1.0
+    elif raw_unit in {'nm', 'nanometer', 'nanometers'}:
+        spectral_unit, reference_to_spectral = 'nm', 0.1
+    elif not raw_unit and norm != 'COUNT_V1':
+        # Legacy unknown coordinate provenance is not science-qualified.
+        spectral_unit, reference_to_spectral = 'Angstrom', 1.0
+    elif not raw_unit:
+        raise ValueError('COUNT_V1 standard requires explicit wavelength-axis units')
+    else:
+        raise ValueError(f'Unsupported standard spectral wavelength unit: {raw_unit!r}')
+    if norm == 'COUNT_V1':
         if str(hdr0.get('WAVEREF') or '').strip().lower() not in {'air', 'vacuum'}:
             raise ValueError('COUNT_V1 standard requires explicitly declared WAVEREF air/vacuum')
-        if str(hdr0.get('WAVEUNIT') or hdr0.get('CUNIT1') or '').strip() == '':
-            raise ValueError('COUNT_V1 standard requires explicit wavelength-axis units')
     std_name = None
     raw_std_path = None
     if isinstance(standard_qc, dict):
@@ -194,7 +207,7 @@ def build_sensfunc(cfg: dict[str, Any], *, standard_spec_path: str | Path, stand
     if rw.size < 2 or rf.size != rw.size:
         raise ValueError('Invalid standard reference table')
     rw = convert_wavelength_convention(rw, from_ref=ref_waveref, to_ref=str(spec.get('waveref') or 'air'))
-    ref_flux = np.interp(wave, rw, rf, left=np.nan, right=np.nan)
+    ref_flux = np.interp(wave, rw * reference_to_spectral, rf, left=np.nan, right=np.nan)
 
     ext_path = reference_path(cfg, prefix='extinction_curve.')
     extinction_meta = reference_metadata(cfg, prefix='extinction_curve.')
@@ -202,7 +215,7 @@ def build_sensfunc(cfg: dict[str, Any], *, standard_spec_path: str | Path, stand
         etbl = read_small_csv(ext_path)
         ew = np.asarray(etbl['wavelength_A'] if 'wavelength_A' in etbl else etbl.get('wavelength', []), dtype=float)
         ek = np.asarray(etbl['k_lambda'] if 'k_lambda' in etbl else etbl.get('extinction', []), dtype=float)
-        extinction = np.interp(wave, ew, ek, left=np.nanmedian(ek) if ek.size else 0.0, right=np.nanmedian(ek) if ek.size else 0.0)
+        extinction = np.interp(wave, ew * reference_to_spectral, ek, left=np.nanmedian(ek) if ek.size else 0.0, right=np.nanmedian(ek) if ek.size else 0.0)
     else:
         extinction = np.zeros_like(wave)
     airmass = None
@@ -220,8 +233,14 @@ def build_sensfunc(cfg: dict[str, Any], *, standard_spec_path: str | Path, stand
     tell_mask_path = reference_path(cfg, exact='telluric_mask.default')
     tell_mask_meta = reference_metadata(cfg, exact='telluric_mask.default')
     tell_intervals = [(a, b) for a, b, _ in read_interval_csv(tell_mask_path)] if tell_mask_path and tell_mask_path.exists() else []
-    feature_mask = _interval_mask(wave, BALMER_WINDOWS_A)
-    telluric_mask = _interval_mask(wave, tell_intervals)
+    feature_mask = _interval_mask(
+        wave, [(a * reference_to_spectral, b * reference_to_spectral)
+               for a, b in BALMER_WINDOWS_A]
+    )
+    telluric_mask = _interval_mask(
+        wave, [(a * reference_to_spectral, b * reference_to_spectral)
+               for a, b in tell_intervals]
+    )
     snr = np.abs(flux) / np.sqrt(np.clip(var, 1e-12, np.inf))
     low_sn = snr < float((((cfg.get('fluxcal') if isinstance(cfg.get('fluxcal'), dict) else {}) or {}).get('sensfunc_min_snr', 5.0) or 5.0))
     bad_mask = np.asarray(mask) != 0
@@ -271,6 +290,9 @@ def build_sensfunc(cfg: dict[str, Any], *, standard_spec_path: str | Path, stand
         'reference_identity_confirmed': True,
         'airmass': (float(airmass) if airmass is not None else None),
         'fit_points': n_fit,
+        'response_wavelength_unit': spectral_unit,
+        'reference_wavelength_unit': 'Angstrom',
+        'reference_to_spectral_factor': float(reference_to_spectral),
         'model_evaluation_points': int(wave.size),
         'fit_wavelength_min': float(np.min(wave[fit_mask])),
         'fit_wavelength_max': float(np.max(wave[fit_mask])),
@@ -301,6 +323,7 @@ def build_sensfunc(cfg: dict[str, Any], *, standard_spec_path: str | Path, stand
         'qc': q,
         'flux_unit': 'erg/s/cm2/Angstrom',
         'waveref': str(spec.get('waveref') or 'air'),
+        'wave_unit': spectral_unit,
         'reference_context_id': str(ctx.get('context_id') or ''),
         'reference_quality': 'validated',
         'input_bunit': str(spec.get('bunit') or ''),
@@ -330,7 +353,7 @@ def write_sensfunc_products(out_dir: str | Path, payload: dict[str, Any]) -> dic
     from astropy.io import fits
     ph = fits.Header()
     ph['WAVEREF'] = str(payload.get('waveref') or 'air')
-    ph['WAVEUNIT'] = 'Angstrom'
+    ph['WAVEUNIT'] = str(payload.get('wave_unit') or 'Angstrom')
     # Response is only applicable to observations in the same detector
     # count/rate and bin/density units as the standard star.
     if str(payload.get('input_bunit') or '').strip():
@@ -384,7 +407,11 @@ def write_sensfunc_products(out_dir: str | Path, payload: dict[str, Any]) -> dic
     preview_path = plot_lines_png(out_dir / 'sensfunc_preview.png', [
         (payload['wave'], payload['raw_ratio'], 'raw ratio'),
         (payload['wave'], payload['response_abs'], 'smoothed response'),
-    ], title='Sensfunc', vspans=[(float(a), float(b)) for a, b in BALMER_WINDOWS_A])
+    ], title='Sensfunc', vspans=[
+        (float(a) * (0.1 if str(payload.get('wave_unit')) == 'nm' else 1.0),
+         float(b) * (0.1 if str(payload.get('wave_unit')) == 'nm' else 1.0))
+        for a, b in BALMER_WINDOWS_A
+    ])
     plan_path = save_json(out_dir / 'sensfunc_plan.json', {'stage': 'sensfunc', 'status': 'ok', 'qc': safe_json(payload.get('qc') or {})})
     return {
         'sensfunc_table_fits': str(table_path),
