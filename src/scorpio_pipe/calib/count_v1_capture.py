@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -115,7 +116,8 @@ def write_count_v1_capture(
 
 
 def audit_count_v1_capture(
-    manifest_path: Path, *, max_bytes: int = 536_870_912
+    manifest_path: Path, *, max_bytes: int = 536_870_912,
+    sky_lineage_manifest: Path | None = None,
 ) -> dict[str, Any]:
     """Reproduce exact COUNT_V1 SCI/VAR/COV for supported electron sources.
 
@@ -151,6 +153,9 @@ def audit_count_v1_capture(
         raise ValueError("COUNT_V1 native geometry invalid")
     if type(max_bytes) is not int or max_bytes <= 0 or shape[0]*shape[1]*9 > max_bytes:
         raise ValueError("COUNT_V1 audit byte budget exceeded")
+    with zipfile.ZipFile(checked["archive"]) as zipped:
+        if sum(item.file_size for item in zipped.infolist()) > max_bytes + 4096:
+            raise ValueError("COUNT_V1 archive decompression exceeds budget")
     with np.load(checked["archive"], allow_pickle=False) as z:
         if set(z.files) != {"valid", "lambda_map"}:
             raise ValueError("COUNT_V1 actual-validity archive schema mismatch")
@@ -159,6 +164,15 @@ def audit_count_v1_capture(
     if (mask.shape != tuple(shape) or mask.dtype != np.dtype(bool)
             or lam.shape != mask.shape or lam.dtype != np.dtype("float64")):
         raise ValueError("COUNT_V1 captured validity/wavelength geometry invalid")
+    sky_lineage_state = "UNBOUND"
+    if sky_lineage_manifest is not None:
+        from scorpio_pipe.calib.sky_fit_lineage import audit_frozen_kelson_fit_lineage
+        linked = audit_frozen_kelson_fit_lineage(
+            sky_lineage_manifest, check_fit_against_products=True,
+        )
+        if Path(linked["residual_fits"]).resolve() != checked["source"]:
+            raise ValueError("Linearize source is not the captured Kelson SkySub output")
+        sky_lineage_state = "HASH_AND_FIT_REPLAY_VERIFIED"
     grid = data["grid"]
     wave0, dw, nlam = float(grid["wave0"]), float(grid["dw"]), grid["nlam"]
     if (not np.isfinite(wave0) or not np.isfinite(dw) or dw <= 0
@@ -236,7 +250,7 @@ def audit_count_v1_capture(
         "hashes_verified": True, "count_v1_replayed": True,
         "max_delta_sci": max_delta_sci, "max_delta_var": max_delta_var,
         "max_delta_cov": max_delta_cov,
-        "sky_lineage": "UNBOUND",
+        "sky_lineage": sky_lineage_state,
         "science_uncertainty_qualified": False,
         "production_variance_release_allowed": False,
     }
