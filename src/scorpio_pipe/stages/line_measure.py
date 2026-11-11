@@ -65,6 +65,36 @@ def _qualify_lines_for_shared_bias_covariance(
     return qualified, shared
 
 
+def _science_wavelength_angstrom(
+    wave: np.ndarray, header: Any,
+) -> tuple[np.ndarray, str, str]:
+    """Normalize the wavelength *coordinate* to Å for catalog line science.
+
+    Calibrated F_lambda is already per Angstrom: never scale the flux or
+    variance here. Native nm coordinates need conversion so both the
+    rest-line match and the physical wavelength integral use Angstrom.
+    """
+    unit = str(header.get("WAVEUNIT") or header.get("CUNIT1") or "").strip().lower()
+    norm = str(header.get("REBNORM") or "").strip().upper()
+    if unit in {"a", "aa", "ang", "angstrom", "angstroms", "å", "ångström"}:
+        scale, native, qualification = 1.0, "Angstrom", "EXPLICIT"
+    elif unit in {"nm", "nanometer", "nanometers"}:
+        scale, native, qualification = 10.0, "nm", "EXPLICIT"
+    elif not unit and norm != "COUNT_V1":
+        # Existing legacy spectra may lack axis metadata; keep the assumption
+        # visible and unqualified rather than claiming verified coordinates.
+        scale, native, qualification = 1.0, "ASSUMED_ANGSTROM", "LEGACY_ASSUMED"
+    elif not unit:
+        raise ValueError("COUNT_V1 LineMeasure requires explicit WAVEUNIT")
+    else:
+        raise ValueError(f"Unsupported LineMeasure wavelength unit: {unit!r}")
+    arr = np.asarray(wave, dtype=float)
+    if (arr.ndim != 1 or arr.size < 2 or not np.isfinite(arr).all()
+            or np.any(arr <= 0) or not np.all(np.diff(arr) > 0)):
+        raise ValueError("LineMeasure requires finite positive increasing wavelengths")
+    return arr * scale, native, qualification
+
+
 def run_line_measure(cfg: dict[str, Any], *, run_root: Path, stage_dir_path: Path) -> StageResult:
     stage_dir_path.mkdir(parents=True, exist_ok=True)
     spec_path = PRODUCT_CATALOG.best_path(cfg, 'fluxcal_spec1d_fits', run_root=run_root)
@@ -72,7 +102,9 @@ def run_line_measure(cfg: dict[str, Any], *, run_root: Path, stage_dir_path: Pat
     fluxcal_qc_path = PRODUCT_CATALOG.best_path(cfg, 'fluxcal_qc_json', run_root=run_root)
     spec = read_spec1d(spec_path, mode='trace')
     calsys = _read_calsys(calsys_path, len(spec['wave']))
-    wave = np.asarray(spec['wave'], dtype=float)
+    wave, input_waveunit, coordinate_qualification = _science_wavelength_angstrom(
+        spec['wave'], spec['header']
+    )
     flux = np.asarray(spec['flux'], dtype=float)
     var = np.asarray(spec['var'], dtype=float)
     mask = np.asarray(spec['mask'])
@@ -114,6 +146,10 @@ def run_line_measure(cfg: dict[str, Any], *, run_root: Path, stage_dir_path: Pat
         'lines': rows,
         'reddening': redd,
         'dq1d_version': spec.get('dq1d_version'),
+        'wavelength_medium': waveref,
+        'input_wavelength_unit': input_waveunit,
+        'measurement_wavelength_unit': 'Angstrom',
+        'coordinate_qualification': coordinate_qualification,
         'partial_line_windows': int(sum(
             1 for row in rows if row.get('reason') == 'partial_aperture_or_spectral_coverage'
         )),
@@ -134,6 +170,10 @@ def run_line_measure(cfg: dict[str, Any], *, run_root: Path, stage_dir_path: Pat
         'stage': 'line_measure',
         'n_lines_total': int(len(rows)),
         'n_lines_detected': n_det,
+        'wavelength_medium': waveref,
+        'input_wavelength_unit': input_waveunit,
+        'measurement_wavelength_unit': 'Angstrom',
+        'coordinate_qualification': coordinate_qualification,
         'shared_bias_variance_unqualified': bool(shared_bias_unqualified),
         'strongest_line': (max(detected, key=lambda r: abs(float(r.get('flux') or 0.0)))['name'] if detected else None),
         'reddening': redd,
