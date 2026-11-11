@@ -331,6 +331,16 @@ def write_fluxcal_products(cfg: dict[str, Any], out_dir: str | Path, *, spec_pay
     with fits.open(in_spec, memmap=False) as hdul:
         hdr0 = hdul[0].header.copy()
         hdr0['BUNIT'] = spec_payload['flux_unit']
+        hdr0['ATMCORR'] = (
+            bool(spec_payload.get('science_extinction_applied', False)),
+            'Numerical science atmospheric extinction correction',
+        )
+        if spec_payload.get('science_airmass') is not None:
+            hdr0['ATMXSCI'] = (float(spec_payload['science_airmass']), 'Science airmass')
+            hdr0['ATMPROV'] = (
+                str(spec_payload.get('science_airmass_provenance') or 'unknown'),
+                'Provenance of the science airmass',
+            )
         # After physical flux calibration, data no longer have detector
         # electron/ADU units. Preserve the historical gain/noise cards but
         # remove the detector-only SCI unit-model label.
@@ -449,6 +459,31 @@ def write_fluxcal_products(cfg: dict[str, Any], out_dir: str | Path, *, spec_pay
             tr = np.interp(wave, tel['wave'], tel['trans'], left=1.0, right=1.0)
             sci = sci / np.clip(tr[None, :], 0.25, np.inf)
             var = var / np.clip(tr[None, :], 0.25, np.inf) ** 2
+        if spec_payload.get('science_extinction_applied', False):
+            src_wave = np.asarray(spec_payload['wave'], dtype=float)
+            factor = np.asarray(spec_payload['science_extinction_factor'], dtype=float)
+            # Applying an independently interpolated atmospheric factor to
+            # the wrong 2D grid could make the two calibrated products
+            # inconsistent. Same samples are required for this v1 transfer.
+            if (wave.shape != src_wave.shape
+                    or not np.allclose(wave, src_wave, rtol=0.0, atol=1e-8)
+                    or factor.shape != wave.shape
+                    or not np.all(np.isfinite(factor) & (factor > 0))):
+                raise ValueError(
+                    'Science 2D wavelength grid differs from 1D extinction grid'
+                )
+            sci = sci * factor[None, :]
+            var = var * factor[None, :] ** 2
+        hdr0['ATMCORR'] = (
+            bool(spec_payload.get('science_extinction_applied', False)),
+            'Numerical science atmospheric extinction correction',
+        )
+        if spec_payload.get('science_airmass') is not None:
+            hdr0['ATMXSCI'] = (float(spec_payload['science_airmass']), 'Science airmass')
+            hdr0['ATMPROV'] = (
+                str(spec_payload.get('science_airmass_provenance') or 'unknown'),
+                'Provenance of the science airmass',
+            )
         hdr0['BUNIT'] = spec_payload['flux_unit']
         if 'SCORPUM' in hdr0:
             del hdr0['SCORPUM']
@@ -497,6 +532,14 @@ def write_fluxcal_products(cfg: dict[str, Any], out_dir: str | Path, *, spec_pay
         'telluric_applied': bool(spec_payload['telluric_applied']),
         'science_extinction_applied': bool(spec_payload['science_extinction_applied']),
         'science_extinction_reason': str(spec_payload['science_extinction_reason']),
+        'science_airmass': spec_payload.get('science_airmass'),
+        'science_airmass_provenance': spec_payload.get('science_airmass_provenance'),
+        'science_extinction_reference': spec_payload.get('science_extinction_reference'),
+        'science_extinction_warning': (
+            'Airmass correction does not validate slit losses, covariances or absolute flux'
+            if spec_payload.get('science_extinction_applied')
+            else 'No lineage-verified science airmass transfer; absolute flux unqualified'
+        ),
         'systematics': {
             'calsys_rel_median': float(np.nanmedian(spec_payload['calsys_rel'])),
             'calsys_tell_median': float(np.nanmedian(spec_payload['calsys_tell'])),
