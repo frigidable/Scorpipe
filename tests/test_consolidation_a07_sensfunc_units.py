@@ -41,7 +41,11 @@ def _prepare_standard(tmp_path, monkeypatch, *, waveunit="nm"):
     raw = tmp_path / "original_standard.fits"
     fits.PrimaryHDU().writeto(raw)
     extinction_file = tmp_path / "extinction.csv"
-    extinction_file.write_text("dummy", encoding="utf-8")
+    extinction_file.write_text(
+        "# units: mag_per_airmass\n# wavelength_convention: air\n"
+        "wavelength_A,k_lambda\n3900,0.195\n5500,0.275\n",
+        encoding="utf-8",
+    )
     telluric_file = tmp_path / "telluric.csv"
     telluric_file.write_text("dummy", encoding="utf-8")
 
@@ -73,7 +77,13 @@ def _prepare_standard(tmp_path, monkeypatch, *, waveunit="nm"):
         return None
 
     monkeypatch.setattr(sf, "reference_path", ref_path)
-    monkeypatch.setattr(sf, "reference_metadata", lambda *_a, **_kw: {})
+    monkeypatch.setattr(
+        sf, "reference_metadata",
+        lambda _cfg, *, prefix=None, exact=None: (
+            {"wavelength_convention": "air", "units": "mag_per_airmass"}
+            if prefix == "extinction_curve." else {}
+        ),
+    )
     monkeypatch.setattr(
         sf, "read_interval_csv",
         lambda _p: [(5200.0, 5210.0, "telluric")],
