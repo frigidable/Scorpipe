@@ -180,3 +180,24 @@ def test_full_sensfunc_requires_source_file_unit_declarations(
         sf.build_sensfunc(
             {}, standard_spec_path=tmp_path / "unused_spec.fits", standard_qc=qc,
         )
+
+
+
+@pytest.mark.parametrize("bad_airmass", [0.5, 6.0, float("nan")])
+def test_full_sensfunc_rejects_nonphysical_standard_airmass(
+    tmp_path, monkeypatch, bad_airmass,
+):
+    from types import SimpleNamespace
+    sf, qc = _build_sensfunc_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        sf, "parse_frame_meta",
+        lambda *_a, **_kw: SimpleNamespace(
+            airmass=bad_airmass,
+            provenance_class=lambda key: "header",
+            provenance_for=lambda key: "header",
+        ),
+    )
+    with pytest.raises(ValueError, match="Standard airmass must be finite"):
+        sf.build_sensfunc(
+            {}, standard_spec_path=tmp_path / "unused_spec.fits", standard_qc=qc,
+        )
