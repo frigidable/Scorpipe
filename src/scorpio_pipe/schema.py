@@ -490,6 +490,20 @@ class ProjectBlock(BaseModel):
     wave_reference: str = Field(default="air")
     barycentric_correction: Optional[str] = None
 
+    @field_validator("barycentric_correction", mode="before")
+    @classmethod
+    def _validate_barycentric_request(cls, v: Any) -> Optional[str]:
+        # This is a compute-only utility: no active reduction stage applies
+        # the velocity correction. Reject silently ignored science requests.
+        if v is None:
+            return None
+        if isinstance(v, str) and v.strip().upper() == "OFF":
+            return "OFF"
+        raise ValueError(
+            "project.barycentric_correction application is not implemented in the engine; "
+            "use OFF/None and the explicit compute-only velocity utility"
+        )
+
     @field_validator("wave_reference", mode="before")
     @classmethod
     def _norm_wave_reference(cls, v: Any) -> str:
