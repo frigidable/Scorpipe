@@ -104,6 +104,22 @@ def audit_frozen_operator_sidecar_pair(
         raise ValueError("Frozen stack operator exceeds audit byte budget")
     if 2*ny*nlam*8 > max_extract_weight_bytes:
         raise ValueError("Frozen extraction operator exceeds audit byte budget")
+    smeta = s.get("frozen_parameters")
+    emeta = e.get("frozen_parameters")
+    if not isinstance(smeta, dict) or not isinstance(emeta, dict):
+        raise ValueError("Captured operator parameters are missing")
+    if smeta.get("resampling_contract") != "COUNT_V1":
+        raise ValueError("Full-chain admission requires COUNT_V1 spectral resampling")
+    if emeta.get("input_mode") != "stack2d" or emeta.get("apply_local_sky") is not False:
+        raise ValueError("Captured extraction must use stack2d without local sky correction")
+    for name in ("y_shifts", "sci_scales", "var_scales"):
+        value = smeta.get(name)
+        if not isinstance(value, list) or len(value) != len(inputs):
+            raise ValueError(f"Captured Stack2D {name} must describe each exposure")
+        coeff = np.asarray(value, dtype=np.float64)
+        if (not np.isfinite(coeff).all()
+                or (name != "y_shifts" and np.any(coeff <= 0))):
+            raise ValueError(f"Captured Stack2D {name} contains invalid coefficients")
 
     stack_path, stack_sha = _artifact(s.get("output"))
     extract_input_path, extract_input_sha = _artifact(e.get("input"))
