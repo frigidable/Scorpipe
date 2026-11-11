@@ -157,6 +157,16 @@ def run_line_measure(cfg: dict[str, Any], *, run_root: Path, stage_dir_path: Pat
         bool(row.get("conditional_detection_candidate", row.get("detected")))
         for row in rows
     )
+    n_blended_window_candidates = sum(
+        bool(row.get("blend_flag"))
+        and bool(row.get("conditional_detection_candidate", row.get("detected")))
+        for row in rows
+    )
+    n_overlap_free_candidates = sum(
+        bool(row.get("blend_window_overlap_free"))
+        and bool(row.get("conditional_detection_candidate", row.get("detected")))
+        for row in rows
+    )
     lines_by_name = {str(r.get('name')): r for r in rows if isinstance(r, dict)}
     redd = balmer_decrement_summary(lines_by_name)
     csv_path = write_lines_csv(stage_dir_path / 'science_lines.csv', rows)
@@ -177,6 +187,9 @@ def run_line_measure(cfg: dict[str, Any], *, run_root: Path, stage_dir_path: Pat
         'shared_bias_variance_unqualified': bool(shared_bias_unqualified),
         'uncertainty_detection_gate_triggered': bool(uncertainty_gate_triggered),
         'n_conditional_detection_candidates': int(n_conditional_candidates),
+        'n_blended_window_candidates': int(n_blended_window_candidates),
+        'n_overlap_free_window_candidates': int(n_overlap_free_candidates),
+        'window_flux_qualification': 'DIAGNOSTIC_ONLY_NOT_DEBLENDED',
         'calibration_status': json.loads(fluxcal_qc_path.read_text(encoding='utf-8')).get('status') if fluxcal_qc_path.exists() else None,
         'calibration_uncertainty_summary': {
             'median_rel': float(np.nanmedian(calsys['rel'])) if calsys['rel'].size else 0.0,
@@ -194,6 +207,13 @@ def run_line_measure(cfg: dict[str, Any], *, run_root: Path, stage_dir_path: Pat
         'n_lines_total': int(len(rows)),
         'n_lines_detected': n_det,
         'n_conditional_detection_candidates': int(n_conditional_candidates),
+        'n_blended_window_candidates': int(n_blended_window_candidates),
+        'n_overlap_free_window_candidates': int(n_overlap_free_candidates),
+        'n_blended_window_detections': int(sum(
+            bool(row.get('blend_flag')) and bool(row.get('detected'))
+            for row in rows
+        )),
+        'window_flux_qualification': 'DIAGNOSTIC_ONLY_NOT_DEBLENDED',
         'uncertainty_detection_gate_triggered': bool(uncertainty_gate_triggered),
         'wavelength_medium': waveref,
         'input_wavelength_unit': input_waveunit,
