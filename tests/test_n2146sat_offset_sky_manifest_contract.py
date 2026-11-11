@@ -21,6 +21,15 @@ def _name_set(paths: list[str]) -> set[str]:
 def _historic_cfg(tmp_path: Path) -> dict:
     raw = tmp_path / "night"
     raw.mkdir()
+    # The manifest resolver prefers data_dir only for EXISTING source files.
+    # Create header-free fake source paths so absolute and relative references
+    # refer to the same physical file, as they do on a real observing night.
+    filenames = (
+        [f"s228006{i:02d}.fts" for i in (4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)]
+        + [f"s228001{i:02d}.fts" for i in range(1, 21)]
+    )
+    for name in filenames:
+        (raw / name).touch()
     return {
         "work_dir": str(tmp_path / "new_isolated_run"),
         "config_dir": str(tmp_path),
