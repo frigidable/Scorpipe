@@ -160,6 +160,53 @@ def _load_standard_reference(cfg: dict[str, Any], *, selected_name: str | None) 
     return lib, tbl_path, units, waveref
 
 
+def _interpolate_standard_extinction_air(
+    wave: np.ndarray, *, wave_unit: str, wave_ref: str,
+    extinction_wave_A: np.ndarray, k_lambda: np.ndarray,
+) -> np.ndarray:
+    """Sample a tabulated AIR-Angstrom extinction law at standard wavelengths.
+
+    Interpolation is performed in the reference law's native AIR coordinate;
+    resampling a linear law on vacuum wavelength knots would otherwise add a
+    small deterministic medium-conversion bias. Never extrapolate.
+    """
+    unit = str(wave_unit or "").strip().lower()
+    medium = str(wave_ref or "").strip().lower()
+    if unit in {"angstrom", "a", "aa", "ang", "angstroms", "å", "ångström"}:
+        scale = 1.0
+    elif unit in {"nm", "nanometer", "nanometers"}:
+        scale = 10.0
+    else:
+        raise ValueError("Standard extinction requires explicit Angstrom/nm wavelength unit")
+    if medium not in {"air", "vacuum"}:
+        raise ValueError("Standard extinction requires explicit air/vacuum WAVEREF")
+    spectral = np.asarray(wave, dtype=float)
+    curve_wave = np.asarray(extinction_wave_A, dtype=float)
+    attenuation = np.asarray(k_lambda, dtype=float)
+    if (spectral.ndim != 1 or spectral.size < 2
+            or not np.all(np.isfinite(spectral) & (spectral > 0))
+            or not np.all(np.diff(spectral) > 0)):
+        raise ValueError("Invalid standard extinction wavelength grid")
+    if (curve_wave.ndim != 1 or curve_wave.size < 2
+            or curve_wave.shape != attenuation.shape
+            or not np.all(np.isfinite(curve_wave) & (curve_wave > 0))
+            or not np.all(np.isfinite(attenuation) & (attenuation >= 0))
+            or not np.all(np.diff(curve_wave) > 0)):
+        raise ValueError("Invalid atmospheric extinction reference curve")
+    science_sample_air_A = convert_wavelength_convention(
+        spectral * scale, from_ref=medium, to_ref="air",
+    )
+    k = np.interp(
+        science_sample_air_A, curve_wave, attenuation,
+        left=np.nan, right=np.nan,
+    )
+    if not np.isfinite(k).all():
+        raise ValueError(
+            "Atmospheric extinction reference does not cover standard wavelength grid"
+        )
+    return k
+
+
 def build_sensfunc(cfg: dict[str, Any], *, standard_spec_path: str | Path, standard_qc: dict[str, Any] | None = None) -> dict[str, Any]:
     spec = read_spec1d(standard_spec_path, mode='trace')
     wave = spec['wave']
@@ -213,11 +260,15 @@ def build_sensfunc(cfg: dict[str, Any], *, standard_spec_path: str | Path, stand
     extinction_meta = reference_metadata(cfg, prefix='extinction_curve.')
     if ext_path is not None and ext_path.exists():
         etbl = read_small_csv(ext_path)
-        ew = np.asarray(etbl['wavelength_A'] if 'wavelength_A' in etbl else etbl.get('wavelength', []), dtype=float)
-        ek = np.asarray(etbl['k_lambda'] if 'k_lambda' in etbl else etbl.get('extinction', []), dtype=float)
-        extinction = np.interp(wave, ew * reference_to_spectral, ek, left=np.nanmedian(ek) if ek.size else 0.0, right=np.nanmedian(ek) if ek.size else 0.0)
+        if 'wavelength_A' not in etbl or 'k_lambda' not in etbl:
+            raise ValueError(
+                'Extinction reference requires wavelength_A and k_lambda columns'
+            )
+        ew = np.asarray(etbl['wavelength_A'], dtype=float)
+        ek = np.asarray(etbl['k_lambda'], dtype=float)
     else:
-        extinction = np.zeros_like(wave)
+        ew = np.array([], dtype=float)
+        ek = np.array([], dtype=float)
     airmass = None
     airmass_prov = 'missing'
     if raw_meta is not None:
@@ -228,7 +279,21 @@ def build_sensfunc(cfg: dict[str, Any], *, standard_spec_path: str | Path, stand
         if raw_meta.airmass is not None and getattr(raw_meta, 'provenance_class', lambda _f: 'missing')('airmass') in {'header', 'derived'}:
             airmass = float(raw_meta.airmass)
     extinction_applied = bool(airmass is not None and ext_path is not None and ext_path.exists())
-    ext_corr = 10.0 ** (0.4 * extinction * float(airmass)) if extinction_applied else np.ones_like(wave)
+    if extinction_applied:
+        if (str(extinction_meta.get('wavelength_convention') or '').strip().lower() != 'air'
+                or str(extinction_meta.get('units') or '').strip().lower() != 'mag_per_airmass'):
+            raise ValueError(
+                'Standard atmospheric extinction reference must declare air / mag_per_airmass'
+            )
+        extinction = _interpolate_standard_extinction_air(
+            wave, wave_unit=spectral_unit,
+            wave_ref=str(hdr0.get('WAVEREF') or spec.get('waveref') or ''),
+            extinction_wave_A=ew, k_lambda=ek,
+        )
+        ext_corr = 10.0 ** (0.4 * extinction * float(airmass))
+    else:
+        extinction = np.zeros_like(wave, dtype=float)
+        ext_corr = np.ones_like(wave, dtype=float)
 
     tell_mask_path = reference_path(cfg, exact='telluric_mask.default')
     tell_mask_meta = reference_metadata(cfg, exact='telluric_mask.default')
