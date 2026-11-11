@@ -52,6 +52,35 @@ def _load_lambda_map(path: Path) -> tuple[np.ndarray, fits.Header]:
     return np.asarray(data, dtype=float), hdr
 
 
+def _lambda_map_as_angstrom(
+    lam_map: np.ndarray, hdr: fits.Header
+) -> tuple[np.ndarray, str, float]:
+    """Convert a detector wavelength map to Å before any ARC-LSF measurement.
+
+    ARC-line catalogues, fitted Gaussian widths, manual FWHM priors and
+    science-support intervals are all expressed in Angstrom. A wavelength
+    map in nm is valid input, but silently treating it as Angstrom biases
+    every physical width by a factor of ten.
+    """
+    raw = str(hdr.get("WAVEUNIT") or hdr.get("CUNIT1") or "").strip().lower()
+    if raw in {"angstrom", "ang", "a", "aa"}:
+        native, factor = "Angstrom", 1.0
+    elif raw in {"nm", "nanometer", "nanometers"}:
+        native, factor = "nm", 10.0
+    else:
+        raise ValueError(
+            "ARC LSF requires an explicit wavelength-map unit "
+            f"(Angstrom or nm), got {raw!r}"
+        )
+    arr = np.asarray(lam_map, dtype=float)
+    if arr.ndim != 2:
+        raise ValueError("ARC LSF requires a two-dimensional wavelength map")
+    valid = np.isfinite(arr)
+    if not np.any(valid) or np.any(arr[valid] <= 0.0):
+        raise ValueError("ARC LSF wavelength map lacks positive physical support")
+    return arr * factor, native, factor
+
+
 def _read_arc_image(path: Path) -> tuple[np.ndarray, fits.Header]:
     with fits.open(path, memmap=False) as hdul:
         data = hdul[0].data
@@ -366,6 +395,16 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
         raise FileNotFoundError(f"Missing superneon frame: {arc_path}")
 
     lam_map, lam_hdr = _load_lambda_map(lam_map_path)
+    # Normalize once, at the entry boundary, so all profile fits, physical
+    # support checks and manual priors operate in the same units (Angstrom).
+    lam_map, native_wave_unit, native_to_A_factor = _lambda_map_as_angstrom(
+        lam_map, lam_hdr
+    )
+    lam_hdr = fits.Header(lam_hdr)
+    lam_hdr["WAVEUNIT"] = ("Angstrom", "ARC-LSF spectral coordinate unit")
+    lam_hdr["CUNIT1"] = ("Angstrom", "Approximate spectral WCS unit")
+    lam_hdr["LAMUNIT"] = ("Angstrom", "Wavelength coordinate unit")
+    lam_hdr["NATWUNIT"] = (native_wave_unit, "Native input lambda-map unit")
     arc, arc_hdr = _read_arc_image(arc_path)
     if arc.shape != lam_map.shape:
         raise ValueError(f"superneon shape {arc.shape} != lambda_map shape {lam_map.shape}")
@@ -487,6 +526,8 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
     grid = _approx_linear_grid_from_lambda_map(lam_map, lam_hdr)
 
     primary_hdr = fits.Header(lam_hdr)
+    primary_hdr["LSFGEOM"] = ("DETECTOR", "Arc LSF is in detector pixel geometry")
+    primary_hdr["LSFQUAL"] = (False, "Not a qualified science-extracted LSF")
     primary_hdr["BUNIT"] = ("Angstrom", "Instrumental sigma unit")
     primary_hdr["LSFUNIT"] = ("sigma_A", "LSF map quantity")
     primary_hdr["LSFSRC"] = (str(fit_source), "LSF source")
@@ -546,7 +587,10 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
             "disperser": disperser,
             "slit_arcsec": slit_arcsec,
             "wave_ref": str(lam_hdr.get("WAVEREF", "unknown") or "unknown"),
-            "wave_unit": str(lam_hdr.get("WAVEUNIT", "Angstrom") or "Angstrom"),
+            "wave_unit": "Angstrom",
+            "native_wave_unit": native_wave_unit,
+            "native_to_A_factor": float(native_to_A_factor),
+            "lsf_geometry": "DETECTOR",
         },
         "model": source_meta,
         "summary_1d": summary_1d,
@@ -562,6 +606,9 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
         "ok": bool(finite.size > 0),
         "source": fit_source,
         "science_lsf_validated": False,
+        "native_wave_unit": native_wave_unit,
+        "native_to_A_factor": float(native_to_A_factor),
+        "lsf_geometry": "DETECTOR",
         "arc_profile_fit_method": "gaussian_plus_linear_background_isolated",
         "support_range_A": source_meta.get("support_range_A"),
         "extrapolated_fraction": float(extrapolated_frac),
