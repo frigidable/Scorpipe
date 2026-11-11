@@ -2368,6 +2368,46 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                 write_sci_var_mask(skymodel_path, model, var=None, mask=mask, header=hdr0)
                 write_sci_var_mask(skysub_path, skysub, var=var_out, mask=mask, header=hdr0)
 
+                # Bind the ACTUAL selected science file, captured solver
+                # snapshot and both completed FITS products by full-file SHA256.
+                # Keep ancillary provenance failures separate from valid SCI:
+                # an old manifest must never appear to belong to a new run.
+                if method_used == "kelson_raw" and frozen_capture_enabled:
+                    lineage_path = out_dir / f"{stem}_kelson_frozen_fit_lineage_v1.json"
+                    if frozen_snapshot is None:
+                        lineage_path.unlink(missing_ok=True)
+                    else:
+                        try:
+                            from scorpio_pipe.calib.sky_fit_lineage import (
+                                write_frozen_kelson_fit_lineage,
+                            )
+
+                            written = write_frozen_kelson_fit_lineage(
+                                lineage_path,
+                                selected_sky_input=p,
+                                frozen_fit=Path(str(frozen_snapshot["path"])),
+                                skymodel_raw=skymodel_path,
+                                skysub_raw=skysub_path,
+                            )
+                            fit_meta["frozen_covariance_lineage"] = {
+                                "path": str(written),
+                                "status": "FIT_ONLY_NOT_SCIENCE_COVARIANCE",
+                                "full_file_sha256": True,
+                                "science_uncertainty_qualified": False,
+                            }
+                        except Exception as exc:
+                            lineage_path.unlink(missing_ok=True)
+                            fit_meta["frozen_covariance_lineage"] = {
+                                "status": "LINEAGE_BIND_FAILED",
+                                "error": f"{type(exc).__name__}: {exc}",
+                            }
+                            stage_flags.append(make_flag(
+                                "SKY_FROZEN_LINEAGE_FAILED", "WARN",
+                                "Optional frozen sky provenance could not be bound to science FITS",
+                                stem=stem,
+                                error=f"{type(exc).__name__}: {exc}",
+                            ))
+
                 # Compatibility aliases belong to the current Sky stage only.
                 # NEVER pull a pre-existing 10_linearize product into 09_sky:
                 # it may belong to a previous science run (and has the wrong
