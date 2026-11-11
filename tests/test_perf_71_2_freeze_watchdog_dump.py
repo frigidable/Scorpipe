@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 
 def test_recent_ui_actions_tracks_begin_end_and_inflight() -> None:
     from scorpio_pipe.ui import slow_action_profiler as sap
@@ -40,6 +42,9 @@ def test_freeze_watchdog_dump_contains_stack_jobs_backlog_and_recent_actions(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    # Qt is an optional GUI extra, absent from the headless fast CI job.
+    # Keep the GUI behavior tested when installed, without breaking core CI.
+    pytest.importorskip("PySide6")
     from scorpio_pipe.ui import async_worker, qt_log, slow_action_profiler as sap
     from scorpio_pipe.ui.freeze_watchdog import FreezeWatchdog
 
