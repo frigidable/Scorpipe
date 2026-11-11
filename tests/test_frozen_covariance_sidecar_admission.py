@@ -44,7 +44,12 @@ def linked_pair(tmp_path: Path):
     capture.write(1, 0, 3, np.full((3, 4), .7))
     stack_manifest = capture.finalize(
         stack_fits=stack,
-        meta={"y_shifts": [0., 0.], "resampling_contract": "COUNT_V1"},
+        meta={
+            "y_shifts": [0., 0.],
+            "sci_scales": [1., 1.],
+            "var_scales": [1., 1.],
+            "resampling_contract": "COUNT_V1",
+        },
     )
     trace = np.zeros((3, 4))
     fixed = np.zeros((3, 4))
@@ -53,7 +58,11 @@ def linked_pair(tmp_path: Path):
     extract_manifest = save_extraction_operators(
         extract_dir, input_fits=stack, spec_fits=spec,
         E_trace=trace, E_fixed=fixed,
-        metadata={"extraction_method": "boxcar", "input_mode": "stack2d"},
+        metadata={
+            "extraction_method": "boxcar",
+            "input_mode": "stack2d",
+            "apply_local_sky": False,
+        },
     )
     return stack_manifest, extract_manifest, (a, b, stack, spec)
 
@@ -182,4 +191,36 @@ def test_rebound_capture_input_index_is_rejected(linked_pair):
     stack_manifest, extract_manifest, _ = linked_pair
     _update_manifest(stack_manifest, lambda obj: obj["inputs"][0].update({"index": 1}))
     with pytest.raises(ValueError, match="input order"):
+        audit_frozen_operator_sidecar_pair(stack_manifest, extract_manifest)
+
+
+@pytest.mark.parametrize("field,value,message", [
+    ("resampling_contract", "LEGACY_UNQUALIFIED", "COUNT_V1"),
+    ("sci_scales", [1., 0.], "sci_scales"),
+    ("var_scales", [1.], "var_scales"),
+    ("y_shifts", [float("nan"), 0.], "y_shifts"),
+])
+def test_unqualified_stage_transform_metadata_fails_closed(
+    linked_pair, field, value, message,
+):
+    stack_manifest, extract_manifest, _ = linked_pair
+    _update_manifest(
+        stack_manifest,
+        lambda record: record["frozen_parameters"].update({field: value}),
+    )
+    with pytest.raises(ValueError, match=message):
+        audit_frozen_operator_sidecar_pair(stack_manifest, extract_manifest)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("input_mode", "single_frame"),
+    ("apply_local_sky", True),
+])
+def test_unqualified_extraction_lineage_fails_closed(linked_pair, field, value):
+    stack_manifest, extract_manifest, _ = linked_pair
+    _update_manifest(
+        extract_manifest,
+        lambda record: record["frozen_parameters"].update({field: value}),
+    )
+    with pytest.raises(ValueError, match="without local sky correction"):
         audit_frozen_operator_sidecar_pair(stack_manifest, extract_manifest)
