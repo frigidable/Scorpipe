@@ -289,6 +289,49 @@ def measure_line(
     }
 
 
+def _window_overlap_partners(
+    spec: LineSpec,
+    catalogue: tuple[LineSpec, ...],
+    *,
+    redshift: float,
+    waveref: str,
+) -> list[str]:
+    """List catalogue lines whose *integration windows* overlap this window.
+
+    This reports the risk of unresolved component contamination, not the
+    existence, detection or physical amplitude of a second emission line.
+    Check the whole catalogue even if only one line was requested.
+    """
+    from scorpio_pipe.calib.common import convert_wavelength_convention
+
+    medium = str(waveref or "").strip().lower()
+    z = float(redshift)
+    if medium not in {"air", "vacuum"}:
+        raise ValueError("Blend-window eligibility requires air/vacuum WAVEREF")
+    if not np.isfinite(z) or z <= -1.0:
+        raise ValueError("Blend-window eligibility requires finite redshift > -1")
+
+    def bounds(s: LineSpec) -> tuple[float, float]:
+        rest = float(s.rest_wavelength)
+        half = float(s.window_half_width)
+        if not np.isfinite(rest) or rest <= 0 or not np.isfinite(half) or half <= 0:
+            raise ValueError("Blend-window catalogue has invalid rest wavelength or width")
+        observed = float(convert_wavelength_convention(
+            np.array([rest]), from_ref="air", to_ref=medium,
+        )[0]) * (1.0 + z)
+        return observed - half, observed + half
+
+    lo, hi = bounds(spec)
+    partners: set[str] = set()
+    for other in catalogue:
+        if other.name == spec.name:
+            continue
+        other_lo, other_hi = bounds(other)
+        if max(lo, other_lo) < min(hi, other_hi):
+            partners.add(str(other.name))
+    return sorted(partners)
+
+
 def measure_lines(
     wave: np.ndarray,
     flux: np.ndarray,
@@ -304,11 +347,17 @@ def measure_lines(
     waveref: str = "air",
     detection_snr: float = 3.0,
 ) -> list[dict[str, Any]]:
-    return [
-        measure_line(
-            wave,
-            flux,
-            var,
+    requested = tuple(lines)
+    # Include known neighbours even when not requested for measurement.
+    # Reusing the default catalogue does not infer that those lines exist.
+    catalogue = DEFAULT_LINES + tuple(
+        line for line in requested
+        if line.name not in {item.name for item in DEFAULT_LINES}
+    )
+    rows: list[dict[str, Any]] = []
+    for spec in requested:
+        row = measure_line(
+            wave, flux, var,
             calsys_rel=calsys_rel,
             calsys_tell=calsys_tell,
             calsys_abs=calsys_abs,
@@ -319,8 +368,25 @@ def measure_lines(
             waveref=waveref,
             detection_snr=detection_snr,
         )
-        for spec in lines
-    ]
+        partners = _window_overlap_partners(
+            spec, catalogue, redshift=redshift, waveref=waveref,
+        )
+        row["fit_method"] = "continuum_subtracted_window_integral"
+        row["blend_partners"] = partners
+        row["blend_flag"] = bool(partners)
+        row["blend_warning"] = bool(row.get("blend_warning") or partners)
+        row["blend_window_overlap_free"] = not bool(partners)
+        # A window integral is never an independent multi-component
+        # line-profile fit, even if no known catalogue windows overlap.
+        row["component_flux_qualified"] = False
+        row["flux_interpretation"] = (
+            "BLENDED_DIAGNOSTIC_ONLY" if partners
+            else "ISOLATED_WINDOW_DIAGNOSTIC"
+        )
+        if partners and row.get("flux_kind") != "partial_window_integral_unqualified":
+            row["flux_kind"] = "window_integral_not_deblended"
+        rows.append(row)
+    return rows
 
 
 def write_lines_csv(path: str | Path, rows: list[dict[str, Any]]) -> Path:
