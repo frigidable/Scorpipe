@@ -239,3 +239,20 @@ def test_spatial_operator_verifier_fails_closed_if_weights_do_not_replay_flux():
         verify_spatial_operator(sci, E, np.full(7, 10.0))
     with pytest.raises(ValueError, match="Nonfinite|Invalid"):
         verify_spatial_operator(sci, np.full_like(sci, np.nan), np.ones(7))
+
+
+def test_nonfinite_zero_support_does_not_poison_accumulator_replay():
+    # The historical P1.4d2 branch also carried this independent
+    # zero-support regression; modern W2VAR must retain the behaviour.
+    acc = st._WeightedMeanAccumulator((1, 2))
+    acc.update(
+        np.array([[5.0, np.nan]]),
+        np.array([[1.0, np.nan]]),
+    )
+    acc.update(
+        np.array([[7.0, 9.0]]),
+        np.array([[1.0, 2.0]]),
+    )
+    mean, variance = acc.finalize()
+    np.testing.assert_allclose(mean, [[6.0, 9.0]])
+    np.testing.assert_allclose(variance, [[0.5, 0.5]])
