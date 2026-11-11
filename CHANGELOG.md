@@ -1,5 +1,17 @@
 ## Unreleased
 
+- fix(velocity/P1.2): preserve compute-only optical barycentric/heliocentric
+  corrections with explicit RA units, observer location, UTC midpoint, reference
+  frames, bundled IERS-B/builtin ephemeris and input validation. Unsupported
+  requests to apply a correction through `project.barycentric_correction`
+  now fail closed instead of being silently accepted by the configuration.
+  Wavelength-grid corrections remain **unconnected to science stages**.
+  A vacuum-grid helper rejects repeated/non-topocentric application.
+- fix(linearize): default FITS `SSYSOBS=TOPOCENT` independently of the
+  spectral-axis `SPECSYS`, preserving explicit observer-frame metadata.
+  No science FITS, previous run or archived calibration was rewritten.
+  See `docs/science/P1_2_VELOCITY_CORRECTION_AUDIT_20261111.md`.
+
 - fix(airvac): use the VALD Morton (2000) standard-air refractive index and
   numerically invert that same relation for air-to-vacuum wavelengths. Calibration
   helpers now delegate to the shared NumPy kernel. Wavelengths are in Angstrom;
