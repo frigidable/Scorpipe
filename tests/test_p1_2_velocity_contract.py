@@ -120,7 +120,9 @@ def test_compute_matches_direct_astropy(kind, expected_frame):
     {"MJD-OBS": None},
 ])
 def test_unsafe_or_incomplete_compute_fails_closed(changes):
-    result = compute_barycentric_velocity_mps(_header(RAUNIT="deg", **changes))
+    header = _header(RAUNIT="deg")
+    header.update(changes)
+    result = compute_barycentric_velocity_mps(header)
     assert not result.ok
     assert math.isnan(result.v_bary_mps)
     assert math.isnan(result.doppler_factor)
