@@ -241,18 +241,28 @@ def test_spatial_operator_verifier_fails_closed_if_weights_do_not_replay_flux():
         verify_spatial_operator(sci, np.full_like(sci, np.nan), np.ones(7))
 
 
-def test_nonfinite_zero_support_does_not_poison_accumulator_replay():
-    # The historical P1.4d2 branch also carried this independent
-    # zero-support regression; modern W2VAR must retain the behaviour.
+def test_nonfinite_weight_is_refused_and_missing_pixel_still_replays():
+    # In vNext a missing source pixel must be explicitly assigned weight
+    # ZERO. A NaN WEIGHT itself is a data-contract violation, not coverage.
     acc = st._WeightedMeanAccumulator((1, 2))
+    with pytest.raises(ValueError, match="finite nonnegative weights"):
+        acc.update(
+            np.array([[5.0, np.nan]]),
+            np.array([[1.0, np.nan]]),
+        )
+
+    # The test must use actual detector variances, not the historical
+    # implicit inverse-weight variance when the weights are arbitrary.
     acc.update(
         np.array([[5.0, np.nan]]),
-        np.array([[1.0, np.nan]]),
+        np.array([[1.0, 0.0]]),
+        variances=np.array([[1.0, np.nan]]),
     )
     acc.update(
         np.array([[7.0, 9.0]]),
         np.array([[1.0, 2.0]]),
+        variances=np.array([[1.0, 2.0]]),
     )
     mean, variance = acc.finalize()
     np.testing.assert_allclose(mean, [[6.0, 9.0]])
-    np.testing.assert_allclose(variance, [[0.5, 0.5]])
+    np.testing.assert_allclose(variance, [[0.5, 2.0]])
