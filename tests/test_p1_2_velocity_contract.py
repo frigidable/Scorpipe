@@ -42,8 +42,12 @@ def test_ra_numeric_unit_not_inferred_from_fk5_or_magnitude():
         _parse_radec(_header(RADESYS="FK5"))
     with pytest.raises(ValueError, match="Numeric RA is ambiguous"):
         _parse_radec(_header())
-    assert _parse_radec(_header(RAUNIT="deg")) == (10.0, 20.0)
-    assert _parse_radec(_header(RAUNIT="hourangle")) == (150.0, 20.0)
+    ra_deg, dec_deg = _parse_radec(_header(RAUNIT="deg"))
+    assert ra_deg == pytest.approx(10.0, abs=1e-12)
+    assert dec_deg == pytest.approx(20.0, abs=1e-12)
+    ra_hours, dec_hours = _parse_radec(_header(RAUNIT="hourangle"))
+    assert ra_hours == pytest.approx(150.0, abs=1e-12)
+    assert dec_hours == pytest.approx(20.0, abs=1e-12)
 
 
 def test_colon_ra_is_explicit_hourangle_and_nonfinite_rejected():
