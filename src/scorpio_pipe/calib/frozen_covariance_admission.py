@@ -111,6 +111,9 @@ def audit_frozen_operator_sidecar_pair(
     if stack_sha != extract_input_sha or stack_path != extract_input_path:
         raise ValueError("Extract1D input is not the captured Stack2D output")
     # Bind weights to the captured exposures, including their exact order.
+    # Pixel-wise support is required: support elsewhere in a wavelength
+    # column does NOT justify using an uncovered spatial row.
+    support_mask = np.zeros(shape, dtype=bool)
     arrays = []
     try:
         for i, rec in enumerate(inputs):
@@ -134,12 +137,9 @@ def audit_frozen_operator_sidecar_pair(
                     raise ValueError("Nonfinite or negative captured stack coefficients")
                 total += block
             supported = total > 0
+            support_mask[y0:y1] = supported
             if np.any(~np.isclose(total[supported], 1., rtol=2e-6, atol=2e-8)):
                 raise ValueError("Captured stack coefficients are not normalized")
-            # Extraction coefficients cannot claim a contributor in empty pixels.
-            if y0 == 0:
-                support_summary = np.zeros(nlam, dtype=bool)
-            support_summary |= np.any(supported, axis=0)
     finally:
         arrays.clear()
 
@@ -157,8 +157,8 @@ def audit_frozen_operator_sidecar_pair(
             arr = data[k]
             if arr.shape != shape or arr.dtype != np.float64 or not np.isfinite(arr).all():
                 raise ValueError("Captured extraction coefficients have invalid geometry")
-            if np.any(np.any(arr != 0, axis=0) & ~support_summary):
-                raise ValueError("Extraction uses wavelength column with no stack support")
+            if np.any((arr != 0) & ~support_mask):
+                raise ValueError("Extraction uses a spatial/spectral pixel with no stack support")
     # The frozen operators alone do not prove the original CCD fits,
     # spectral mapping, source group assignment or actual captured sky fit.
     return {
