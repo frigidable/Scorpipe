@@ -194,6 +194,7 @@ def _lineage_fixture(tmp_path, monkeypatch):
     (sd / "stack2d_done.json").write_text(json.dumps(report), encoding="utf-8")
     atmosphere = work / "extinction.csv"
     atmosphere.write_text(
+        "# units: mag_per_airmass\n# wavelength_convention: air\n"
         "wavelength_A,k_lambda\n4900,0.2\n5100,0.25\n", encoding="utf-8",
     )
     import scorpio_pipe.instruments as inst
@@ -303,3 +304,18 @@ def test_written_2d_1d_products_have_consistent_atmospheric_transfer(tmp_path, m
     assert qc["science_airmass"] == pytest.approx(1.4)
     assert qc["status"] == "ABSOLUTE_APPROX"
     assert qc["science_extinction_lineage_qualification"] == "LOWLEVEL_EXPLICIT_ONLY"
+
+
+
+def test_undeclared_reference_curve_units_disallow_automatic_correction(
+    tmp_path, monkeypatch,
+):
+    cfg, src, work, sd = _lineage_fixture(tmp_path, monkeypatch)
+    atmosphere = work / "extinction.csv"
+    atmosphere.write_text(
+        "wavelength_A,k_lambda\n4900,0.2\n5100,0.25\n",
+        encoding="utf-8",
+    )
+    assert stage._single_science_airmass_model(
+        cfg, science_spec_path=src, run_root=work,
+    ) is None
