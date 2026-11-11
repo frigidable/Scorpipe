@@ -692,6 +692,26 @@ def apply_project_manifest_to_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
         # Stages/dataset builder can use this unified list.
         cfg["exclude_frames"] = excluded_abs
 
+    # In a curated manifest, a dedicated SKY exposure must not also enter
+    # OBJECT_FRAMES. Resolve relative vs absolute spellings before comparing;
+    # fail before any downstream Cosmics/Stack2D stage sees ambiguous roles.
+    from os.path import normcase
+
+    def _frame_identity(raw_path: Any) -> str:
+        p = Path(str(raw_path)).expanduser()
+        if not p.is_absolute():
+            p = data_dir_eff / p
+        return normcase(str(p.resolve()))
+
+    obj_ids = {_frame_identity(p) for p in (frames.get("obj") or [])}
+    sky_ids = {_frame_identity(p) for p in (frames.get("sky") or [])}
+    role_conflicts = sorted(obj_ids & sky_ids)
+    if role_conflicts:
+        raise ValueError(
+            "A frame cannot be both OBJECT_FRAMES and SKY_FRAMES: "
+            + ", ".join(role_conflicts[:5])
+        )
+
     cfg["frames"] = frames
 
     sky_list = frames.get("sky") if isinstance(frames.get("sky"), list) else []
