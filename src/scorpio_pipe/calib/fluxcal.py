@@ -311,6 +311,14 @@ def apply_fluxcal_to_spec1d(science_spec_path: str | Path, *, sensfunc_path: str
             str(science_extinction.get('extinction_reference') or '')
             if science_extinction_applied else None
         ),
+        'science_extinction_source_exposure': (
+            str(science_extinction.get('source_exposure') or '')
+            if science_extinction_applied else None
+        ),
+        'science_extinction_lineage_qualification': (
+            str(science_extinction.get('lineage_qualification') or 'LOWLEVEL_EXPLICIT_ONLY')
+            if science_extinction_applied else 'NOT_APPLIED'
+        ),
         'transmission': transmission,
         'tell_conf': tell_conf,
         'calsys_rel': calsys_rel,
@@ -340,6 +348,11 @@ def write_fluxcal_products(cfg: dict[str, Any], out_dir: str | Path, *, spec_pay
             hdr0['ATMPROV'] = (
                 str(spec_payload.get('science_airmass_provenance') or 'unknown'),
                 'Provenance of the science airmass',
+            )
+            hdr0['ATMLINE'] = (
+                'STEM_ONLY' if spec_payload.get('science_extinction_lineage_qualification')
+                == 'SINGLE_STACK_STEM_MATCH_ONLY' else 'LOWLEVEL',
+                'Science input lineage qualification',
             )
         # After physical flux calibration, data no longer have detector
         # electron/ADU units. Preserve the historical gain/noise cards but
@@ -484,6 +497,11 @@ def write_fluxcal_products(cfg: dict[str, Any], out_dir: str | Path, *, spec_pay
                 str(spec_payload.get('science_airmass_provenance') or 'unknown'),
                 'Provenance of the science airmass',
             )
+            hdr0['ATMLINE'] = (
+                'STEM_ONLY' if spec_payload.get('science_extinction_lineage_qualification')
+                == 'SINGLE_STACK_STEM_MATCH_ONLY' else 'LOWLEVEL',
+                'Science input lineage qualification',
+            )
         hdr0['BUNIT'] = spec_payload['flux_unit']
         if 'SCORPUM' in hdr0:
             del hdr0['SCORPUM']
@@ -535,6 +553,8 @@ def write_fluxcal_products(cfg: dict[str, Any], out_dir: str | Path, *, spec_pay
         'science_airmass': spec_payload.get('science_airmass'),
         'science_airmass_provenance': spec_payload.get('science_airmass_provenance'),
         'science_extinction_reference': spec_payload.get('science_extinction_reference'),
+        'science_extinction_source_exposure': spec_payload.get('science_extinction_source_exposure'),
+        'science_extinction_lineage_qualification': spec_payload.get('science_extinction_lineage_qualification'),
         'science_extinction_warning': (
             'Airmass correction does not validate slit losses, covariances or absolute flux'
             if spec_payload.get('science_extinction_applied')
