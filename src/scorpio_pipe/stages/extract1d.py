@@ -819,6 +819,7 @@ def _boxcar_extract(
     min_good_frac: float,
     sky_resid: Optional[np.ndarray],
     apply_local_sky: bool,
+    operator_capture: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Simple aperture sum (TRACE or FIXED)."""
     ny, nlam = sci.shape
@@ -879,6 +880,8 @@ def _boxcar_extract(
         if n_good < int(math.ceil(min_good_frac * n_tot)):
             out_mask[j] |= np.uint16(NO_COVERAGE)
 
+        if operator_capture is not None:
+            operator_capture[y0:y1, j] = good.astype(np.float64)
         f = float(np.sum(sl[good]))
         if apply_local_sky and sky_resid is not None and np.isfinite(sky_resid[j]):
             f = f - float(sky_resid[j]) * float(n_good)
@@ -912,6 +915,7 @@ def _optimal_extract(
     clip_negative_profile: bool = True,
     min_profile_sum: float = 1e-6,
     backend: str = "auto",
+    operator_capture: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
     """Horne-like optimal extraction (weights by spatial profile + honest VAR).
 
@@ -1070,6 +1074,24 @@ def _optimal_extract(
                 finite = ok_flux & np.isfinite(sky_arr)
                 flux[finite] = flux[finite] - sky_arr[finite] * (corr_num[finite] / denom[finite])
         meta["backend_used"] = "numpy"
+
+    if operator_capture is not None:
+        # The frozen Horne operator uses the actual fitted profile, mask,
+        # and input VAR, independent of the NumPy/Numba numerical backend.
+        # Keep every rejected contributor's coefficient at exactly zero.
+        safe_v = np.where(good, vv_all, 1.0)
+        denom_capture = np.sum(
+            np.where(good, P * P / safe_v, 0.0), axis=0,
+            dtype=np.float64,
+        )
+        numerator_capture = np.where(good, P / safe_v, 0.0)
+        weights_capture = np.divide(
+            numerator_capture, denom_capture[None, :],
+            out=np.zeros_like(numerator_capture),
+            where=denom_capture[None, :] > 0,
+        )
+        cols_capture = np.broadcast_to(cols, rows.shape)
+        operator_capture[rows_clip[inside], cols_capture[inside]] = weights_capture[inside]
 
     # Distinguish a justified interpolation of the spatial *model* from
     # an aperture whose shape is genuinely not constrained by any data.
@@ -1712,6 +1734,21 @@ def _run_extract1d_impl(
 
     min_good_frac = float(ecfg.get("min_good_frac", 0.6))
 
+    capture_enabled = bool(ecfg.get("capture_frozen_operators", False))
+    E_trace = E_fixed = None
+    if capture_enabled:
+        # The sky estimator is an additive, data-derived term not described
+        # by these frozen linear coefficients. Never misrepresent it as E @ SCI.
+        if apply_local_sky:
+            raise ValueError(
+                "Frozen extraction capture cannot encode nonlinear local sky correction"
+            )
+        capture_limit = int(ecfg.get("capture_max_bytes", 536_870_912))
+        if capture_limit <= 0 or 2 * ny * nlam * np.dtype("float64").itemsize > capture_limit:
+            raise ValueError("Frozen extraction operator capture exceeds explicit byte limit")
+        E_trace = np.zeros((ny, nlam), dtype=np.float64)
+        E_fixed = np.zeros((ny, nlam), dtype=np.float64)
+
     opt_meta: dict[str, Any] = {}
     if method == "optimal":
         ocfg = ecfg.get("optimal") if isinstance(ecfg.get("optimal"), dict) else {}
@@ -1733,6 +1770,7 @@ def _run_extract1d_impl(
             clip_negative_profile=clip_neg,
             min_profile_sum=min_ps,
             backend=opt_backend,
+            operator_capture=E_trace,
         )
         flux_fx, var_fx, mask_fx, sky_fx, npix_fx, m_fx = _optimal_extract(
             sci,
@@ -1748,6 +1786,7 @@ def _run_extract1d_impl(
             clip_negative_profile=clip_neg,
             min_profile_sum=min_ps,
             backend=opt_backend,
+            operator_capture=E_fixed,
         )
         opt_meta = {"trace": m_tr, "fixed": m_fx}
     else:
@@ -1761,6 +1800,7 @@ def _run_extract1d_impl(
             min_good_frac=min_good_frac,
             sky_resid=sky_resid,
             apply_local_sky=apply_local_sky,
+            operator_capture=E_trace,
         )
         flux_fx, var_fx, mask_fx, sky_fx, npix_fx = _boxcar_extract(
             sci,
@@ -1772,6 +1812,7 @@ def _run_extract1d_impl(
             min_good_frac=min_good_frac,
             sky_resid=sky_resid,
             apply_local_sky=apply_local_sky,
+            operator_capture=E_fixed,
         )
     if informational_1d_bits:
         # A stacked contributor was rejected, NOT this final 1D datum.
@@ -1806,6 +1847,9 @@ def _run_extract1d_impl(
         flux_fx = flux_fx / n_eff_fx
         var_tr = var_tr / (n_eff_tr**2)
         var_fx = var_fx / (n_eff_fx**2)
+        if capture_enabled:
+            E_trace /= n_eff_tr[None, :]
+            E_fixed /= n_eff_fx[None, :]
 
     # ------------------------------- outputs ------------------------------
     out_fits = out_dir / "spec1d.fits"
@@ -1892,6 +1936,29 @@ def _run_extract1d_impl(
         frac_trace=frac_tr,
         frac_fixed=frac_fx,
     )
+    covariance_manifest = None
+    if capture_enabled:
+        from scorpio_pipe.covariance_operator_capture import (
+            save_extraction_operators, verify_spatial_operator,
+        )
+        verify_spatial_operator(sci, E_trace, flux_tr)
+        verify_spatial_operator(sci, E_fixed, flux_fx)
+        covariance_manifest = save_extraction_operators(
+            out_dir, input_fits=in_fits, spec_fits=out_fits,
+            E_trace=E_trace, E_fixed=E_fixed,
+            max_bytes=int(ecfg.get("capture_max_bytes", 536_870_912)),
+            metadata={
+                "extraction_method": method,
+                "input_mode": mode,
+                "aperture_half_width": int(trace.aperture_half_width),
+                "fatal_bits": int(fatal_bits),
+                "min_good_frac": float(np.clip(min_good_frac, 0, 1)),
+                "apply_local_sky": False,
+                "eta_applied_to_input_variance": bool(eta_appl),
+                "optimal_config": opt_meta if opt_meta else None,
+                "source_2d_spectral_resampling_operator": "NOT_CAPTURED",
+            },
+        )
     # trace.json
     # Provide stable, explicit metadata for reproducibility and QC.
     trace_model_meta = trace.meta.get("trace_model", {}) if isinstance(trace.meta, dict) else {}
@@ -2136,6 +2203,11 @@ def _run_extract1d_impl(
                 "diagnostics": _safe_json(diagnostics),
             },
             "warnings": [w for w in [eta_warn, geo_meta.get("warning")] if w],
+            "covariance_operator_capture": (
+                {"manifest": str(covariance_manifest),
+                 "status": "CONDITIONAL_FROZEN_OPERATOR_ONLY"}
+                if covariance_manifest is not None else None
+            ),
             # Backward-compatible code list
             "flag_codes": sorted(set(flag_codes)),
         },
@@ -2177,6 +2249,9 @@ def _run_extract1d_impl(
         "extraction_qc_json": str(qc_json),
         "extraction_diagnostics_png": str(diag_png) if diag_png.exists() else None,
         "etaappl": bool(eta_appl),
+        "covariance_operator_manifest": (
+            str(covariance_manifest) if covariance_manifest is not None else None
+        ),
         "products": ["TRACE", "FIXED"],
     }
 
