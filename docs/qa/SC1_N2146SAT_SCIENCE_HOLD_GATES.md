@@ -62,7 +62,8 @@ The program checks all 32 exact-night selected sources independently. It
 computes whole-file SHA-256 fingerprints, verifies that the declared primary
 FITS data block fits inside the actual file size (using Astropy's `datLoc`
 and `datSpan`), then reads unscaled native primary pixels, verifies array
-shape and finite numeric samples, and records storage-value min/max/mean.
+shape and finite real numeric samples, rejects integer FITS BLANK sentinels
+and invalid scaling metadata, and records storage-value min/max/mean.
 The report records a root-independent content manifest digest, refuses
 writing inside RAW/work and refuses replacing prior reports. It is designed
 to keep memory bounded by processing one primary image at a time.
