@@ -71,7 +71,15 @@ jobs:
           if ($tag) {
             $ver = $tag.TrimStart('v')
           } else {
-            $ver = (python -c "import re, pathlib; p=pathlib.Path('src/scorpio_pipe/version.py'); m=re.search(r"__version__\s*=\s*['\"]([^'\"]+)['\"]", p.read_text(encoding='utf-8')); print(m.group(1) if m else '')").Trim()
+            $versionSource = Get-Content -LiteralPath "src/scorpio_pipe/version.py" -Raw -Encoding UTF8
+            $versionMatch = [regex]::Match(
+              $versionSource,
+              '(?m)^\s*__version__\s*=\s*["''](?<value>[^"'']+)["'']'
+            )
+            if (-not $versionMatch.Success) {
+              throw "Could not parse __version__ from src/scorpio_pipe/version.py"
+            }
+            $ver = $versionMatch.Groups["value"].Value
           }
           if (-not $ver) { throw "Failed to resolve APP_VERSION" }
           "APP_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
