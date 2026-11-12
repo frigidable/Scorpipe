@@ -44,14 +44,36 @@ The historic LineID26c NPZ was previously reported on the user's Windows
 machine at:
 C:\Users\frigi\Documents\PhD\Scorpipe_LineID26c_FullSlit_v2_20261111_023442\lineid26c_fullslit_raw_native.npz
 
-Use --inspect first to reveal keys, array shapes, dtypes and archive SHA256;
-it does not write anything. Its literal NPZ key names and frame axis are
-NOT independently available to the current GitHub CI. The analysis mode
-fails closed unless one unique real numerical cube has shape 7x1032x37,
-or --cube-key is explicitly given. The flag --assert-26c-frame-order is
-required to record that the operator has checked the legacy NPZ mapping
-OFF04, then ON07..12; this does not cryptographically authenticate that
-mapping. The historical signed 26c report should be checked separately.
+The observer's real Windows read-only inspection (2026-11-13) identified
+the existing LineID26c archive, correcting the mistaken guessed basename.
+The actual source is
+C:\Users\frigi\Documents\PhD\Scorpipe_LineID26c_FullSlit_v2_20261111_023442\lineid26c_ni5199_native_counts.npz
+(370619 bytes), SHA256
+91689caad2e4d7fcc85433c9d3c390c7ab3c6108ca6d65d535999b9633bca073.
+Its five arrays are `raw_counts` (7x1032x37 float64),
+`original_filename` (7 Unicode strings of length up to 13),
+`native_dx` (37 int32), `x_native_centre_float_prior` (7x1032 float64)
+and `x_native_centre_integer` (7x1032 int32).
+This inspection recorded dimensions, NOT the *values* of frame names or dx.
+
+The revised --inspect lists the actual embedded `original_filename` and
+`native_dx` values. Before calculating any rates, the program now
+enforces the embedded seven names in the observer-confirmed order
+OFF04, ON07..12 and requires the exact signed integer dx grid -18..18.
+The deprecated manual --assert-26c-frame-order flag cannot bypass
+those checks. The caller must also pin `--expected-npz-sha256` to the
+independently observed 64-character SHA above; changed archive bytes
+are rejected. Selected numeric cube remains required to be a unique
+7x1032x37 array, or the caller must provide --cube-key raw_counts.
+The report saves verified embedded labels, dx, and source hash. This is
+an internal archive-source consistency test, **not independent
+authentication of original BTA FITS**.
+
+When the updated exact CI-pinned vNext worktree is available, the
+operator can run --inspect again to view the actual embedded labels,
+then run the read-only analysis into a fresh JSON file outside RAW and
+every earlier archive/work directory. The historical signed LineID26c
+report should still be checked independently.
 
 For each native detector row with 37 sampled x pixels, local background is
 linearly interpolated between the *medians* of the first and last 7 pixels.
