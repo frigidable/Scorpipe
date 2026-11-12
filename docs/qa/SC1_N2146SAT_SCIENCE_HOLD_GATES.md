@@ -47,6 +47,18 @@ A `--check` failure solely due to prior `03_bias` is a clean-workspace
 safety gate, **not** evidence of scientifically invalid raw observations.
 Never delete, rename or move old calibration products to make it pass.
 
+For Windows PowerShell 5.1, an end-to-end **fail-stop** wrapper runs both
+read-only diagnostics while preserving the existing work tree:
+
+`& scripts/qa/run_sc1_n2146sat_audit.ps1 -ConfigPath <saved-config.yaml> -ReportDir <external-qa-directory> -PythonExe <python.exe>`
+
+The wrapper sends a Python dependency probe through standard input instead
+of a quote-sensitive `python -c` argument; it checks native exit codes before
+each subsequent step and only prints a final success summary if both JSON
+reports exist and validate. There is no need to remove or rename `03_bias`.
+The external QA directory will be created only after the Python-side
+out-of-RAW/out-of-work destination checks succeed.
+
 The output location must be outside the work tree, the **configured RAW
 root** and *all* selected RAW frame directories, including nested series. Never overwrite reports. The code verifies selection
 counts and exact early20 basenames; existence and FITS header NAXIS; explicit parseable CCD binning;
