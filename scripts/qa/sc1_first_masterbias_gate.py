@@ -112,7 +112,15 @@ def collect(config_path: Path) -> tuple[dict, list[Path]]:
                     f"Unexpected readout for {role} {p.name}: "
                     f"RATE={rate}, GAIN={gain}, NODE={node}"
                 )
-            sigs.append(FrameSignature.from_header(h, fallback_shape=shape))
+            sig = FrameSignature.from_header(h, fallback_shape=shape)
+            # Equal *missing* metadata across all frames must not be treated
+            # as evidence of compatible CCD binning for this exact-night QA.
+            if sig.bx is None or sig.by is None:
+                raise RuntimeError(
+                    f"Unknown CCD binning for {role} {p.name}; "
+                    "required header metadata is absent or unparseable"
+                )
+            sigs.append(sig)
         reference = sigs[0]
         for p, sig in zip(files, sigs):
             diffs = sig.diff(reference)
