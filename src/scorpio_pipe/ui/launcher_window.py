@@ -8967,6 +8967,16 @@ class LauncherWindow(QtWidgets.QMainWindow):
         except (RuntimeError, AttributeError, TypeError):
             return None
 
+    def _select_stage_key(self, stage_key: str) -> None:
+        """Select a stage by its item identity, even after sidebar reordering."""
+        items = [
+            self.steps.item(i) for i in range(self.steps.count())
+            if str(self.steps.item(i).data(QtCore.Qt.ItemDataRole.UserRole) or "") == stage_key
+        ]
+        if len(items) != 1:
+            raise ValueError(f"GUI stage item missing or duplicated: {stage_key!r}")
+        self.steps.setCurrentItem(items[0])
+
     def _is_wavesol_page_current(self) -> bool:
         """Check the displayed widget itself; Qt indices move on lazy rebuild."""
         try:
@@ -9361,7 +9371,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         ]
         for stage_key, name, fn in chain:
             try:
-                self.steps.setCurrentRow(self._stage_row[stage_key])
+                self._select_stage_key(stage_key)
                 QtWidgets.QApplication.processEvents()
                 self._log_info(f"--- RUN: {name} ---")
                 fn()
