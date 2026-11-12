@@ -104,3 +104,14 @@ def test_workflow_action_versions_are_pinned_not_moving_tags() -> None:
                 continue
             action = step["uses"]
             assert re.fullmatch(r"[^@ ]+@[0-9a-f]{40}", action), action
+
+
+def test_windows_build_version_uses_native_powershell_parser() -> None:
+    """Prevent the real PR #213 Windows failure from nested python -c quoting."""
+    run = _step(_load()["jobs"]["build"], "Resolve build version")["run"]
+    assert 'Get-Content -LiteralPath "src/scorpio_pipe/version.py"' in run
+    assert "[regex]::Match(" in run
+    assert '$versionMatch.Groups["value"].Value' in run
+    assert "if (-not $versionMatch.Success)" in run
+    assert "python -c" not in run
+    assert 'APP_VERSION=$ver' in run
