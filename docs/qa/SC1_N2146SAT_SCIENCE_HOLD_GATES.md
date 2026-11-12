@@ -8,9 +8,15 @@ read, reduced, or scientifically validated on GitHub CI.
 
 The SAO RAS instrument pages establish that SCORPIO-1 and SCORPIO-2 are
 distinct focal reducers and have different CCD configurations. The SCORPIO-1
-description is https://www.sao.ru/hq/lon/SCORPIO/main.html ; the SCORPIO-2
+instrument pages are https://www.sao.ru/hq/lon/SCORPIO/main.html and
+https://www.sao.ru/hq/lsfvo/devices/scorpio/param.html ; the SCORPIO-2
 detector summary is
 https://www.sao.ru/hq/lsfvo/devices/scorpio-2/params_eng.html .
+The official SCORPIO-1 overview lists an EEV 42-40 active CCD format of
+2048x2048 pixels; the exact native raw FITS dimensions depend on binning,
+readout and any accompanying bias regions. Its published nominal gain modes
+are **not proof of the meaning or calibration of particular night-specific
+header `GAIN` values**.
 These public instrument descriptions **do not certify an active/overscan
 pixel map for this exact 2024 night**. A raw array of (1032, 2080), even
 when `BINNING=1x2`, is insufficient by itself to declare the outer columns
