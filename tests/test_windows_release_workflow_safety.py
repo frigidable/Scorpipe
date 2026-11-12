@@ -23,11 +23,22 @@ def _step(job: dict, name: str) -> dict:
 
 def test_windows_publish_only_for_published_release_not_manual_dispatch() -> None:
     data = _load()
-    assert set(data["on"]) == {"release", "workflow_dispatch"}
+    assert set(data["on"]) == {"release", "workflow_dispatch", "pull_request"}
     assert data["on"]["release"]["types"] == ["published"]
+    pr = data["on"]["pull_request"]
+    assert pr["branches"] == ["integration/scorpipe-vnext-20261111"]
+    assert set(pr["types"]) == {"opened", "reopened", "synchronize", "ready_for_review"}
+    assert set(pr["paths"]) == {
+        ".github/workflows/windows_release.yml",
+        "packaging/windows/**",
+        "tests/test_windows_release_workflow_safety.py",
+    }
     jobs = data["jobs"]
-    assert set(jobs) == {"build_check", "build", "publish"}
+    assert set(jobs) == {"build_check", "build", "artifact_contract", "publish"}
     assert jobs["build"]["needs"] == ["build_check"]
+    assert jobs["artifact_contract"]["needs"] == ["build"]
+    assert jobs["artifact_contract"]["if"] == "github.event_name == 'pull_request'"
+    assert jobs["artifact_contract"]["permissions"] == {"contents": "read"}
     assert jobs["publish"]["needs"] == ["build"]
     assert jobs["publish"]["if"] == "github.event_name == 'release'"
     assert jobs["publish"]["permissions"] == {
@@ -46,6 +57,14 @@ def test_windows_artifact_roundtrip_stays_archived_and_same_name() -> None:
     jobs = _load()["jobs"]
     upload = _step(jobs["build"], "Upload release artifacts")
     download = _step(jobs["publish"], "Download release artifacts")
+    qa_download = _step(jobs["artifact_contract"],
+                        "Download Windows artifacts for nonpublishing verification")
+    assert qa_download["uses"] == download["uses"]
+    assert qa_download["with"] == download["with"]
+    verify = _step(jobs["artifact_contract"],
+                   "Verify Windows installer, portable bundle and checksums")
+    assert "sha256sum --check --strict SHA256SUMS.txt" in verify["run"]
+    assert "unzip -t" in verify["run"]
     assert upload["uses"].startswith("actions/upload-artifact@")
     assert download["uses"].startswith("actions/download-artifact@")
     assert upload["with"]["name"] == download["with"]["name"] == "windows-release-assets"
