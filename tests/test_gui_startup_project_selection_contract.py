@@ -55,10 +55,24 @@ class _UnorderedStack:
 class _Fake:
     _on_step_changed = _method("_on_step_changed")
 
+    def _selected_stage_key(self):
+        return self._stage_keys[self.selected_row]
+
+    def _is_wavesol_page_current(self):
+        return False
+
     def __init__(self):
         self.stack = _UnorderedStack()
         self.stack.items = list(reversed(self.stack.items))
-        self._stage_page_index = [0, 1, 2, 4, 3, 5, 6, 7, 8, 9, 10, 11]
+        self._stage_keys = [
+            "project", "setup", "biascorr", "flatfield", "cosmics",
+            "superneon", "arclineid", "wavesol", "linearize", "sky",
+            "stack2d", "extract1d",
+        ]
+        self._page_index_by_key = dict(zip(
+            self._stage_keys, [0, 1, 2, 4, 3, 5, 6, 7, 8, 9, 10, 11]
+        ))
+        self.selected_row = 0
         self._page_widgets = {i: widget for i, widget in enumerate(
             list(reversed(self.stack.items)))}
         self.builders = []
@@ -87,8 +101,10 @@ class _Fake:
 def test_production_step_navigation_uses_widget_identity_not_index():
     window = _Fake()
     for row in (0, 4, 3, 2, 1, 11, 0):
-        index = window._stage_page_index[row]
-        window._on_step_changed(row)
+        window.selected_row = row
+        index = window._page_index_by_key[window._selected_stage_key()]
+        # The emitted row must not be used as the page identity.
+        window._on_step_changed(11 - row)
         assert window.stack.current is window._page_widgets[index]
     assert window.builders == [0, 3, 4, 2, 1, 11, 0]
     assert not window.logs
@@ -103,7 +119,12 @@ def test_first_project_page_is_built_synchronously_before_first_show():
                 and x.name == "__init__")
     # Validate the final initialization block, not an incidental helper.
     statements = [ast.unparse(n) for n in ctor.body]
-    assert any("self._ensure_page_built(0)" in x for x in statements)
+    # The initial Project page must be built before first show, with an
+    # identity-based page index rather than a stale numeric constant.
+    assert any(
+        "self._ensure_page_built(self._page_index_by_key['project'])"
+        in x.replace('"', "'") for x in statements
+    )
     assert any("self.stack.setCurrentWidget(self.page_project)" in x
                for x in statements)
     assert not any("QTimer.singleShot(0" in x and "_ensure_page_built" in x
