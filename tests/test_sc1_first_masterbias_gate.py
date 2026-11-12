@@ -211,3 +211,15 @@ def test_header_preflight_cannot_be_misread_as_pixel_or_overscan_validation(tmp_
     assert report["physical_overscan_region_certified"] is False
     assert report["masterbias_science_validated"] is False
     assert report["status"] == "PRECHECK_PASSED_NOT_SCIENCE_VALIDATION"
+
+
+def test_uniformly_missing_ccd_binning_does_not_count_as_compatibility(tmp_path):
+    """Uniformly absent BINNING previously compared as compatible unknowns."""
+    m = module()
+    conf, cfg, data = case(tmp_path)
+    for names in cfg["frames"].values():
+        for name in names:
+            with fits.open(data / name, mode="update") as hdul:
+                del hdul[0].header["BINNING"]
+    with pytest.raises(RuntimeError, match="Unknown CCD binning"):
+        m.collect(conf)
