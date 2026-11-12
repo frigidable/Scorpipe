@@ -34,8 +34,8 @@ production-certified reductions**.
 Run only the read-only entry point:
 `python scripts/qa/sc1_first_masterbias_gate.py --check <config.yaml> <external-new-report.json>`
 
-The output location must be outside both the work tree and *all* selected
-RAW frame directories. Never overwrite reports. The code verifies selection
+The output location must be outside the work tree, the **configured RAW
+root** and *all* selected RAW frame directories, including nested series. Never overwrite reports. The code verifies selection
 counts and exact early20 basenames; existence and FITS header NAXIS; explicit parseable CCD binning;
 same-mode FrameSignature compatibility; exact finite `RATE` and `GAIN`; NODE;
 `bias_policy=strict`; `flatfield.enabled=false`;
