@@ -173,3 +173,25 @@ def test_bad_inventory_manifest_is_rejected_before_creating_plan(tmp_path):
     with pytest.raises(ValueError, match="manifest digest"):
         mod.prepare(config, inventory, out)
     assert not out.exists()
+
+
+def test_explicit_manifest_conflict_is_fail_closed_by_real_config_loader(tmp_path):
+    """Never use seven stale OBJ if explicit OBJ/SKY manifest cannot apply."""
+    config, inventory, roles, _, raw = _fixture(tmp_path)
+    isolated = tmp_path / "new_run"
+    isolated.mkdir()
+    manifest = isolated / "project_manifest.yaml"
+    manifest.write_text(yaml.safe_dump({
+        "role_policy": "explicit",
+        "roles": {
+            "OBJECT_FRAMES": {"files": ["s22800604.fts"]},
+            "SKY_FRAMES": {"files": ["s22800604.fts"]},
+        },
+    }), encoding="utf-8")
+    cfg = yaml.safe_load(config.read_text())
+    cfg["work_dir"] = str(isolated)
+    cfg["project_manifest_path"] = str(manifest)
+    new_config = isolated / "config.yaml"
+    new_config.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    with pytest.raises(ValueError, match="Explicit project_manifest_path"):
+        load_config(new_config)
