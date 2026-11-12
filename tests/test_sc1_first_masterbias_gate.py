@@ -223,3 +223,44 @@ def test_uniformly_missing_ccd_binning_does_not_count_as_compatibility(tmp_path)
                 del hdul[0].header["BINNING"]
     with pytest.raises(RuntimeError, match="Unknown CCD binning"):
         m.collect(conf)
+
+
+def test_preflight_forbids_raw_data_root_even_for_nested_fits(tmp_path):
+    """Output in RAW root is unsafe even if selected files live in subdirs."""
+    m = module()
+    conf, cfg, raw = case(tmp_path)
+    sub = raw / "series"
+    sub.mkdir()
+    for role, names in cfg["frames"].items():
+        relocated = []
+        for name in names:
+            (raw / name).rename(sub / name)
+            relocated.append(f"series/{name}")
+        cfg["frames"][role] = relocated
+    conf.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    report, selected = m.collect(conf)
+    assert report["raw_data_dir"] == str(raw.resolve())
+    assert len(selected) == 32
+    assert all(p.parent == sub.resolve() for p in selected)
+    # Old code checked only selected parents and allowed raw/preflight.json.
+    for dest in (raw / "preflight.json", raw / "qa" / "preflight.json"):
+        with pytest.raises(ValueError, match="outside the work and RAW"):
+            m.run(conf, dest)
+        assert not dest.exists()
+
+
+def test_preflight_accepts_external_report_for_nested_fits(tmp_path):
+    m = module()
+    conf, cfg, raw = case(tmp_path)
+    sub = raw / "series"
+    sub.mkdir()
+    for role, names in cfg["frames"].items():
+        cfg["frames"][role] = [f"series/{name}" for name in names]
+        for name in names:
+            (raw / name).rename(sub / name)
+    conf.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    external = tmp_path / "qa_out" / "preflight.json"
+    m.run(conf, external)
+    assert external.is_file()
+    import json
+    assert json.loads(external.read_text(encoding="utf-8"))["raw_data_dir"] == str(raw.resolve())
