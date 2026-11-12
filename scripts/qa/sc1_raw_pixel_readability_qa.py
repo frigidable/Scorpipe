@@ -69,6 +69,22 @@ def _inspect_file(path: Path, role: str, expected_shape: tuple[int, int]) -> dic
             raise RuntimeError(
                 f"Non-finite raw pixels ({role} {path.name}): {bad}"
             )
+        # In an integer FITS image the BLANK keyword marks undefined pixels,
+        # even though the stored integer sentinel is mathematically finite.
+        blank = primary.header.get("BLANK")
+        if blank is not None:
+            if not np.issubdtype(pixels.dtype, np.integer):
+                raise RuntimeError(f"BLANK keyword on non-integer FITS: {path}")
+            blank_value = int(blank)
+            blank_count = int(np.count_nonzero(pixels == blank_value))
+            if blank_count:
+                raise RuntimeError(
+                    f"Undefined FITS BLANK pixels ({role} {path.name}): "
+                    f"{blank_count}"
+                )
+        for key in ("BSCALE", "BZERO"):
+            if key in primary.header and not math.isfinite(float(primary.header[key])):
+                raise RuntimeError(f"Non-finite FITS {key} metadata: {path}")
         # No scaling is applied: values are storage samples, not certified ADU.
         min_sample = float(np.min(pixels))
         max_sample = float(np.max(pixels))
