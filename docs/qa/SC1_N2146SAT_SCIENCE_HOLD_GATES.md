@@ -50,6 +50,31 @@ supply the real saved config and selected RAW files and examine the report.
 Do **not** use archived `--run-superbias` or run a general CLI command
 that regenerates a saved config as a substitute for this gate.
 
+## Gate A2 — native RAW FITS readability and content fingerprints (HOLD for real night)
+
+After Gate A succeeds on the observer's saved config, run this separate
+**read-only** check to verify the selected primary arrays are physically
+present and finite and to capture reproducible source byte fingerprints:
+
+`python scripts/qa/sc1_raw_pixel_readability_qa.py --inspect <config.yaml> <new-external-report.json>`
+
+The program checks all 32 exact-night selected sources independently. It
+computes whole-file SHA-256 fingerprints, verifies that the declared primary
+FITS data block fits inside the actual file size (using Astropy's `datLoc`
+and `datSpan`), then reads unscaled native primary pixels, verifies array
+shape and finite numeric samples, and records storage-value min/max/mean.
+The report records a root-independent content manifest digest, refuses
+writing inside RAW/work and refuses replacing prior reports. It is designed
+to keep memory bounded by processing one primary image at a time.
+
+**Limitations:** a generated SHA-256 is not an independently trusted original
+observing archive hash; it proves only reproducible bytes at the time of the
+inventory. FITS CHECKSUM/DATASUM keyword validity, unselected files, physical
+gain and unit scaling, electronic bias removal, detector pixel geometry,
+flatfield, and all covariance remain unvalidated. Any `NaN`, `Inf`, missing
+or truncated source payload is an input-readability failure, not an approved
+method to replace or silently interpolate a bad science exposure.
+
 ## Gate B — CCD geometry and physical overscan (HOLD)
 
 Obtain detector ID, readout mode, binning, and raw `BIASSEC`/`DATASEC`
