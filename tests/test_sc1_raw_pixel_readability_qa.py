@@ -149,7 +149,7 @@ def test_existing_bias_products_do_not_block_readonly_raw_pixel_inventory(
     legacy = conf.parent / "03_bias"
     legacy.mkdir()
     product = legacy / "previous_masterbias.fits"
-    product.write_bytes(b"previous science product — do not modify")
+    product.write_bytes(b"previous science product - do not modify")
     original = {p: p.read_bytes() for p in [conf, product, *raw.iterdir()]}
     report, selected = inspect_small(m, conf, monkeypatch)
     assert len(selected) == 32
