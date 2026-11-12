@@ -24,8 +24,8 @@ Set-StrictMode -Version Latest
 $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..")).Path
 $config = (Resolve-Path -LiteralPath $ConfigPath).Path
 
-$previousPythonPath = $env:PYTHONPATH
-$previousNoBytecode = $env:PYTHONDONTWRITEBYTECODE
+$previousPythonPath = [Environment]::GetEnvironmentVariable("PYTHONPATH", "Process")
+$previousNoBytecode = [Environment]::GetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", "Process")
 
 try {
     $env:PYTHONPATH = "$root\src;$root\scripts\qa"
@@ -86,6 +86,6 @@ print("PYTHON DEPENDENCIES OK")
     Write-Host "Scientific E2E qualification: HOLD"
 }
 finally {
-    $env:PYTHONPATH = $previousPythonPath
-    $env:PYTHONDONTWRITEBYTECODE = $previousNoBytecode
+    [Environment]::SetEnvironmentVariable("PYTHONPATH", $previousPythonPath, "Process")
+    [Environment]::SetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", $previousNoBytecode, "Process")
 }
