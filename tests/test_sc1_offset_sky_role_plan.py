@@ -139,6 +139,7 @@ def test_explicit_wrong_or_overlapping_obj_sky_selection_is_rejected(tmp_path):
     mod = _module()
     config, inventory, roles, product, raw = _fixture(tmp_path)
     cfg = yaml.safe_load(config.read_text())
+    (raw / "s22800601.fts").write_bytes(b"unselected synthetic target")
     cfg["frames"]["obj"][-1] = "s22800601.fts"
     config.write_text(yaml.safe_dump(cfg), encoding="utf-8")
     with pytest.raises(ValueError, match="not exactly OFF04"):
