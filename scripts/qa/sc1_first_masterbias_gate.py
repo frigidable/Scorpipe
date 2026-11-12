@@ -53,7 +53,10 @@ def collect(config_path: Path) -> tuple[dict, list[Path]]:
 
     data_dir = Path(str(cfg.get("data_dir") or config_path.parent)).expanduser()
     if not data_dir.is_absolute():
-        data_dir = (config_path.parent / data_dir).resolve()
+        data_dir = config_path.parent / data_dir
+    data_dir = data_dir.resolve(strict=True)
+    if not data_dir.is_dir():
+        raise RuntimeError("Configured RAW data_dir must be an existing directory")
     frame_lists = cfg.get("frames") or {}
     if not isinstance(frame_lists, dict):
         raise RuntimeError("frames must be a dictionary")
@@ -157,6 +160,7 @@ def collect(config_path: Path) -> tuple[dict, list[Path]]:
     report = {
         "status": "PRECHECK_PASSED_NOT_SCIENCE_VALIDATION",
         "config": str(config_path), "work_dir": str(workdir),
+        "raw_data_dir": str(data_dir),
         "input_counts": dict(EXPECTED_N),
         "audited_early20_bias_confirmed": True,
         "readout_modes": {
@@ -183,8 +187,9 @@ def run(config: Path, out: Path) -> None:
     config_path = Path(config).expanduser().resolve(strict=True)
     out = Path(out).expanduser().resolve()
     work_dir = Path(report["work_dir"]).resolve(strict=True)
+    raw_dir = Path(report["raw_data_dir"]).resolve(strict=True)
     input_paths = {config_path, *(p.resolve(strict=True) for p in raw_paths)}
-    raw_roots = {p.parent.resolve() for p in raw_paths}
+    raw_roots = {raw_dir, *(p.parent.resolve() for p in raw_paths)}
     if (out in input_paths or out == work_dir or out.is_relative_to(work_dir)
             or any(out == root or out.is_relative_to(root) for root in raw_roots)):
         raise ValueError("Preflight report must be outside the work and RAW directories")
