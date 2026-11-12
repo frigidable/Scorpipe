@@ -122,3 +122,19 @@ def test_manifest_changes_if_selected_raw_content_changes(tmp_path, monkeypatch)
         hdu[0].data[0, 0] += 1
     b, _ = inspect_small(m, conf, monkeypatch)
     assert a["input_manifest_sha256"] != b["input_manifest_sha256"]
+
+
+def test_integer_fits_blank_sentinel_is_not_treated_as_valid_data(
+    tmp_path, monkeypatch,
+):
+    m = load(monkeypatch)
+    conf, cfg, raw = case(tmp_path)
+    target = raw / cfg["frames"]["bias"][0]
+    with fits.open(target) as source:
+        hdr = source[0].header.copy()
+    hdu = fits.PrimaryHDU(np.full((6, 8), 999, dtype=np.int16), header=hdr)
+    hdu.header["BLANK"] = -32768
+    hdu.data[0, 0] = -32768
+    hdu.writeto(target, overwrite=True)
+    with pytest.raises(RuntimeError, match="Undefined FITS BLANK pixels"):
+        inspect_small(m, conf, monkeypatch)
