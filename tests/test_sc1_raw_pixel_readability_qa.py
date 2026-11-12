@@ -24,23 +24,6 @@ def load(monkeypatch):
     assert spec is not None and spec.loader is not None
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
-    # The exact-night production shape is 1032x2080; tests use small FITS.
-    from sc1_first_masterbias_gate import collect
-    original_collect = collect
-
-    def test_collect(path):
-        from sc1_first_masterbias_gate import EXPECTED_SHAPE
-        import sc1_first_masterbias_gate
-        old = EXPECTED_SHAPE
-        sc1_first_masterbias_gate.EXPECTED_SHAPE = (6, 8)
-        try:
-            return original_collect(path)
-        finally:
-            sc1_first_masterbias_gate.EXPECTED_SHAPE = old
-
-    # Replace only exact-night header validation and its test shape;
-    # pixel shape must use the same synthetic signature.
-    m._test_collect = test_collect
     return m
 
 
@@ -99,7 +82,7 @@ def test_raw_pixel_inventory_rejects_truncated_primary_image(tmp_path, monkeypat
     target = raw / cfg["frames"]["obj"][0]
     with target.open("r+b") as f:
         f.truncate(2880)  # leave the header but remove its required data
-    with pytest.raises(Exception):
+    with pytest.raises(RuntimeError, match="Truncated primary FITS payload"):
         inspect_small(m, conf, monkeypatch)
 
 
