@@ -180,3 +180,34 @@ def test_preflight_never_overwrites_existing_diagnostic(tmp_path):
     with pytest.raises(FileExistsError):
         m.run(conf, output)
     assert output.read_text(encoding="utf-8") == "sentinel"
+
+
+@pytest.mark.parametrize("field,bad_value", [
+    ("RATE", "NaN"),
+    ("GAIN", "NaN"),
+    ("RATE", "inf"),
+    ("GAIN", "-inf"),
+])
+def test_nonfinite_readout_header_fails_closed_even_for_matching_cohort(
+    tmp_path, field, bad_value,
+):
+    """Identical nonfinite values in all BIAS+OBJ must not pass comparison."""
+    m = module()
+    conf, cfg, data = case(tmp_path)
+    for role in ("bias", "obj"):
+        for name in cfg["frames"][role]:
+            with fits.open(data / name, mode="update") as hdul:
+                hdul[0].header[field] = bad_value
+    with pytest.raises(RuntimeError, match="Non-finite CCD readout"):
+        m.collect(conf)
+
+
+def test_header_preflight_cannot_be_misread_as_pixel_or_overscan_validation(tmp_path):
+    m = module()
+    conf, _, _ = case(tmp_path)
+    report, _ = m.collect(conf)
+    assert report["header_only_preflight"] is True
+    assert report["raw_pixel_integrity_verified"] is False
+    assert report["physical_overscan_region_certified"] is False
+    assert report["masterbias_science_validated"] is False
+    assert report["status"] == "PRECHECK_PASSED_NOT_SCIENCE_VALIDATION"
