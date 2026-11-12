@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Guarded first SCORPIO-1 N2146sat calibration stage. Exact-night only.
 
-One read-only-science-input mode:
-    --check config.yaml qa_report.json  # FITS headers, never executes a stage
+Two read-only-science-input modes:
+    --check config.yaml qa_report.json  # first-build gate: refuses prior stages
+    --audit-existing config.yaml qa_report.json  # inspect saved workspace, no stage run
 
 No production engine invocation is present. The new diagnostic report must
 be outside the selected RAW and work directories, and is created exclusively;
@@ -22,7 +23,14 @@ EXPECTED_SHAPE = (1032, 2080)
 EXPECTED_BIASES = {f"s228001{i:02d}.fts" for i in range(1, 21)}
 
 
-def collect(config_path: Path) -> tuple[dict, list[Path]]:
+def collect(
+    config_path: Path, *, require_clean_workdir: bool = True,
+) -> tuple[dict, list[Path]]:
+    """Validate exact-night inputs, optionally forbidding existing stage output.
+
+    Both modes are strictly read-only with respect to RAW and workspace data.
+    Only require_clean_workdir=True is suitable for *first-build* readiness.
+    """
     import yaml
     from astropy.io import fits
     from scorpio_pipe.frame_signature import FrameSignature
@@ -152,13 +160,21 @@ def collect(config_path: Path) -> tuple[dict, list[Path]]:
     forbidden.extend(workdir.glob("??_flat*"))
     forbidden.extend(workdir.glob("products/??_*"))
     found = [str(p) for p in set(forbidden) if p.exists()]
-    if found:
+    if found and require_clean_workdir:
         raise RuntimeError(
             "Prior stage products found; abort first-build to avoid overwriting: "
             + ", ".join(sorted(found))
         )
     report = {
-        "status": "PRECHECK_PASSED_NOT_SCIENCE_VALIDATION",
+        "status": (
+            "PRECHECK_PASSED_NOT_SCIENCE_VALIDATION"
+            if require_clean_workdir else
+            "EXISTING_WORKSPACE_HEADER_AUDIT_NOT_SCIENCE_VALIDATION"
+        ),
+        "mode": "first_build_preflight" if require_clean_workdir else "audit_existing_readonly",
+        "existing_stage_products": sorted(found),
+        "first_build_clear": require_clean_workdir and not found,
+        "stage_execution_authorized": False,
         "config": str(config_path), "work_dir": str(workdir),
         "raw_data_dir": str(data_dir),
         "input_counts": dict(EXPECTED_N),
@@ -181,9 +197,11 @@ def collect(config_path: Path) -> tuple[dict, list[Path]]:
     return report, all_paths
 
 
-def run(config: Path, out: Path) -> None:
-    """Execute preflight ONLY; never run the pipeline or alter source FITS."""
-    report, raw_paths = collect(config)
+def run(config: Path, out: Path, *, audit_existing: bool = False) -> None:
+    """Read-only header check; audit-existing cannot authorize a first build."""
+    report, raw_paths = collect(
+        config, require_clean_workdir=not audit_existing,
+    )
     config_path = Path(config).expanduser().resolve(strict=True)
     out = Path(out).expanduser().resolve()
     work_dir = Path(report["work_dir"]).resolve(strict=True)
@@ -220,9 +238,14 @@ def selftest():
 if __name__ == "__main__":
     if len(sys.argv) == 2 and sys.argv[1] == "--selftest":
         selftest()
-    elif len(sys.argv) == 4 and sys.argv[1] == "--check":
-        run(Path(sys.argv[2]), Path(sys.argv[3]))
+    elif len(sys.argv) == 4 and sys.argv[1] in {"--check", "--audit-existing"}:
+        run(
+            Path(sys.argv[2]), Path(sys.argv[3]),
+            audit_existing=sys.argv[1] == "--audit-existing",
+        )
     else:
         raise SystemExit(
-            "Usage: script.py --selftest | --check config.yaml report.json"
+            "Usage: script.py --selftest | "
+            "--check config.yaml report.json | "
+            "--audit-existing config.yaml report.json"
         )
