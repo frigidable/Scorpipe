@@ -123,7 +123,12 @@ def inspect(config: Path) -> tuple[dict, list[Path]]:
         EXPECTED_N, EXPECTED_SHAPE, collect,
     )
 
-    header_report, sources = collect(Path(config))
+    # Pixel inventory is read-only: prior stage products are evidence to
+    # preserve, not grounds to reject the original selected RAW frames.
+    # The separate --check preflight retains its strict first-build guard.
+    header_report, sources = collect(
+        Path(config), require_clean_workdir=False,
+    )
     manifest = []
     index = 0
     for role, count in EXPECTED_N.items():
@@ -149,6 +154,10 @@ def inspect(config: Path) -> tuple[dict, list[Path]]:
         "schema": SCHEMA,
         "status": "READ_ONLY_PIXEL_READABILITY_NOT_SCIENCE_QUALIFICATION",
         "header_preflight_status": header_report["status"],
+        "header_audit_mode": header_report["mode"],
+        "existing_stage_products": header_report["existing_stage_products"],
+        "first_build_clear": False,
+        "stage_execution_authorized": False,
         "source_config": header_report["config"],
         "work_dir": header_report["work_dir"],
         "raw_data_dir": header_report["raw_data_dir"],
