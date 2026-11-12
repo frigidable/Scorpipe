@@ -86,6 +86,38 @@ intentionally expects seven historical `frames.obj`; do **not** invoke it
 on the corrected six-OBJECT/one-SKY isolated plan as if it were a first-build
 check — use the explicit loader verification instead.
 
+## SkySub dedicated-SKY calibration prerequisite (still SCIENCE HOLD)
+
+The real isolated role contract was verified by the observer on 2026-11-13
+against all 32 input file hashes: 6 ON-TARGET + 1 OFF-TARGET SKY.
+The uploaded `role_contract.json` confirms explicit manifest resolution,
+but sets `sky_subtraction_approved=false` and `stage_execution_authorized=false`.
+
+Code review found a separate unsafe route: `cosmics.apply_to` defaults to
+`["obj"]`, and `SkySub._resolve_best` falls back to native RAW for SKY when
+there is no existing sky clean/flat product. The optional
+`sky.primary_method=sky_scale_raw` then builds the OFF-SKY template from that
+input. If SCIENCE was bias-subtracted while the SKY template still contains
+its native electronic pedestal, scaling a template would also scale detector
+bias; its fitted amplitude is not a physically meaningful sky intensity
+transfer.
+
+The guard introduced by the follow-up sky-template PR requires an
+instrument-identified SCORPIO (or E2V CCD4240) SKY source to declare
+`BIASSUB=True` in its **primary** FITS header before the template is built.
+A raw SKY missing this evidence is rejected regardless of the presence of
+valid explicit SKY_FRAMES. The guard is a provenance prerequisite, **not**
+proof that the subtraction was correct, that the same-mode MasterBias
+estimator is statistically qualified, or that a sky source is spatially clean.
+The default `kelson_raw` branch is not automatically switched to
+`sky_scale_raw` and remains subject to its own scientific gates.
+
+Before any eventual controlled stage run: independently validate the
+dedicated SKY's same-mode electronic bias subtraction, its propagated
+variance/mask, cosmic-ray protection, contaminated slit rows, temporal
+airglow variability, and 600/1200s exposure normalization. The current
+isolated config is a **role plan only**; do not execute it as a reduction.
+
 ## Remaining physical gates
 
 OBJ04's intent is known; its spatial cleanliness is **not** approved.
