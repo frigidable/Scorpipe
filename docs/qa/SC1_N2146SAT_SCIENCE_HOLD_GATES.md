@@ -31,16 +31,31 @@ production-certified reductions**.
 
 ## Gate A — configuration and header-only preflight
 
-Run only the read-only entry point:
-`python scripts/qa/sc1_first_masterbias_gate.py --check <config.yaml> <external-new-report.json>`
+Choose the explicitly read-only mode according to the *existing* workspace state:
+
+- **Before a first build in an untouched work directory:**
+  `python scripts/qa/sc1_first_masterbias_gate.py --check <config.yaml> <external-new-report.json>`
+  — fails closed if any prior stage products exist.
+- **For an already reduced or partially reduced observation, including a
+  saved `03_bias` directory:**
+  `python scripts/qa/sc1_first_masterbias_gate.py --audit-existing <config.yaml> <external-new-report.json>`
+  — performs identical selection/header checks but *only lists* existing
+  stage outputs. It does not authorize creating, replacing or overwriting
+  any prior product and is explicitly **not** a first-build readiness PASS.
+
+A `--check` failure solely due to prior `03_bias` is a clean-workspace
+safety gate, **not** evidence of scientifically invalid raw observations.
+Never delete, rename or move old calibration products to make it pass.
 
 The output location must be outside the work tree, the **configured RAW
 root** and *all* selected RAW frame directories, including nested series. Never overwrite reports. The code verifies selection
 counts and exact early20 basenames; existence and FITS header NAXIS; explicit parseable CCD binning;
 same-mode FrameSignature compatibility; exact finite `RATE` and `GAIN`; NODE;
 `bias_policy=strict`; `flatfield.enabled=false`;
-`superneon.bias_sub=false`; and `project.wave_reference=air`. It refuses
-pre-existing stage outputs. **PASS certifies only these checks**, not
+`superneon.bias_sub=false`; and `project.wave_reference=air`. Only `--check` refuses
+pre-existing stage outputs. In `--audit-existing` the report records
+`existing_stage_products`, `mode=audit_existing_readonly` and
+`stage_execution_authorized=false`. **PASS certifies only these checks**, not
 binary FITS integrity, unselected candidate frames, illumination/overscan
 physics, CCD data quality, or output SCI/VAR/DQ.
 
@@ -52,8 +67,9 @@ that regenerates a saved config as a substitute for this gate.
 
 ## Gate A2 — native RAW FITS readability and content fingerprints (HOLD for real night)
 
-After Gate A succeeds on the observer's saved config, run this separate
-**read-only** check to verify the selected primary arrays are physically
+After the header-only `--audit-existing` check succeeds on the observer's
+saved config, run this separate **read-only** check (which likewise tolerates
+prior stage products without touching them) to verify the selected primary arrays are physically
 present and finite and to capture reproducible source byte fingerprints:
 
 `python scripts/qa/sc1_raw_pixel_readability_qa.py --inspect <config.yaml> <new-external-report.json>`
