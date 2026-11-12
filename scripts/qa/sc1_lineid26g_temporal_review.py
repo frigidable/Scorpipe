@@ -65,6 +65,37 @@ def npz_inventory(path: Path) -> dict:
         }
 
 
+def verified_archive_axis(path: Path) -> tuple[list[str], list[int]]:
+    """Verify both source frame identities and native spectral coordinate axis.
+
+    The actual archived LineID26c NPZ includes original_filename (7, U13)
+    and native_dx (37, int32). A human assertion may not override a bad
+    embedded source order, duplicates, or an unexpected x coordinate grid.
+    """
+    with np.load(path, allow_pickle=False) as archive:
+        if "original_filename" not in archive or "native_dx" not in archive:
+            raise ValueError("Original LineID26c NPZ lacks required frame/dx metadata")
+        original = archive["original_filename"]
+        dx = archive["native_dx"]
+        if original.shape != (7,) or original.dtype.kind not in {"U", "S"}:
+            raise ValueError("original_filename must contain 7 text entries")
+        names = [
+            str(x).replace("\\", "/").rsplit("/", 1)[-1].lower()
+            for x in original
+        ]
+        if names != FILENAMES:
+            raise ValueError(
+                "NPZ original_filename does not match observer-confirmed "
+                f"OFF04 / ON07..12 order: {names}"
+            )
+        if (dx.shape != (37,) or dx.dtype.kind not in "iu"
+                or not np.array_equal(dx, np.arange(-18, 19))):
+            raise ValueError(
+                "NPZ native_dx is not the original integer -18..18 grid"
+            )
+    return names, [int(x) for x in dx]
+
+
 def read_cube(path: Path, key: str | None) -> tuple[np.ndarray, str, dict]:
     inventory = npz_inventory(path)
     candidates = [
@@ -167,6 +198,7 @@ def prepare(
     *,
     key: str | None = None,
     asserted_order: bool = False,
+    expected_npz_sha256: str | None = None,
 ) -> dict:
     archive_npz = archive_npz.expanduser().resolve(strict=True)
     role_contract = role_contract.expanduser().resolve(strict=True)
@@ -178,32 +210,45 @@ def prepare(
         for role in ("obj", "sky", "bias", "flat", "neon")
         for path in contract["resolved_roles"].get(role, [])
     }
-    protected = {old_work, *raw_roots}
+    # Neither source archive nor role-contract output directory is a place
+    # for new audit products. Their contents must remain immutable.
+    protected = {old_work, archive_npz.parent, role_contract.parent, *raw_roots}
     if (output in {archive_npz, role_contract}
             or any(output == root or output.is_relative_to(root)
                    for root in protected)):
         raise ValueError("Output must not be inside prior source, RAW or work roots")
     if output.exists():
         raise FileExistsError("Refusing to overwrite sky transfer review")
-    if not asserted_order:
+    npz_hash = sha256_file(archive_npz)
+    if (not isinstance(expected_npz_sha256, str)
+            or len(expected_npz_sha256) != 64
+            or any(x not in "0123456789abcdef"
+                   for x in expected_npz_sha256.lower())
+            or expected_npz_sha256.lower() != npz_hash):
         raise ValueError(
-            "Array frame axis is not self-verifying. Supply explicit "
-            "--assert-26c-frame-order after reviewing --inspect"
+            "Pinned --expected-npz-sha256 is absent, invalid, or mismatched"
         )
+    contract_hash = sha256_file(role_contract)
+    names, native_dx = verified_archive_axis(archive_npz)
     cube, cube_key, inventory = read_cube(archive_npz, key)
+    if (sha256_file(archive_npz) != npz_hash
+            or sha256_file(role_contract) != contract_hash):
+        raise RuntimeError("Source NPZ or role contract changed during review")
     comparisons = region_statistics(row_feature_proxy(cube))
     report = {
         "schema": SCHEMA,
         "status": "RAW_FEATURE_TIME_TRANSFER_DIAGNOSTIC_ONLY",
-        "role_contract_sha256": sha256_file(role_contract),
+        "role_contract_sha256": contract_hash,
         "raw_inventory_manifest_sha256": contract["source_raw_manifest_sha256"],
         "lineid26c_npz": str(archive_npz),
-        "lineid26c_npz_sha256": sha256_file(archive_npz),
+        "lineid26c_npz_sha256": npz_hash,
         "source_cube_key": cube_key,
         "source_array_schema": inventory,
-        "assumed_frame_axis": FILENAMES,
+        "verified_embedded_original_filename": names,
+        "verified_embedded_native_dx": native_dx,
         "frame_axis_basis":
-            "operator_asserted_lineid26c_original_exports_NOT_source_cryptographic_proof",
+            "NPZ_embedded_original_filename_verified_against_explicit_role_contract",
+        "source_hash_pinned": True,
         "nominal_exposure_seconds_from_historical_observing_metadata": SECONDS,
         "reference_line_label": "5199_A_UNIDENTIFIED_CONDITIONAL_FEATURE",
         "method":
@@ -226,7 +271,8 @@ def prepare(
             "Neither provisional y region is certified source-free sky.",
             "Alternating blocks share detector/sky systematics.",
             "Rate ratios are diagnostics, not sky-subtraction coefficients.",
-            "Frame axis was operator-asserted, not authenticated from the NPZ.",
+            "Frame names and native_dx verified INSIDE the pinned NPZ.",
+            "NPZ metadata does not independently authenticate original FITS.",
         ],
     }
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -243,14 +289,32 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--inspect", action="store_true",
                         help="Only display NPZ keys, dimensions, dtypes and SHA-256")
     parser.add_argument("--cube-key")
-    parser.add_argument("--assert-26c-frame-order", action="store_true")
+    parser.add_argument(
+        "--assert-26c-frame-order", action="store_true",
+        help="Deprecated: embedded NPZ names/dx are checked even without this",
+    )
+    parser.add_argument(
+        "--expected-npz-sha256",
+        help="Required for analysis: independent 64-character source NPZ hash",
+    )
     parser.add_argument("--out", type=Path)
     args = parser.parse_args(argv)
     if args.inspect:
+        with np.load(args.npz, allow_pickle=False) as archive:
+            source_names = (
+                [str(x) for x in archive["original_filename"]]
+                if "original_filename" in archive else None
+            )
+            native_dx = (
+                [int(x) for x in archive["native_dx"]]
+                if "native_dx" in archive else None
+            )
         print(json.dumps({
             "file": str(args.npz),
             "sha256": sha256_file(args.npz),
             "npz_keys": npz_inventory(args.npz),
+            "original_filename_values": source_names,
+            "native_dx_values": native_dx,
         }, indent=2))
         return
     if args.out is None:
@@ -258,6 +322,7 @@ def main(argv: list[str] | None = None) -> None:
     result = prepare(
         args.npz, args.role_contract, args.out, key=args.cube_key,
         asserted_order=args.assert_26c_frame_order,
+        expected_npz_sha256=args.expected_npz_sha256,
     )
     print("STATUS:", result["status"])
     print("COMPARISONS:", len(result["comparisons"]))
