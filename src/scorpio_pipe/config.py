@@ -163,6 +163,14 @@ def load_config(cfg_path: str | Path) -> dict[str, Any]:
     try:
         apply_project_manifest_to_cfg(cfg)
     except Exception as e:
+        # A caller-specified manifest is an intentional source-of-truth.
+        # Falling back to stale frames.obj when the explicit roles fail
+        # would silently put an OFF-SKY exposure into the science sequence.
+        if cfg.get("project_manifest_path"):
+            raise ValueError(
+                "Explicit project_manifest_path could not be applied: "
+                f"{cfg['project_manifest_path']}"
+            ) from e
         logging.getLogger(__name__).warning("Failed to apply project_manifest.yaml: %s", e)
 
     return cfg
