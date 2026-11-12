@@ -1540,6 +1540,53 @@ def _fit_sky_scale(
     }
 
 
+def _require_calibrated_scorpio_sky_template(path: Path) -> None:
+    """Fail closed before using a raw SCORPIO SKY as a scale-fit template.
+
+    A real CCD pedestal is not sky emission and cannot be scaled as though it
+    were a bias-subtracted spectrum. The ordinary SCIENCE branch already
+    rejects uncalibrated SCORPIO input in _prepare_sky_input_planes(); the
+    separate sky_scale_raw template path needs the same prerequisite.
+    """
+    with fits.open(path, memmap=False) as hdul:
+        primary = hdul[0].header
+        sci = next(
+            (h.header for h in hdul
+             if str(h.header.get("EXTNAME", "")).strip().upper() == "SCI"
+             and getattr(h, "data", None) is not None),
+            None,
+        )
+        instrument = str(
+            primary.get("INSTRUME")
+            or (sci.get("INSTRUME") if sci is not None else "")
+            or ""
+        ).strip().upper()
+        detector = str(
+            primary.get("DETECTOR")
+            or (sci.get("DETECTOR") if sci is not None else "")
+            or ""
+        ).strip().upper()
+        if not (instrument.startswith("SCORPIO") or "CCD4240" in detector):
+            return
+
+        # Primary header is authoritative upstream provenance. An arbitrary
+        # nonempty string (especially "F") is NOT evidence of calibration.
+        flag = primary.get("BIASSUB")
+        calibrated = (
+            flag is True
+            or (isinstance(flag, str) and flag.strip().upper() in {"T", "TRUE"})
+        )
+        if not calibrated:
+            raise RuntimeError(
+                "Uncalibrated SCORPIO SKY template: BIASSUB=True is required "
+                "before sky_scale_raw may fit this source. Configure a "
+                "readout-matched SKY calibration path (e.g. Cosmics with "
+                "apply_to including 'sky') and independently inspect SKY "
+                "quality; never scale a native RAW bias pedestal. "
+                f"Source: {path}"
+            )
+
+
 def _median_template(frames: Iterable[Path]) -> Tuple[np.ndarray, fits.Header]:
     imgs = []
     hdr0 = None
@@ -1846,6 +1893,12 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                         "Check project_manifest.yaml or switch to kelson_raw."
                     )
 
+                # The dedicated SKY template must be detector-bias-corrected
+                # independently of the SCIENCE input path. The resolver can
+                # otherwise fall back to native RAW when Cosmics processed
+                # only the default apply_to=["obj"] set.
+                for sky_source in sky_inputs_ok:
+                    _require_calibrated_scorpio_sky_template(sky_source)
                 sky_template, _hdr_t = _median_template(sky_inputs_ok)
 
                 # record for done.json
