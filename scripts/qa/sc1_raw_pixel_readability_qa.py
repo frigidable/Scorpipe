@@ -39,6 +39,16 @@ def _inspect_file(path: Path, role: str, expected_shape: tuple[int, int]) -> dic
         path, mode="readonly", memmap=False, do_not_scale_image_data=True,
         ignore_missing_end=False,
     ) as hdus:
+        info = hdus.fileinfo(0)
+        if (not info or info.get("datLoc") is None
+                or info.get("datSpan") is None):
+            raise RuntimeError(f"Cannot establish native FITS image extent: {path}")
+        expected_end = int(info["datLoc"]) + int(info["datSpan"])
+        if before.st_size < expected_end:
+            raise RuntimeError(
+                f"Truncated primary FITS payload ({role} {path.name}): "
+                f"file has {before.st_size} bytes; need >= {expected_end}"
+            )
         primary = hdus[0]
         image = primary.data
         if image is None:
