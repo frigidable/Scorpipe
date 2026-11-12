@@ -12,6 +12,7 @@ This is engineering QA, never scientific qualification.
 from __future__ import annotations
 
 import json
+import math
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -94,6 +95,14 @@ def collect(config_path: Path) -> tuple[dict, list[Path]]:
                 node = str(h.get("NODE", "")).strip().upper()
             except Exception as exc:
                 raise RuntimeError(f"Cannot validate FITS {p.name}: {exc}") from exc
+            # Comparisons with NaN are always False: without this explicit
+            # check an entire coherent cohort of NaN headers can pass the
+            # tolerance test below and appear readout-compatible.
+            if not math.isfinite(rate) or not math.isfinite(gain):
+                raise RuntimeError(
+                    f"Non-finite CCD readout for {role} {p.name}: "
+                    f"RATE={rate}, GAIN={gain}"
+                )
             required_rate, required_gain = ((145.0, 0.9)
                                             if role in ("bias", "obj")
                                             else (225.0, 3.5))
@@ -150,6 +159,12 @@ def collect(config_path: Path) -> tuple[dict, list[Path]]:
         "first_masterbias_target": str(bias_output),
         "expected_stage_tasks": ["superbias"],
         "fast_flat_neon_bias_status": "HOLD_NO_FAST_MODE_MASTERBIAS",
+        # A FITS-header and config preflight neither reads detector pixels
+        # nor verifies detector regions, overscan physics, or data corruption.
+        "header_only_preflight": True,
+        "raw_pixel_integrity_verified": False,
+        "physical_overscan_region_certified": False,
+        "masterbias_science_validated": False,
     }
     return report, all_paths
 
