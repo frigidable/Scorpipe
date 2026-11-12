@@ -9,7 +9,6 @@ from scorpio_pipe.calib.common import (
     ensure_refctx,
     plot_lines_png,
     read_interval_csv,
-    read_small_csv,
     read_spec1d,
     reference_metadata,
     reference_path,
@@ -55,14 +54,17 @@ def build_telluric_model(cfg: dict[str, Any], *, standard_spec_path: str | Path)
             transmission[m] = trans
             confidence[m] = conf
             model_mask[m] = 1
-    if tmpl_path and tmpl_path.exists():
-        tbl = read_small_csv(tmpl_path)
-        tw = np.asarray(tbl['wavelength_A'] if 'wavelength_A' in tbl else tbl.get('wavelength', []), dtype=float)
-        tt = np.asarray(tbl['transmission'] if 'transmission' in tbl else tbl.get('telluric', []), dtype=float)
-        if tw.size >= 2 and tt.size == tw.size:
-            interp_t = np.interp(wave, tw, tt, left=1.0, right=1.0)
-            transmission = np.where(model_mask > 0, 0.7 * transmission + 0.3 * interp_t, np.clip(interp_t, 0.25, 1.1))
-            confidence = np.where(model_mask > 0, confidence, 0.25)
+    # A four-point default template joins the O2 B and A bands with an
+    # unphysical deep absorption trough. Never interpret sparse interpolation
+    # between distinct atmospheric bands as science transmission.
+    # The present standard-derived estimates are diagnostic ONLY; they are
+    # not exposure-specific T_sci(lambda, airmass, weather).
+    # An explicitly supplied template is retained in provenance for later
+    # qualified fitting, but not applied until a physically justified model
+    # and validation contract are implemented.
+    template_ignored = bool(tmpl_path and tmpl_path.exists())
+    transmission[model_mask == 0] = 1.0
+    confidence[model_mask == 0] = 0.0
     qc = {
         'stage': 'telluric_model',
         'reference_context_id': str(ctx.get('context_id') or ''),
@@ -70,6 +72,12 @@ def build_telluric_model(cfg: dict[str, Any], *, standard_spec_path: str | Path)
         'coverage_fraction': float(np.mean(model_mask > 0)) if wave.size else 0.0,
         'median_confidence': float(np.nanmedian(confidence)) if confidence.size else 0.0,
         'transmission_floor': float(np.nanmin(transmission)) if transmission.size else 1.0,
+        'scientific_status': 'DIAGNOSTIC',
+        'science_qualified': False,
+        'template_applied': False,
+        'template_ignored': bool(template_ignored),
+        'outside_model_windows': 'UNITY',
+        'reason': 'standard-derived transmission is not an airmass/time-matched science model',
         'reference_lineage': {
             'telluric_mask': mask_meta,
             'telluric_template': tmpl_meta,
@@ -94,6 +102,7 @@ def write_telluric_products(out_dir: str | Path, payload: dict[str, Any]) -> dic
     ph['WAVEREF'] = str(payload.get('waveref') or 'air')
     ph['WAVEUNIT'] = 'Angstrom'
     ph['REFCTID'] = str(payload.get('reference_context_id') or '')
+    ph['TELQUAL'] = 'DIAGNOSTIC'
     fits_path = write_bintable_fits(
         out_dir / 'telluric_model.fits',
         primary_header=ph,
@@ -110,7 +119,7 @@ def write_telluric_products(out_dir: str | Path, payload: dict[str, Any]) -> dic
         (payload['wave'], payload['confidence'], 'confidence'),
     ], title='Telluric model')
     qc = save_json(out_dir / 'telluric_qc.json', payload.get('qc') or {})
-    plan = save_json(out_dir / 'telluric_model_plan.json', {'stage': 'telluric_model', 'status': 'ok', 'qc': payload.get('qc') or {}})
+    plan = save_json(out_dir / 'telluric_model_plan.json', {'stage': 'telluric_model', 'status': 'warn', 'qc': payload.get('qc') or {}})
     return {
         'telluric_model_fits': str(fits_path),
         'telluric_preview_png': str(preview),

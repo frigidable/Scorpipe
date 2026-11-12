@@ -992,7 +992,7 @@ def resolve_global_exclude(
                 "exclude_globs": ex_globs,
                 "excluded_n": int(len(excluded_abs)),
                 "excluded_paths": [
-                    str(Path(p).relative_to(data_dir_p)) if p.startswith(str(data_dir_p)) else p
+                    Path(p).relative_to(data_dir_p).as_posix() if p.startswith(str(data_dir_p)) else p
                     for p in excluded_abs
                 ],
                 "missing_files": missing_files,

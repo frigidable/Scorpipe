@@ -20,6 +20,16 @@ def balmer_decrement_summary(lines_by_name: dict[str, dict[str, Any]], *, intrin
     hb = lines_by_name.get('Hbeta') or lines_by_name.get('Hβ') or lines_by_name.get('Hb')
     if not isinstance(ha, dict) or not isinstance(hb, dict):
         return None
+    # A formal Balmer decrement cannot be derived from window fluxes whose
+    # identity/significance is unverified. Halpha lies in the [NII] blend,
+    # so the current independent-window fitter intentionally flags it.
+    if not (bool(ha.get('detected')) and bool(hb.get('detected'))):
+        return None
+    if (bool(ha.get('blend_warning')) or bool(hb.get('blend_warning'))
+            or bool(ha.get('blend_flag')) or bool(hb.get('blend_flag'))
+            or ha.get('component_flux_qualified') is False
+            or hb.get('component_flux_qualified') is False):
+        return None
     try:
         fha = float(ha.get('flux'))
         fhb = float(hb.get('flux'))

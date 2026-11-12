@@ -362,6 +362,35 @@ def _read_sky_input_planes(
         var = _plane("VAR")
         mask = _plane("MASK")
 
+        # An explicit FlatField component schema MUST be complete before
+        # this stage drops its pre-sky-only component maps. A missing map
+        # must never be accepted as a physically valid decomposition.
+        if "VCMPVER" in hdr:
+            if int(hdr["VCMPVER"]) != 1:
+                raise ValueError("Unsupported FlatField variance component version")
+            if (str(hdr.get("VCMPGID") or "").strip() !=
+                    str(hdr.get("SB_GID") or "").strip() or
+                    not str(hdr.get("VCMPGID") or "").strip()):
+                raise ValueError("MasterBias component group provenance mismatch")
+            if var is None:
+                raise ValueError("FlatField variance components require input VAR")
+            arrays = {}
+            for name in ("VBIAS", "VREST", "BSENS", "BVARADU"):
+                value = _plane(name)
+                if value is None:
+                    raise ValueError(f"FlatField variance component {name} missing")
+                arrays[name] = np.asarray(value, dtype=np.float64)
+            vb, vr, bs, bm = (arrays[k] for k in
+                              ("VBIAS", "VREST", "BSENS", "BVARADU"))
+            if (not np.isfinite(vb).all() or not np.isfinite(vr).all()
+                    or not np.isfinite(bs).all() or not np.isfinite(bm).all()
+                    or np.any(vb < 0) or np.any(vr < 0) or np.any(bm < 0)):
+                raise ValueError("Invalid FlatField MasterBias component values")
+            if not np.allclose(vb + vr, var, rtol=3e-5, atol=3e-5):
+                raise ValueError("FlatField component variance closure failed")
+            if not np.allclose(vb, bs**2 * bm, rtol=3e-5, atol=3e-5):
+                raise ValueError("FlatField MasterBias derivative closure failed")
+
     return sci, var, mask, hdr
 
 
@@ -374,9 +403,26 @@ def _prepare_sky_input_planes(
     *,
     cfg: dict,
     sky_cfg: dict,
+    input_bias_var: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, fits.Header]:
     """Preserve upstream detector uncertainty and DQ; estimate VAR only if absent."""
     sci = np.asarray(sci)
+
+    # An SCORPIO observation without evidence of electronic bias subtraction
+    # cannot be interpreted as photoelectron counts. In particular, the
+    # Poisson+RN fallback must never treat raw detector pedestal as photons.
+    # Historical generic synthetic fixtures without an instrument label may
+    # still exercise the low-level numerical helper, but instrument-identified
+    # science always requires a declared calibration state.
+    instrument = str(hdr.get("INSTRUME") or "").strip().upper()
+    if instrument.startswith("SCORPIO") and not bool(hdr.get("BIASSUB", False)):
+        raise ValueError(
+            "Sky refuses SCORPIO detector input without verified "
+            "BIASSUB=True. Run compatible bias calibration (Cosmics or "
+            "Flatfield) before sky subtraction; raw ADU pedestal cannot "
+            "be used in the CCD variance model."
+        )
+
     mask = np.zeros(sci.shape, dtype=np.uint16)
     for name, layer in (("MASK", input_mask), ("cosmics MASK", cosmic_mask)):
         if layer is None:
@@ -440,8 +486,42 @@ def _prepare_sky_input_planes(
             require_gain=require_gain,
         )
 
+    if hdr.get("BVARREF") and input_bias_var is None:
+        raise ValueError(
+            "Sky missing declared Cosmics MasterBias variance sidecar"
+        )
+    if input_bias_var is not None:
+        if input_var is not None:
+            raise ValueError(
+                "Sky cannot combine a preexisting VAR plane and pending "
+                "Cosmics MasterBias variance without double-counting provenance"
+            )
+        from scorpio_pipe.cosmics_biasvar import validate_bias_var_extra
+
+        var = validate_bias_var_extra(
+            var, input_bias_var, sci.shape
+        )
+
     out_hdr = fits.Header(hdr)
-    out_hdr["SKYIVAR"] = ("INPUT" if input_var is not None else "ESTIM", "Sky input VAR source")
+    if "VCMPVER" in out_hdr:
+        if int(out_hdr["VCMPVER"]) != 1:
+            raise ValueError("Unsupported incoming variance component version")
+        # Current SkySub fits a data-dependent sky model and does not
+        # propagate the required bias-response operator. Do not retain a
+        # false claim that FlatField component HDUs survive in sky products.
+        del out_hdr["VCMPVER"]
+        if "VCMPGID" in out_hdr:
+            del out_hdr["VCMPGID"]
+        out_hdr["VCMPQ"] = ("SKY_LOST", "Pre-sky components not propagated")
+    out_hdr["SKYIVAR"] = (
+        "INPUT" if input_var is not None else "ESTIM+BV"
+        if input_bias_var is not None else "ESTIM",
+        "Sky input VAR source",
+    )
+    if input_bias_var is not None:
+        out_hdr["BVARINC"] = (True, "MasterBias variance included in VAR")
+        if "BVARREF" in out_hdr:
+            del out_hdr["BVARREF"]
     sources = int(input_mask is not None) + int(cosmic_mask is not None)
     out_hdr["SKYIMSK"] = (
         "BOTH" if sources == 2 else "INPUT" if input_mask is not None
@@ -1131,6 +1211,13 @@ def _fit_kelson_bspline(
         "clipped_frac": float(clipped_frac),
         "sigma_r_before": float(sig_before) if (sig_before is not None and np.isfinite(sig_before)) else None,
         "sigma_r_after": float(sig_after) if np.isfinite(sig_after) else None,
+        "solver_diagnostics": {
+            "method": "lsqr",
+            "atol": 1e-10, "btol": 1e-10, "iter_lim": 2000,
+            "stop_code": int(sol[1]), "iterations": int(sol[2]),
+            "residual_norm": float(sol[3]),
+            "condition_estimate": float(sol[6]),
+        },
         "coeff": {
             "c0": c0.astype(np.float32),
             "c1": (c1.astype(np.float32) if c1 is not None else None),
@@ -1453,6 +1540,53 @@ def _fit_sky_scale(
     }
 
 
+def _require_calibrated_scorpio_sky_template(path: Path) -> None:
+    """Fail closed before using a raw SCORPIO SKY as a scale-fit template.
+
+    A real CCD pedestal is not sky emission and cannot be scaled as though it
+    were a bias-subtracted spectrum. The ordinary SCIENCE branch already
+    rejects uncalibrated SCORPIO input in _prepare_sky_input_planes(); the
+    separate sky_scale_raw template path needs the same prerequisite.
+    """
+    with fits.open(path, memmap=False) as hdul:
+        primary = hdul[0].header
+        sci = next(
+            (h.header for h in hdul
+             if str(h.header.get("EXTNAME", "")).strip().upper() == "SCI"
+             and getattr(h, "data", None) is not None),
+            None,
+        )
+        instrument = str(
+            primary.get("INSTRUME")
+            or (sci.get("INSTRUME") if sci is not None else "")
+            or ""
+        ).strip().upper()
+        detector = str(
+            primary.get("DETECTOR")
+            or (sci.get("DETECTOR") if sci is not None else "")
+            or ""
+        ).strip().upper()
+        if not (instrument.startswith("SCORPIO") or "CCD4240" in detector):
+            return
+
+        # Primary header is authoritative upstream provenance. An arbitrary
+        # nonempty string (especially "F") is NOT evidence of calibration.
+        flag = primary.get("BIASSUB")
+        calibrated = (
+            flag is True
+            or (isinstance(flag, str) and flag.strip().upper() in {"T", "TRUE"})
+        )
+        if not calibrated:
+            raise RuntimeError(
+                "Uncalibrated SCORPIO SKY template: BIASSUB=True is required "
+                "before sky_scale_raw may fit this source. Configure a "
+                "readout-matched SKY calibration path (e.g. Cosmics with "
+                "apply_to including 'sky') and independently inspect SKY "
+                "quality; never scale a native RAW bias pedestal. "
+                f"Source: {path}"
+            )
+
+
 def _median_template(frames: Iterable[Path]) -> Tuple[np.ndarray, fits.Header]:
     imgs = []
     hdr0 = None
@@ -1495,6 +1629,8 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
     geom_cfg = sky_cfg.get("geometry") if isinstance(sky_cfg.get("geometry"), dict) else {}
     kel_cfg = sky_cfg.get("kelson_raw") if isinstance(sky_cfg.get("kelson_raw"), dict) else {}
     scl_cfg = sky_cfg.get("sky_scale_raw") if isinstance(sky_cfg.get("sky_scale_raw"), dict) else {}
+    freeze_cfg = sky_cfg.get("covariance_capture") if isinstance(sky_cfg.get("covariance_capture"), dict) else {}
+    frozen_capture_enabled = bool(freeze_cfg.get("enabled", False))
 
     primary = str(sky_cfg.get("primary_method") or sky_cfg.get("method") or "kelson_raw").lower()
 
@@ -1661,6 +1797,9 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
         allow_lam_shape_adjust = True
 
     preview_stack = []
+    # Preview is a visualization-only median of sky-subtracted SCI frames.
+    # All contributing arrays must have compatible physical units.
+    preview_bunits: set[str] = set()
 
     try:
         if lam_map is None:
@@ -1754,6 +1893,12 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                         "Check project_manifest.yaml or switch to kelson_raw."
                     )
 
+                # The dedicated SKY template must be detector-bias-corrected
+                # independently of the SCIENCE input path. The resolver can
+                # otherwise fall back to native RAW when Cosmics processed
+                # only the default apply_to=["obj"] set.
+                for sky_source in sky_inputs_ok:
+                    _require_calibrated_scorpio_sky_template(sky_source)
                 sky_template, _hdr_t = _median_template(sky_inputs_ok)
 
                 # record for done.json
@@ -1789,9 +1934,12 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                 cosmic_mask = _try_load_mask_for_clean(
                     p, masks_fits_dir=obj_mask_dir, clean_header=hdr,
                 )
+                from scorpio_pipe.cosmics_biasvar import read_clean_biasvar_sidecar
+                input_bias_var = read_clean_biasvar_sidecar(p, hdr, sci.shape)
                 sci, var, mask, hdr = _prepare_sky_input_planes(
                     sci, input_var, input_mask, cosmic_mask, hdr,
                     cfg=cfg, sky_cfg=sky_cfg,
+                    input_bias_var=input_bias_var,
                 )
 
                 # IMPORTANT (P0-J): downstream geometry/fit helpers may modify arrays in-place.
@@ -2064,20 +2212,50 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                         degree=int(kel_cfg.get("bspline_degree", 3) or 3),
                         rng=rng,
                     )
-                    # flexure scan (best-effort; never fail the whole stage on flexure heuristics)
+                    # A spline trained on these same sky pixels has no
+                    # absolute laboratory wavelength reference. Shifting it
+                    # against its *own* training data is a self-consistency
+                    # diagnostic, NOT a measurement of spectral flexure.
                     try:
-                        flex = _estimate_flexure_delta(
+                        internal = _estimate_flexure_delta(
                             fit,
                             delta_max_A=float(kel_cfg.get("delta_max_A", 10.0) or 10.0),
                             delta_step_A=float(kel_cfg.get("delta_step_A", 0.2) or 0.2),
                             n_samples=int(kel_cfg.get("flexure_n_samples", 200000) or 200000),
                             rng=rng,
                         )
-                    except Exception as e:
-                        flex = {"delta_A": 0.0, "sigma_delta_A": None, "flexure_score": None, "flag": "FLEXURE_FAILED", "error": str(e)}
-                        stage_flags.append(make_flag("FLEXURE_FAILED", "WARN", "Flexure estimation failed; proceeding with delta_lambda=0", stem=stem, error=str(e)))
-                    delta_A = float(flex.get("delta_A") or 0.0)
-                    fit_meta = {k: v for k, v in fit.items() if k not in {"_cache", "coeff"}}
+                    except Exception as exc:
+                        internal = {"error": str(exc)}
+                    flex = {
+                        "verification": "unverified",
+                        "reference_kind": "none",
+                        "reference_id": None,
+                        "flag": "FLEXURE_UNVERIFIED",
+                        "delta_A": None,
+                        "sigma_delta_A": None,
+                        "flexure_score": None,
+                        "applied": False,
+                        "self_fit_shift_A": internal.get("delta_A"),
+                        "self_fit_sigma_A": internal.get("sigma_delta_A"),
+                        "self_fit_error": internal.get("error"),
+                    }
+                    # Sky subtraction uses only the nominal ARC lambda map.
+                    # Never use the non-identifiable self-fit shift for sky
+                    # subtraction, or write it as a measured SKYDLAM.
+                    delta_A = 0.0
+                    stage_flags.append(
+                        make_flag(
+                            "FLEXURE_UNVERIFIED",
+                            "WARN",
+                            "Sky self-fit has no independent sky-line reference; "
+                            "no wavelength correction was measured or applied",
+                            stem=stem,
+                        )
+                    )
+                    fit_meta = {
+                        k: v for k, v in fit.items()
+                        if k not in {"_cache", "coeff"}
+                    }
                     fit_meta["coeff"] = {
                         "basis_lambda": str((kel_cfg.get("basis_lambda") or "bspline")).lower(),
                         "knot_step_A": float(kel_cfg.get("knot_step_A", 1.0) or 1.0),
@@ -2089,7 +2267,8 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                         t=np.asarray(fit["basis"]["t"], dtype=float),
                         degree=int(fit["basis"]["degree"]),
                         c0=np.asarray(fit["coeff"]["c0"], dtype=float),
-                        c1=(np.asarray(fit["coeff"]["c1"], dtype=float) if fit["coeff"]["c1"] is not None else None),
+                        c1=(np.asarray(fit["coeff"]["c1"], dtype=float)
+                            if fit["coeff"]["c1"] is not None else None),
                         y_norm_rows=y_norm_rows,
                         delta_A=delta_A,
                         strip_rows=strip_rows,
@@ -2100,81 +2279,80 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                         "strip_rows": int(strip_rows),
                         "strip_workers": int(strip_workers),
                         "parallel_min_pixels": int(parallel_min_pixels),
-                        "parallel_enabled": bool(strip_workers > 1 and lam_eff.size >= parallel_min_pixels),
+                        "parallel_enabled": bool(
+                            strip_workers > 1 and lam_eff.size >= parallel_min_pixels
+                        ),
                         "mode": "bspline_tiled",
                     }
 
-                    # FLEXURE_UNCERTAIN heuristic
-                    sigd = flex.get("sigma_delta_A")
-                    score = flex.get("flexure_score")
-                    # FLEXURE_UNCERTAIN heuristic. Allow users/tests to disable
-                    # this warning by setting an extremely large threshold.
-                    unc_thr_raw = kel_cfg.get("delta_uncertain_A", 2.0)
-                    unc_thr = float(2.0 if unc_thr_raw is None else unc_thr_raw)
-                    # Disable uncertain warnings if user sets <=0 or an extremely large threshold.
-                    unc_enabled = np.isfinite(unc_thr) and (0.0 < unc_thr < 1e8)
-                    if unc_enabled:
-                        if sigd is None or (isinstance(sigd, (int, float)) and float(sigd) > unc_thr):
-                            stage_flags.append(
-                                make_flag(
-                                    "FLEXURE_UNCERTAIN",
-                                    "WARN",
-                                    "Flexure estimate is uncertain",
-                                    stem=stem,
-                                    sigma_delta_A=sigd,
-                                    flexure_score=score,
-                                    delta_uncertain_A=unc_thr,
-                                )
-                            )
-                    thr_raw = kel_cfg.get("delta_score_warn", 2.5)
-                    thr = float(2.5 if thr_raw is None else thr_raw)
-                    # Allow disabling by setting 0.0
-                    if score is not None and thr > 0.0 and float(score) < thr:
-                        stage_flags.append(
-                            make_flag(
-                                "FLEXURE_UNCERTAIN",
-                                "WARN",
-                                "Flexure significance is low",
-                                stem=stem,
-                                sigma_delta_A=sigd,
-                                flexure_score=score,
-                                delta_score_warn=thr,
-                            )
+                # Optional ACTUAL post-clipping snapshot: save the fit's final
+                # native CCD sky pixels, weights, basis and wavelength map.
+                # A capture error is an ancillary warning and cannot replace
+                # otherwise valid science data with a sky-failure pass-through.
+                frozen_snapshot = None
+                if method_used == "kelson_raw" and frozen_capture_enabled:
+                    try:
+                        from scorpio_pipe.calib.sky_fit_capture import capture_kelson_fit
+
+                        frozen_snapshot = capture_kelson_fit(
+                            out_dir / f"{stem}_kelson_frozen_fit_v1.npz",
+                            fit=fit,
+                            lambda_map=lam_eff,
+                            y_norm_rows=y_norm_rows,
+                            candidate_flat_indices=(y_idx * nx + x_idx),
+                            candidate_lambda=lam_s,
+                            candidate_y=y_s_norm,
+                            candidate_data=d_s,
+                            candidate_variance=var_s,
                         )
+                        fit_meta["frozen_covariance_capture"] = frozen_snapshot
+                    except Exception as exc:
+                        fit_meta["frozen_covariance_capture"] = {
+                            "status": "CAPTURE_FAILED",
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                        stage_flags.append(make_flag(
+                            "SKY_FROZEN_CAPTURE_FAILED", "WARN",
+                            "Optional frozen sky-fit provenance not available",
+                            stem=stem,
+                            error=f"{type(exc).__name__}: {exc}",
+                        ))
 
                 skysub = (sci.astype(np.float32) - model.astype(np.float32)).astype(np.float32)
 
-                # P0-D: variance after sky subtraction.
-                # Minimal honest model: add an extra scalar variance term estimated
-                # from robust sky residual scatter beyond the predicted VAR.
-                var_out = var
-                var_model = None
+                # Detector variance and fitted-sky-model covariance are
+                # different statistical objects:
+                # Var(D - M) = Var(D) + Var(M) - 2 Cov(D,M).
+                # An in-sample residual MAD is NOT Var(M). Do not present it
+                # as a calibrated model variance or attach detector VAR to
+                # the standalone model. Until a coefficient covariance / held-
+                # out evaluation exists, only detector VAR is propagated.
+                var_out = np.asarray(var, dtype=np.float32)
+                hdr["SKYVADD"] = (False, "No unverified sky-model VAR added")
+                hdr["SKYVSRC"] = ("DET_ONLY", "Sky-sub VAR: detector component")
+                hdr["SKYVCOV"] = ("UNKNOWN", "Sky model covariance not estimated")
+                hdr["SKYVQUAL"] = ("INCOMP", "Sky-sub VAR uncertainty incomplete")
                 try:
-                    # Use the same sky pixels used for QC (y_idx,x_idx).
                     res_sky = skysub[y_idx, x_idx]
                     vv = var[y_idx, x_idx]
                     okv = np.isfinite(res_sky) & np.isfinite(vv) & (vv > 0)
                     if np.any(okv):
                         sig_res = float(_robust_sigma(res_sky[okv]))
                         med_var = float(np.nanmedian(vv[okv]))
-                        add = max(sig_res * sig_res - med_var, 0.0)
-                        if np.isfinite(add) and add > 0:
-                            var_model = np.full_like(var, add, dtype=np.float32)
-                            var_out = (var + var_model).astype(np.float32)
-                            hdr['SKYVADD'] = (True, 'Variance includes sky-model term')
-                            hdr['SKYVMOD'] = (float(add), 'Added sky-model variance [e-^2]')
-                            hdr['SKYVSRC'] = ('RESMAD', 'Sky-model variance source')
-                            hdr['SKYMSIG'] = (float(sig_res), 'Sky residual sigma [e-]')
-                        else:
-                            hdr['SKYVADD'] = (False, 'No sky-model variance added')
-                    else:
-                        hdr['SKYVADD'] = (False, 'No sky pixels for VAR model')
+                        extra_emp = max(sig_res * sig_res - med_var, 0.0)
+                        if np.isfinite(sig_res):
+                            hdr["SKYMSIG"] = (sig_res, "In-sample sky residual sigma")
+                        if np.isfinite(extra_emp):
+                            hdr["SKYVEMP"] = (extra_emp, "Residual excess; NOT model variance")
                 except Exception:
-                    try:
-                        hdr['SKYVADD'] = (False, 'Sky-model VAR failed')
-                    except Exception:
-                        pass
-
+                    pass
+                stage_flags.append(make_flag(
+                    "SKY_MODEL_VAR_UNVERIFIED",
+                    "WARN",
+                    "Sky model covariance is unmeasured; SCI VAR contains "
+                    "detector noise only (in-sample residual MAD is diagnostic)",
+                    stem=stem,
+                ))
 
                 # QC on sky residuals
                 res = skysub[y_idx, x_idx]
@@ -2222,56 +2400,74 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                 # write products
                 hdr0 = hdr.copy()
                 hdr0["SKYMD"] = (str(method_used), "Sky model method")
+                if frozen_snapshot is not None:
+                    hdr0["SKYFRZV"] = (1, "Captured actual frozen sky fit schema")
+                    hdr0["SKYFRZQ"] = ("FIT_ONLY", "Conditional fit, not science covariance")
+                    hdr0["SKYFRZP"] = (
+                        Path(str(frozen_snapshot["path"])).name,
+                        "Fitted-sky covariance provenance snapshot",
+                    )
                 # FITS header comments must be plain printable ASCII (astropy enforces this).
                 # Avoid Greek letters like λ/δ here.
                 hdr0["SKYKS"] = (float(kel_cfg.get("knot_step_A", 1.0) or 1.0), "lambda knot step (Angstrom)")
                 if flex is not None:
-                    hdr0["SKYDLAM"] = (float(flex.get("delta_A") or 0.0), "Flexure delta_lambda applied (Angstrom)")
+                    hdr0["SKYFLX"] = ("UNVERIF", "Spectral flexure not calibrated")
+                    hdr0["SKYDAPP"] = (False, "No independent flexure shift applied")
                 hdr0 = add_provenance(hdr0, cfg, stage="sky")
 
                 skymodel_path = out_dir / f"{stem}_skymodel_raw.fits"
                 skysub_path = out_dir / f"{stem}_skysub_raw.fits"
                 # `write_sci_var_mask` uses keyword-only args for VAR/MASK.
-                write_sci_var_mask(skymodel_path, model, var=(var_model if var_model is not None else var), mask=mask, header=hdr0)
+                write_sci_var_mask(skymodel_path, model, var=None, mask=mask, header=hdr0)
                 write_sci_var_mask(skysub_path, skysub, var=var_out, mask=mask, header=hdr0)
 
-                # Backward-compatible aliases (synthetic smoke tests / legacy scripts).
-                # Keep these as plain copies to avoid cross-platform symlink issues.
-                #
-                # Important nuance:
-                # - *_skysub_raw.fits is ALWAYS in RAW detector geometry (no wavelength grid).
-                # - Some legacy flows/tests expect 09_sky/*_skysub.fits to be directly stackable,
-                #   i.e. to carry a linear wavelength grid. If a linearized product already exists
-                #   (10_linearize/<stem>_skysub.fits), prefer copying THAT into 09_sky aliases.
-                alias_src = skysub_path
-                try:
-                    lin_dir = stage_dir(work_dir, "linearize")
-                    cand = [
-                        lin_dir / f"{stem}_skysub.fits",
-                        lin_dir / stem / f"{stem}_skysub.fits",
-                        lin_dir / f"{stem}_sky_sub.fits",
-                        lin_dir / stem / f"{stem}_sky_sub.fits",
-                    ]
-                    for c in cand:
-                        if not c.exists():
-                            continue
+                # Bind the ACTUAL selected science file, captured solver
+                # snapshot and both completed FITS products by full-file SHA256.
+                # Keep ancillary provenance failures separate from valid SCI:
+                # an old manifest must never appear to belong to a new run.
+                if method_used == "kelson_raw" and frozen_capture_enabled:
+                    lineage_path = out_dir / f"{stem}_kelson_frozen_fit_lineage_v1.json"
+                    if frozen_snapshot is None:
+                        lineage_path.unlink(missing_ok=True)
+                    else:
                         try:
-                            with fits.open(c, memmap=False) as _hd:
-                                _h = _hd[0].header
-                            has_grid = ("SCORP_L0" in _h or "CRVAL1" in _h) and ("SCORP_DL" in _h or "CDELT1" in _h)
-                            if has_grid:
-                                alias_src = c
-                                break
-                        except Exception:
-                            continue
-                except Exception:
-                    pass
+                            from scorpio_pipe.calib.sky_fit_lineage import (
+                                write_frozen_kelson_fit_lineage,
+                            )
 
+                            written = write_frozen_kelson_fit_lineage(
+                                lineage_path,
+                                selected_sky_input=p,
+                                frozen_fit=Path(str(frozen_snapshot["path"])),
+                                skymodel_raw=skymodel_path,
+                                skysub_raw=skysub_path,
+                            )
+                            fit_meta["frozen_covariance_lineage"] = {
+                                "path": str(written),
+                                "status": "FIT_ONLY_NOT_SCIENCE_COVARIANCE",
+                                "full_file_sha256": True,
+                                "science_uncertainty_qualified": False,
+                            }
+                        except Exception as exc:
+                            lineage_path.unlink(missing_ok=True)
+                            fit_meta["frozen_covariance_lineage"] = {
+                                "status": "LINEAGE_BIND_FAILED",
+                                "error": f"{type(exc).__name__}: {exc}",
+                            }
+                            stage_flags.append(make_flag(
+                                "SKY_FROZEN_LINEAGE_FAILED", "WARN",
+                                "Optional frozen sky provenance could not be bound to science FITS",
+                                stem=stem,
+                                error=f"{type(exc).__name__}: {exc}",
+                            ))
+
+                # Compatibility aliases belong to the current Sky stage only.
+                # NEVER pull a pre-existing 10_linearize product into 09_sky:
+                # it may belong to a previous science run (and has the wrong
+                # wavelength grid, geometry or reduction parameters).
+                # A legacy alias is explicitly a RAW-geometry Sky product.
                 for _alias in (f"{stem}_skysub.fits", f"{stem}_sky_sub.fits"):
-                    try:
-                        shutil.copy2(alias_src, out_dir / _alias)
-                    except Exception:
-                        pass
+                    shutil.copy2(skysub_path, out_dir / _alias)
                 for _alias in (f"{stem}_skymodel.fits", f"{stem}_sky_model.fits"):
                     try:
                         shutil.copy2(skymodel_path, out_dir / _alias)
@@ -2298,13 +2494,14 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                     pass
 
                 preview_stack.append(skysub)
+                preview_bunits.add(str(hdr0.get("BUNIT", "") or "").strip())
 
                 # metrics for qc_report compatibility
                 # pixel scale: convert δλ to pixels using median dλ/dx at center row
                 flex_pix = None
                 flex_A = None
-                if flex is not None:
-                    flex_A = float(flex.get("delta_A") or 0.0)
+                if flex is not None and flex.get("delta_A") is not None:
+                    flex_A = float(flex["delta_A"])
                     try:
                         midy = int(ny // 2)
                         dldx = np.nanmedian(np.abs(np.diff(lam_eff[midy, :]))).item()
@@ -2429,7 +2626,9 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                         skysub_skywin_png = out_dir / f"{stem}_skysub_raw_skywin.png"
 
                         model0 = np.zeros_like(sci0, dtype=np.float32)
-                        write_sci_var_mask(skymodel_path, model0, var=var0, mask=m0, header=hdr0)
+                        hdr0["SKYVQUAL"] = ("INCOMP", "No valid fitted-sky covariance")
+                        hdr0["SKYVCOV"] = ("UNKNOWN", "Sky model uncertainty unmeasured")
+                        write_sci_var_mask(skymodel_path, model0, var=None, mask=m0, header=hdr0)
                         write_sci_var_mask(skysub_path, sci0, var=var0, mask=m0, header=hdr0)
 
                         # Backward-compatible aliases.
@@ -2463,6 +2662,7 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                         )
 
                         preview_stack.append(sci0)
+                        preview_bunits.add(str(hdr0.get("BUNIT", "") or "").strip())
                         per_exp.append(
                             {
                                 "stem": stem,
@@ -2499,9 +2699,17 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
 
         # preview
         if preview_stack:
+            if len(preview_bunits) != 1 or not next(iter(preview_bunits)):
+                raise RuntimeError(
+                    "Cannot combine Sky preview SCI frames with missing or different BUNIT: "
+                    + repr(sorted(preview_bunits))
+                )
             stack = np.nanmedian(np.stack(preview_stack, axis=0), axis=0).astype(np.float32)
             hdr0 = fits.Header()
-            hdr0["BUNIT"] = (str(lam_hdr.get("BUNIT", "ADU")), "Data unit")
+            # Derive BUNIT from the processed sky-subtracted SCI frames, NOT
+            # from lambda_map (whose BUNIT describes wavelengths).
+            hdr0["BUNIT"] = (next(iter(preview_bunits)), "Data unit of sky-subtracted SCI")
+            hdr0["SCORPPRV"] = (True, "Visualization-only preview, not science MEF")
             hdr0["NEXP"] = (int(len(preview_stack)), "Number of exposures (median)")
             hdr0 = add_provenance(hdr0, cfg, stage="sky")
             # `write_sci_var_mask` uses keyword-only args for VAR/MASK.
@@ -2617,6 +2825,9 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                 except Exception:
                     pass
         flexure_summary = {
+            "verification": "unverified",
+            "reference_kind": "none",
+            "reference_id": None,
             "delta_A_median": float(np.nanmedian(flex_deltas)) if flex_deltas else None,
             "sigma_delta_A_median": float(np.nanmedian(flex_sigmas)) if flex_sigmas else None,
             "flexure_score_median": float(np.nanmedian(flex_scores)) if flex_scores else None,

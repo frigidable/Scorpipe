@@ -73,23 +73,35 @@ def test_sky_roi_dialog_quick_peek_runs_async_and_keeps_event_loop_alive(monkeyp
     t0 = time.monotonic()
     dlg = mod.SkyRoiDialog(fits_path)
     dt = time.monotonic() - t0
-    dlg.show()
+    try:
+        dlg.show()
+        assert dt < 0.5, f'SkyRoiDialog constructor blocked for {dt:.3f}s'
+        assert calls['full'] == 0
+        assert dlg.img is None
+        assert 'Loading quick peek' in dlg.lbl_status.text()
 
-    assert dt < 0.5, f'SkyRoiDialog constructor blocked for {dt:.3f}s'
-    assert calls['quick'] == 1
-    assert calls['full'] == 0
-    assert dlg.img is None
-    assert 'Loading quick peek' in dlg.lbl_status.text()
+        # A QThreadPool job is queued, not guaranteed to start before the
+        # constructor returns. Observe actual start without weakening the
+        # constructor's non-blocking or event-loop responsiveness checks.
+        assert _process_events_until(
+            app, lambda: calls['quick'] == 1, timeout_s=1.5
+        ), 'quick preview worker never started'
 
-    fired: list[float] = []
-    QtCore.QTimer.singleShot(100, lambda: fired.append(time.monotonic()))
-    assert _process_events_until(app, lambda: bool(fired), timeout_s=0.8), 'event loop stalled while quick peek was loading'
+        fired: list[float] = []
+        QtCore.QTimer.singleShot(100, lambda: fired.append(time.monotonic()))
+        assert _process_events_until(app, lambda: bool(fired), timeout_s=0.8), 'event loop stalled while quick peek was loading'
 
-    assert _process_events_until(app, lambda: dlg.img is not None, timeout_s=2.0), 'quick peek never finished'
-    assert dlg._render_mode == 'quick'
-    assert dlg.btn_full_res.isEnabled()
-    assert 'Quick peek' in dlg.lbl_status.text()
-    dlg.close()
+        assert _process_events_until(app, lambda: dlg.img is not None, timeout_s=2.0), 'quick peek never finished'
+        assert dlg._render_mode == 'quick'
+        assert dlg.btn_full_res.isEnabled()
+        assert 'Quick peek' in dlg.lbl_status.text()
+    finally:
+        # An early assertion failure must not tear down a QApplication while
+        # its loader is still running and holding Qt signal objects.
+        handle = dlg._load_job
+        dlg.close()
+        if handle is not None:
+            handle.wait(timeout_ms=2500)
 
 
 
@@ -145,7 +157,9 @@ def test_sky_roi_dialog_full_resolution_is_on_demand_and_async(monkeypatch, tmp_
 
     dlg = mod.SkyRoiDialog(fits_path)
     dlg.show()
-    assert _process_events_until(app, lambda: dlg.img is not None, timeout_s=1.0)
+    # Completion latency includes QThreadPool scheduling and GUI event-loop
+    # delivery; the constructor/responsiveness checks enforce non-blocking UX.
+    assert _process_events_until(app, lambda: dlg.img is not None, timeout_s=2.0), 'quick preview completion was not delivered'
     assert calls['quick'] == 1
     assert calls['full'] == 0
     assert dlg.btn_full_res.isEnabled()
@@ -157,7 +171,9 @@ def test_sky_roi_dialog_full_resolution_is_on_demand_and_async(monkeypatch, tmp_
     dt = time.monotonic() - t0
 
     assert dt < 0.5, f'Full-resolution request blocked for {dt:.3f}s'
-    assert calls['full'] == 1
+    # QThreadPool submission is asynchronous. The loader is not required to
+    # start before click() returns, particularly after other GUI tests.
+    assert _process_events_until(app, lambda: calls['full'] == 1, timeout_s=1.5), 'full-resolution worker never started'
     assert _process_events_until(app, lambda: bool(fired), timeout_s=0.8), 'event loop stalled while full resolution was loading'
     assert _process_events_until(app, lambda: dlg._render_mode == 'full', timeout_s=2.0), 'full resolution never finished'
     assert not dlg.btn_full_res.isEnabled()

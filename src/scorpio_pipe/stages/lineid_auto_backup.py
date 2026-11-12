@@ -22,66 +22,125 @@ def _resolve_from_root(p: str | Path) -> Path:
 
 
 def _load_neon_lines_csv(path: Path) -> Tuple[np.ndarray, np.ndarray]:
+    """Read the laboratory linelist; comments must not replace CSV headers.
+
+    NumPy genfromtxt(names=True) otherwise treats a first metadata comment
+    (# waveref: air) as column names, and silently converts the real
+    wavelength column to NaNs. Reject malformed line lists explicitly.
+    """
+    from io import StringIO
+
+    lines = path.read_text(encoding="utf-8-sig").splitlines()
+    metadata: dict[str, str] = {}
+    rows: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            comment = stripped.lstrip("#").strip()
+            if ":" in comment:
+                key, value = comment.split(":", 1)
+                metadata[key.strip().lower()] = value.strip().lower()
+            continue
+        rows.append(line)
+    if not rows:
+        raise ValueError(f"Line list contains no CSV rows: {path}")
+
+    # Legacy one- or two-column lists may omit a header.
+    fields = [value.strip() for value in rows[0].split(",")]
     try:
-        data = np.genfromtxt(
-            str(path), delimiter=",", names=True, dtype=None, encoding=None
+        for value in fields:
+            float(value)
+    except ValueError:
+        headerless = False
+    else:
+        headerless = True
+
+    if headerless:
+        arr = np.genfromtxt(
+            StringIO("\n".join(rows)), delimiter=",", dtype=float, ndmin=2
         )
-        names = [n.lower() for n in data.dtype.names]
+        if arr.ndim != 2 or arr.shape[1] not in (1, 2):
+            raise ValueError(f"Headerless linelist must have one or two columns: {path}")
+        lam = np.asarray(arr[:, 0], dtype=float)
+        w = (
+            np.asarray(arr[:, 1], dtype=float)
+            if arr.shape[1] == 2 else np.ones_like(lam)
+        )
+        safe = np.ones_like(lam, dtype=bool)
+    else:
+        data = np.genfromtxt(
+            StringIO("\n".join(rows)), delimiter=",", names=True,
+            dtype=None, encoding=None, ndmin=1
+        )
+        if data.dtype.names is None:
+            raise ValueError(f"Line list has no usable CSV column names: {path}")
+        names = [name.lower() for name in data.dtype.names]
         wl_key = None
         for cand in ("wavelength", "lambda", "wl", "lam", "lambda_a", "wavelength_a"):
             if cand in names:
                 wl_key = data.dtype.names[names.index(cand)]
                 break
         if wl_key is None:
-            wl_key = data.dtype.names[0]
-        lam = np.asarray(data[wl_key], dtype=float)
-
-        w = np.ones_like(lam, dtype=float)
+            raise ValueError(
+                f"Line list lacks a recognized wavelength column: {path} "
+                f"(columns={list(data.dtype.names)})"
+            )
+        try:
+            lam = np.atleast_1d(np.asarray(data[wl_key], dtype=float))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Non-numeric wavelength column in {path}") from exc
+        w = np.ones_like(lam)
         for cand in ("intensity", "relint", "i", "strength"):
             if cand in names:
-                ik = data.dtype.names[names.index(cand)]
-                w = np.asarray(data[ik], dtype=float)
+                key = data.dtype.names[names.index(cand)]
+                w = np.atleast_1d(np.asarray(data[key], dtype=float))
                 break
-
         if "priority" in names:
             pk = data.dtype.names[names.index("priority")]
-            pr = np.asarray(data[pk], dtype=float)
+            pr = np.atleast_1d(np.asarray(data[pk], dtype=float))
             w = w * np.clip(1.0 + 0.35 * pr, 0.25, None)
-
         if "safe_for_auto" in names:
             sk = data.dtype.names[names.index("safe_for_auto")]
-            safe_raw = np.asarray(data[sk])
+            values = np.atleast_1d(np.asarray(data[sk]))
             safe = np.array(
-                [str(v).strip().lower() in {"1", "y", "yes", "true", "t"} for v in safe_raw],
-                dtype=bool,
+                [str(v).strip().lower() in {"1", "y", "yes", "true", "t"}
+                 for v in values], dtype=bool,
             )
         else:
             safe = np.ones_like(lam, dtype=bool)
-
         if "blend_class" in names:
             bk = data.dtype.names[names.index("blend_class")]
-            bc = np.asarray(data[bk]).astype(str)
-            severe = np.array([("weak" in b.lower()) or ("blend" in b.lower()) for b in bc], dtype=bool)
+            classes = np.atleast_1d(np.asarray(data[bk])).astype(str)
+            severe = np.array(
+                [("weak" in b.lower()) or ("blend" in b.lower()) for b in classes],
+                dtype=bool,
+            )
             w = np.where(severe, 0.5 * w, w)
-    except Exception:
-        arr = np.genfromtxt(str(path), delimiter=",", dtype=float)
-        if arr.ndim == 1:
-            arr = arr[None, :]
-        lam = arr[:, 0].astype(float)
-        w = arr[:, 1].astype(float) if arr.shape[1] >= 2 else np.ones_like(lam)
-        safe = np.ones_like(lam, dtype=bool)
 
-    if np.nanmax(lam) < 1000:
+    if not lam.size or not np.all(np.isfinite(lam)):
+        raise ValueError(f"Line list has empty or nonfinite laboratory wavelengths: {path}")
+    if np.any(lam <= 0):
+        raise ValueError(f"Line list has nonpositive laboratory wavelengths: {path}")
+    units = metadata.get("unit", "").replace(" ", "")
+    if units in {"nm", "nanometer", "nanometers", "nanometre", "nanometres"}:
         lam = lam * 10.0
+    elif units not in {"", "angstrom", "angstroms", "a", "å"}:
+        raise ValueError(f"Unsupported line-list wavelength unit {units!r}: {path}")
+    elif not units and float(np.max(lam)) < 1000:
+        raise ValueError(
+            f"Ambiguous sub-1000 line-list wavelengths: {path}. "
+            "Declare '# unit: nm' or '# unit: angstrom' explicitly."
+        )
 
-    m = np.isfinite(lam) & safe
-    lam = lam[m]
-    w = w[m] if w.size == m.size else np.ones_like(lam)
+    # Legacy weights with missing or nonpositive values are neutral.
     w = np.where(np.isfinite(w) & (w > 0), w, 1.0)
-
+    if not np.any(safe):
+        raise ValueError(f"Line list has no lines safe for automatic matching: {path}")
+    lam, w = lam[safe], w[safe]
     idx = np.argsort(lam)
     return lam[idx], w[idx]
-
 
 def _nearest_idx(sorted_arr: np.ndarray, x: np.ndarray) -> np.ndarray:
     i = np.searchsorted(sorted_arr, x)
@@ -259,21 +318,41 @@ def prepare_lineid(cfg: dict[str, Any], *, run_root: str | Path | None = None) -
     auto_path = outdir / "manual_pairs_auto.csv"
     rep_path = outdir / "lineid_report.txt"
 
-    x_pairs, lam_pairs, d_pairs, meta = _suggest_linear_pairs(
-        px, amp, lam_lab, w_lab, tol_A, top_peaks, top_lines
-    )
+    # LineID preparation must remain usable when the automatic pattern
+    # matching is inconclusive. This is NOT approval of a wavelength
+    # solution: wavesolution still requires independently reviewed
+    # hand_pairs.txt. Do not raise the matching tolerance to force matches.
+    auto_failure = None
+    try:
+        x_pairs, lam_pairs, d_pairs, meta = _suggest_linear_pairs(
+            px, amp, lam_lab, w_lab, tol_A, top_peaks, top_lines
+        )
+    except RuntimeError as exc:
+        auto_failure = str(exc)
+        x_pairs = lam_pairs = d_pairs = np.array([], dtype=float)
+        meta = {}
+        print(
+            "LINEID AUTO: no reliable matching; manual pairs required: "
+            + auto_failure,
+            flush=True,
+        )
 
-    idx_near = np.argmin(np.abs(px[None, :] - x_pairs[:, None]), axis=1)
     with auto_path.open("w", encoding="utf-8", newline="") as f:
         f.write("use,x_pix,lambda_A,delta_A,amp,fwhm_pix,comment\n")
-        for k in range(len(x_pairs)):
-            i = int(idx_near[k])
-            f.write(
-                f"1,{x_pairs[k]:.6f},{lam_pairs[k]:.6f},{d_pairs[k]:.6f},{amp[i]:.6f},{fwhm[i]:.6f},auto\n"
-            )
+        if auto_failure is None:
+            idx_near = np.argmin(np.abs(px[None, :] - x_pairs[:, None]), axis=1)
+            for k in range(len(x_pairs)):
+                i = int(idx_near[k])
+                f.write(
+                    f"1,{x_pairs[k]:.6f},{lam_pairs[k]:.6f},{d_pairs[k]:.6f},{amp[i]:.6f},{fwhm[i]:.6f},auto\n"
+                )
 
     with rep_path.open("w", encoding="utf-8") as f:
-        f.write("LINE-ID (auto) report\n")
+        f.write(
+            "LINE-ID: MANUAL_ONLY_NO_RELIABLE_AUTO_PAIRS\n"
+            if auto_failure is not None else
+            "LINE-ID: AUTO_SUGGESTIONS_UNVERIFIED\n"
+        )
         f.write(f"lines_csv: {lines_path}\n")
         if long_prior_meta.get("applied"):
             cov = long_prior_meta.get("coverage_A") or []
@@ -285,9 +364,16 @@ def prepare_lineid(cfg: dict[str, Any], *, run_root: str | Path | None = None) -
                 f"dispersion={float(disp):.4f} A/px kept={int(long_prior_meta.get('kept_n_lines') or 0)}\n"
             )
         f.write(f"tol_A: {tol_A}\n")
+        f.write(f"peaks_detected: {int(px.size)}\n")
+        f.write(f"laboratory_lines_loaded: {int(lam_lab.size)}\n")
         f.write(f"pairs_auto: {len(x_pairs)}\n")
-        f.write(f"linear_guess: a={meta['a']:.6f} A/px, b={meta['b']:.3f} A\n")
-        f.write(f"linear_rms_A: {meta['rms_A']:.3f}\n")
+        if auto_failure is not None:
+            f.write(f"auto_failure: {auto_failure}\n")
+            f.write("No automatic pairs are scientifically accepted. "
+                    "Create and review hand_pairs.txt manually.\n")
+        else:
+            f.write(f"linear_guess: a={meta['a']:.6f} A/px, b={meta['b']:.3f} A\n")
+            f.write(f"linear_rms_A: {meta['rms_A']:.3f}\n")
 
     if long_prior_meta.get("applied"):
         try:

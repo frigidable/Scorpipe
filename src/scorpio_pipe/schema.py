@@ -202,6 +202,7 @@ class CalibBlock(BaseModel):
 
     bias_combine: str = "median"  # median|mean
     bias_sigma_clip: float = 0.0
+    bias_gross_reject_adu: float = Field(default=0.0, ge=0.0, allow_inf_nan=False)
 
     # P0-C1: how strictly to enforce MasterBias readout matching.
     # - strict: raise if no exact (geometry+readout) match exists.
@@ -489,6 +490,20 @@ class ProjectBlock(BaseModel):
     wave_reference: str = Field(default="air")
     barycentric_correction: Optional[str] = None
 
+    @field_validator("barycentric_correction", mode="before")
+    @classmethod
+    def _validate_barycentric_request(cls, v: Any) -> Optional[str]:
+        # This is a compute-only utility: no active reduction stage applies
+        # the velocity correction. Reject silently ignored science requests.
+        if v is None:
+            return None
+        if isinstance(v, str) and v.strip().upper() == "OFF":
+            return "OFF"
+        raise ValueError(
+            "project.barycentric_correction application is not implemented in the engine; "
+            "use OFF/None and the explicit compute-only velocity utility"
+        )
+
     @field_validator("wave_reference", mode="before")
     @classmethod
     def _norm_wave_reference(cls, v: Any) -> str:
@@ -570,6 +585,15 @@ class ConfigSchema(BaseModel):
     stack2d: Stack2DBlock = Field(default_factory=Stack2DBlock)
     extract1d: Extract1DBlock = Field(default_factory=Extract1DBlock)
 
+    lsf_model: Dict[str, Any] = Field(default_factory=dict)
+    sky_refine: Dict[str, Any] = Field(default_factory=dict)
+
+    observer_setup_preset: Optional[Dict[str, Any]] = Field(
+        default=None,
+        alias="_observer_setup_preset",
+        exclude=True,
+    )
+
     # Deprecated/compat: historically some configs used a top-level "noise".
     # Stages should prefer namespaced noise (e.g. wavesol.noise).
     noise: Optional[Dict[str, Any]] = None
@@ -582,7 +606,18 @@ class ConfigSchema(BaseModel):
     project_root: Optional[str] = None
     work_dir_abs: Optional[str] = None
     setup: Optional[Dict[str, Any]] = None
-    _profiles_applied: Optional[List[str]] = None
+    # Runtime-only metadata injected by load_config() to record project
+    # manifest provenance and role-selection state. Pydantic treats leading
+    # underscore field names as private attributes, so register the external
+    # key through an explicit alias instead. Keep it out of serialized YAML.
+    project_manifest_runtime: Optional[Dict[str, Any]] = Field(
+        default=None, alias="_project_manifest", exclude=True
+    )
+    profiles_applied_runtime: Optional[List[str]] = Field(
+        default=None,
+        alias="_profiles_applied",
+        exclude=True,
+    )
 
     @model_validator(mode="before")
     @classmethod

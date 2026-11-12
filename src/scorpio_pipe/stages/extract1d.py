@@ -238,6 +238,121 @@ def _safe_json(obj: Any) -> Any:
     return obj
 
 
+def _extraction_mask_policy(*, is_stack: bool) -> tuple[int, int]:
+    """Return (fatal input bits, 1D-only provenance bits to clear).
+
+    Stack2D REJECTED means that some constituent exposures were clipped or
+    downweighted. It is not by itself an invalidity of the accepted coadd.
+    For an individual exposure the same bit remains a fatal input DQ.
+    """
+    from scorpio_pipe.maskbits import BADPIX, COSMIC, NO_COVERAGE, REJECTED, SATURATED, USER
+
+    always_fatal = int(NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER)
+    if is_stack:
+        return always_fatal, int(REJECTED)
+    return always_fatal | int(REJECTED), 0
+
+
+def _strip_informational_1d_bits(mask: np.ndarray, *, bits: int) -> np.ndarray:
+    """Return output usability DQ; never modify the source 2D MASK."""
+    arr = np.asarray(mask, dtype=np.uint16)
+    if not int(bits):
+        return arr
+    return arr & np.uint16(~int(bits) & 0xFFFF)
+
+
+def _verified_stack_rejection_provenance(
+    path: Path, hdr: fits.Header, mask: np.ndarray,
+) -> bool:
+    """Only recast REJECTED as contributor provenance for verified Stack2D.
+
+    Legacy or merely stack-*named FITS may have different REJECTED semantics.
+    The final Stack2D must have a declared method, a correctly shaped integer
+    number-of-contributors map, and NO_COVERAGE for every uncovered pixel.
+    A failed check conservatively keeps REJECTED fatal.
+    """
+    from scorpio_pipe.maskbits import NO_COVERAGE
+
+    if not str(hdr.get("STKMETH") or "").strip():
+        return False
+    try:
+        with fits.open(path, memmap=False) as hdul:
+            if "COV" not in hdul:
+                return False
+            cov = np.asarray(hdul["COV"].data)
+        if cov.shape != mask.shape or cov.dtype.kind not in "iu":
+            return False
+        if np.any(cov < 0):
+            return False
+        invalid = (cov == 0) & ((mask & np.uint16(NO_COVERAGE)) == 0)
+        if np.any(invalid):
+            return False
+        return True
+    except (OSError, KeyError, TypeError, ValueError):
+        return False
+
+
+def _aperture_input_dq(
+    mask: np.ndarray | None, centers: np.ndarray, *, ap_hw: int,
+) -> np.ndarray:
+    """OR raw DQ inside each extraction aperture without changing usability."""
+    positions = np.asarray(centers, dtype=float)
+    out = np.zeros(positions.size, dtype=np.uint16)
+    if mask is None:
+        return out
+    source = np.asarray(mask, dtype=np.uint16)
+    if source.ndim != 2 or source.shape[1] != positions.size:
+        raise ValueError("Aperture provenance MASK shape mismatch")
+    ny = source.shape[0]
+    for j, yc in enumerate(positions):
+        if not np.isfinite(yc):
+            continue
+        y0 = max(0, int(math.floor(float(yc))) - int(ap_hw))
+        y1 = min(ny, int(math.floor(float(yc))) + int(ap_hw) + 1)
+        if y1 > y0:
+            out[j] = np.bitwise_or.reduce(source[y0:y1, j])
+    return out
+
+
+def _science_usable_1d_mask(
+    extracted_mask: np.ndarray, *,
+    upstream_degraded: bool = False,
+) -> np.ndarray:
+    """Translate pre-v1 mixed provenance into explicit output-fatal DQ.
+
+    Only NO_COVERAGE and SKYMODEL_FAIL are reliable post-extraction fatal
+    properties from the current kernels. All recognized excluded-input flags
+    remain in DQ_ANY, not MASK. Unknown bits are retained conservatively.
+    """
+    from scorpio_pipe.maskbits import (
+        NO_COVERAGE, BADPIX, COSMIC, SATURATED, EDGE, USER,
+        REJECTED, OUTSIDE_SLIT, INVALID_WAVELENGTH, SKYMODEL_FAIL,
+    )
+    src = np.asarray(extracted_mask, dtype=np.uint16)
+    known = int(
+        NO_COVERAGE | BADPIX | COSMIC | SATURATED | EDGE |
+        USER | REJECTED | OUTSIDE_SLIT | INVALID_WAVELENGTH | SKYMODEL_FAIL
+    )
+    unknown = np.uint16(~known & 0xFFFF)
+    fatal = np.uint16(int(NO_COVERAGE | SKYMODEL_FAIL))
+    out = (src & (fatal | unknown)).astype(np.uint16, copy=True)
+    if upstream_degraded:
+        out |= np.uint16(SKYMODEL_FAIL)
+    return out
+
+
+def _aperture_fraction_used(
+    npix: np.ndarray, *, ap_hw: int,
+) -> np.ndarray:
+    """Fraction of the NOMINAL geometric aperture with usable data.
+
+    This is a spatial-pixel fraction, NOT an inferred fraction of source
+    flux. It must never be used as a flux aperture correction.
+    """
+    n = np.asarray(npix, dtype=float)
+    return np.clip(n / float(2 * int(ap_hw) + 1), 0.0, 1.0)
+
+
 def _is_stack2d_input(path: Path, hdr: fits.Header) -> bool:
     name = path.name.lower()
     if name in {"stack2d.fits", "stacked2d.fits"}:
@@ -704,6 +819,7 @@ def _boxcar_extract(
     min_good_frac: float,
     sky_resid: Optional[np.ndarray],
     apply_local_sky: bool,
+    operator_capture: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Simple aperture sum (TRACE or FIXED)."""
     ny, nlam = sci.shape
@@ -744,9 +860,12 @@ def _boxcar_extract(
 
         if have_mask:
             mm = mask[y0:y1, j]
-            # OR all bits for output (keeps provenance of masked contributors)
+            # Input NO_COVERAGE belongs to an excluded spatial pixel, not
+            # necessarily to the extracted spectral channel. Output coverage
+            # is determined below from the *actual usable contributors*.
             try:
-                out_mask[j] |= np.uint16(np.bitwise_or.reduce(mm))
+                aperture_bits = np.uint16(np.bitwise_or.reduce(mm))
+                out_mask[j] |= aperture_bits & np.uint16(~int(NO_COVERAGE) & 0xFFFF)
             except Exception:
                 pass
             good &= (mm & fatal_bits) == 0
@@ -761,6 +880,8 @@ def _boxcar_extract(
         if n_good < int(math.ceil(min_good_frac * n_tot)):
             out_mask[j] |= np.uint16(NO_COVERAGE)
 
+        if operator_capture is not None:
+            operator_capture[y0:y1, j] = good.astype(np.float64)
         f = float(np.sum(sl[good]))
         if apply_local_sky and sky_resid is not None and np.isfinite(sky_resid[j]):
             f = f - float(sky_resid[j]) * float(n_good)
@@ -794,6 +915,7 @@ def _optimal_extract(
     clip_negative_profile: bool = True,
     min_profile_sum: float = 1e-6,
     backend: str = "auto",
+    operator_capture: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
     """Horne-like optimal extraction (weights by spatial profile + honest VAR).
 
@@ -828,47 +950,82 @@ def _optimal_extract(
         mm_all = np.asarray(mask[rows_clip, cols], dtype=np.uint16)
         good &= (mm_all & np.uint16(fatal_bits)) == 0
 
-    prof = np.where(inside & np.isfinite(sl_all), sl_all, 0.0)
+    # Learn the spatial model exclusively from valid measurements. A masked
+    # cosmic ray must not pollute adjacent wavelengths through smoothing.
+    observed_profile = np.where(good, sl_all, 0.0)
     if clip_negative_profile:
-        prof = np.maximum(prof, 0.0)
-
-    good_prof = good
+        observed_profile = np.maximum(observed_profile, 0.0)
 
     try:
         sig = float(max(0.0, smooth_lambda_sigma))
     except Exception:
         sig = 3.0
     if sig > 0:
-        prof = gaussian_filter1d(prof, sigma=sig, axis=1, mode="nearest")
+        # Normalized convolution compensates for missing samples *before*
+        # smoothing. The resulting model is evaluated even at masked spatial
+        # pixels, which are excluded later from the optimal weighted sum.
+        num_profile = gaussian_filter1d(
+            observed_profile, sigma=sig, axis=1, mode="nearest"
+        )
+        support = gaussian_filter1d(
+            good.astype(float), sigma=sig, axis=1, mode="nearest"
+        )
+        profile_supported = inside & (support > 1e-12)
+        prof = np.divide(
+            num_profile, support,
+            out=np.zeros_like(num_profile), where=profile_supported,
+        )
+    else:
+        # Even with spectral smoothing disabled, the *profile model* must
+        # have values at isolated masked locations. Interpolate only the
+        # model (never SCI/VAR) from available wavelengths of the same row.
+        prof = observed_profile.copy()
+        profile_supported = good.copy()
+        for k in range(nwin):
+            valid = np.flatnonzero(good[k])
+            missing = np.flatnonzero(inside[k] & ~good[k])
+            if valid.size and missing.size:
+                prof[k, missing] = np.interp(
+                    missing, valid, observed_profile[k, valid]
+                )
+                profile_supported[k, missing] = True
 
-    prof_good = np.where(good_prof, prof, 0.0)
-    sum_prof = np.sum(prof_good, axis=0, dtype=float)
-    good_counts = np.sum(good_prof, axis=0, dtype=np.int32)
-    fallback = ~(sum_prof > float(min_profile_sum))
-
-    P = np.zeros_like(prof, dtype=float)
-    ok = ~fallback
-    if np.any(ok):
-        P[:, ok] = np.where(good_prof[:, ok], prof_good[:, ok] / sum_prof[None, ok], 0.0)
-    if np.any(fallback):
-        fb_good = fallback & (good_counts > 0)
-        if np.any(fb_good):
-            P[:, fb_good] = np.where(
-                good_prof[:, fb_good],
-                1.0 / good_counts[fb_good][None, :].astype(float),
-                0.0,
-            )
-        fb_empty = fallback & ~(good_counts > 0)
-        if np.any(fb_empty):
-            P[:, fb_empty] = 1.0 / float(nwin)
-
+    # P_j is normalized to the *geometric aperture*, not merely the surviving
+    # good samples. Otherwise dropping 1 of 3 uniform rows changes the
+    # estimand from full-aperture flux (30) to partial flux (20).
+    profile_amplitude = np.sum(
+        np.where(inside, prof, 0.0), axis=0, dtype=float
+    )
+    good_counts = np.sum(good, axis=0, dtype=np.int32)
     n_tot = np.sum(inside, axis=0, dtype=np.int32)
+    fallback = ~(profile_amplitude > float(min_profile_sum))
+    P = np.zeros_like(prof, dtype=float)
+    fitted = ~fallback
+    if np.any(fitted):
+        P[:, fitted] = np.where(
+            inside[:, fitted],
+            prof[:, fitted] / profile_amplitude[None, fitted],
+            0.0,
+        )
+    if np.any(fallback):
+        P[:, fallback] = np.where(
+            inside[:, fallback],
+            1.0 / np.maximum(n_tot[fallback], 1)[None, :],
+            0.0,
+        )
+    # If an aperture row has no data from which to infer its profile,
+    # the full-aperture flux is not scientifically qualified.
+    profile_unconstrained = np.any(inside & ~profile_supported, axis=0)
+
     from scorpio_pipe.maskbits import NO_COVERAGE
 
     meta: dict[str, Any] = {
         "profile_smooth_lambda_sigma": float(sig),
         "profile_clip_negative": bool(clip_negative_profile),
         "profile_fallback_frac": float(np.sum(fallback)) / float(max(1, nlam)),
+        "profile_unconstrained_frac": float(np.mean(profile_unconstrained)),
+        "profile_normalization": "full_geometric_aperture",
+        "profile_mask_policy": "exclude_before_normalized_smoothing",
         "backend_requested": str(backend_req),
         "numba_available": bool(_NUMBA_OK),
         "vectorized": True,
@@ -918,6 +1075,28 @@ def _optimal_extract(
                 flux[finite] = flux[finite] - sky_arr[finite] * (corr_num[finite] / denom[finite])
         meta["backend_used"] = "numpy"
 
+    if operator_capture is not None:
+        # The frozen Horne operator uses the actual fitted profile, mask,
+        # and input VAR, independent of the NumPy/Numba numerical backend.
+        # Keep every rejected contributor's coefficient at exactly zero.
+        safe_v = np.where(good, vv_all, 1.0)
+        denom_capture = np.sum(
+            np.where(good, P * P / safe_v, 0.0), axis=0,
+            dtype=np.float64,
+        )
+        numerator_capture = np.where(good, P / safe_v, 0.0)
+        weights_capture = np.divide(
+            numerator_capture, denom_capture[None, :],
+            out=np.zeros_like(numerator_capture),
+            where=denom_capture[None, :] > 0,
+        )
+        cols_capture = np.broadcast_to(cols, rows.shape)
+        operator_capture[rows_clip[inside], cols_capture[inside]] = weights_capture[inside]
+
+    # Distinguish a justified interpolation of the spatial *model* from
+    # an aperture whose shape is genuinely not constrained by any data.
+    out_mask[profile_unconstrained] |= np.uint16(NO_COVERAGE)
+
     if have_mask:
         # Keep the provenance of every geometrically sampled aperture pixel,
         # including flagged contributors excluded from the optimal weights.
@@ -955,6 +1134,10 @@ def _write_spec1d_fits(
     mask_fixed: np.ndarray,
     sky_fixed: np.ndarray,
     npix_fixed: np.ndarray,
+    dq_any_trace: np.ndarray | None = None,
+    dq_any_fixed: np.ndarray | None = None,
+    frac_trace: np.ndarray | None = None,
+    frac_fixed: np.ndarray | None = None,
 ) -> None:
     """Write spec1d.fits (tables + lightweight preview images).
 
@@ -986,7 +1169,29 @@ def _write_spec1d_fits(
     ph["PIPEVER"] = (str(PIPELINE_VERSION), "Pipeline version")
     ph["STAGE"] = ("12_extract", "Pipeline stage (directory name)")
     stamp_data_model(ph)
-
+    # Versioned *1D* mask semantics, independent of the global 2D bit map.
+    have_new_dq = all(x is not None for x in (
+        dq_any_trace, dq_any_fixed, frac_trace, frac_fixed
+    ))
+    if have_new_dq:
+        ph["DQ1DVER"] = (1, "1D science usability / aperture provenance schema")
+        ph["DQ1DSEM"] = ("FATAL", "MASK_* contains output-fatal DQ only")
+    elif any(x is not None for x in (
+        dq_any_trace, dq_any_fixed, frac_trace, frac_fixed
+    )):
+        raise ValueError("Incomplete DQ1D provenance/coverage arrays")
+    if have_new_dq:
+        for name, dq, frac in (
+            ("TRACE", dq_any_trace, frac_trace),
+            ("FIXED", dq_any_fixed, frac_fixed),
+        ):
+            dq_arr = np.asarray(dq)
+            frac_arr = np.asarray(frac, dtype=float)
+            if dq_arr.shape != wave.shape or frac_arr.shape != wave.shape:
+                raise ValueError(f"DQ1D {name} provenance array length mismatch")
+            if (not np.isfinite(frac_arr).all() or np.any(frac_arr < 0)
+                    or np.any(frac_arr > 1)):
+                raise ValueError(f"DQ1D {name} spatial fraction must be in [0,1]")
 
     if "INPUT2D" in hdr0:
         ph["INPUT2D"] = (str(hdr0["INPUT2D"]), "2D input FITS used for extraction")
@@ -1011,6 +1216,14 @@ def _write_spec1d_fits(
         ph["ETAAPPL"] = hdr0["ETAAPPL"]
     if "ETAPATH" in hdr0:
         ph["ETAPATH"] = hdr0["ETAPATH"]
+
+    # Science variance provenance and qualification from Stack2D.
+    for key in (
+        "STKMETH", "STKVRALG", "STKVARQ", "STKXCVQ", "STKYCVQ",
+        "SBCOVQ", "SBGSTAT", "SBGRPN", "SBGMISS",
+    ):
+        if key in hdr0:
+            ph[key] = hdr0[key]
 
     # Upstream degradation flags (P0-L)
     if "QADEGRD" in hdr0:
@@ -1057,6 +1270,11 @@ def _write_spec1d_fits(
         fits.Column(name="SKY_TRACE", format="E", array=np.asarray(sky_trace, dtype=np.float32)),
         fits.Column(name="NPIX_TRACE", format="I", array=np.asarray(npix_trace, dtype=np.int16)),
     ]
+    if have_new_dq:
+        cols_trace.extend([
+            fits.Column(name="DQ_ANY_TRACE", format="J", array=np.asarray(dq_any_trace, dtype=np.int32)),
+            fits.Column(name="FRAC_TRACE", format="E", array=np.asarray(frac_trace, dtype=np.float32)),
+        ])
     ht = fits.BinTableHDU.from_columns(cols_trace, name="SPEC_TRACE")
     ht.header["WUNIT"] = (hdr0.get("CUNIT1", "Angstrom"), "Wavelength unit")
     ht.header["FUNIT"] = (hdr0.get("BUNIT", "ADU"), "Flux unit")
@@ -1070,6 +1288,11 @@ def _write_spec1d_fits(
         fits.Column(name="SKY_FIXED", format="E", array=np.asarray(sky_fixed, dtype=np.float32)),
         fits.Column(name="NPIX_FIXED", format="I", array=np.asarray(npix_fixed, dtype=np.int16)),
     ]
+    if have_new_dq:
+        cols_fixed.extend([
+            fits.Column(name="DQ_ANY_FIXED", format="J", array=np.asarray(dq_any_fixed, dtype=np.int32)),
+            fits.Column(name="FRAC_FIXED", format="E", array=np.asarray(frac_fixed, dtype=np.float32)),
+        ])
     hf = fits.BinTableHDU.from_columns(cols_fixed, name="SPEC_FIXED")
     hf.header["WUNIT"] = (hdr0.get("CUNIT1", "Angstrom"), "Wavelength unit")
     hf.header["FUNIT"] = (hdr0.get("BUNIT", "ADU"), "Flux unit")
@@ -1109,6 +1332,11 @@ def _write_spec1d_fits(
         _img("SKY2", sky2, np.float32),
     ]
 
+    if have_new_dq:
+        hdus.extend([
+            _img("DQANY2", np.vstack([dq_any_trace, dq_any_fixed]), np.int32),
+            _img("FRAC2", np.vstack([frac_trace, frac_fixed]), np.float32),
+        ])
     atomic_write_fits(out_path, fits.HDUList(hdus))
 
 
@@ -1425,8 +1653,16 @@ def _run_extract1d_impl(
     if isinstance(ecfg.get("roi"), dict) and ecfg.get("roi"):
         roi.update({k: v for k, v in ecfg.get("roi", {}).items() if v is not None})
 
-    from scorpio_pipe.maskbits import BADPIX, COSMIC, NO_COVERAGE, REJECTED, SATURATED, USER
-    fatal_bits = int(NO_COVERAGE | BADPIX | COSMIC | SATURATED | USER | REJECTED)
+    qualified_stack_rejection = bool(
+        is_stack and _verified_stack_rejection_provenance(in_fits, hdr0, np.asarray(mask))
+    )
+    fatal_bits, informational_1d_bits = _extraction_mask_policy(
+        is_stack=qualified_stack_rejection
+    )
+    # Invalid lambda/slit geometry must not contribute even if their
+    # numerical SCI/VAR happen to be finite.
+    from scorpio_pipe.maskbits import INVALID_WAVELENGTH, OUTSIDE_SLIT
+    fatal_bits |= int(INVALID_WAVELENGTH | OUTSIDE_SLIT)
 
     sky_windows: list[tuple[int, int]] | None = None
     geo_meta: dict[str, Any] = {}
@@ -1498,6 +1734,21 @@ def _run_extract1d_impl(
 
     min_good_frac = float(ecfg.get("min_good_frac", 0.6))
 
+    capture_enabled = bool(ecfg.get("capture_frozen_operators", False))
+    E_trace = E_fixed = None
+    if capture_enabled:
+        # The sky estimator is an additive, data-derived term not described
+        # by these frozen linear coefficients. Never misrepresent it as E @ SCI.
+        if apply_local_sky:
+            raise ValueError(
+                "Frozen extraction capture cannot encode nonlinear local sky correction"
+            )
+        capture_limit = int(ecfg.get("capture_max_bytes", 536_870_912))
+        if capture_limit <= 0 or 2 * ny * nlam * np.dtype("float64").itemsize > capture_limit:
+            raise ValueError("Frozen extraction operator capture exceeds explicit byte limit")
+        E_trace = np.zeros((ny, nlam), dtype=np.float64)
+        E_fixed = np.zeros((ny, nlam), dtype=np.float64)
+
     opt_meta: dict[str, Any] = {}
     if method == "optimal":
         ocfg = ecfg.get("optimal") if isinstance(ecfg.get("optimal"), dict) else {}
@@ -1519,6 +1770,7 @@ def _run_extract1d_impl(
             clip_negative_profile=clip_neg,
             min_profile_sum=min_ps,
             backend=opt_backend,
+            operator_capture=E_trace,
         )
         flux_fx, var_fx, mask_fx, sky_fx, npix_fx, m_fx = _optimal_extract(
             sci,
@@ -1534,6 +1786,7 @@ def _run_extract1d_impl(
             clip_negative_profile=clip_neg,
             min_profile_sum=min_ps,
             backend=opt_backend,
+            operator_capture=E_fixed,
         )
         opt_meta = {"trace": m_tr, "fixed": m_fx}
     else:
@@ -1547,6 +1800,7 @@ def _run_extract1d_impl(
             min_good_frac=min_good_frac,
             sky_resid=sky_resid,
             apply_local_sky=apply_local_sky,
+            operator_capture=E_trace,
         )
         flux_fx, var_fx, mask_fx, sky_fx, npix_fx = _boxcar_extract(
             sci,
@@ -1558,7 +1812,33 @@ def _run_extract1d_impl(
             min_good_frac=min_good_frac,
             sky_resid=sky_resid,
             apply_local_sky=apply_local_sky,
+            operator_capture=E_fixed,
         )
+    if informational_1d_bits:
+        # A stacked contributor was rejected, NOT this final 1D datum.
+        # Preserve rejected-contributor history in the original 2D stack
+        # mask/COV rather than abusing the output science usability mask.
+        mask_tr = _strip_informational_1d_bits(mask_tr, bits=informational_1d_bits)
+        mask_fx = _strip_informational_1d_bits(mask_fx, bits=informational_1d_bits)
+
+    # Legacy extraction kernels intentionally return mixed provenance flags
+    # for standalone numerical comparisons. At the FITS stage boundary we
+    # publish versioned, separate DQ_ANY and science-usability MASK columns.
+    dq_any_tr = _aperture_input_dq(
+        mask, trace.y_trace, ap_hw=trace.aperture_half_width
+    )
+    dq_any_fx = _aperture_input_dq(
+        mask, trace.y_fixed, ap_hw=trace.aperture_half_width
+    )
+    frac_tr = _aperture_fraction_used(npix_tr, ap_hw=trace.aperture_half_width)
+    frac_fx = _aperture_fraction_used(npix_fx, ap_hw=trace.aperture_half_width)
+    mask_tr = _science_usable_1d_mask(
+        mask_tr, upstream_degraded=upstream_sky_passthrough
+    )
+    mask_fx = _science_usable_1d_mask(
+        mask_fx, upstream_degraded=upstream_sky_passthrough
+    )
+
     if method == "mean":
         # Convert sum → mean (and propagate VAR scaling).
         n_eff_tr = np.maximum(np.asarray(npix_tr, dtype=float), 1.0)
@@ -1567,6 +1847,9 @@ def _run_extract1d_impl(
         flux_fx = flux_fx / n_eff_fx
         var_tr = var_tr / (n_eff_tr**2)
         var_fx = var_fx / (n_eff_fx**2)
+        if capture_enabled:
+            E_trace /= n_eff_tr[None, :]
+            E_fixed /= n_eff_fx[None, :]
 
     # ------------------------------- outputs ------------------------------
     out_fits = out_dir / "spec1d.fits"
@@ -1582,6 +1865,14 @@ def _run_extract1d_impl(
     for k in (
         "CRVAL1", "CDELT1", "CD1_1", "CRPIX1", "CTYPE1", "CUNIT1",
         "BUNIT", "SCORPUM", "NORMEXP", "REBNORM",
+    ):
+        if k in hdr0:
+            ohdr[k] = hdr0[k]
+
+    # Preserve explicit conditional-variance and shared-calibration warnings.
+    for k in (
+        "STKMETH", "STKVRALG", "STKVARQ", "STKXCVQ", "STKYCVQ",
+        "SBCOVQ", "SBGSTAT", "SBGRPN", "SBGMISS",
     ):
         if k in hdr0:
             ohdr[k] = hdr0[k]
@@ -1640,7 +1931,34 @@ def _run_extract1d_impl(
         mask_fixed=mask_fx,
         sky_fixed=sky_fx,
         npix_fixed=npix_fx,
+        dq_any_trace=dq_any_tr,
+        dq_any_fixed=dq_any_fx,
+        frac_trace=frac_tr,
+        frac_fixed=frac_fx,
     )
+    covariance_manifest = None
+    if capture_enabled:
+        from scorpio_pipe.covariance_operator_capture import (
+            save_extraction_operators, verify_spatial_operator,
+        )
+        verify_spatial_operator(sci, E_trace, flux_tr)
+        verify_spatial_operator(sci, E_fixed, flux_fx)
+        covariance_manifest = save_extraction_operators(
+            out_dir, input_fits=in_fits, spec_fits=out_fits,
+            E_trace=E_trace, E_fixed=E_fixed,
+            max_bytes=int(ecfg.get("capture_max_bytes", 536_870_912)),
+            metadata={
+                "extraction_method": method,
+                "input_mode": mode,
+                "aperture_half_width": int(trace.aperture_half_width),
+                "fatal_bits": int(fatal_bits),
+                "min_good_frac": float(np.clip(min_good_frac, 0, 1)),
+                "apply_local_sky": False,
+                "eta_applied_to_input_variance": bool(eta_appl),
+                "optimal_config": opt_meta if opt_meta else None,
+                "source_2d_spectral_resampling_operator": "NOT_CAPTURED",
+            },
+        )
     # trace.json
     # Provide stable, explicit metadata for reproducibility and QC.
     trace_model_meta = trace.meta.get("trace_model", {}) if isinstance(trace.meta, dict) else {}
@@ -1870,6 +2188,9 @@ def _run_extract1d_impl(
             "extract": {
                 "method": method,
                 "input_mode": mode,
+                "dq1d_version": 1,
+                "trace_fraction_used_min": float(np.min(frac_tr)) if frac_tr.size else None,
+                "fixed_fraction_used_min": float(np.min(frac_fx)) if frac_fx.size else None,
                 "snr_trace_median": (
                     float(np.nanmedian(np.where(np.isfinite(var_tr) & (var_tr > 0), flux_tr / np.sqrt(var_tr), np.nan)))
                     if flux_tr.size else None
@@ -1882,6 +2203,11 @@ def _run_extract1d_impl(
                 "diagnostics": _safe_json(diagnostics),
             },
             "warnings": [w for w in [eta_warn, geo_meta.get("warning")] if w],
+            "covariance_operator_capture": (
+                {"manifest": str(covariance_manifest),
+                 "status": "CONDITIONAL_FROZEN_OPERATOR_ONLY"}
+                if covariance_manifest is not None else None
+            ),
             # Backward-compatible code list
             "flag_codes": sorted(set(flag_codes)),
         },
@@ -1923,6 +2249,9 @@ def _run_extract1d_impl(
         "extraction_qc_json": str(qc_json),
         "extraction_diagnostics_png": str(diag_png) if diag_png.exists() else None,
         "etaappl": bool(eta_appl),
+        "covariance_operator_manifest": (
+            str(covariance_manifest) if covariance_manifest is not None else None
+        ),
         "products": ["TRACE", "FIXED"],
     }
 

@@ -91,36 +91,26 @@ def load_config(cfg_path: str | Path) -> dict[str, Any]:
         cfg["work_dir"] = str(wd)
         cfg["work_dir_abs"] = str(wd)
 
-    # resolve calib paths robustly
+    # Resolve calibration paths deterministically, including BEFORE the stage has
+    # created the output. The former "if (work_dir / rel).exists() else
+    # project_root / rel" switched a fresh GUI run to paths outside its run root.
+    # Explicit legacy "work/..." paths stay relative to the Git project root.
     wd = Path(cfg.get("work_dir", cfg_dir))
-    # v5.17+: ensure standard work layout (raw/calibs/science/products/qc)
+    # Preserve the established run-layout initialization contract.
     ensure_work_layout(wd)
     calib = cfg.get("calib") or {}
     if isinstance(calib, dict):
-        if calib.get("superbias_path"):
-            sb_raw = Path(_norm_path_str(str(calib["superbias_path"])))
-            if sb_raw.is_absolute():
-                sb = sb_raw
-            else:
-                # Prefer:
-                # 1) inside work_dir (calib/superbias.fits)
-                # 2) relative to project root (work/run1/calib/superbias.fits)
-                cand1 = (wd / sb_raw).resolve()
-                cand2 = (Path(project_root) / sb_raw).resolve()
-                sb = cand1 if cand1.exists() else cand2
-            calib["superbias_path"] = str(sb)
-        if calib.get("superflat_path"):
-            sf_raw = Path(_norm_path_str(str(calib["superflat_path"])))
-            if sf_raw.is_absolute():
-                sf = sf_raw
-            else:
-                # Prefer:
-                # 1) inside work_dir (calib/superflat.fits)
-                # 2) relative to project root (work/run1/calib/superflat.fits)
-                cand1 = (wd / sf_raw).resolve()
-                cand2 = (Path(project_root) / sf_raw).resolve()
-                sf = cand1 if cand1.exists() else cand2
-            calib["superflat_path"] = str(sf)
+        def _resolve_calib_path(value: str | Path) -> Path:
+            path = Path(_norm_path_str(str(value)))
+            if path.is_absolute():
+                return path.resolve()
+            if path.parts and path.parts[0].lower() == "work":
+                return (Path(project_root) / path).resolve()
+            return (wd / path).resolve()
+
+        for key in ("superbias_path", "superflat_path"):
+            if calib.get(key):
+                calib[key] = str(_resolve_calib_path(calib[key]))
         cfg["calib"] = calib
 
     # resolve frame paths: if relative, treat as relative to data_dir (preferred)
@@ -173,6 +163,14 @@ def load_config(cfg_path: str | Path) -> dict[str, Any]:
     try:
         apply_project_manifest_to_cfg(cfg)
     except Exception as e:
+        # A caller-specified manifest is an intentional source-of-truth.
+        # Falling back to stale frames.obj when the explicit roles fail
+        # would silently put an OFF-SKY exposure into the science sequence.
+        if cfg.get("project_manifest_path"):
+            raise ValueError(
+                "Explicit project_manifest_path could not be applied: "
+                f"{cfg['project_manifest_path']}"
+            ) from e
         logging.getLogger(__name__).warning("Failed to apply project_manifest.yaml: %s", e)
 
     return cfg

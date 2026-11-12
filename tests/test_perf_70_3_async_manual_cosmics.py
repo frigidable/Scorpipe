@@ -78,28 +78,41 @@ def test_manual_cosmics_loads_frames_async_and_keeps_event_loop_alive(monkeypatc
     t0 = time.monotonic()
     dlg = mod.CosmicsManualDialog(cfg)
     dt = time.monotonic() - t0
-    dlg.show()
+    try:
+        dlg.show()
 
-    assert dt < 0.5, f'CosmicsManualDialog constructor blocked for {dt:.3f}s'
-    assert calls == ['a_clean.fits']
-    assert dlg._frame_busy is True
-    assert 'Loading' in dlg.lbl_help.text()
+        assert dt < 0.5, f'CosmicsManualDialog constructor blocked for {dt:.3f}s'
+        assert dlg._frame_busy is True
+        assert 'Loading' in dlg.lbl_help.text()
+        # QThreadPool submission is asynchronous; neither the first nor
+        # second frame loader is required to start before the caller returns.
+        assert _process_events_until(app, lambda: calls == ['a_clean.fits'], timeout_s=1.5), 'first frame worker never started'
 
-    fired: list[float] = []
-    QtCore.QTimer.singleShot(100, lambda: fired.append(time.monotonic()))
-    assert _process_events_until(app, lambda: bool(fired), timeout_s=0.8), 'event loop stalled while first frame was loading'
-    assert _process_events_until(app, lambda: dlg._img is not None and dlg._frame_busy is False, timeout_s=2.0), 'first frame never finished loading'
+        fired: list[float] = []
+        QtCore.QTimer.singleShot(100, lambda: fired.append(time.monotonic()))
+        assert _process_events_until(app, lambda: bool(fired), timeout_s=0.8), 'event loop stalled while first frame was loading'
+        assert _process_events_until(app, lambda: dlg._img is not None and dlg._frame_busy is False, timeout_s=2.0), 'first frame never finished loading'
 
-    fired2: list[float] = []
-    QtCore.QTimer.singleShot(100, lambda: fired2.append(time.monotonic()))
-    t1 = time.monotonic()
-    dlg._step_frame(+1)
-    dt2 = time.monotonic() - t1
-    assert dt2 < 0.5, f'_step_frame(+1) blocked for {dt2:.3f}s'
-    assert calls == ['a_clean.fits', 'b_clean.fits']
-    assert _process_events_until(app, lambda: bool(fired2), timeout_s=0.8), 'event loop stalled while switching frames'
-    assert _process_events_until(app, lambda: dlg.frame_idx == 1 and dlg._img is not None and dlg._frame_busy is False, timeout_s=2.0), 'second frame never finished loading'
-    dlg.close()
+        fired2: list[float] = []
+        QtCore.QTimer.singleShot(100, lambda: fired2.append(time.monotonic()))
+        t1 = time.monotonic()
+        dlg._step_frame(+1)
+        dt2 = time.monotonic() - t1
+        assert dt2 < 0.5, f'_step_frame(+1) blocked for {dt2:.3f}s'
+        assert _process_events_until(
+            app,
+            lambda: calls == ['a_clean.fits', 'b_clean.fits'],
+            timeout_s=1.5,
+        ), 'second frame worker never started'
+        assert _process_events_until(app, lambda: bool(fired2), timeout_s=0.8), 'event loop stalled while switching frames'
+        assert _process_events_until(app, lambda: dlg.frame_idx == 1 and dlg._img is not None and dlg._frame_busy is False, timeout_s=2.0), 'second frame never finished loading'
+    finally:
+        # Do not leave a worker active if a GUI assertion fails: subsequent
+        # tests may otherwise inherit stale callbacks or deleted Qt signals.
+        handle = dlg._frame_job
+        dlg.close()
+        if handle is not None:
+            handle.wait(timeout_ms=2500)
 
 
 

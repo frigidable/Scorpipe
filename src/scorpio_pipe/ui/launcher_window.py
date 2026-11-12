@@ -16,6 +16,7 @@ from scorpio_pipe.ui.config_defaults import schema_default
 from scorpio_pipe.ui.param_metadata import get_param_meta
 from scorpio_pipe.ui.delayed_tooltip import install_delayed_tooltip
 from scorpio_pipe.pipeline.public_api import iter_gui_stages
+from scorpio_pipe.ui.stage_navigation import build_page_index
 from scorpio_pipe.pairs_library import (
     list_pair_sets,
     save_user_pair_set,
@@ -54,26 +55,61 @@ def _lazy_outputs_tool_dialog():
 
 
 
-def _representative_header_from_inspect_df(df: Any) -> dict[str, Any] | None:
-    try:
-        if df is None or getattr(df, "empty", True) or "path" not in df.columns:
-            return None
+def _representative_header_from_inspect_df(
+    df: Any,
+    *,
+    object_name: str | None = None,
+    disperser: str | None = None,
+    slit: str | None = None,
+    binning: str | None = None,
+) -> dict[str, Any] | None:
+    """Use a SCI frame from the *selected* target/setup for run identity.
 
-        def _pick(kind: str) -> str | None:
-            try:
-                sub = df[df.get("kind") == kind]
-                if not sub.empty:
-                    return str(sub.iloc[0]["path"])
-            except Exception:
-                return None
-            return None
-
-        p0 = _pick("obj") or _pick("arc") or str(df.iloc[0]["path"])
-        if not p0:
-            return None
-        return dict(get_header_fields(Path(p0)))
-    except Exception:
+    No fallback to another object's first frame is permitted when a
+    selected science configuration is supplied.
+    """
+    if df is None or getattr(df, "empty", True) or "path" not in df.columns:
         return None
+    if "kind" not in df.columns:
+        return None
+    sub = df[df["kind"].astype(str) == "obj"]
+    selected = str(object_name or "").strip()
+    if selected:
+        objkey = "".join(ch for ch in selected.upper() if ch.isalnum())
+        if "object_norm" in sub.columns:
+            sub = sub[sub["object_norm"].astype(str) == objkey]
+        elif "object" in sub.columns:
+            sub = sub[sub["object"].astype(str).map(
+                lambda v: "".join(c for c in v.upper() if c.isalnum())
+            ) == objkey]
+        else:
+            return None
+    for column, value in (
+        ("disperser", disperser), ("slit", slit), ("binning", binning)
+    ):
+        value = str(value or "").strip()
+        if not value:
+            continue
+        if column not in sub.columns:
+            return None
+        sub = sub[sub[column].astype(str).str.strip() == value]
+    if sub.empty:
+        return None
+    path = str(sub.iloc[0]["path"]).strip()
+    if not path:
+        return None
+    header = dict(get_header_fields(Path(path)))
+    # Preserve original FITS header science evidence, but ensure the
+    # selected catalogue identity (not another object) is used.
+    if selected:
+        measured = "".join(ch for ch in str(header.get("OBJECT") or "").upper() if ch.isalnum())
+        if measured != "".join(ch for ch in selected.upper() if ch.isalnum()):
+            raise ValueError("Selected science object does not match FITS OBJECT")
+    # Inspector-derived physical slit selection is allowed as provenance,
+    # not as a change to any on-disk FITS header.
+    if str(slit or "").strip():
+        header["SLIT"] = str(slit).strip()
+    return header
 
 
 def load_context(cfg_path):  # type: ignore[override]
@@ -398,8 +434,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._stage_keys = [s.key for s in iter_gui_stages()]
         self._stage_row = {k: i for i, k in enumerate(self._stage_keys)}
         self._stage_titles = [s.title for s in iter_gui_stages()]
-        for title in self._stage_titles:
-            it = QtWidgets.QListWidgetItem(title)
+        for stage in iter_gui_stages():
+            it = QtWidgets.QListWidgetItem(stage.title)
+            it.setData(QtCore.Qt.ItemDataRole.UserRole, stage.key)
             it.setIcon(self._icon_status("idle"))
             self.steps.addItem(it)
             self._step_items.append(it)
@@ -446,7 +483,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
             return pw
 
         for i in range(12):
-            title = self._stage_titles[i] if i < len(self._stage_titles) else f"Page {i}"
+            spec = self._page_specs.get(i)
+            stage_key = spec[0] if spec is not None else None
+            title = (
+                self._stage_titles[self._stage_row[stage_key]]
+                if stage_key in self._stage_row else f"Page {i}"
+            )
             ph = _mk_placeholder(title)
             self.stack.addWidget(ph)
             self._page_widgets[i] = ph
@@ -458,28 +500,16 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         
 
-        # Map canonical stage list (01..12) to actual UI pages.
-        _page_by_stage_key = {
-            "project": 0,
-            "setup": 1,
-            "biascorr": 2,
-            "flatfield": 4,
-            "cosmics": 3,
-            "superneon": 5,
-            "arclineid": 6,
-            "wavesol": 7,
-            "linearize": 8,
-            "sky": 9,
-            "stack2d": 10,
-            "extract1d": 11,
-        }
-        self._stage_page_index = [_page_by_stage_key[k] for k in self._stage_keys]
+        # Match stable stage keys to physical UI pages, never sidebar positions.
+        self._page_index_by_key = build_page_index(self._page_specs, self._stage_keys)
 
         self.steps.currentRowChanged.connect(self._on_step_changed)
 
-        # Build the initial Project page after the event loop starts.
-        # This keeps the splash screen time minimal on slow/frozen environments.
-        QtCore.QTimer.singleShot(0, lambda: self._ensure_page_built(0))
+        # Do not defer the initial Project page: a queued placeholder
+        # replacement can leave the selected 01 Project row displaying
+        # "Loading… 02 Setup" until another selection event is delivered.
+        # The Project page is intentionally lightweight and is constructed
+        # before the first window show.
 
         # Dock: log (collapsible)
         self.log_view = QtWidgets.QPlainTextEdit()
@@ -542,7 +572,11 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._build_statusbar_widgets()
         self._install_shortcuts()
 
-        # Initial state
+        # Initial state: resolve the selected page by widget identity.
+        # QStackedWidget may select its next child when a placeholder is
+        # removed, so never infer displayed page from step-row highlighting.
+        self._ensure_page_built(self._page_index_by_key["project"])
+        self.stack.setCurrentWidget(self.page_project)
         self._update_enables()
         # refresh derived UI state
         try:
@@ -628,7 +662,14 @@ class LauncherWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
-        if was_current:
+        selected_page = None
+        try:
+            selected_key = self._selected_stage_key()
+            if selected_key is not None:
+                selected_page = self._page_index_by_key[selected_key]
+        except (ValueError, TypeError, RuntimeError, AttributeError, KeyError):
+            pass
+        if was_current or selected_page == i:
             self.stack.setCurrentWidget(w)
 
         try:
@@ -651,6 +692,15 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self._pages_built.add(i)
         except Exception:
             pass
+
+        # A completed Night Inspector can precede the first visit to Setup.
+        # Populate its selectors only when the lazy Setup page actually
+        # exists. Never build Setup as a side effect of inspecting a night.
+        if i == 1 and self._inspect is not None:
+            try:
+                self._populate_objects_from_inspect()
+            except Exception as exc:
+                self._log_exception(exc)
 
         # Update ...
         try:
@@ -1233,14 +1283,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         (Project/Setup) there are no products, so stage=None.
         """
 
-        try:
-            row = int(self.steps.currentRow())
-        except Exception:
-            row = -1
-        if row < 0 or row >= len(getattr(self, "_stage_keys", [])):
-            return None
-        stage_key = str(self._stage_keys[row])
-        if stage_key in {"project", "setup"}:
+        stage_key = self._selected_stage_key()
+        if stage_key is None or stage_key in {"project", "setup"}:
             return None
         return stage_key
 
@@ -1572,19 +1616,28 @@ class LauncherWindow(QtWidgets.QMainWindow):
         return msg
 
     def _finish_inspect_ui(self) -> None:
+        # Qt QProgressDialog.closeEvent() emits canceled() even when the
+        # application closes the dialog after successful inspection. Detach
+        # the user-cancellation slot before closing and invalidate its token,
+        # otherwise a completed scan is incorrectly left at "Cancelling…".
+        dlg = self._inspect_progress_dialog
+        self._inspect_progress_dialog = None
+        self._inspect_cancel_event = None
+        self._inspect_job = None
+        if dlg is not None:
+            try:
+                dlg.canceled.disconnect(self._cancel_inspect)
+            except (RuntimeError, TypeError):
+                pass
+            try:
+                dlg.close()
+            except RuntimeError:
+                pass
         try:
             self.btn_inspect.setText("Inspect dataset")
             self.btn_inspect.setEnabled(True)
         except Exception:
             pass
-        try:
-            if self._inspect_progress_dialog is not None:
-                self._inspect_progress_dialog.close()
-        except Exception:
-            pass
-        self._inspect_progress_dialog = None
-        self._inspect_cancel_event = None
-        self._inspect_job = None
         try:
             self._update_enables()
         except Exception:
@@ -1716,6 +1769,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
     def _jump_to_object_from_overview(self, item: QtWidgets.QListWidgetItem) -> None:
         """Select the object in Config page when user double-clicks it in overview."""
         try:
+            # The overview is on Project, so Setup may not exist yet.
+            self._ensure_page_built(1)
             obj = item.data(QtCore.Qt.ItemDataRole.UserRole) or item.text()
             obj = str(obj).split("  (")[0].strip()
             if hasattr(self, "combo_object"):
@@ -1896,8 +1951,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
     def _use_setup_from_frame(self, sel: SelectedFrame) -> None:
         """Fill Config page setup fields from a selected inspected frame."""
         try:
+            # A fresh Project/Frames launch has not built the lazy Setup
+            # page yet. Build it before accessing the target controls;
+            # otherwise the first "Use this setup" click is silently lost.
+            self._ensure_page_built(1)
             if not hasattr(self, "combo_object"):
-                return
+                raise RuntimeError("Setup page controls were not initialized")
             if sel.object:
                 self.combo_object.setCurrentText(sel.object)
 
@@ -2111,9 +2170,51 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         # --- setup (left) ---
         g_setup = _box("Target & setup")
-        g_setup.setMinimumWidth(430)
+        g_setup.setMinimumWidth(570)
         splitter.addWidget(g_setup)
         fl = QtWidgets.QFormLayout(g_setup)
+        fl.setFieldGrowthPolicy(QtWidgets.QFormLayout.AllNonFixedFieldsGrow)
+        fl.setHorizontalSpacing(16)
+
+        def _add_full_width_path(
+            label: str,
+            help_text: str,
+            editor: QtWidgets.QLineEdit,
+            browse: QtWidgets.QToolButton,
+        ) -> None:
+            """Single, comfortably tall path editor spanning the whole form.
+
+            QLineEdit already supports horizontal scrolling and Ctrl+A/C.
+            Keep the complete current path in a tooltip, without a second
+            small/low-contrast label duplicating the same value.
+            """
+            host = QtWidgets.QWidget(g_setup)
+            host.setSizePolicy(
+                QtWidgets.QSizePolicy.Expanding,
+                QtWidgets.QSizePolicy.Preferred,
+            )
+            column = QtWidgets.QVBoxLayout(host)
+            column.setContentsMargins(0, 2, 0, 2)
+            column.setSpacing(6)
+            column.addWidget(self._param_label(label, help_text))
+
+            row = QtWidgets.QHBoxLayout()
+            row.setSpacing(8)
+            editor.setSizePolicy(
+                QtWidgets.QSizePolicy.Expanding,
+                QtWidgets.QSizePolicy.Fixed,
+            )
+            editor.setMinimumWidth(0)
+            editor.setFixedHeight(36)
+            editor.setAccessibleName(label)
+            browse.setFixedSize(36, 36)
+            editor.setToolTip(editor.text())
+            editor.textChanged.connect(editor.setToolTip)
+            row.addWidget(editor, 1)
+            row.addWidget(browse, 0)
+            column.addLayout(row)
+            fl.addRow(host)
+
         # Object
         row_obj = QtWidgets.QHBoxLayout()
         self.combo_object = QtWidgets.QComboBox()
@@ -2148,7 +2249,6 @@ class LauncherWindow(QtWidgets.QMainWindow):
         fl.addRow(self._param_label("Binning", "Биннинг CCD.\nВлияет на масштаб [px] и шум.\nНе смешивай разные binning в одном run."), row_bin)
 
         # Workspace root (top-level base)
-        row_ws = QtWidgets.QHBoxLayout()
         self.edit_workspace_root = QtWidgets.QLineEdit()
         try:
             from scorpio_pipe.app_paths import pick_workspace_root
@@ -2158,9 +2258,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.edit_workspace_root.setText("")
         self.btn_pick_workspace_root = QtWidgets.QToolButton(text="…")
         self.btn_pick_workspace_root.setCursor(QtCore.Qt.PointingHandCursor)
-        row_ws.addWidget(self.edit_workspace_root, 1)
-        row_ws.addWidget(self.btn_pick_workspace_root)
-        fl.addRow(self._param_label("Workspace root", "Верхняя база workspace.\nLayout: <Night>/<Object>_<Disperser>_<Run>/<NN_stage>/.\nЗдесь живут все проекты."), row_ws)
+        _add_full_width_path(
+            "Workspace root",
+            "Верхняя база workspace.\nLayout: <Night>/<Object>_<Disperser>_<Run>/<NN_stage>/.\nЗдесь живут все проекты.",
+            self.edit_workspace_root,
+            self.btn_pick_workspace_root,
+        )
 
         # Run controls
         row_run = QtWidgets.QHBoxLayout()
@@ -2169,6 +2272,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.spin_run_id.setSpecialValueText("Auto")
         self.spin_run_id.setToolTip("0 = Auto (следующий свободный _01/_02/...)")
         self.btn_init_run = QtWidgets.QPushButton("Initialize run")
+        self.spin_run_id.setMinimumWidth(94)
+        self.btn_init_run.setMinimumWidth(142)
         row_run.addWidget(self.spin_run_id)
         row_run.addWidget(self.btn_init_run)
         fl.addRow(self._param_label("Run", "Номер run в рамках ночи/объекта/решётки.\nAuto = следующий свободный _01/_02/...\nInitialize создаёт/выбирает run-folder."), row_run)
@@ -2179,13 +2284,14 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.combo_recent_runs.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
         self.btn_switch_run = QtWidgets.QPushButton("Switch")
         self.btn_open_run = QtWidgets.QPushButton("Open…")
+        self.btn_switch_run.setMinimumWidth(76)
+        self.btn_open_run.setMinimumWidth(74)
         row_recent.addWidget(self.combo_recent_runs, 1)
         row_recent.addWidget(self.btn_switch_run)
         row_recent.addWidget(self.btn_open_run)
         fl.addRow(self._param_label("Recent runs", "Последние 10 run-folder.\nSwitch — открыть выбранный.\nOpen… — выбрать любой через проводник."), row_recent)
 
         # Work dir (run-root)
-        row_wd = QtWidgets.QHBoxLayout()
         self.edit_work_dir = QtWidgets.QLineEdit()
         # If the user edits the field manually, we stop auto-suggesting paths.
         self._workdir_user_edited = False
@@ -2194,9 +2300,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
         )
         self.btn_pick_work_dir = QtWidgets.QToolButton(text="…")
         self.btn_pick_work_dir.setCursor(QtCore.Qt.PointingHandCursor)
-        row_wd.addWidget(self.edit_work_dir, 1)
-        row_wd.addWidget(self.btn_pick_work_dir)
-        fl.addRow(self._param_label("Run folder", "Текущий run-folder (root для стадий).\nВнутри создаются папки <NN_stage>/.\nМетаданные — в manifest/."), row_wd)
+        _add_full_width_path(
+            "Run folder",
+            "Текущий run-folder (root для стадий).\nВнутри создаются папки <NN_stage>/.\nМетаданные — в manifest/.",
+            self.edit_work_dir,
+            self.btn_pick_work_dir,
+        )
 
         # Create/Load config actions
         row_cfg = QtWidgets.QHBoxLayout()
@@ -2219,9 +2328,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
         # right: YAML editor (manual edit)
         g_yaml = _box("Config YAML (editable)")
         splitter.addWidget(g_yaml)
-        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([430, 900])
+        splitter.setSizes([700, 760])
 
         yl = QtWidgets.QVBoxLayout(g_yaml)
         self.editor_yaml = QtWidgets.QPlainTextEdit()
@@ -2257,6 +2366,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self.btn_open_run.clicked.connect(self._open_run_dialog)
         # Keep recent list fresh when user changes workspace root.
         self.edit_workspace_root.editingFinished.connect(self._refresh_recent_runs)
+        self.edit_workspace_root.editingFinished.connect(
+            lambda: self._suggest_work_dir()
+            if not getattr(self, "_workdir_user_edited", False) else None
+        )
         self.btn_pick_work_dir.clicked.connect(self._pick_work_dir)
         self.btn_suggest_workdir.clicked.connect(self._suggest_work_dir)
         self.btn_make_cfg.clicked.connect(self._do_make_cfg)
@@ -2480,10 +2593,20 @@ class LauncherWindow(QtWidgets.QMainWindow):
             header = None
             try:
                 if self._inspect is not None and getattr(self._inspect, "table", None) is not None:
-                    header = _representative_header_from_inspect_df(self._inspect.table)
+                    header = _representative_header_from_inspect_df(
+                        self._inspect.table,
+                        object_name=self.combo_object.currentText(),
+                        disperser=self.combo_disperser.currentText(),
+                        slit=self.combo_slit.currentText(),
+                        binning=self.combo_binning.currentText(),
+                    )
+                    if header is None:
+                        raise ValueError("No science FITS matches the selected object/setup")
             except Exception:
                 header = None
 
+            if header is None:
+                raise ValueError("Cannot initialize a run without a matching science FITS")
             run_id = int(self.spin_run_id.value()) if hasattr(self, "spin_run_id") else 0
             run_id_opt = None if run_id <= 0 else run_id
 
@@ -2578,13 +2701,23 @@ class LauncherWindow(QtWidgets.QMainWindow):
             header = None
             try:
                 if self._inspect is not None and getattr(self._inspect, "table", None) is not None:
-                    header = _representative_header_from_inspect_df(self._inspect.table)
+                    header = _representative_header_from_inspect_df(
+                        self._inspect.table,
+                        object_name=self.combo_object.currentText(),
+                        disperser=self.combo_disperser.currentText(),
+                        slit=self.combo_slit.currentText(),
+                        binning=self.combo_binning.currentText(),
+                    )
+                    if header is None:
+                        raise ValueError("No science FITS matches the selected object/setup")
             except Exception:
                 header = None
 
             run_id = int(self.spin_run_id.value()) if hasattr(self, "spin_run_id") else 0
             run_id_opt = None if run_id <= 0 else run_id
 
+            if header is None:
+                raise ValueError("Cannot suggest a run folder without a matching science FITS")
             rr = get_or_create_run_root(
                 ws,
                 dataset_path=Path(self.edit_data_dir.text()) if hasattr(self, "edit_data_dir") else None,
@@ -2594,19 +2727,19 @@ class LauncherWindow(QtWidgets.QMainWindow):
             )
             self.edit_work_dir.setText(str(rr))
             self._workdir_user_edited = False
-        except Exception:
-            # fall back to the older heuristic
-            dmy = self._infer_night_date_parts()
-            if dmy is None:
-                now = datetime.now()
-                dd, mm, yyyy = int(now.day), int(now.month), int(now.year)
-            else:
-                dd, mm, yyyy = dmy
-            night_dir = f"{dd:02d}_{mm:02d}_{yyyy:04d}"
-            base = Path((self.edit_workspace_root.text() or "").strip()).expanduser() / night_dir
-            self.edit_work_dir.setText(str(base))
+        except Exception as exc:
+            # A guessed folder for an unknown night/target is less safe
+            # than reporting the missing science provenance explicitly.
+            if not getattr(self, "_workdir_user_edited", False):
+                self.edit_work_dir.clear()
+            self._log_error(f"Run folder suggestion unavailable: {exc}")
 
     def _populate_objects_from_inspect(self) -> None:
+        # Project and Night Inspector are usable before lazy Setup is built.
+        # The result is stored in self._inspect and synchronized when Setup
+        # is materialized by _ensure_page_built(1).
+        if 1 not in self._pages_built:
+            return
         self.combo_object.blockSignals(True)
         self.combo_object.clear()
         if self._inspect is not None:
@@ -2615,6 +2748,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         if self.combo_object.count() > 0:
             self.combo_object.setCurrentIndex(0)
         self._update_dispersers_from_inspect()
+        if not getattr(self, "_workdir_user_edited", False):
+            self._suggest_work_dir()
 
     def _update_dispersers_from_inspect(self) -> None:
         self.combo_disperser.blockSignals(True)
@@ -2798,9 +2933,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
     def _on_object_changed(self, *_: object) -> None:
         self._update_dispersers_from_inspect()
         try:
-            if (not self.edit_work_dir.text().strip()) and (
-                not getattr(self, "_workdir_user_edited", False)
-            ):
+            if not getattr(self, "_workdir_user_edited", False):
                 self._suggest_work_dir()
         except Exception:
             pass
@@ -2810,9 +2943,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._update_slit_binning_from_inspect()
         self._update_setup_hint()
         try:
-            if (not self.edit_work_dir.text().strip()) and (
-                not getattr(self, "_workdir_user_edited", False)
-            ):
+            if not getattr(self, "_workdir_user_edited", False):
                 self._suggest_work_dir()
         except Exception:
             pass
@@ -2880,7 +3011,23 @@ class LauncherWindow(QtWidgets.QMainWindow):
                 slit=slit,
                 binning=binning,
             )
-            cfg_path.write_text(ac.to_yaml_text(), encoding="utf-8")
+            candidate_yaml = ac.to_yaml_text()
+            if not ac.frames.get("obj"):
+                raise ValueError(
+                    f"AutoConfig returned 0 SCI frames for {obj} / {disp} / "
+                    f"{slit} / {binning}; refusing to overwrite config.yaml"
+                )
+            if cfg_path.is_file():
+                # Create new config regenerates the entire YAML. Retain the
+                # existing science decisions and manual edits before replacing
+                # it, particularly after a BTA manifest-role recovery.
+                import shutil
+
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                backup = cfg_path.with_name(f"config.yaml.bak.{stamp}")
+                shutil.copy2(cfg_path, backup)
+                self._log_info(f"Preserved prior config: {backup}")
+            cfg_path.write_text(candidate_yaml, encoding="utf-8")
             self._log_info(f"Wrote config: {cfg_path}")
             self.edit_cfg_path.setText(str(cfg_path))
             self._load_config(cfg_path)
@@ -2941,7 +3088,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._sync_outputs_action_state()
 
         try:
-            if hasattr(self, "stack") and int(self.stack.currentIndex()) == 7:
+            if self._is_wavesol_page_current():
                 self._update_wavesol_stepper()
         except Exception:
             pass
@@ -3079,6 +3226,60 @@ class LauncherWindow(QtWidgets.QMainWindow):
         # Keep the detached Outputs tool window in sync.
         self._update_outputs_tool_context()
 
+    def _validate_science_frames_before_save(self) -> bool:
+        """Fail closed when Inspector proves SCI frames exist but GUI YAML has none.
+
+        This guards against persisting manifest-masked frame lists back
+        into config.yaml, as discovered on the real 306-frame BTA night.
+        It does not invent or silently assign science or calibration data.
+        """
+        cfg = self._cfg or {}
+        if not isinstance(cfg, dict):
+            return False
+        inspect = getattr(self, "_inspect", None)
+        if inspect is None or getattr(inspect, "table", None) is None:
+            return True
+        table = inspect.table
+        if getattr(table, "empty", True):
+            return True
+
+        frames = cfg.get("frames") or {}
+        if not isinstance(frames, dict):
+            return True
+        if frames.get("obj"):
+            return True
+
+        obj = str(cfg.get("object") or "").strip()
+        if not obj:
+            return True
+        setup = frames.get("__setup__") or cfg.get("instrument") or {}
+        if not isinstance(setup, dict):
+            setup = {}
+
+        from scorpio_pipe.autocfg import build_autoconfig
+        try:
+            candidates = build_autoconfig(
+                table,
+                Path(str(cfg.get("data_dir") or self.edit_data_dir.text())),
+                obj,
+                Path(str(cfg.get("work_dir") or self.edit_work_dir.text())),
+                disperser=str(setup.get("disperser") or "") or None,
+                slit=str(setup.get("slit") or "") or None,
+                binning=str(setup.get("binning") or "") or None,
+            )
+        except (ValueError, KeyError):
+            return True
+
+        n_sci = len(candidates.frames.get("obj") or [])
+        if n_sci <= 0:
+            return True
+        self._log_error(
+            f"Refusing to save config.yaml with 0 SCI frames: Inspector "
+            f"found {n_sci} for {obj}. Regenerate the config from Setup "
+            "and inspect the frame inventory before saving."
+        )
+        return False
+
     def _do_save_cfg(self) -> None:
         # Resolve target path.
         if not self._cfg_path:
@@ -3128,6 +3329,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
             return
 
         if not self._sync_cfg_from_editor():
+            return
+        if not self._validate_science_frames_before_save():
             return
 
         txt = self.editor_yaml.toPlainText()
@@ -3193,7 +3396,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             pass
 
         try:
-            if hasattr(self, "stack") and int(self.stack.currentIndex()) == 7:
+            if self._is_wavesol_page_current():
                 self._update_wavesol_stepper()
         except Exception:
             pass
@@ -4572,7 +4775,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         # locale for doubles
         self._force_dot_locale(self.spin_cosmics_k)
-        for w in (
+        # Do not shadow the root page widget named 'w'. On PySide6, losing
+        # its last Python reference destroys its child QVBoxLayout mid-build.
+        for spin in (
             self.dspin_cosmics_mad_scale,
             self.dspin_cosmics_min_mad,
             self.dspin_cosmics_max_frac,
@@ -4583,7 +4788,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             self.dspin_cosmics_lap_k_scale,
             self.dspin_cosmics_lap_k_min,
         ):
-            self._force_dot_locale(w)
+            self._force_dot_locale(spin)
 
         pl.addWidget(self._mk_basic_advanced_tabs(basic, adv))
         pl.addWidget(self._mk_stage_apply_row("cosmics"))
@@ -4609,14 +4814,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
         left_layout.addStretch(1)
 
         # Outputs are shown in a detached tool window (toolbar: Outputs).
-        try:
-            lay.addWidget(left, 1)
-        except RuntimeError:
-            # Defensive: if Qt ownership got confused and the layout was deleted, rebuild it.
-            lay = QtWidgets.QVBoxLayout(w)
-            lay.setSpacing(12)
-            lay.addWidget(left, 1)
-
+        # A deleted layout is a programming error; do not attempt to create
+        # a second layout on a possibly destroyed or unrelated QWidget.
+        lay.addWidget(left, 1)
 
         self.btn_run_cosmics.clicked.connect(self._do_run_cosmics)
         self.btn_qc_cosmics.clicked.connect(self._open_qc_viewer)
@@ -8756,25 +8956,54 @@ class LauncherWindow(QtWidgets.QMainWindow):
             wd = (self._cfg_path.parent / wd).resolve()
         return wd
 
+    def _selected_stage_key(self) -> str | None:
+        """Read stable stage identity from the selected sidebar item."""
+        try:
+            item = self.steps.currentItem()
+            if item is None:
+                return None
+            key = str(item.data(QtCore.Qt.ItemDataRole.UserRole) or "")
+            return key if key in self._page_index_by_key else None
+        except (RuntimeError, AttributeError, TypeError):
+            return None
+
+    def _select_stage_key(self, stage_key: str) -> None:
+        """Select a stage by its item identity, even after sidebar reordering."""
+        items = [
+            self.steps.item(i) for i in range(self.steps.count())
+            if str(self.steps.item(i).data(QtCore.Qt.ItemDataRole.UserRole) or "") == stage_key
+        ]
+        if len(items) != 1:
+            raise ValueError(f"GUI stage item missing or duplicated: {stage_key!r}")
+        self.steps.setCurrentItem(items[0])
+
+    def _is_wavesol_page_current(self) -> bool:
+        """Check the displayed widget itself; Qt indices move on lazy rebuild."""
+        try:
+            index = self._page_index_by_key["wavesol"]
+            widget = self._page_widgets.get(index)
+            return widget is not None and self.stack.currentWidget() is widget
+        except (KeyError, AttributeError, RuntimeError):
+            return False
+
     def _on_step_changed(self, idx: int) -> None:
         try:
-            i = int(idx)
-            page_i = self._stage_page_index[i] if hasattr(self, "_stage_page_index") else i
-            self._ensure_page_built(int(page_i))
-            self.stack.setCurrentIndex(int(page_i))
-        except Exception:
-            pass
+            stage_key = self._selected_stage_key()
+            if stage_key is None:
+                return
+            page_i = self._page_index_by_key[stage_key]
+            self._ensure_page_built(page_i)
+            page = self._page_widgets.get(page_i)
+            if page is not None and self.stack.indexOf(page) >= 0:
+                # Preserve newer vNext widget-identity navigation fix.
+                self.stack.setCurrentWidget(page)
+        except Exception as exc:
+            self._log_exception(exc)
         self._refresh_statusbar()
         self._sync_outputs_action_state()
         self._update_outputs_tool_context()
-        # If Outputs tool window is open, keep it pinned to current stage.
-        self._update_outputs_tool_context()
-
-        try:
-            if hasattr(self, "stack") and int(self.stack.currentIndex()) == 7:
-                self._update_wavesol_stepper()
-        except Exception:
-            pass
+        if self._is_wavesol_page_current():
+            self._update_wavesol_stepper()
 
     # --------------------------- statusbar / shortcuts ---------------------------
 
@@ -8814,7 +9043,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._sync_outputs_action_state()
 
         try:
-            if hasattr(self, "stack") and int(self.stack.currentIndex()) == 7:
+            if self._is_wavesol_page_current():
                 self._update_wavesol_stepper()
         except Exception:
             pass
@@ -9010,17 +9239,17 @@ class LauncherWindow(QtWidgets.QMainWindow):
         frames_btn.setMenu(m)
 
         def _stage_for_current_step() -> str:
-            idx = int(self.steps.currentRow()) if hasattr(self, "steps") else 0
+            # Preserve the legacy Frame Browser aliases; key by stage identity.
             mapping = {
-                0: "project",
-                2: "calib",
-                3: "cosmics",
-                4: "flatfield",
-                5: "superneon",
-                6: "lineid",
-                7: "wavesol",
+                "project": "project",
+                "biascorr": "calib",
+                "cosmics": "cosmics",
+                "flatfield": "flatfield",
+                "superneon": "superneon",
+                "arclineid": "lineid",
+                "wavesol": "wavesol",
             }
-            return mapping.get(idx, "project")
+            return mapping.get(self._selected_stage_key(), "project")
 
         frames_btn.clicked.connect(
             lambda: self._open_frames_window(_stage_for_current_step())
@@ -9131,16 +9360,18 @@ class LauncherWindow(QtWidgets.QMainWindow):
         """
         if not self._ensure_cfg_saved():
             return
+        # This historical action is deliberately partial, not a full reduction.
+        # Fix only navigation; scientific task ordering remains unchanged.
         chain = [
-            (2, "Calibrations", self._do_run_calib),
-            (3, "Cosmics", self._do_run_cosmics),
-            (4, "SuperNeon", self._do_run_superneon),
-            (5, "LineID", self._do_open_lineid),
-            (6, "Wavelength solution", self._do_wavesolution),
+            ("biascorr", "Calibrations", self._do_run_calib),
+            ("cosmics", "Cosmics", self._do_run_cosmics),
+            ("superneon", "SuperNeon", self._do_run_superneon),
+            ("arclineid", "LineID", self._do_open_lineid),
+            ("wavesol", "Wavelength solution", self._do_wavesolution),
         ]
-        for row, name, fn in chain:
+        for stage_key, name, fn in chain:
             try:
-                self.steps.setCurrentRow(row)
+                self._select_stage_key(stage_key)
                 QtWidgets.QApplication.processEvents()
                 self._log_info(f"--- RUN: {name} ---")
                 fn()

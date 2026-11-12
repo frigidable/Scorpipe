@@ -139,3 +139,50 @@ def test_full_stack2d_with_nonzero_subpix_alignment_no_longer_crashes(tmp_path,m
         assert np.all(cov[1:7]==2)
         np.testing.assert_allclose(data[1:7], (10/4+14/2)/(.25+.5), atol=2e-4)
         np.testing.assert_allclose(var[1:7], 1/(.25+.5), atol=2e-4)
+
+
+
+def test_huber_one_exposure_edge_survives_subpixel_alignment(tmp_path, monkeypatch):
+    """Regression from historical PR #52: 0*NaN must not poison the coadd.
+
+    At the shifted image edge one exposure lacks usable support. The other
+    contributes a finite measurement with its original detector variance.
+    This is a synthetic engineering test, not full spatial covariance QA.
+    """
+    work = tmp_path / "night"
+    lin = stage_dir(work, "linearize")
+    out = stage_dir(work, "stack2d")
+    lin.mkdir(parents=True, exist_ok=True)
+    out.mkdir(parents=True, exist_ok=True)
+    a, b = lin / "a_skysub.fits", lin / "b_skysub.fits"
+    _write_input(a, 10.0)
+    _write_input(b, 14.0)
+    monkeypatch.setattr(st, "_xcorr_subpix_shift_1d", lambda *_args: (0.5, 1.0))
+
+    result = st.run_stack2d(
+        {
+            "work_dir": str(work),
+            "stack2d": {
+                "enabled": True,
+                "method": "invvar_huber",
+                "robust_iter": 2,
+                "chunk_rows": 3,
+                "var_floor_enabled": False,
+                "save_png": False,
+                "eta": {"enabled": False},
+                "y_align": {"enabled": True, "max_shift_pix": 3},
+            },
+        },
+        inputs=[a, b], out_dir=out,
+    )
+    with fits.open(result["stack2d_fits"], memmap=False) as hdul:
+        sci = np.asarray(hdul[0].data, dtype=float)
+        variance = np.asarray(hdul["VAR"].data, dtype=float)
+        cov = np.asarray(hdul["COV"].data, dtype=int)
+        supported = cov > 0
+        assert supported.any()
+        assert np.all(np.isfinite(sci[supported]))
+        assert np.all(np.isfinite(variance[supported]) & (variance[supported] > 0))
+        np.testing.assert_array_equal(cov[0], np.ones(cov.shape[1], dtype=int))
+        np.testing.assert_allclose(sci[0], 10.0, atol=1e-5)
+        np.testing.assert_allclose(variance[0], 4.0, atol=1e-5)

@@ -1,0 +1,1034 @@
+{
+  "schema": "scorpipe.branch.consolidation.registry.v1",
+  "date_utc": "2026-11-11",
+  "ancestry_baseline_sha": "e1c1e3d2072b7df953128e4e7f046d0efec91fc4",
+  "integration_ref": "integration/scorpipe-vnext-20261111",
+  "meaning": "The first 83 branch tips were individually compared against pre-checkpoint PR178; integration branch is a direct descendant. Diverged commits require patch-level review and tests, not blanket merging. This file is a GitHub snapshot, not a claim of CI PASS.",
+  "n_branches": 84,
+  "n_open_prs": 73,
+  "counts": {
+    "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT": 54,
+    "ARCHIVED_PRECHECKPOINT_ANCESTOR": 1,
+    "DIVERGED_REVIEW_NOT_AUTO_MERGE": 26,
+    "DOC_CHECKPOINT_ANCESTOR": 1,
+    "PR178_CURRENT_SOURCE_ANCESTOR": 1,
+    "INTEGRATION_ACTIVE": 1
+  },
+  "branches": [
+    {
+      "branch": "archive/local-base-20261111-d145f171",
+      "head_sha": "d145f171d057ce56516e0ae755a3afe9a9d80c95",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": []
+    },
+    {
+      "branch": "archive/pr178-20261111-e1c1e3d2",
+      "head_sha": "e1c1e3d2072b7df953128e4e7f046d0efec91fc4",
+      "status": "ARCHIVED_PRECHECKPOINT_ANCESTOR",
+      "open_prs": []
+    },
+    {
+      "branch": "audit/barycentric-optical-wavelength-factor-20261103",
+      "head_sha": "8c2f4c549a035390acaf8bd02f3c4ee01f32cd89",
+      "status": "DIVERGED_REVIEW_NOT_AUTO_MERGE",
+      "open_prs": [
+        {
+          "pr": 84,
+          "base": "main",
+          "draft": true,
+          "title": "fix(science): correct Astropy optical barycentric wavelength sign"
+        }
+      ]
+    },
+    {
+      "branch": "audit/recipe-dependency-order-20261103",
+      "head_sha": "4f85fb18760f473066d5d138cb8c25d3708a9687",
+      "status": "DIVERGED_REVIEW_NOT_AUTO_MERGE",
+      "open_prs": [
+        {
+          "pr": 85,
+          "base": "main",
+          "draft": true,
+          "title": "fix(science): enforce deterministic recipe order and canonical task uniqueness"
+        }
+      ]
+    },
+    {
+      "branch": "checkpoint/scorpipe-20261111-science-hold",
+      "head_sha": "7e8945b19747a281321b008f4d489691bdc2050d",
+      "status": "DOC_CHECKPOINT_ANCESTOR",
+      "open_prs": []
+    },
+    {
+      "branch": "codex/add-.gitignore-for-python-pipeline",
+      "head_sha": "b3a0751b031f5c4828ef2e1de8d601f90ac0a2a9",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": []
+    },
+    {
+      "branch": "codex/add-build_superflat-function-and-task",
+      "head_sha": "5e0e502023e3b1652faf2da0a10937b495f35b34",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": []
+    },
+    {
+      "branch": "codex/add-readme.md-for-scorpipe-repository",
+      "head_sha": "c71fb47d9c0d7dce4d636c8fa1c13f075b8ccf00",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": []
+    },
+    {
+      "branch": "codex/add-step-for-clearing-spaces",
+      "head_sha": "385b02fa77fefba2f11f055c667a010fdf14cf8e",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": []
+    },
+    {
+      "branch": "codex/refactor-ar,-hg,-he-checks-for-tokens",
+      "head_sha": "edc3d80169e4793a0db99350c023cc1403dc8cd9",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": []
+    },
+    {
+      "branch": "codex/replace-placeholder-in-task_wavesol",
+      "head_sha": "aa3aa52294b4738a9924d1161a46ddfd168a864b",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": []
+    },
+    {
+      "branch": "codex/use-residual-in-_find_peaks_simple",
+      "head_sha": "3e3eceb55a866ce9ed114c6907dc3bcedae61751",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": []
+    },
+    {
+      "branch": "dependabot/github_actions/github-actions-edf61e22d6",
+      "head_sha": "f7fdb45c34b3da7481f9ee2293e0f8e699b70e54",
+      "status": "DIVERGED_REVIEW_NOT_AUTO_MERGE",
+      "open_prs": [
+        {
+          "pr": 53,
+          "base": "main",
+          "draft": false,
+          "title": "Bump the github-actions group across 1 directory with 17 updates"
+        }
+      ]
+    },
+    {
+      "branch": "dependabot/pip/pydantic-gte-2.12.5",
+      "head_sha": "1e414b0107ab25a7d00edb5fa3b2841cea50be1b",
+      "status": "DIVERGED_REVIEW_NOT_AUTO_MERGE",
+      "open_prs": [
+        {
+          "pr": 25,
+          "base": "main",
+          "draft": false,
+          "title": "Update pydantic requirement from >=2 to >=2.12.5"
+        }
+      ]
+    },
+    {
+      "branch": "feat/flatfield-masterbias-components-v1-20261103",
+      "head_sha": "d6febcefd4bc192d388207bcf99e90d6b7ddbd7a",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 149,
+          "base": "feat/shared-bias-frozen-chain-oracle-20261103",
+          "draft": true,
+          "title": "feat(calib): publish FlatField MasterBias variance components with fail-closed SkySub boundary"
+        }
+      ]
+    },
+    {
+      "branch": "feat/frozen-sky-to-1d-grouped-covariance-p14e1-20261104",
+      "head_sha": "1ffa83347c2c1014e4036a910a67c2d7de6fdd47",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 161,
+          "base": "fix/gui-worker-terminal-before-signal-p14d13-20261104",
+          "draft": true,
+          "title": "feat(science): compose frozen Kelson SkySub and full Linearize-to-Extract1D grouped covariance"
+        }
+      ]
+    },
+    {
+      "branch": "feat/frozen-skysub-masterbias-covariance-p14d3-20261103",
+      "head_sha": "fdcf309273b57650d3f8e561b7699fb4b22d1204",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 150,
+          "base": "feat/flatfield-masterbias-components-v1-20261103",
+          "draft": true,
+          "title": "feat(science): frozen SkySub WLS residual adjoint and grouped MasterBias covariance oracle"
+        }
+      ]
+    },
+    {
+      "branch": "feat/kelson-frozen-fit-capture-p14d4-20261104",
+      "head_sha": "cd7a7c33d09c5ec308f3db5d5173195adadc458c",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 151,
+          "base": "feat/frozen-skysub-masterbias-covariance-p14d3-20261103",
+          "draft": true,
+          "title": "feat(sky): opt-in capture of actual post-clipping Kelson fit for frozen covariance QA"
+        }
+      ]
+    },
+    {
+      "branch": "feat/kelson-frozen-fits-fidelity-p14d5-20261104",
+      "head_sha": "b3bf3ba9c51bb2be32434455cf667404db5dfdbc",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 152,
+          "base": "feat/kelson-frozen-fit-capture-p14d4-20261104",
+          "draft": true,
+          "title": "test(science): audit actual captured Kelson fit against SkySub FITS and LSQR residual"
+        }
+      ]
+    },
+    {
+      "branch": "feat/pipeline-stage-naming-v1",
+      "head_sha": "3c2d80a5b8157329c88d95b6e7b3af255f50ac51",
+      "status": "DIVERGED_REVIEW_NOT_AUTO_MERGE",
+      "open_prs": [
+        {
+          "pr": 175,
+          "base": "main",
+          "draft": true,
+          "title": "feat(ui): scientific stage naming and presentation taxonomy (phase 1)"
+        }
+      ]
+    },
+    {
+      "branch": "feat/shared-bias-frozen-chain-oracle-20261103",
+      "head_sha": "2e33ab34fd8cf1f8039e50ff47ce495d3bf54116",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 143,
+          "base": "fix/masterbias-group-covariance-gate-20261103",
+          "draft": true,
+          "title": "feat(science): matrix-free frozen-chain shared MasterBias covariance with independent dense and Monte Carlo oracles"
+        }
+      ]
+    },
+    {
+      "branch": "feat/synthetic-kelson-reclipping-oracle-p14d7-20261104",
+      "head_sha": "8dba70e4421a5462c441e1accfc835b395606630",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 154,
+          "base": "test/kelson-lsqr-jacobian-fidelity-p14d6-20261104",
+          "draft": true,
+          "title": "test(science): synthetic full-refit Kelson clipping versus frozen SkySub Jacobian"
+        }
+      ]
+    },
+    {
+      "branch": "fix/audit-a01-sensfunc-full-grid",
+      "head_sha": "fe5c28940d3bb34df171dae82075e6e46a2472c4",
+      "status": "DIVERGED_REVIEW_NOT_AUTO_MERGE",
+      "open_prs": [
+        {
+          "pr": 54,
+          "base": "main",
+          "draft": true,
+          "title": "fix(science): evaluate masked sensfunc fit on full wavelength grid (audit A01)"
+        }
+      ]
+    },
+    {
+      "branch": "fix/audit-a02-a03-emission-detection-dq",
+      "head_sha": "4c0d5886d2c013e4b30cc9e27f8c1b99f0f4f569",
+      "status": "DIVERGED_REVIEW_NOT_AUTO_MERGE",
+      "open_prs": [
+        {
+          "pr": 55,
+          "base": "main",
+          "draft": true,
+          "title": "fix(science): require signed S/N and DQ-safe emission-line measurements (audit A02/A03)"
+        }
+      ]
+    },
+    {
+      "branch": "fix/audit-a04-boxcar-output-coverage",
+      "head_sha": "cbe743cf41a3a586105b64dce11c0269a8d87750",
+      "status": "DIVERGED_REVIEW_NOT_AUTO_MERGE",
+      "open_prs": [
+        {
+          "pr": 56,
+          "base": "main",
+          "draft": true,
+          "title": "fix(science): compute boxcar NO_COVERAGE from accepted support (audit A04)"
+        }
+      ]
+    },
+    {
+      "branch": "fix/audit-a05-air-vac-line-coordinate",
+      "head_sha": "32c31efdec609fcb458b695a512663bb05a678ec",
+      "status": "DIVERGED_REVIEW_NOT_AUTO_MERGE",
+      "open_prs": [
+        {
+          "pr": 58,
+          "base": "fix/audit-a02-a03-emission-detection-dq",
+          "draft": true,
+          "title": "fix(science): align AIR/VAC rest-line and velocity coordinates (audit A05)"
+        }
+      ]
+    },
+    {
+      "branch": "fix/audit-a06-wavesol-waveref-fail-closed",
+      "head_sha": "42873763d7ed28d4597b3b10ed6770eae81ffe96",
+      "status": "DIVERGED_REVIEW_NOT_AUTO_MERGE",
+      "open_prs": [
+        {
+          "pr": 57,
+          "base": "main",
+          "draft": true,
+          "title": "fix(science): reject unknown wavelength medium in wavesolution (audit A06)"
+        }
+      ]
+    },
+    {
+      "branch": "fix/audit-a07-sensfunc-nm-reference-units",
+      "head_sha": "4d658c598f7fc1fcfeb7f82224a47713c88325a7",
+      "status": "DIVERGED_REVIEW_NOT_AUTO_MERGE",
+      "open_prs": [
+        {
+          "pr": 59,
+          "base": "fix/audit-a01-sensfunc-full-grid",
+          "draft": true,
+          "title": "fix(science): align Å standard references with nm sensfunc grids (audit A07)"
+        }
+      ]
+    },
+    {
+      "branch": "fix/audit-a08-publication-geometry-contract",
+      "head_sha": "e23172deae20685cd72cf1b9337c2d957832862c",
+      "status": "DIVERGED_REVIEW_NOT_AUTO_MERGE",
+      "open_prs": [
+        {
+          "pr": 60,
+          "base": "main",
+          "draft": true,
+          "title": "fix(science): declare detector vs rectified export geometry (audit A08)"
+        }
+      ]
+    },
+    {
+      "branch": "fix/audit-a09-science-airmass-extinction",
+      "head_sha": "9d5be62481e465bbf5e75eae3a267c6ae6f52390",
+      "status": "DIVERGED_REVIEW_NOT_AUTO_MERGE",
+      "open_prs": [
+        {
+          "pr": 61,
+          "base": "main",
+          "draft": true,
+          "title": "fix(science): correct science airmass extinction and absolute-status semantics (A09)"
+        }
+      ]
+    },
+    {
+      "branch": "fix/audit-a10-emission-blend-eligibility",
+      "head_sha": "fee55c2af75e0cd3b8e52975e82d05dac61013e6",
+      "status": "DIVERGED_REVIEW_NOT_AUTO_MERGE",
+      "open_prs": [
+        {
+          "pr": 62,
+          "base": "fix/audit-a05-air-vac-line-coordinate",
+          "draft": true,
+          "title": "fix(science): flag blended emission-line window fluxes (audit A10)"
+        }
+      ]
+    },
+    {
+      "branch": "fix/audit-a11-kinprep-lsf-eligibility",
+      "head_sha": "94703985583b7239c4af985ec55e5aab133b2108",
+      "status": "DIVERGED_REVIEW_NOT_AUTO_MERGE",
+      "open_prs": [
+        {
+          "pr": 63,
+          "base": "main",
+          "draft": true,
+          "title": "fix(science): do not export detector-arc LSF as effective pPXF resolution (A11)"
+        }
+      ]
+    },
+    {
+      "branch": "fix/audit-a11b-detector-lsf-native-units",
+      "head_sha": "e406f248acc8fcfdfc967f2a14789fe516226cd3",
+      "status": "DIVERGED_REVIEW_NOT_AUTO_MERGE",
+      "open_prs": [
+        {
+          "pr": 64,
+          "base": "main",
+          "draft": true,
+          "title": "fix(science): normalize nm wavelength maps before detector arc LSF fit (A11b)"
+        }
+      ]
+    },
+    {
+      "branch": "fix/bta-empty-manifest-role-selection",
+      "head_sha": "c8c7e6316c8a9d93e3f0a0bd786c7505bf16d93f",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 71,
+          "base": "fix/gui-setup-readable-path-fields",
+          "draft": true,
+          "title": "fix(science): preserve BTA frames when generated project manifest is unconfigured (#70)"
+        }
+      ]
+    },
+    {
+      "branch": "fix/bta-prevent-empty-science-config-save",
+      "head_sha": "2eb4e58206e6fb2e1569456afa84f7f2f2252523",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 73,
+          "base": "fix/bta-empty-manifest-role-selection",
+          "draft": true,
+          "title": "fix(gui): refuse to save empty SCI config when Inspector finds BTA exposures"
+        }
+      ]
+    },
+    {
+      "branch": "fix/bta-sunsky-calibration-role-conflicts",
+      "head_sha": "ff9f795d8ed38262a00bade1754f743bc8bdf6eb",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 75,
+          "base": "fix/bta-prevent-empty-science-config-save",
+          "draft": true,
+          "title": "fix(inspect): quarantine BTA SUNSKY vs FITS flat/neon role conflicts"
+        }
+      ]
+    },
+    {
+      "branch": "fix/dq1d-science-usability-20261103",
+      "head_sha": "dc467f2e8ccb3a44c890c98783b5196eadb76425",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 121,
+          "base": "fix/stack-rejection-science-usability-20261103",
+          "draft": true,
+          "title": "feat(science): versioned 1D DQ usability/provenance and partial-line qualification gate"
+        }
+      ]
+    },
+    {
+      "branch": "fix/extract-stacked-rejected-provenance-20261103",
+      "head_sha": "f9e4af772d5911f097e462059580cf5f266eb163",
+      "status": "DIVERGED_REVIEW_NOT_AUTO_MERGE",
+      "open_prs": [
+        {
+          "pr": 111,
+          "base": "main",
+          "draft": true,
+          "title": "fix(science): distinguish Stack2D rejection provenance from 1D usability"
+        }
+      ]
+    },
+    {
+      "branch": "fix/gui-cosmics-widget-lifetime",
+      "head_sha": "73d655bcd0603ccf593a5af77b03312f555c14bf",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 78,
+          "base": "fix/preflight-selected-frames-sc1-imaging",
+          "draft": true,
+          "title": "fix(gui): prevent Cosmics lazy-page QWidget deletion"
+        }
+      ]
+    },
+    {
+      "branch": "fix/gui-inspect-qt-cancel-on-close",
+      "head_sha": "33a44419a16a22e853f0197d3ccb9237cd211c1b",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 66,
+          "base": "main",
+          "draft": true,
+          "title": "fix(gui): do not mark successful night inspect as cancelled"
+        }
+      ]
+    },
+    {
+      "branch": "fix/gui-selected-target-run-path-provenance",
+      "head_sha": "096552001fb5ef579a220fb4b6fda64f572ac813",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 68,
+          "base": "fix/gui-startup-project-page-selection",
+          "draft": true,
+          "title": "fix(gui): derive BTA run folder from selected science FITS"
+        }
+      ]
+    },
+    {
+      "branch": "fix/gui-setup-readable-path-fields",
+      "head_sha": "16ac0c4becac7441a869d44addcd4a41779b099e",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 69,
+          "base": "fix/gui-selected-target-run-path-provenance",
+          "draft": true,
+          "title": "fix(gui): readable full-width workspace and run paths on Setup"
+        }
+      ]
+    },
+    {
+      "branch": "fix/gui-startup-project-page-selection",
+      "head_sha": "a36f11371931a5792ea37fe530107e336fbfca38",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 67,
+          "base": "fix/gui-inspect-qt-cancel-on-close",
+          "draft": true,
+          "title": "fix(gui): show real Project page on first launch, not Setup placeholder"
+        }
+      ]
+    },
+    {
+      "branch": "fix/gui-worker-terminal-before-signal-p14d13-20261104",
+      "head_sha": "92e40b238d06c1b62f3bcc7fbf8dfade31515f61",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 160,
+          "base": "test/synthetic-sky-evidence-register-p14d12-20261104",
+          "draft": true,
+          "title": "fix(gui): publish worker terminal state before immediate result signals"
+        }
+      ]
+    },
+    {
+      "branch": "fix/masterbias-group-covariance-gate-20261103",
+      "head_sha": "a472d037bd1348f285903df809c836c7a459170a",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 123,
+          "base": "fix/stack2d-conditional-variance-20261103",
+          "draft": true,
+          "title": "feat(science): audit shared MasterBias covariance groups and carry unqualified-error provenance"
+        }
+      ]
+    },
+    {
+      "branch": "fix/preflight-selected-frames-sc1-imaging",
+      "head_sha": "4826bd5b3ca373151633bb43039673aebffcab76",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 77,
+          "base": "fix/science-masterflat-matching",
+          "draft": true,
+          "title": "fix(preflight): scoped run gate and slitless SCORPIO-1 imaging"
+        }
+      ]
+    },
+    {
+      "branch": "fix/qt-async-test-cleanup-and-deleted-signals",
+      "head_sha": "7ddca14bb34dd82fee6ac3e20e4a5caefa5f9b51",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 82,
+          "base": "fix/qt-worker-signal-race-and-watchdog-qa",
+          "draft": true,
+          "title": "fix(gui): await ROI worker startup and tolerate deleted Qt signal source"
+        }
+      ]
+    },
+    {
+      "branch": "fix/qt-worker-signal-race-and-watchdog-qa",
+      "head_sha": "10b5757205e341bc168feb9332f4a80ea1d89a9e",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 81,
+          "base": "fix/windows-fast-regression-portability",
+          "draft": true,
+          "title": "fix(gui): connect worker completion before execution; stabilize watchdog QA"
+        }
+      ]
+    },
+    {
+      "branch": "fix/real-gui-air-atlas-run-local-calib-paths-20261104",
+      "head_sha": "e2984411a897207ae76221ea4d7578f8d16b621e",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 169,
+          "base": "test/synthetic-1d-spectral-covariance-line-variance-p14e7-20261104",
+          "draft": true,
+          "title": "fix(gui): air-based SCORPIO AutoConfig and deterministic run-local calibration paths"
+        }
+      ]
+    },
+    {
+      "branch": "fix/reference-integrity-failclosed-20261103",
+      "head_sha": "e2d6d1b249cb0f02e58cc4b7e05f264ada9c189b",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 119,
+          "base": "fix/typed-config-manifest-runtime-meta",
+          "draft": true,
+          "title": "fix(science): fail-closed spectrophotometric references, tellurics and standard flats"
+        }
+      ]
+    },
+    {
+      "branch": "fix/sc1-masterbias-gross-var-20261109",
+      "head_sha": "7e8945b19747a281321b008f4d489691bdc2050d",
+      "status": "PR178_CURRENT_SOURCE_ANCESTOR",
+      "open_prs": [
+        {
+          "pr": 178,
+          "base": "qa/sc1-flat-profile-shift-and-route-20261106",
+          "draft": true,
+          "title": "fix(masterbias): opt-in gross-transient median with per-pixel estimator VAR"
+        }
+      ]
+    },
+    {
+      "branch": "fix/sc1-zenith-z-contract-20261105",
+      "head_sha": "592520aff236903ef7015674d738a59520fd8c61",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 170,
+          "base": "fix/real-gui-air-atlas-run-local-calib-paths-20261104",
+          "draft": true,
+          "title": "fix(sc1): normalize Z zenith distance with provenance and range checks"
+        }
+      ]
+    },
+    {
+      "branch": "fix/science-masterflat-matching",
+      "head_sha": "bbbdf0b3fba5028763d40e1f921486252749fc5b",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 76,
+          "base": "fix/bta-sunsky-calibration-role-conflicts",
+          "draft": true,
+          "title": "fix(calib): require matching CCD readout for SuperFlat"
+        }
+      ]
+    },
+    {
+      "branch": "fix/sensfunc-evaluate-full-grid-20261103",
+      "head_sha": "87ebd14ddb48ee6be0807301b13bc2d3ee66c1e6",
+      "status": "DIVERGED_REVIEW_NOT_AUTO_MERGE",
+      "open_prs": [
+        {
+          "pr": 104,
+          "base": "main",
+          "draft": true,
+          "title": "fix(science): evaluate Sensfunc spline on full wavelength grid after masking"
+        }
+      ]
+    },
+    {
+      "branch": "fix/stack2d-conditional-variance-20261103",
+      "head_sha": "87cf82825b1e0a13950231898ee8109f944c7c00",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 122,
+          "base": "fix/dq1d-science-usability-20261103",
+          "draft": true,
+          "title": "fix(science): propagate Stack2D fixed-weight variance and declare covariance limits"
+        }
+      ]
+    },
+    {
+      "branch": "fix/stack2d-fixed-weight-variance-20261103",
+      "head_sha": "bcea8aa3ac8b6a3585b2026517e6a373efab7c27",
+      "status": "DIVERGED_REVIEW_NOT_AUTO_MERGE",
+      "open_prs": [
+        {
+          "pr": 115,
+          "base": "main",
+          "draft": true,
+          "title": "fix(science): propagate Stack2D weighted variance under Huber and variance floors"
+        }
+      ]
+    },
+    {
+      "branch": "fix/stack2d-nonfinite-huber-weights",
+      "head_sha": "e85d8c74d7cfa5207afd9f4b5bbcf8925c689d0d",
+      "status": "DIVERGED_REVIEW_NOT_AUTO_MERGE",
+      "open_prs": [
+        {
+          "pr": 52,
+          "base": "main",
+          "draft": true,
+          "title": "fix(science): prevent NaN Huber weights corrupting Stack2D (#51)"
+        }
+      ]
+    },
+    {
+      "branch": "fix/stack-rejection-science-usability-20261103",
+      "head_sha": "7143d0573c54c7fbb78d22df392bd1612a05cf1d",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 120,
+          "base": "fix/reference-integrity-failclosed-20261103",
+          "draft": true,
+          "title": "fix(science): preserve Stack2D rejected-contributor provenance without discarding valid 1D signal"
+        }
+      ]
+    },
+    {
+      "branch": "fix/standard-reference-identity-20261103",
+      "head_sha": "f59ec80312599e27f923462594e288eeb8198a0b",
+      "status": "DIVERGED_REVIEW_NOT_AUTO_MERGE",
+      "open_prs": [
+        {
+          "pr": 106,
+          "base": "main",
+          "draft": true,
+          "title": "fix(science): fail closed on unmatched standard-star identities"
+        }
+      ]
+    },
+    {
+      "branch": "fix/tests-platform-independent-manifest-target",
+      "head_sha": "c0d049c3b3f4136a38c350c728eb52d266c9c217",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 79,
+          "base": "fix/gui-cosmics-widget-lifetime",
+          "draft": true,
+          "title": "test(workflow): compare manifest target paths portably"
+        }
+      ]
+    },
+    {
+      "branch": "fix/typed-config-manifest-runtime-meta",
+      "head_sha": "0e8bca4a2b8103cfad1dd297ed2f2226e3ab456e",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 83,
+          "base": "fix/qt-async-test-cleanup-and-deleted-signals",
+          "draft": true,
+          "title": "fix(pipeline): Golden E2E and Science Correctness P0 (draft)"
+        }
+      ]
+    },
+    {
+      "branch": "fix/windows-fast-regression-portability",
+      "head_sha": "3d0122671bde6634be94bf72408b54a58751b557",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 80,
+          "base": "fix/tests-platform-independent-manifest-target",
+          "draft": true,
+          "title": "fix(qa): deterministic Windows paths, valid FITS fixtures and async test scheduling"
+        }
+      ]
+    },
+    {
+      "branch": "integration/scorpipe-vnext-20261111",
+      "head_sha": "0cfc3f26170c3865a1de85f7e335d80cb2e4beee",
+      "status": "INTEGRATION_ACTIVE",
+      "open_prs": [
+        {
+          "pr": 180,
+          "base": "main",
+          "draft": true,
+          "title": "integration(vNext): consolidate Scorpipe development safely [SCIENCE HOLD]"
+        }
+      ]
+    },
+    {
+      "branch": "main",
+      "head_sha": "dee41ed3b661f566090ab2bf7c34481b364a9306",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": []
+    },
+    {
+      "branch": "qa/sc1-fast-flat-neon-bias-20261106",
+      "head_sha": "5781bade36b23e67809fc15dd2ef5d6eba13afb0",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 172,
+          "base": "test/sc1-bias-2d-cross-epoch-qa-20261106",
+          "draft": true,
+          "title": "test(sc1): validate fast 225/3.5 FLAT and NEON readout without cross-mode bias"
+        }
+      ]
+    },
+    {
+      "branch": "qa/sc1-first-masterbias-controlled-run-20261107",
+      "head_sha": "5c9c1f4eb6b17fcd73aa09ca1a949763dead707a",
+      "status": "DIVERGED_REVIEW_NOT_AUTO_MERGE",
+      "open_prs": [
+        {
+          "pr": 174,
+          "base": "qa/sc1-flat-profile-shift-and-route-20261106",
+          "draft": true,
+          "title": "research(sc1): N2146sat MasterBias audit archive — superseded by focused PR #178"
+        }
+      ]
+    },
+    {
+      "branch": "qa/sc1-flat-profile-shift-and-route-20261106",
+      "head_sha": "aaccd587ff6760aeec34eb714bc1b6c83ff07189",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 173,
+          "base": "qa/sc1-fast-flat-neon-bias-20261106",
+          "draft": true,
+          "title": "test(sc1): identify fast-FLAT spectral shifts and inspect actual flatfield route"
+        }
+      ]
+    },
+    {
+      "branch": "refactor/gui-keyed-stage-navigation",
+      "head_sha": "b440a2be915c99f3f3a60e8e5fbc812199494526",
+      "status": "DIVERGED_REVIEW_NOT_AUTO_MERGE",
+      "open_prs": [
+        {
+          "pr": 176,
+          "base": "main",
+          "draft": true,
+          "title": "refactor(ui): key-based stage navigation without changing pipeline execution"
+        }
+      ]
+    },
+    {
+      "branch": "release-please--branches--main--components--scorpipe",
+      "head_sha": "fc5ab08a1c498025df05194b7be2805cca6dc56d",
+      "status": "DIVERGED_REVIEW_NOT_AUTO_MERGE",
+      "open_prs": [
+        {
+          "pr": 16,
+          "base": "main",
+          "draft": false,
+          "title": "chore(main): release scorpipe 8.1.0"
+        }
+      ]
+    },
+    {
+      "branch": "science/p14d2-frozen-operator-capture",
+      "head_sha": "45524a2e406e2df8a96d2fbd881cfbc65cb15401",
+      "status": "DIVERGED_REVIEW_NOT_AUTO_MERGE",
+      "open_prs": [
+        {
+          "pr": 50,
+          "base": "fix/stack2d-nonfinite-huber-weights",
+          "draft": true,
+          "title": "feat(science): capture frozen Stack2D and Extract1D operators (P1.4d2)"
+        }
+      ]
+    },
+    {
+      "branch": "test/adaptive-stack2d-shared-bias-mc-p14e4-20261104",
+      "head_sha": "9f37bd62f518ae2160ef9a5232c3d28fa3ec322e",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 165,
+          "base": "test/optimal-profile-same-data-mc-p14e3-20261104",
+          "draft": true,
+          "title": "test(science): adaptive production Stack2D Huber sampling coverage with shared MasterBias"
+        }
+      ]
+    },
+    {
+      "branch": "test/frozen-sky-wls-svd-conditioning-p14d10-20261104",
+      "head_sha": "903f69dd4473eabaf9d55b283da6306ec698f477",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 157,
+          "base": "test/synthetic-production-kelson-reclip-mc-p14d9-20261104",
+          "draft": true,
+          "title": "test(science): independent SVD conditioning audit for frozen SkySub WLS covariance"
+        }
+      ]
+    },
+    {
+      "branch": "test/full-native-kelson-adaptive-chain-mc-p14e6-20261104",
+      "head_sha": "62ca10f0565baa900161b4f0c16c2eaca3c514ef",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 167,
+          "base": "test/joint-adaptive-stack-optimal-mc-p14e5-20261104",
+          "draft": true,
+          "title": "test(science): paired native Kelson→COUNT_V1→adaptive Stack2D→optimal Extract1D MC"
+        }
+      ]
+    },
+    {
+      "branch": "test/joint-adaptive-stack-optimal-mc-p14e5-20261104",
+      "head_sha": "ade999234ac3a24cb6faa9b219a6940040759935",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 166,
+          "base": "test/adaptive-stack2d-shared-bias-mc-p14e4-20261104",
+          "draft": true,
+          "title": "test(science): paired Monte Carlo of adaptive Stack2D and same-data optimal extraction"
+        }
+      ]
+    },
+    {
+      "branch": "test/kelson-lsqr-jacobian-fidelity-p14d6-20261104",
+      "head_sha": "9f3783405283962f58bab6942da5d3d948bfd39b",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 153,
+          "base": "feat/kelson-frozen-fits-fidelity-p14d5-20261104",
+          "draft": true,
+          "title": "test(science): finite-difference LSQR Jacobian vs frozen Kelson WLS on actual sky products"
+        }
+      ]
+    },
+    {
+      "branch": "test/optimal-profile-same-data-mc-p14e3-20261104",
+      "head_sha": "6de9d4b3f7d8ef59e69eed6bfa4ac9aff7f1f2f9",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 164,
+          "base": "test/synthetic-sky-to-1d-reclipping-mc-p14e2-20261104",
+          "draft": true,
+          "title": "test(science): synthetic optimal-extraction same-data profile noise bias and coverage"
+        }
+      ]
+    },
+    {
+      "branch": "test/sc1-bias-2d-cross-epoch-qa-20261106",
+      "head_sha": "88c0fdc9ad32eccb363fd76d6553904e3e78ba40",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 171,
+          "base": "fix/sc1-zenith-z-contract-20261105",
+          "draft": true,
+          "title": "test(sc1): reproducible two-epoch residual BIAS spatial QA (read-only)"
+        }
+      ]
+    },
+    {
+      "branch": "test/synthetic-1d-spectral-covariance-line-variance-p14e7-20261104",
+      "head_sha": "58f617571f1a8508fc50fb193d29ddb82ae6139e",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 168,
+          "base": "test/full-native-kelson-adaptive-chain-mc-p14e6-20261104",
+          "draft": true,
+          "title": "test(science): full frozen 1D spectral covariance kernel and integrated line-flux variance"
+        }
+      ]
+    },
+    {
+      "branch": "test/synthetic-adaptive-stack-extract-coverage-p14e2-20261104",
+      "head_sha": "0481c6d84bd109485322007185d9b39284b7eb6b",
+      "status": "DIVERGED_REVIEW_NOT_AUTO_MERGE",
+      "open_prs": [
+        {
+          "pr": 162,
+          "base": "feat/frozen-sky-to-1d-grouped-covariance-p14e1-20261104",
+          "draft": true,
+          "title": "test(science): synthetic Huber Stack2D and self-learned optimal Extract1D coverage ablation"
+        }
+      ]
+    },
+    {
+      "branch": "test/synthetic-production-kelson-reclip-mc-p14d9-20261104",
+      "head_sha": "e8feb440d73f38c22a6b1762fed0344864e8f0a4",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 156,
+          "base": "test/synthetic-shared-bias-sky-mc-coverage-p14d8-20261104",
+          "draft": true,
+          "title": "test(science): Monte Carlo covariance coverage with full production Kelson re-clipping"
+        }
+      ]
+    },
+    {
+      "branch": "test/synthetic-shared-bias-sky-mc-coverage-p14d8-20261104",
+      "head_sha": "ae1dd9beecd1cfe03b27ca616994ca259f63edb7",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 155,
+          "base": "feat/synthetic-kelson-reclipping-oracle-p14d7-20261104",
+          "draft": true,
+          "title": "test(science): independent synthetic Monte Carlo coverage of shared-MasterBias SkySub covariance"
+        }
+      ]
+    },
+    {
+      "branch": "test/synthetic-sky-condition-coverage-sweep-p14d11-20261104",
+      "head_sha": "58e2f958175b4927229e7ffac47dd3ec887cb1f4",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 158,
+          "base": "test/frozen-sky-wls-svd-conditioning-p14d10-20261104",
+          "draft": true,
+          "title": "test(science): synthetic LU/SVD conditioning sweep versus shared-bias Monte Carlo coverage"
+        }
+      ]
+    },
+    {
+      "branch": "test/synthetic-sky-evidence-register-p14d12-20261104",
+      "head_sha": "9c322f584350e27f5ac26282d0e996879c322c90",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 159,
+          "base": "test/synthetic-sky-condition-coverage-sweep-p14d11-20261104",
+          "draft": true,
+          "title": "test(qc): fail-closed synthetic SkySub evidence register and block false VAR qualification"
+        }
+      ]
+    },
+    {
+      "branch": "test/synthetic-sky-to-1d-reclipping-mc-p14e2-20261104",
+      "head_sha": "056a2e4262830d1d21403c02cca2a6231f56c851",
+      "status": "ALREADY_ANCESTOR_OF_PR178_PRECHECKPOINT",
+      "open_prs": [
+        {
+          "pr": 163,
+          "base": "feat/frozen-sky-to-1d-grouped-covariance-p14e1-20261104",
+          "draft": true,
+          "title": "test(science): repeat actual Kelson sigma-clipping in synthetic SkySub-to-1D Monte Carlo"
+        }
+      ]
+    }
+  ]
+}

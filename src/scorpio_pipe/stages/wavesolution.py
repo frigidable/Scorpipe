@@ -15,6 +15,10 @@ from numpy.polynomial.chebyshev import chebvander2d, chebval2d
 log = logging.getLogger(__name__)
 
 
+class ScienceSetupMismatchError(RuntimeError):
+    """Mutually incompatible science setups cannot share a wavelength map."""
+
+
 # --------------------------- IO helpers ---------------------------
 
 
@@ -413,6 +417,7 @@ def _trace_one_line_xcorr(
     search_rad: int = 12,
     y_step: int = 1,
     amp_thresh: float = 20.0,
+    max_step_px: float = 3.0,
 ) -> tuple[list[float], list[float], list[float]]:
     """Trace one emission line in a 2D image by local X-correlation.
 
@@ -420,6 +425,9 @@ def _trace_one_line_xcorr(
     """
     H, W = img.shape
     y0 = int(np.clip(y0, 0, H - 1))
+    if (not np.isfinite(max_step_px) or max_step_px <= 0
+            or search_rad < 1 or y_step < 1):
+        raise ValueError("Trace requires finite positive max_step_px, search_rad and y_step")
 
     # template from several rows around y0
     x1 = int(max(0, np.floor(x0 - template_hw)))
@@ -436,7 +444,9 @@ def _trace_one_line_xcorr(
     # go in two directions from y0
     xs: list[float] = [float(x0)]
     ys: list[float] = [float(y0)]
-    scores: list[float] = [float(np.nanmax(template))]
+    # Seed must have the same correlation-score scale as all other rows.
+    # A raw amplitude here was O(1e3) while dot products were O(1e6).
+    scores: list[float] = [float(np.dot(template, template))]
 
     def _walk(direction: int) -> None:
         nonlocal xs, ys, scores
@@ -458,14 +468,29 @@ def _trace_one_line_xcorr(
             if corr.size == 0:
                 y += direction * y_step
                 continue
-            i_max = int(np.argmax(corr))
+            # A large correlation window is NOT permission to jump to
+            # another physical line. Evaluate only candidates consistent
+            # with the previous row (or y_step rows). This fixes the
+            # observed 4181/4190, 4333/4345, 5037/5047 and 5330/5341
+            # track collisions in the N2146sat VPHG1200B pilot.
+            candidate_x = (
+                c1 + np.arange(corr.size, dtype=float)
+                + (len(template) - 1) / 2.0
+            )
+            max_jump = float(max_step_px) * float(y_step)
+            allowed = np.abs(candidate_x - x_prev) <= max_jump
+            if not np.any(allowed):
+                break
+            i_max = int(np.argmax(np.where(allowed, corr, -np.inf)))
             cmax = float(corr[i_max])
-            if cmax < amp_thresh:
+            if not np.isfinite(cmax) or cmax < amp_thresh:
                 y += direction * y_step
                 continue
 
-            sub = _parabolic_subpix(corr, i_max)
+            sub = float(np.clip(_parabolic_subpix(corr, i_max), -0.5, 0.5))
             x_found = (c1 + i_max + sub) + (len(template) - 1) / 2.0
+            if abs(x_found - x_prev) > max_jump + 0.5:
+                break
 
             xs.append(float(x_found))
             ys.append(float(y))
@@ -489,6 +514,7 @@ def trace_lines_2d_cc(
     search_rad: int = 12,
     y_step: int = 1,
     amp_thresh: float = 20.0,
+    max_step_px: float = 3.0,
     y0: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Trace multiple lines; returns control points (x,y,lambda,score)."""
@@ -510,6 +536,7 @@ def trace_lines_2d_cc(
             search_rad=search_rad,
             y_step=y_step,
             amp_thresh=amp_thresh,
+            max_step_px=max_step_px,
         )
         if len(xs) == 0:
             continue
@@ -1208,6 +1235,26 @@ class WaveSolutionResult:
         }
 
 
+def _validated_wavesol_medium(wcfg: dict[str, Any]) -> str:
+    """Require explicitly valid air/vacuum wave medium before stage execution.
+
+    Only an omitted setting uses the historical air default; an explicitly
+    invalid or null medium must never be silently relabelled as air.
+    """
+    if "wave_ref" in wcfg:
+        requested = wcfg["wave_ref"]
+    elif "waveref" in wcfg:
+        requested = wcfg["waveref"]
+    else:
+        requested = "air"
+    medium = str(requested).strip().lower()
+    if medium not in {"air", "vacuum"}:
+        raise ValueError(
+            f"wavesol.wave_ref must be explicitly 'air' or 'vacuum'; got {requested!r}"
+        )
+    return medium
+
+
 def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> WaveSolutionResult:
     """Build 1D and 2D dispersion solution from superneon + hand_pairs.
 
@@ -1217,6 +1264,7 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
     Outputs are also written to work_dir/wavesol.
     """
     wcfg = cfg.get("wavesol", {}) if isinstance(cfg.get("wavesol"), dict) else {}
+    waveref = _validated_wavesol_medium(wcfg)
     # Engine-owned run root (P0-ARCH-02.1): do not let the stage choose its own.
     from scorpio_pipe.paths import resolve_work_dir
 
@@ -1392,6 +1440,10 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
         arc_list = [Path(x) for x in (cfg.get("frames", {}) or {}).get("neon", [])]  # type: ignore[union-attr]
 
     # Safety-net exclude application (absolute policy).
+    # Defined even if the exclusion policy is empty. Previously this
+    # provenance object was referenced only at final QC serialization,
+    # causing NameError that an overbroad except silently suppressed.
+    excluded_summary: dict[str, Any] | None = None
     try:
         from scorpio_pipe.exclude_policy import filter_paths_by_exclude, resolve_exclude_set
         from scorpio_pipe.qc.flags import make_flag
@@ -1400,6 +1452,13 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
         if ex.excluded_abs:
             obj_list, obj_dropped = filter_paths_by_exclude(obj_list, ex.excluded_abs)
             arc_list, arc_dropped = filter_paths_by_exclude(arc_list, ex.excluded_abs)
+            excluded_summary = {
+                "policy_path_count": int(len(ex.excluded_abs)),
+                "n_obj_dropped": int(len(obj_dropped)),
+                "n_arc_dropped": int(len(arc_dropped)),
+                "obj_dropped": [str(p) for p in obj_dropped],
+                "arc_dropped": [str(p) for p in arc_dropped],
+            }
             if obj_dropped or arc_dropped:
                 pre_flags.append(
                     make_flag(
@@ -1525,7 +1584,7 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
                 parts = []
                 for k, paths in setup_groups.items():
                     parts.append({"setup_key": list(k), "n": len(paths), "examples": paths[:3]})
-                raise RuntimeError(
+                raise ScienceSetupMismatchError(
                     "Multiple distinct science setups detected in this wavesolution run. "
                     "Build wavelength solutions per-setup (separate work dirs/configs), or run in a mode that "
                     "produces per-setup solutions. Details: "
@@ -1563,11 +1622,14 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
                 "n_arcs": int(len(arc_list)),
                 "arc_checks": arc_checks,
             }
-    except CalibrationMismatchError:
-        # must-match mismatch is a hard ERROR
+    except (CalibrationMismatchError, ScienceSetupMismatchError):
+        # Must-match calibration mismatches and mixed science setups are
+        # explicitly fatal. Never downgrade these deterministic science
+        # configuration errors to ARC_COMPAT_CHECK_FAILED warnings.
         raise
     except Exception as e:
-        # Do not fail the whole stage just because we could not read headers.
+        # Independent unreadable ARC metadata remain a diagnostic warning;
+        # deterministic incompatibilities above must never enter this path.
         try:
             from scorpio_pipe.qc.flags import make_flag
 
@@ -1765,6 +1827,7 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
             search_rad=int(wcfg.get("trace_search_rad", 12)),
             y_step=int(wcfg.get("trace_y_step", 1)),
             amp_thresh=float(wcfg.get("trace_amp_thresh", 20.0)),
+            max_step_px=float(wcfg.get("trace_max_step_px", 3.0)),
             y0=(None if y0 is None else int(y0)),
         )
 
@@ -1818,6 +1881,30 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
                 (outdir / 'geometry_prior_used.json').write_text(json.dumps({**geometry_prior_used, 'source': geometry_prior_payload.get('source'), 'trust_score': (geometry_prior_payload.get('metrics') or {}).get('trust_score')}, indent=2, ensure_ascii=False), encoding='utf-8')
             except Exception:
                 pass
+
+    # Line identity must be checked before any 2D fit. A correlation walker
+    # may silently lock onto another strong line: the resulting smooth
+    # polynomial could then be internally self-consistent but physically wrong.
+    from scorpio_pipe.wave_trace_qc import trace_identity_qc
+
+    trace_qc = trace_identity_qc(
+        xs_cp, ys_cp, lams_cp, x_fit, lam_fit,
+        collision_px=float(wcfg.get("trace_collision_px", 1.5)),
+        max_collision_fraction=float(
+            wcfg.get("trace_max_collision_fraction", 0.01)
+        ),
+    )
+    trace_qc_path = outdir / "trace_identity_qc.json"
+    trace_qc_path.write_text(
+        json.dumps(trace_qc, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    if trace_qc["status"] != "PASS":
+        raise RuntimeError(
+            "Wavesolution TRACE_IDENTITY_QC FAILED: "
+            + " | ".join(trace_qc["issues"][:8])
+            + f". Inspect {trace_qc_path}"
+        )
 
     # Save control points for QC / interactive cleanup (after all basic filtering).
     # This file is the *single source of truth* for the interactive 2D cleaner.
@@ -1976,6 +2063,119 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
         YY, XX = np.mgrid[0:H, 0:W]
         lam_map = polyval2d_cheb(XX, YY, cheb_C, cheb_meta).astype(np.float32)
 
+
+    # A tiny in-sample RMS is not evidence of a good line-based fit if
+    # global per-row sigma clipping has discarded almost an entire
+    # independent laboratory line. In auto mode, recover with a low-order
+    # all-line, line-balanced model; *never* auto-delete laboratory anchors.
+    # This fallback is accepted only when independent whole-line CV and
+    # per-line residual gates pass. Explicit forced model choices remain
+    # fail-closed and are never silently replaced.
+    model_selection_diagnostic: dict[str, Any] = {
+        "policy": "line_preserving_fallback_v1",
+        "original_kind": kind,
+        "original_training_rms_A": float(
+            pow_rms if kind == "power" else cheb_rms
+        ),
+        "mode": model2d,
+        "line_retention": {},
+        "fallback_attempted": False,
+        "fallback_selected": False,
+    }
+    insufficient_lines: list[float] = []
+    for line in np.unique(lams_fit):
+        lm = np.isclose(lams_fit, line, rtol=0.0, atol=1e-5)
+        n_original = int(np.count_nonzero(lm))
+        n_kept = int(np.count_nonzero(used2d[fit_mask][lm]))
+        fraction = float(n_kept / n_original)
+        model_selection_diagnostic["line_retention"][f"{float(line):.3f}"] = {
+            "n_total": n_original, "n_used": n_kept,
+            "fraction": fraction,
+        }
+        if fraction < 0.65:
+            insufficient_lines.append(float(line))
+
+    if insufficient_lines and model2d not in ("cheb", "chebyshev", "pow", "power", "poly"):
+        model_selection_diagnostic["fallback_attempted"] = True
+        model_selection_diagnostic["trigger_lines_A"] = insufficient_lines
+        # The input wavelengths are 19 independent LineID anchors for the
+        # pilot, not 19,000 independent points. Unit *group* weight per line
+        # prevents brighter lines from dominating the entire least squares
+        # problem by several orders of magnitude.
+        try:
+            fallback_weights = np.ones_like(lams_fit, dtype=float)
+            for line in np.unique(lams_fit):
+                mask = np.isclose(lams_fit, line, rtol=0.0, atol=1e-5)
+                fallback_weights[mask] = 1.0 / np.sqrt(float(mask.sum()))
+            fallback_C, fallback_meta, fallback_used = robust_polyfit_2d_cheb(
+                xs_fit, ys_fit, lams_fit, 3, 2,
+                weights=fallback_weights,
+                maxiter=0,  # no line may disappear through global clipping
+            )
+            if not np.all(fallback_used):
+                raise RuntimeError("All-line fallback unexpectedly rejected control points")
+            fallback_resid = (
+                polyval2d_cheb(xs_fit, ys_fit, fallback_C, fallback_meta)
+                - lams_fit
+            )
+            from scorpio_pipe.wave_trace_qc import evaluate_solution_2d
+            from scorpio_pipe.qc_thresholds import compute_thresholds
+            fallback_review = evaluate_solution_2d(
+                xs_fit, ys_fit, lams_fit,
+                fallback_resid, np.ones_like(fallback_used, dtype=bool),
+                dispersion_A_per_px=dlamdx_med,
+            )
+            thresh, _ = compute_thresholds(cfg)
+            fallback_rms = float(np.sqrt(np.mean(fallback_resid ** 2)))
+            fallback_p95 = float(np.percentile(np.abs(fallback_resid), 95))
+            fallback_ok = (
+                fallback_review["status"] == "PASS"
+                and np.isfinite(fallback_rms)
+                and np.isfinite(fallback_p95)
+                and fallback_rms < float(thresh.wavesol_2d_rms_bad)
+                and fallback_p95 < float(thresh.resid_2d_p95_bad)
+            )
+            model_selection_diagnostic["fallback_science_qc"] = fallback_review
+            model_selection_diagnostic["fallback_rms_A"] = fallback_rms
+            model_selection_diagnostic["fallback_p95_abs_A"] = fallback_p95
+            if fallback_ok:
+                kind = "chebyshev"
+                cheb_C, cheb_meta = fallback_C, fallback_meta
+                cheb_rms = fallback_rms
+                cheb_used_fit = fallback_used
+                cheb_used = np.zeros_like(xs_cp, dtype=bool)
+                cheb_used[fit_mask] = fallback_used
+                cheb_resid = polyval2d_cheb(
+                    xs_cp, ys_cp, fallback_C, fallback_meta
+                ) - lams_cp
+                used2d = cheb_used
+                resid2d = cheb_resid
+                lam_map = polyval2d_cheb(
+                    XX, YY, fallback_C, fallback_meta
+                ).astype(np.float32)
+                model_payload["kind"] = "chebyshev"
+                model_payload["chebyshev"] = {
+                    "degx": 3, "degy": 2,
+                    "C": fallback_C.tolist(),
+                    "meta": fallback_meta,
+                    "rms_A": fallback_rms,
+                    "n_used": int(fallback_used.sum()),
+                }
+                model_selection_diagnostic["fallback_selected"] = True
+        except Exception as exc:
+            # Keep the original bad model so the existing quantitative QC
+            # writes a rejection report; do NOT downgrade this exception to
+            # an acceptance or disable the downstream science gate.
+            model_selection_diagnostic["fallback_error"] = (
+                f"{type(exc).__name__}: {exc}"
+            )
+    model_selection_path = outdir / "wavesolution_model_selection.json"
+    model_selection_path.write_text(
+        json.dumps(model_selection_diagnostic, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    model_payload["model_selection_diagnostic"] = str(model_selection_path)
+
     wavesol2d_json = outdir / "wavesolution_2d.json"
     wavesol2d_json.write_text(
         json.dumps(
@@ -2075,7 +2275,8 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
         final_view=False,
     )
     _plot_residuals_vs_lambda(
-        lams_all=lams_cp,
+        lam_key=np.round(lams_cp.astype(float), 3),
+        lam_all=lams_cp,
         dlam_all=resid2d,
         used_mask=used2d,
         rejected_lines_A=rej,
@@ -2083,7 +2284,7 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
         title="Δλ vs λ (per-line medians)",
     )
     _plot_residuals_vs_y(
-        ys_pix_all=ys_cp,
+        y_all=ys_cp,
         dlam_all=resid2d,
         used_mask=used2d,
         outpng=resid_vs_y_png,
@@ -2199,6 +2400,55 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
         )
     report_txt.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
+    # A stage may not report success with a physically unusable 2D solution.
+    # In particular, a good 1D fit does not certify trace identities across
+    # the slit. Run independent whole-line (not per-row) cross-validation and
+    # per-line support/bias tests BEFORE writing a consumable lambda_map.fits.
+    from scorpio_pipe.wave_trace_qc import evaluate_solution_2d
+
+    science_qc = evaluate_solution_2d(
+        xs_cp[fit_mask], ys_cp[fit_mask], lams_cp[fit_mask],
+        resid2d[fit_mask], used2d[fit_mask],
+        dispersion_A_per_px=disp2d_A_per_px,
+    )
+    science_qc["trace_identity_qc"] = str(trace_qc_path)
+    # Existing setup-dependent QC ERROR limits must also be fatal before a
+    # consumable lambda map is written. The historical implementation only
+    # recorded flags in done.json while the StageResult still returned OK.
+    from scorpio_pipe.qc_thresholds import compute_thresholds
+
+    wave_thresholds, wave_threshold_meta = compute_thresholds(cfg)
+    science_qc["existing_thresholds_A"] = {
+        "wavesol_1d_rms_bad": float(wave_thresholds.wavesol_1d_rms_bad),
+        "wavesol_2d_rms_bad": float(wave_thresholds.wavesol_2d_rms_bad),
+        "resid_2d_p95_bad": float(wave_thresholds.resid_2d_p95_bad),
+        "metadata": wave_threshold_meta,
+    }
+    for value, threshold, label in (
+        (rms1d, wave_thresholds.wavesol_1d_rms_bad, "1D_RMS"),
+        (rms2d_A, wave_thresholds.wavesol_2d_rms_bad, "2D_RMS"),
+        (resid2d_p95_A, wave_thresholds.resid_2d_p95_bad, "2D_P95"),
+    ):
+        if (not np.isfinite(value) or not np.isfinite(threshold)
+                or float(threshold) <= 0 or float(value) >= float(threshold)):
+            science_qc["issues"].append(
+                f"Existing wavesolution {label} ERROR: "
+                f"{float(value):.4g} A >= {float(threshold):.4g} A"
+            )
+    if science_qc["issues"]:
+        science_qc["status"] = "REJECT"
+    science_qc_file = outdir / "wavesolution_science_qc.json"
+    science_qc_file.write_text(
+        json.dumps(science_qc, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    if science_qc["status"] != "PASS":
+        raise RuntimeError(
+            "Wavesolution SCIENCE_2D_QC FAILED: "
+            + " | ".join(science_qc["issues"][:8])
+            + f". Inspect {science_qc_file}"
+        )
+
     # finalize counts / robust stats for 2D
     n_lines_total = int(n_lines)
     n_lines_rejected = int(n_rejected_lines)
@@ -2216,11 +2466,6 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
         wave_unit = "nm"
     else:
         wave_unit = wave_unit_raw
-
-    waveref = str(wcfg.get("wave_ref", wcfg.get("waveref", "air")) or "air").strip().lower()
-    if waveref not in {"air", "vacuum"}:
-        # keep but normalise to a safe default
-        waveref = "air"
 
     # Convert internally-Angstrom lambda_map to requested output unit if needed
     unit_scale = 1.0
@@ -2264,7 +2509,36 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
     from scorpio_pipe.frame_signature import FrameSignature
     from scorpio_pipe.qc.lambda_map import validate_lambda_map
 
-    frame_sig = FrameSignature.from_path(superneon_fits)
+    # rectification_model.frame_signature is the signature of the SCIENCE
+    # detector frames to which the wavelength map will be applied, not the arc
+    # stack. Arcs may legitimately use a different gain/rate. Arc/SCI setup
+    # compatibility (including geometry and NODE) was checked above by
+    # ensure_compatible_calib(..., kind="arc", strict=True,
+    # allow_readout_diff=True). Preserve both signatures for provenance.
+    arc_sig = FrameSignature.from_path(arc_list[0]) if arc_list else FrameSignature.from_path(superneon_fits)
+    if obj_list:
+        frame_sig = FrameSignature.from_path(obj_list[0])
+        if frame_sig.shape != tuple(int(x) for x in lam_map_out.shape):
+            raise RuntimeError(
+                "Science-frame detector shape does not match lambda_map: "
+                f"science={frame_sig.shape}, lambda_map={tuple(lam_map_out.shape)}"
+            )
+        for science_path in obj_list[1:]:
+            candidate = FrameSignature.from_path(science_path)
+            if not candidate.is_compatible_with(frame_sig):
+                raise RuntimeError(
+                    "Multiple incompatible science detector signatures in one "
+                    "wavelength solution: "
+                    f"reference={frame_sig.describe()}, "
+                    f"frame={science_path}: {candidate.describe()}"
+                )
+        frame_sig_origin = "science"
+    else:
+        # Calibration-only workflows can create a wavelength solution before
+        # science selection. Record the fallback explicitly; science applications
+        # must still validate their own detector geometry and provenance.
+        frame_sig = arc_sig
+        frame_sig_origin = "arc_fallback"
 
     lam_diag = validate_lambda_map(
         lambda_map_fits,
@@ -2345,6 +2619,8 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
         "pipeline_version": str(PIPELINE_VERSION),
         "stage": "wavesolution",
         "frame_signature": frame_sig.to_dict(),
+        "frame_signature_origin": frame_sig_origin,
+        "arc_frame_signature": arc_sig.to_dict(),
         "input_shape": [ny_in, nx_in],
         "output_shape": [ny_out, int(nlam)],
         "y_crop": {"top": int(y_crop_top), "bottom": int(y_crop_bottom)},
@@ -2545,8 +2821,6 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
         # --- quicklook for lambda_map (navigator-friendly) ---
         lambda_map_png = outdir / "lambda_map.png"
         try:
-            from astropy.io import fits
-            import numpy as np
             from scorpio_pipe.io.quicklook import write_quicklook_png
 
             with fits.open(lambda_map_fits, memmap=False) as hdul:
@@ -2637,8 +2911,24 @@ def build_wavesolution(cfg: dict[str, Any], *, run_root: Path | None = None) -> 
             },
         }
         (outdir / "wave_done.json").write_text(json.dumps(wave_done, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as exc:
+        raise RuntimeError(
+            "Wavesolution QC flags/provenance could not be written: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+
+    # ERROR flags must not be downgraded to an operationally successful
+    # StageResult. Do not allow downstream stages to consume such a solution.
+    if sev in {"ERROR", "FATAL"}:
+        raise RuntimeError(
+            "Wavesolution produced QC ERROR/FATAL flags: "
+            + ", ".join(
+                str(flag.get("code") or "?")
+                for flag in flags
+                if isinstance(flag, dict)
+                and str(flag.get("severity") or "").upper() in {"ERROR", "FATAL"}
+            )
+        )
 
     return WaveSolutionResult(
         wavesol_dir=outdir,

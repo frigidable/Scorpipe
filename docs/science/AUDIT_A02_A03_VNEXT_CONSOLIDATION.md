@@ -1,0 +1,11 @@
+# A02/A03 — independent continuum support and DQ-safe line detection
+
+**Source review:** historic [PR #55](https://github.com/frigidable/Scorpipe/pull/55). **Target:** Draft [vNext PR #180](https://github.com/frigidable/Scorpipe/pull/180), SCIENCE HOLD.
+
+The current vNext LineMeasure already requires positive, signed S/N ≥3 for a diagnostic line candidate, rejects 1D fatal DQ, excludes nonpositive VAR, evaluates the line integration's pixel spacing before skipping masked bins and respects DQ1D v1 partial-coverage restrictions. These later science contracts supersede the older main-based A02/A03 implementation and must not be overwritten.
+
+One independent support condition was still missing. The internal `_continuum_model` falls back to a constant baseline if one continuum sideband has no usable samples, or to a global median if both sidebands fail. LineMeasure did not explicitly reject those fallbacks, so a numerical positive feature could be flagged as `detected=True` despite a one-sided or absent local continuum. This violates the intended independent-sideband measurement condition.
+
+The narrow fix verifies at least **two finite, positive-variance, unmasked samples on each** predeclared sideband before any scientifically interpreted line integral. If either side fails, the line becomes `detected=False` with `reason=insufficient_unmasked_continuum`, sideband sample counts and **no** formal three-sigma upper limit. The internal continuum helper remains usable for purely diagnostic callers; only LineMeasure's science eligibility changes. Direct line-integral calls also require a finite strictly increasing wavelength vector to prevent malformed integration widths. Normal supported lines remain measurable; fatal cosmic-ray pixels are excluded without widening adjacent line bins.
+
+The threshold of two points per side is a **minimal numerical support condition, not a validated continuum fit**. These tests do not certify covariance, blaze/sensitivity interpolation, physical flux scales, line blending, underlying stellar absorption, differential extinction, LSF, velocity reference frames or real-instrument S/N. No original observations are modified. The old A02/A03 source must be preserved and closed as superseded only after exact-HEAD CI and final patch equivalence.

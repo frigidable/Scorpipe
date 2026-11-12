@@ -293,7 +293,9 @@ class ProductCatalog:
         # FITS contract validators
         from scorpio_pipe.contracts.validators import (
             validate_lambda_map_product,
+            validate_eta_lambda_product,
             validate_mef2d_product,
+            validate_preview2d_product,
             validate_calibrated_mef2d_product,
             validate_calibrated_spec1d_product,
             validate_calibration_systematics_product,
@@ -305,6 +307,12 @@ class ProductCatalog:
 
         if k == "mef":
             validate_mef2d_product(path, stage=stage)
+            return
+        if k == "eta1d":
+            validate_eta_lambda_product(path, stage=stage)
+            return
+        if k == "preview2d":
+            validate_preview2d_product(path, stage=stage)
             return
         if k == "spec1d":
             validate_spec1d_product(path, stage=stage)
@@ -1131,10 +1139,11 @@ S(
             "sky_preview_fits",
             "fits",
             ["@stage(sky)/preview.fits"],
-            "mef",
+            "preview2d",
             dm,
             "science",
             optional=True,
+            description="Visualization-only median SCI image; no propagated VAR/MASK",
         ),
         S(
             "sky_preview_png",
@@ -1269,10 +1278,11 @@ S(
             "eta_lambda_fits",
             "fits",
             ["@stage(stack2d)/eta_lambda.fits"],
-            "mef",
+            "eta1d",
             dm,
             "science",
             optional=True,
+            description="Dimensionless 1D eta(lambda) variance correction factors",
         ),
         S(
             "coverage_png",

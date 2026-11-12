@@ -406,6 +406,152 @@ def load_master_bias_index(work_dir: Path) -> dict[str, Any] | None:
         return None
 
 
+def _require_estimator_masterbias_index(
+    index: dict[str, Any],
+    group: dict[str, Any],
+    work_dir: Path,
+) -> None:
+    """Refuse cached MasterBias VAR with obsolete *frame-scatter* semantics.
+
+    The old on-disk index schema v2 encoded per-exposure dispersion (MAD^2)
+    as though it were the uncertainty of the combined MasterBias. Schema v3
+    explicitly records the estimator-variance definition and FITS provenance.
+    The legacy index is intentionally rejected before any subtraction.
+    """
+    schema = str(index.get("schema") or "")
+    if not schema:
+        # Historical minimally mocked indexes in low-level tests. Production
+        # build_superbias always stamps a named schema.
+        return
+    if schema != "scorpio_pipe.master_bias_index":
+        raise RuntimeError("Unrecognized MasterBias calibration index schema")
+    try:
+        version = int(index.get("schema_version") or 0)
+    except (TypeError, ValueError):
+        version = 0
+    if version < 3:
+        raise RuntimeError(
+            "Obsolete MasterBias variance definition (index schema v2 or "
+            "earlier): master_bias_var.fits contains individual-frame scatter, "
+            "not combined-estimator uncertainty. Regenerate MasterBias."
+        )
+    if version != 3:
+        raise RuntimeError(
+            f"Unsupported MasterBias variance schema version: {version}"
+        )
+
+    info = group.get("variance")
+    if not isinstance(info, dict) or info.get("definition") != (
+        "uncertainty_of_combined_master_bias"
+    ):
+        raise RuntimeError(
+            "MasterBias index lacks combined-estimator variance provenance"
+        )
+    model = str(info.get("model") or "")
+    if model not in {"MEANSEM", "GAUSSMED", "MEDASYMP", "CLIPAPPX", "GROSSMED"}:
+        raise RuntimeError(f"MasterBias estimator variance model invalid: {model}")
+
+    files = group.get("files") or {}
+    var_rel = files.get("var")
+    if not isinstance(var_rel, str) or not var_rel:
+        raise RuntimeError("Indexed MasterBias has no VAR product")
+    path = (Path(work_dir) / var_rel).resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"Indexed MasterBias estimator VAR missing: {path}")
+    header = fits.getheader(path)
+    if (str(header.get("BUNIT") or "").strip().upper() != "ADU^2"
+            or str(header.get("SB_VMOD") or "") != model
+            or str(header.get("SB_GID") or "") != str(group.get("gid") or "")):
+        raise RuntimeError(
+            "MasterBias VAR FITS estimator model, unit or group conflicts "
+            f"with index: {path}"
+        )
+    try:
+        n_used = int(group.get("n_used"))
+        n_hdr = int(header["NBIAS"])
+        n_min = int(header["SB_NMIN"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "MasterBias VAR missing estimator sample-count provenance"
+        ) from exc
+    if n_used < 2 or n_hdr != n_used or not (1 <= n_min <= n_used):
+        raise RuntimeError(
+            "MasterBias estimator variance has invalid sample-count metadata"
+        )
+    if model not in {"CLIPAPPX", "GROSSMED"} and n_min != n_used:
+        raise RuntimeError(
+            "Unclipped MasterBias estimator has inconsistent sample counts"
+        )
+    if model == "CLIPAPPX" and n_min < 2:
+        raise RuntimeError(
+            "Clipped MasterBias has insufficient per-pixel samples; "
+            "mask or regenerate before science usage"
+        )
+
+    if model == "GROSSMED":
+        # Gross-rejected sample medians use *per-pixel* Gaussian finite-N
+        # factors. There is intentionally no universal SB_VFAC. The producer
+        # recalculates SCI and VAR from each pixel's accepted exposure subset.
+        # The current Cosmics consumer does not propagate MasterBias DQ, so
+        # even one pixel with insufficient support must fail closed.
+        try:
+            cutoff = float(info["gross_reject_adu"])
+            index_cutoff = float(index["gross_reject_adu"])
+            header_cutoff = float(header["SB_GROS"])
+            header_clip = float(header["SB_CLIP"])
+            min_index = int(info["min_effective_n"])
+            bad_support = int(info["bad_support_pixels"])
+            n_rejected = int(info["gross_rejected_samples"])
+            n_affected = int(info["gross_affected_pixels"])
+            n_rejected_hdr = int(header["SB_GCNT"])
+            index_sigma = float(index["sigma_clip"])
+        except (KeyError, ValueError, TypeError) as exc:
+            raise RuntimeError(
+                "Gross-rejected MasterBias lacks estimator provenance"
+            ) from exc
+        if (
+            str(index.get("combine") or "").lower() != "median"
+            or str(header.get("SB_METH") or "").lower() != "median"
+            or not np.isfinite(index_sigma) or index_sigma != 0.0
+            or not np.isfinite(header_clip) or header_clip != 0.0
+            or not (np.isfinite(cutoff) and cutoff > 0)
+            or not np.isclose(cutoff, index_cutoff, rtol=1e-6)
+            or not np.isclose(cutoff, header_cutoff, rtol=1e-6)
+            or info.get("factor") is not None
+            or "SB_VFAC" in header
+            or min_index != n_min
+            or n_rejected < 0 or n_affected < 0
+            or n_rejected_hdr != n_rejected
+            or (n_rejected == 0) != (n_affected == 0)
+            or (n_rejected == 0) != (n_min == n_used)
+            or n_affected > n_rejected
+            or "PROVISIONAL" not in str(info.get("assumptions") or "")
+        ):
+            raise RuntimeError(
+                "Gross-rejected MasterBias index/FITS estimator provenance "
+                "is inconsistent"
+            )
+        required = max(2, n_used - max(1, n_used // 10))
+        if bad_support != 0 or n_min < required:
+            raise RuntimeError(
+                "Gross-rejected MasterBias has pixels with insufficient "
+                "support; Cosmics does not yet propagate MasterBias DQ. "
+                "Regenerate or implement DQ propagation before use."
+            )
+    elif model != "CLIPAPPX":
+        try:
+            factor = float(info["factor"])
+            factor_hdr = float(header["SB_VFAC"])
+        except (KeyError, ValueError, TypeError) as exc:
+            raise RuntimeError(
+                "MasterBias estimator variance factor is missing"
+            ) from exc
+        if not (np.isfinite(factor) and factor > 0
+                and np.isclose(factor, factor_hdr, rtol=1e-6)):
+            raise RuntimeError(
+                "MasterBias estimator variance factor conflicts with FITS"
+            )
+
 def _bias_key_from_header(hdr: fits.Header, *, fallback_shape: tuple[int, int] | None = None) -> BiasGroupKey:
     """Build BiasGroupKey from a science/calib header."""
 
@@ -522,6 +668,7 @@ def resolve_master_bias(
 
     if exact:
         best = sorted(exact, key=_score, reverse=True)[0]
+        _require_estimator_masterbias_index(idx, best, work_dir)
         files = best.get("files") or {}
         sdir = _resolve_work_dir(c)
         sci_p = (work_dir / str(files.get("sci"))).resolve() if files.get("sci") else _resolve_superbias_path(c, work_dir)
@@ -555,6 +702,7 @@ def resolve_master_bias(
 
     # Degraded fallback: pick best geometry-matching group with highest n_used.
     best = sorted(geom, key=_score, reverse=True)[0]
+    _require_estimator_masterbias_index(idx, best, work_dir)
     files = best.get("files") or {}
     sci_p = (work_dir / str(files.get("sci"))).resolve() if files.get("sci") else _resolve_superbias_path(c, work_dir)
     var_p = (work_dir / str(files.get("var"))).resolve() if files.get("var") else None
@@ -1210,7 +1358,7 @@ def build_superbias(
     Outputs (in the canonical superbias stage dir)
     ---------------------------------------------
     - master_bias.fits        (SCI)   : default group (best match to expected signature)
-    - master_bias_var.fits    (VAR)   : per-pixel variance estimate (ADU^2)
+    - master_bias_var.fits    (VAR)   : variance of the combined bias estimator (ADU^2)
     - master_bias_dq.fits     (DQ)    : uint16 mask (MASK schema v2)
     - master_bias_index.json  : group registry + file mapping
     - superbias.fits          : legacy alias for master_bias.fits
@@ -1259,6 +1407,7 @@ def build_superbias(
     calib_cfg = c.get("calib", {}) or {}
     combine = str(calib_cfg.get("bias_combine", "median")).strip().lower() or "median"
     sigma_clip = float(calib_cfg.get("bias_sigma_clip", 0.0) or 0.0)
+    gross_reject_adu = float(calib_cfg.get("bias_gross_reject_adu", 0.0) or 0.0)
 
     groups: dict[BiasGroupKey, list[Path]] = {}
     bad_key = 0
@@ -1318,35 +1467,24 @@ def build_superbias(
         except Exception:
             rn_est_adu, rn_diag = None, {}
 
-        # Combine
-        if combine == "median":
-            sci = np.median(arr, axis=0).astype(np.float32)
-        elif combine == "mean" and sigma_clip > 0:
-            med = np.median(arr, axis=0)
-            mad = np.median(np.abs(arr - med), axis=0)
-            sig = 1.4826 * mad
-            sig[sig <= 0] = 1.0
-            m = np.abs(arr - med) <= (sigma_clip * sig)
-            w = m.astype(np.float32)
-            num = (arr * w).sum(axis=0)
-            den = w.sum(axis=0)
-            den[den == 0] = 1.0
-            sci = (num / den).astype(np.float32)
-        else:
-            sci = np.mean(arr, axis=0).astype(np.float32)
+        # MasterBias uncertainty is the sampling variance of the
+        # *combined estimator*; the scatter of individual bias exposures
+        # alone is NOT a valid VAR to subtract from every science frame.
+        from scorpio_pipe.bias_uncertainty import master_bias_estimator_variance
 
-        # VAR: robust per-pixel dispersion estimator (MAD^2 in ADU^2).
-        if n_used >= 2:
-            med = np.median(arr, axis=0)
-            mad = np.median(np.abs(arr - med), axis=0)
-            sig = (1.4826 * mad).astype(np.float32)
-            var = (sig ** 2).astype(np.float32)
-        else:
-            var = np.zeros_like(sci, dtype=np.float32)
+        sci, var, var_meta = master_bias_estimator_variance(
+            arr, combine=combine, sigma_clip=sigma_clip,
+            gross_reject_adu=gross_reject_adu,
+        )
 
-        # DQ: start with zeros; flag non-finite pixels as BADPIX.
+        # Fewer than two accepted samples after sigma clipping cannot
+        # determine a stable MasterBias pixel. Mark it as bad, rather than
+        # returning a zero SCI with an apparently valid VAR.
         dq = np.zeros(sci.shape, dtype=np.uint16)
-        badpix = ~np.isfinite(sci) | ~np.isfinite(var)
+        badpix = (
+            ~np.isfinite(sci) | ~np.isfinite(var)
+            | np.asarray(var_meta["invalid_support"], dtype=bool)
+        )
         if np.any(badpix):
             dq[badpix] |= np.uint16(maskbits.BADPIX)
             sci = sci.copy(); var = var.copy()
@@ -1360,6 +1498,13 @@ def build_superbias(
             "bad_shape": int(bad_shape),
             "combine": str(combine),
             "sigma_clip": float(sigma_clip),
+            "variance_model": str(var_meta["variance_model"]),
+            "variance_factor": var_meta["variance_factor"],
+            "min_effective_n": int(var_meta["n_effective_min"]),
+            "bad_support_pixels": int(np.count_nonzero(var_meta["invalid_support"])),
+            "gross_reject_adu": float(gross_reject_adu),
+            "gross_rejected_samples": int(var_meta["gross_rejected_samples"]),
+            "gross_affected_pixels": int(var_meta["gross_affected_pixels"]),
             "rn_est_adu": (float(rn_est_adu) if rn_est_adu is not None else None),
             "rn_pairs": int((rn_diag or {}).get('pairs_used') or 0),
             "rn_diag": (rn_diag or {}),
@@ -1368,9 +1513,11 @@ def build_superbias(
 
     index: dict[str, Any] = {
         "schema": "scorpio_pipe.master_bias_index",
-        "schema_version": 2,
+        # v3 changes VAR from per-exposure scatter to estimator uncertainty.
+        "schema_version": 3,
         "combine": str(combine),
         "sigma_clip": float(sigma_clip),
+        "gross_reject_adu": float(gross_reject_adu),
         "groups": [],
         "default_gid": "",
         "bad_key": int(bad_key),
@@ -1398,6 +1545,12 @@ def build_superbias(
             h["SB_BAD"] = (int(st["bad_read"] + st["bad_shape"]), "Bias frames skipped")
             h["SB_METH"] = (str(combine), "Combine method")
             h["SB_CLIP"] = (float(sigma_clip), "Sigma clip (0=disabled)")
+            h["SB_GROS"] = (float(gross_reject_adu), "Gross reject threshold ADU (0=off)")
+            h["SB_GCNT"] = (int(st["gross_rejected_samples"]), "Raw BIAS samples rejected")
+            h["SB_VMOD"] = (str(st["variance_model"]), "Bias estimator VAR model")
+            h["SB_NMIN"] = (int(st["min_effective_n"]), "Minimum accepted samples")
+            if st["variance_factor"] is not None:
+                h["SB_VFAC"] = (float(st["variance_factor"]), "VAR/read noise variance factor")
             h["SB_GID"] = (str(gid), "MasterBias group id")
             h["SBINS"] = (str(k.instrument), "Bias instrument")
             h["SBNAX1"] = (int(k.nx), "Group NAXIS1")
@@ -1431,7 +1584,10 @@ def build_superbias(
                     instrument_hint=str(k.instrument),
                     require_gain=False,
                 )
-                h = stamp_noise_keywords(h, npar, overwrite=True)
+                # stamp_noise_keywords returns a *copy*. Apply its cards back
+                # into the caller's header instead of rebinding only this
+                # local variable (which silently lost RN_SRC and NOISRC).
+                h.update(stamp_noise_keywords(h, npar, overwrite=True))
                 # Extra compact diagnostics
                 if st.get('rn_est_adu') is not None:
                     h['RNADU'] = (float(st.get('rn_est_adu')), 'Read noise estimate [ADU]')
@@ -1459,7 +1615,8 @@ def build_superbias(
         hv = fits.Header(hdr0)
         _stamp_common(hv)
         hv["BUNIT"] = ("ADU^2", "Variance unit")
-        hv.add_history("MasterBias VAR (per-pixel MAD^2)")
+        hv.add_history("MasterBias VAR: uncertainty of combined estimator, not frame scatter")
+        hv.add_history("Independent Gaussian read noise assumed; inspect SB_VMOD")
         atomic_write_fits(var_f, var.astype(np.float32), header=hv)
 
         # DQ
@@ -1478,6 +1635,24 @@ def build_superbias(
                 "n_used": int(st["n_used"]),
                 "bad_read": int(st["bad_read"]),
                 "bad_shape": int(st["bad_shape"]),
+                "variance": {
+                    "definition": "uncertainty_of_combined_master_bias",
+                    "unit": "ADU^2",
+                    "model": str(st["variance_model"]),
+                    "factor": st["variance_factor"],
+                    "min_effective_n": int(st["min_effective_n"]),
+                    "bad_support_pixels": int(st["bad_support_pixels"]),
+                    "gross_reject_adu": float(st["gross_reject_adu"]),
+                    "gross_rejected_samples": int(st["gross_rejected_samples"]),
+                    "gross_affected_pixels": int(st["gross_affected_pixels"]),
+                    "assumptions": (
+                        "independent_gaussian_read_noise; "
+                        "gross-rejection variance PROVISIONAL and quantization "
+                        "coverage not calibrated"
+                        if gross_reject_adu > 0 else
+                        "independent_gaussian_read_noise"
+                    ),
+                },
                 "files": {
                     "sci": str(sci_f.relative_to(work_dir)),
                     "var": str(var_f.relative_to(work_dir)),
@@ -1630,8 +1805,13 @@ def build_superflat(
     sigma_clip = float(calib_cfg.get("flat_sigma_clip", 0.0) or 0.0)
     log.info("Superflat settings: combine=%s, sigma_clip=%g", combine, sigma_clip)
 
-    # P0-C1: choose MasterBias matching the flat readout/geometry.
-    sel = resolve_master_bias(c, fits.Header(h0), sci_shape=d0.shape)
+    # A bias frame from the same CCD geometry but a different RATE/GAIN
+    # must never be silently subtracted from flats. The default resolver
+    # may otherwise fall back to a degraded geometry-only match.
+    sel = resolve_master_bias(
+        c, fits.Header(h0), sci_shape=d0.shape,
+        policy_override="strict",
+    )
     superbias_path = sel.sci_path
     if not superbias_path.exists():
         raise RuntimeError(
@@ -1639,10 +1819,27 @@ def build_superflat(
             "Run the 'superbias' stage first or set calib.superbias_path in config."
         )
 
+    # A legacy superbias file can exist without a master_bias_index.json.
+    # Accept that path only when the actual FITS signature is identical.
+    # In no case allow degraded cross-readout subtraction in SuperFlat.
+    sb_sig = FrameSignature.from_path(superbias_path)
+    diffs_sb = ref_sig.diff(sb_sig)
+    if diffs_sb:
+        raise RuntimeError(
+            "Superflat blocked: flat/master-bias readout mismatch. "
+            "Never subtract a bias taken with another GAIN/RATE, even if "
+            "the pixel dimensions match.\n"
+            + format_signature_mismatch(
+                expected=ref_sig,
+                got=sb_sig,
+                path=superbias_path,
+            )
+        )
+
     superflat, hdr, _stats = _build_superflat_core(
         flat_paths=flat_paths,
         superbias_path=superbias_path,
-        allow_readout_diff=bool(sel.degraded),
+        allow_readout_diff=False,
         combine=combine,
         sigma_clip=sigma_clip,
     )
