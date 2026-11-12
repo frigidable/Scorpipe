@@ -84,4 +84,4 @@ def test_workflow_action_versions_are_pinned_not_moving_tags() -> None:
             if "uses" not in step:
                 continue
             action = step["uses"]
-            assert re.fullmatch(r"[^@\\s]+@[0-9a-f]{40}", action), action
+            assert re.fullmatch(r"[^@ ]+@[0-9a-f]{40}", action), action
