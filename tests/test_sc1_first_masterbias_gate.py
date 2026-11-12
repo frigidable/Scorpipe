@@ -264,3 +264,53 @@ def test_preflight_accepts_external_report_for_nested_fits(tmp_path):
     assert external.is_file()
     import json
     assert json.loads(external.read_text(encoding="utf-8"))["raw_data_dir"] == str(raw.resolve())
+
+
+def test_existing_03_bias_allows_only_explicit_readonly_audit(tmp_path):
+    """A saved bias stage must block first-build but not a header inventory."""
+    m = module()
+    conf, cfg, raw = case(tmp_path)
+    stage = conf.parent / "03_bias"
+    stage.mkdir()
+    sentinel = stage / "legacy_master_bias.fits"
+    sentinel.write_bytes(b"immutable existing stage output")
+    before = {p: p.read_bytes() for p in [conf, sentinel, *raw.iterdir()]}
+    strict_path = tmp_path / "qa" / "strict.json"
+    with pytest.raises(RuntimeError, match="Prior stage products"):
+        m.run(conf, strict_path)
+    assert not strict_path.exists()
+
+    safe_report, selected = m.collect(conf, require_clean_workdir=False)
+    assert len(selected) == 32
+    assert safe_report["mode"] == "audit_existing_readonly"
+    assert safe_report["status"] == (
+        "EXISTING_WORKSPACE_HEADER_AUDIT_NOT_SCIENCE_VALIDATION"
+    )
+    assert safe_report["first_build_clear"] is False
+    assert safe_report["stage_execution_authorized"] is False
+    assert str(stage) in safe_report["existing_stage_products"]
+
+    import json
+    target = tmp_path / "qa" / "existing.json"
+    m.run(conf, target, audit_existing=True)
+    recorded = json.loads(target.read_text(encoding="utf-8"))
+    assert recorded["mode"] == "audit_existing_readonly"
+    assert str(stage) in recorded["existing_stage_products"]
+    assert all(p.read_bytes() == content for p, content in before.items())
+
+    with pytest.raises(FileExistsError, match="overwrite"):
+        m.run(conf, target, audit_existing=True)
+    with pytest.raises(ValueError, match="outside the work and RAW"):
+        m.run(conf, conf.parent / "qa.json", audit_existing=True)
+
+
+def test_existing_workspace_audit_still_rejects_wrong_ccd_readout(tmp_path):
+    """Audit-existing is not a bypass for physical header consistency."""
+    m = module()
+    conf, cfg, raw = case(tmp_path)
+    (conf.parent / "03_bias").mkdir()
+    target = raw / cfg["frames"]["obj"][0]
+    with fits.open(target, mode="update") as hdu:
+        hdu[0].header["GAIN"] = "NaN"
+    with pytest.raises(RuntimeError, match="Non-finite CCD readout"):
+        m.collect(conf, require_clean_workdir=False)
