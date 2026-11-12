@@ -30,8 +30,8 @@ Run only the read-only entry point:
 
 The output location must be outside both the work tree and *all* selected
 RAW frame directories. Never overwrite reports. The code verifies selection
-counts and exact early20 basenames; existence and FITS header NAXIS; same-mode
-FrameSignature compatibility; exact finite `RATE` and `GAIN`; NODE;
+counts and exact early20 basenames; existence and FITS header NAXIS; explicit parseable CCD binning;
+same-mode FrameSignature compatibility; exact finite `RATE` and `GAIN`; NODE;
 `bias_policy=strict`; `flatfield.enabled=false`;
 `superneon.bias_sub=false`; and `project.wave_reference=air`. It refuses
 pre-existing stage outputs. **PASS certifies only these checks**, not
