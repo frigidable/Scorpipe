@@ -91,8 +91,10 @@ def test_display_labels_do_not_replace_identifiers_or_aliases() -> None:
 def test_presentation_does_not_change_recipe_identity_or_order() -> None:
     from scorpio_pipe.pipeline.recipes import recipe_tasks
 
+    # Pin the existing vNext recipe, not the obsolete historical #175 base.
+    # Display labels cannot introduce a new biascorr task or reorder execution.
     assert recipe_tasks("full_reduction")[:4] == (
-        "manifest", "superbias", "biascorr", "superflat",
+        "manifest", "superbias", "superflat", "cosmics",
     )
     assert recipe_tasks("full_reduction")[-2:] == (
         "qc_report", "observer_dashboard",
