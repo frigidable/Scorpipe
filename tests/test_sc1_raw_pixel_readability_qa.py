@@ -138,3 +138,38 @@ def test_integer_fits_blank_sentinel_is_not_treated_as_valid_data(
     hdu.writeto(target, overwrite=True)
     with pytest.raises(RuntimeError, match="Undefined FITS BLANK pixels"):
         inspect_small(m, conf, monkeypatch)
+
+
+def test_existing_bias_products_do_not_block_readonly_raw_pixel_inventory(
+    tmp_path, monkeypatch,
+):
+    """Existing 03_bias output must remain byte-identical during RAW QA."""
+    m = load(monkeypatch)
+    conf, cfg, raw = case(tmp_path)
+    legacy = conf.parent / "03_bias"
+    legacy.mkdir()
+    product = legacy / "previous_masterbias.fits"
+    product.write_bytes(b"previous science product — do not modify")
+    original = {p: p.read_bytes() for p in [conf, product, *raw.iterdir()]}
+    report, selected = inspect_small(m, conf, monkeypatch)
+    assert len(selected) == 32
+    assert report["header_audit_mode"] == "audit_existing_readonly"
+    assert report["header_preflight_status"] == (
+        "EXISTING_WORKSPACE_HEADER_AUDIT_NOT_SCIENCE_VALIDATION"
+    )
+    assert str(legacy) in report["existing_stage_products"]
+    assert report["stage_execution_authorized"] is False
+    assert report["first_build_clear"] is False
+
+    import sc1_first_masterbias_gate as gate
+    prior_shape = gate.EXPECTED_SHAPE
+    gate.EXPECTED_SHAPE = (6, 8)
+    try:
+        out = tmp_path / "external" / "pixel_inventory.json"
+        m.run(conf, out)
+        on_disk = json.loads(out.read_text(encoding="utf-8"))
+        assert len(on_disk["input_files"]) == 32
+        assert on_disk["header_audit_mode"] == "audit_existing_readonly"
+    finally:
+        gate.EXPECTED_SHAPE = prior_shape
+    assert all(p.read_bytes() == expected for p, expected in original.items())
