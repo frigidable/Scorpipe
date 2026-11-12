@@ -16,6 +16,7 @@ from scorpio_pipe.ui.config_defaults import schema_default
 from scorpio_pipe.ui.param_metadata import get_param_meta
 from scorpio_pipe.ui.delayed_tooltip import install_delayed_tooltip
 from scorpio_pipe.pipeline.public_api import iter_gui_stages
+from scorpio_pipe.ui.stage_navigation import build_page_index
 from scorpio_pipe.pairs_library import (
     list_pair_sets,
     save_user_pair_set,
@@ -433,8 +434,9 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._stage_keys = [s.key for s in iter_gui_stages()]
         self._stage_row = {k: i for i, k in enumerate(self._stage_keys)}
         self._stage_titles = [s.title for s in iter_gui_stages()]
-        for title in self._stage_titles:
-            it = QtWidgets.QListWidgetItem(title)
+        for stage in iter_gui_stages():
+            it = QtWidgets.QListWidgetItem(stage.title)
+            it.setData(QtCore.Qt.ItemDataRole.UserRole, stage.key)
             it.setIcon(self._icon_status("idle"))
             self.steps.addItem(it)
             self._step_items.append(it)
@@ -481,7 +483,12 @@ class LauncherWindow(QtWidgets.QMainWindow):
             return pw
 
         for i in range(12):
-            title = self._stage_titles[i] if i < len(self._stage_titles) else f"Page {i}"
+            spec = self._page_specs.get(i)
+            stage_key = spec[0] if spec is not None else None
+            title = (
+                self._stage_titles[self._stage_row[stage_key]]
+                if stage_key in self._stage_row else f"Page {i}"
+            )
             ph = _mk_placeholder(title)
             self.stack.addWidget(ph)
             self._page_widgets[i] = ph
@@ -493,22 +500,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         
 
-        # Map canonical stage list (01..12) to actual UI pages.
-        _page_by_stage_key = {
-            "project": 0,
-            "setup": 1,
-            "biascorr": 2,
-            "flatfield": 4,
-            "cosmics": 3,
-            "superneon": 5,
-            "arclineid": 6,
-            "wavesol": 7,
-            "linearize": 8,
-            "sky": 9,
-            "stack2d": 10,
-            "extract1d": 11,
-        }
-        self._stage_page_index = [_page_by_stage_key[k] for k in self._stage_keys]
+        # Match stable stage keys to physical UI pages, never sidebar positions.
+        self._page_index_by_key = build_page_index(self._page_specs, self._stage_keys)
 
         self.steps.currentRowChanged.connect(self._on_step_changed)
 
@@ -582,7 +575,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         # Initial state: resolve the selected page by widget identity.
         # QStackedWidget may select its next child when a placeholder is
         # removed, so never infer displayed page from step-row highlighting.
-        self._ensure_page_built(0)
+        self._ensure_page_built(self._page_index_by_key["project"])
         self.stack.setCurrentWidget(self.page_project)
         self._update_enables()
         # refresh derived UI state
@@ -671,11 +664,10 @@ class LauncherWindow(QtWidgets.QMainWindow):
 
         selected_page = None
         try:
-            row = int(self.steps.currentRow())
-            page_map = getattr(self, "_stage_page_index", [])
-            if 0 <= row < len(page_map):
-                selected_page = int(page_map[row])
-        except (ValueError, TypeError, RuntimeError):
+            selected_key = self._selected_stage_key()
+            if selected_key is not None:
+                selected_page = self._page_index_by_key[selected_key]
+        except (ValueError, TypeError, RuntimeError, AttributeError, KeyError):
             pass
         if was_current or selected_page == i:
             self.stack.setCurrentWidget(w)
@@ -1291,14 +1283,8 @@ class LauncherWindow(QtWidgets.QMainWindow):
         (Project/Setup) there are no products, so stage=None.
         """
 
-        try:
-            row = int(self.steps.currentRow())
-        except Exception:
-            row = -1
-        if row < 0 or row >= len(getattr(self, "_stage_keys", [])):
-            return None
-        stage_key = str(self._stage_keys[row])
-        if stage_key in {"project", "setup"}:
+        stage_key = self._selected_stage_key()
+        if stage_key is None or stage_key in {"project", "setup"}:
             return None
         return stage_key
 
@@ -3102,7 +3088,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._sync_outputs_action_state()
 
         try:
-            if hasattr(self, "stack") and int(self.stack.currentIndex()) == 7:
+            if self._is_wavesol_page_current():
                 self._update_wavesol_stepper()
         except Exception:
             pass
@@ -3410,7 +3396,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
             pass
 
         try:
-            if hasattr(self, "stack") and int(self.stack.currentIndex()) == 7:
+            if self._is_wavesol_page_current():
                 self._update_wavesol_stepper()
         except Exception:
             pass
@@ -8970,32 +8956,44 @@ class LauncherWindow(QtWidgets.QMainWindow):
             wd = (self._cfg_path.parent / wd).resolve()
         return wd
 
+    def _selected_stage_key(self) -> str | None:
+        """Read stable stage identity from the selected sidebar item."""
+        try:
+            item = self.steps.currentItem()
+            if item is None:
+                return None
+            key = str(item.data(QtCore.Qt.ItemDataRole.UserRole) or "")
+            return key if key in self._page_index_by_key else None
+        except (RuntimeError, AttributeError, TypeError):
+            return None
+
+    def _is_wavesol_page_current(self) -> bool:
+        """Check the displayed widget itself; Qt indices move on lazy rebuild."""
+        try:
+            index = self._page_index_by_key["wavesol"]
+            widget = self._page_widgets.get(index)
+            return widget is not None and self.stack.currentWidget() is widget
+        except (KeyError, AttributeError, RuntimeError):
+            return False
+
     def _on_step_changed(self, idx: int) -> None:
         try:
-            i = int(idx)
-            page_map = getattr(self, "_stage_page_index", [])
-            if not 0 <= i < len(page_map):
+            stage_key = self._selected_stage_key()
+            if stage_key is None:
                 return
-            page_i = int(page_map[i])
+            page_i = self._page_index_by_key[stage_key]
             self._ensure_page_built(page_i)
             page = self._page_widgets.get(page_i)
             if page is not None and self.stack.indexOf(page) >= 0:
-                # Widget identity is stable even if placeholder insertion
-                # has changed the QStackedWidget numerical ordering.
+                # Preserve newer vNext widget-identity navigation fix.
                 self.stack.setCurrentWidget(page)
         except Exception as exc:
             self._log_exception(exc)
         self._refresh_statusbar()
         self._sync_outputs_action_state()
         self._update_outputs_tool_context()
-        # If Outputs tool window is open, keep it pinned to current stage.
-        self._update_outputs_tool_context()
-
-        try:
-            if hasattr(self, "stack") and int(self.stack.currentIndex()) == 7:
-                self._update_wavesol_stepper()
-        except Exception:
-            pass
+        if self._is_wavesol_page_current():
+            self._update_wavesol_stepper()
 
     # --------------------------- statusbar / shortcuts ---------------------------
 
@@ -9035,7 +9033,7 @@ class LauncherWindow(QtWidgets.QMainWindow):
         self._sync_outputs_action_state()
 
         try:
-            if hasattr(self, "stack") and int(self.stack.currentIndex()) == 7:
+            if self._is_wavesol_page_current():
                 self._update_wavesol_stepper()
         except Exception:
             pass
@@ -9231,17 +9229,17 @@ class LauncherWindow(QtWidgets.QMainWindow):
         frames_btn.setMenu(m)
 
         def _stage_for_current_step() -> str:
-            idx = int(self.steps.currentRow()) if hasattr(self, "steps") else 0
+            # Preserve the legacy Frame Browser aliases; key by stage identity.
             mapping = {
-                0: "project",
-                2: "calib",
-                3: "cosmics",
-                4: "flatfield",
-                5: "superneon",
-                6: "lineid",
-                7: "wavesol",
+                "project": "project",
+                "biascorr": "calib",
+                "cosmics": "cosmics",
+                "flatfield": "flatfield",
+                "superneon": "superneon",
+                "arclineid": "lineid",
+                "wavesol": "wavesol",
             }
-            return mapping.get(idx, "project")
+            return mapping.get(self._selected_stage_key(), "project")
 
         frames_btn.clicked.connect(
             lambda: self._open_frames_window(_stage_for_current_step())
@@ -9352,16 +9350,18 @@ class LauncherWindow(QtWidgets.QMainWindow):
         """
         if not self._ensure_cfg_saved():
             return
+        # This historical action is deliberately partial, not a full reduction.
+        # Fix only navigation; scientific task ordering remains unchanged.
         chain = [
-            (2, "Calibrations", self._do_run_calib),
-            (3, "Cosmics", self._do_run_cosmics),
-            (4, "SuperNeon", self._do_run_superneon),
-            (5, "LineID", self._do_open_lineid),
-            (6, "Wavelength solution", self._do_wavesolution),
+            ("biascorr", "Calibrations", self._do_run_calib),
+            ("cosmics", "Cosmics", self._do_run_cosmics),
+            ("superneon", "SuperNeon", self._do_run_superneon),
+            ("arclineid", "LineID", self._do_open_lineid),
+            ("wavesol", "Wavelength solution", self._do_wavesolution),
         ]
-        for row, name, fn in chain:
+        for stage_key, name, fn in chain:
             try:
-                self.steps.setCurrentRow(row)
+                self.steps.setCurrentRow(self._stage_row[stage_key])
                 QtWidgets.QApplication.processEvents()
                 self._log_info(f"--- RUN: {name} ---")
                 fn()
