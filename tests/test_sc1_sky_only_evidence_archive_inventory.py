@@ -39,7 +39,7 @@ def _sources(tmp_path: Path) -> Path:
     with zipfile.ZipFile(f / "lineid26f_native.npz", "w") as z:
         z.writestr("raw_counts.npy", b"synthetic metadata only")
     (d / "raw_s22800607.fts").write_bytes(b"Do not read or copy this FITS")
-    (d / "unrelated.json").write_text("{}", encoding="utf-8")
+    (root / "unrelated.json").write_text("{}", encoding="utf-8")
     return root
 
 
