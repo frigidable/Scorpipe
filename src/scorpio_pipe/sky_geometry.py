@@ -383,6 +383,24 @@ def compute_sky_geometry(
         ]
         mask_sky_y = _mask_from_windows(ny, sky_windows)
         mask_sky_y &= core
+        # A user ROI was checked against the undilated object band above.
+        # Protect the *dilated* object footprint, too: silently fitting on
+        # adjacent protected sky rows would contaminate the sky estimate.
+        overlap_rows = int(np.count_nonzero(mask_sky_y & mask_obj_y))
+        if overlap_rows:
+            flags.append({
+                "code": "ROI_PROTECTED_MARGIN_OVERLAP",
+                "severity": "ERROR",
+                "message": "User SKY ROI intersects the dilated object protection region",
+                "n_overlap_rows": overlap_rows,
+                "dilation_px": int(dilation_px),
+            })
+            # Fail closed for the entire user ROI, rather than trimming a
+            # user-selected interval or automatically replacing its pixels.
+            mask_sky_y[:] = False
+            sky_windows = []
+            roi_valid = False
+            roi_source = "user_rejected"
         object_spans = [(int(obj_band[0]), int(obj_band[1]))]
     else:
         if roi_policy == "user_only":
@@ -404,6 +422,10 @@ def compute_sky_geometry(
             mask_obj_y = obj
             mask_sky_y = core & (~mask_obj_y)
             sky_windows = _windows_from_mask(mask_sky_y, min_width_px=int(min_sky_width_px))
+            # SkySub consumes mask_sky_y directly, not sky_windows. Rebuild
+            # the fit mask from the width-qualified windows so short islands
+            # cannot leak back into the fitted sky pixels.
+            mask_sky_y = _mask_from_windows(ny, sky_windows)
             object_spans = _windows_from_mask(mask_obj_y & core, min_width_px=int(min_obj_width_px))
 
             if not sky_windows:
