@@ -69,3 +69,14 @@ code path authorizing a physical correction or scientific export.
 
 No RAW FITS, old 03_bias, legacy _95/_96, vNext, main or science-stage
 implementation changes in this PR. CI only tests code-level safety.
+
+## Real P0 checkpoint (15 November 2026)
+
+The observer's existing source-consistency report is
+sc1_pilot_evidence_20261115_221058_086.json, SHA-256
+70097150a4eb30f9718f45e569ffe0d87001c7f98edfbccfbe40198286737309.
+It confirms old input-manifest SHA-256
+be6966c73b7f04aebdbca6739d5d38a279379933b2cf7c80ae567dd65f458765.
+Gate B0 must compare **current RAW bytes** to this historical inventory,
+rather than treating a P0 report as current pixel fidelity. Actual B0
+results remain unknown until the Windows source files are inspected.
