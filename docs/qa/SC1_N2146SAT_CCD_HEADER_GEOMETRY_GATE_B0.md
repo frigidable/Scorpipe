@@ -239,3 +239,51 @@ record or instrument engineer's controller configuration is necessary.
 - CCD42-40 NIMO datasheet (2048×2052 physical readout,
   two selectable amplifiers):
   https://www.sao.ru/hq/adlab/doc/ccd42-40_nimo_bi.pdf
+
+## Actual Windows Gate B1 result — negative local technical-file discovery
+
+The observer executed the source-locked B1 script on 2026-11-15 and
+attached `sc1_dinacon_provenance_20261115_233150_313.json`, SHA-256
+`0a2d2fbe9c8f8e8a2f6a9d120da28c211912736a863b5f76e3bdfd7c6aaa4f22`.
+Status `TECHNICAL_PROVENANCE_DISCOVERY_ONLY_SCIENCE_HOLD`.
+The B1 chain fingerprints exactly match the already authenticated P0
+(`70097150...`) and B0 (`52b6ca93...`) reports. All **five**
+source FITS primary-header anchors (BIAS01, OFF04, ON07, NEON06,
+FLAT14) were reverified byte-for-byte; no pixel samples were read.
+
+Only two local roots, `Documents/PhD` and `Downloads`, were searched.
+The tool screened **125427 filenames** and found **zero** matches to
+its **predefined DINACON technical-file naming patterns**. This is a
+negative finding **within a bounded filename search**; it does not
+establish absence of technical logs on the original BTA controller
+computer, within packaged archives, or under another naming scheme.
+No engineering or science status was promoted by this finding.
+
+**Important newly observed original header field**:
+`ORIGIN='dCon5'` in all five independently checked original FITS,
+with `CRVAL1=CRVAL2=0`, `MODE='Spectra'`, `NODE='A'` and
+`DETECTOR='E2V CCD4240'`. The historical 2012 SCORPIO format
+explicitly defines `ORIGIN` as the acquisition system identifier
+and `CRVAL1/2` as detector X/Y offsets; those keys are NOT a
+wavelength WCS. The designation `dCon5` might refer to a
+DINACON-5-generation acquisition program or controller, but there is
+**no direct source** equating this exact FITS string with the actual
+2024 hardware. The SAO CCD camera catalogue's older DINACON-I label
+must not be silently retained as a verified 2024 hardware identity;
+neither may it be silently replaced by DINACON-5. This distinction is
+a new explicitly **unresolved acquisition-provenance gate**.
+
+A specific source request package with exact original hashes, the
+competing instrument hypotheses, and technical questions is now at
+[SC1_N2146SAT_2024_CONTROLLER_PROVENANCE_REQUEST.md](./SC1_N2146SAT_2024_CONTROLLER_PROVENANCE_REQUEST.md).
+The SAO library also records 2021 technical report No. 348, a study
+of CCD42-40 camera 05-002-20. It is a **potential lead**, not
+identified as this SCORPIO detector:
+https://www.sao.ru/hq/adlab/biblio.html
+
+**Disposition:** B0 DONE as immutable-source metadata intake; B1
+DONE as bounded technical-source discovery; physical Gate B STILL HOLD.
+No further identical local filename searches are justified without
+new information about archive roots or authoritative configuration
+names. Prioritize original BTA CCD acquisition-machine configuration,
+night log, 2021 camera report eligibility and instrument engineers.
