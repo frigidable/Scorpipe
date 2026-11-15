@@ -19,8 +19,8 @@ from pathlib import Path
 SCHEMA = "SC1_DINACON_PROVENANCE_PROBE_V1"
 B0_SCHEMA = "SC1_N2146SAT_CCD_HEADER_SECTIONS_V1"
 P0_SCHEMA = "SC1_N2146SAT_PILOT_EVIDENCE_GATE_V1"
-ANCHORS = ("s22800101.fts", "s22800604.fts", "s22800607.fts",
-           "s22800614.fts", "s22800606.fts")
+ANCHORS = ("s22800101.fts", "s22800604.fts",
+           "s22800607.fts", "s22800606.fts")
 HEADER_KEYS = (
     "ORIGIN", "FILE", "CRVAL1", "CRVAL2", "CRPIX1", "CRPIX2",
     "CTYPE1", "CTYPE2", "CDELT1", "CDELT2",
@@ -180,7 +180,11 @@ def prepare(p0_file: Path, b0_file: Path, roots: list[Path], output: Path) -> di
     raw_names = {row.get("filename"): row for row in entries}
     if len(raw_names) != 32:
         raise ValueError("Duplicated original manifest names")
-    for name in ANCHORS:
+    flats = [e.get("filename") for e in entries if e.get("role") == "flat"]
+    if len(flats) != 3 or len(set(flats)) != 3:
+        raise ValueError("Expected three distinct FLAT references in original manifest")
+    anchors = (*ANCHORS, flats[0])
+    for name in anchors:
         if (name not in b0_names or name not in raw_names or
             b0_names[name].get("sha256") != raw_names[name].get("source_sha256")):
             raise ValueError(f"Missing/mismatched anchor: {name}")
@@ -200,7 +204,7 @@ def prepare(p0_file: Path, b0_file: Path, roots: list[Path], output: Path) -> di
         raise ValueError("At least one existing scan directory is required")
 
     header_rows = []
-    for name in ANCHORS:
+    for name in anchors:
         row = raw_names[name]
         src = real_file(row["source_path"])
         current = digest(src)
