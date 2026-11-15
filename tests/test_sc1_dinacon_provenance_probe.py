@@ -134,3 +134,15 @@ def test_symlinks_are_not_followed_and_scan_limits_are_bounded(tmp_path, monkeyp
     rec = mod.prepare(p0, b0, [scan], out)
     assert rec["technical_file_candidates"] == []
     assert rec["science_hold"] is True
+
+
+def test_symlinked_pilot_evidence_path_is_refused(tmp_path, monkeypatch):
+    mod, p0, b0, scan, out = _setup(tmp_path, monkeypatch)
+    link = tmp_path / "qa" / "linked_p0.json"
+    try:
+        link.symlink_to(p0)
+    except (OSError, NotImplementedError):
+        pytest.skip("Platform does not allow symlinks")
+    with pytest.raises(ValueError, match="Symlinked evidence"):
+        mod.prepare(link, b0, [scan], out)
+    assert not out.exists()
