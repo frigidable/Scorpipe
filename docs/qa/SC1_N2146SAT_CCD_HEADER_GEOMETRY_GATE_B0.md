@@ -160,3 +160,82 @@ overscan, average L/R electronic offsets, change pre-existing
 MasterBias/VAR/DQ, or release data. Next independent piece of evidence
 is the exact controller readout geometry/firmware and night-specific
 physical response mapping, not another identical 53-frame edge scan.
+
+## Historic DINACON readout controls: documented capability, not 2024 settings
+
+**New documentary evidence**: the observatory's primary Dina System for
+Windows user guide explains that Settings > Preferences > Camera has
+two independent configurable fields, *Frame overscanned columns number*
+and *Frame overscanned lines number*. These are **additional** samples
+when the full CCD is read via one output node. The guide says that when
+both output nodes are used simultaneously, additional overscan columns
+and rows are not transferred. The December 2024 original FITS report
+\`NODE=A\`, compatible with the single-node branch but **not proof** of
+the actual 2024 controller program or its settings.
+
+A separate SCORPIO manual, Afanasiev & Moiseev (2012), Appendix H,
+specifies the *historic* DINACMD control syntax:
+- \`-v oC oL\`: extra overscanned columns and lines (historic default 20,20);
+- \`-x X1 X2\` and \`-y Y1 Y2\`: user-defined readout pixel/row ranges
+  in zero-based controller notation;
+- \`-b Bx By\`: pixel binning; \`-n A|B|AB\`: amplifier choice.
+
+These values are **not** documented in the selected 2024 FITS by any
+\`BIASSEC/DATASEC\` fields. The archived B0 tool also did not collect
+all other header cards such as \`CRVAL1/CRVAL2\` or \`ORIGIN\`. The
+historic DINACMD guide describes CRVAL1/CRVAL2 as detector X/Y offsets,
+not spectral wavelength calibration; never interpret such RAW keys as
+an astrophysical wavelength WCS without checking full WCS semantics.
+
+The arithmetic hypothesis \`2080 = 2048 + 32\`,
+\`1032 = (2052/2) + 6\` is **consistent** with one possible
+full-readout plus extra-sample configuration. It is NOT a measurement
+of \`-v 32 6\`, a claim that the older controller software ran in 2024,
+or evidence of where those samples were put in the FITS image.
+Use this hypothesis solely to identify the correct technical questions.
+
+**Original technical-provenance search targets from SAO Dina System guide:**
+the acquisition PC's \`CFG/chip.cfg\` (detector parameters),
+\`CFG/init*.cfg\` (controller initialization),
+\`CFG/fits.hdr\` (FITS template),
+\`CFG/tele*.cfg\`, \`CFG/*.ldr\` (controller uploads),
+\`CFG/*.ngr\` (clock timing diagrams), and any
+documented DINA batch or night settings that explicitly persist
+overscan/ROI/binning/node settings. A similarly named file on another
+PC is not evidence of the 2024 night. Do not execute archived controller
+programs, firmware or command files during an audit.
+
+### Gate B1 technical-provenance discovery tool (read-only)
+
+Use \`scripts/qa/sc1_dinacon_provenance_probe.py\` with:
+\`--p0 <real-p0.json> --b0 <real-b0.json>\`
+\`--scan-root <bounded-folder> --out <new-external-json>\`.
+Repeat \`--scan-root\` for explicitly chosen local archive folders,
+**never** scan the entire system drive automatically.
+
+It requires the actual successful P0/B0 source reports and their
+matching SHA-256 link, the original input-manifest SHA, and verifies
+five representative unchanged original FITS whole-file hashes before
+reading only their primary headers, including \`ORIGIN\`, \`FILE\`,
+\`CRVAL1/2\`, \`MODE\`, \`COMMENT\` and \`HISTORY\` when present.
+It searches filenames of known Dina System technical artifacts, records
+their size/mtime/SHA and does NOT execute or interpret their contents.
+No arbitrary \`.cfg\`/firmware is accepted as the actual 2024 setup.
+
+A success or empty search is recorded only as
+\`TECHNICAL_PROVENANCE_DISCOVERY_ONLY_SCIENCE_HOLD\`.
+This program has **no pathway** to approve raw CCD image sections,
+electronic bias subtraction, a source-free SKY slit mask, or science
+qualification. If no contemporary controller setup can be established
+from the user's local folders, an authoritative observing-night
+record or instrument engineer's controller configuration is necessary.
+
+**Original documentation references:**
+- SAO Dina System user manual:
+  https://www.sao.ru/hq/adlab/doc/ruk_polz_DinaSys.pdf,
+  especially sections 2 and 6.3 and Camera Settings.
+- SCORPIO user manual, 2012, Appendix H pp. 79–83:
+  https://www.sao.ru/hq/lsfvo/devices/scorpio/scorp_man_2012.pdf
+- CCD42-40 NIMO datasheet (2048×2052 physical readout,
+  two selectable amplifiers):
+  https://www.sao.ru/hq/adlab/doc/ccd42-40_nimo_bi.pdf
