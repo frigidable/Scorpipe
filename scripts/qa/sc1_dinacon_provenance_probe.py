@@ -56,8 +56,11 @@ def load_json(path: Path) -> dict:
 def real_file(name: object) -> Path:
     if not isinstance(name, str) or not name.strip():
         raise ValueError("Missing evidence source path")
-    p = Path(name).expanduser().resolve(strict=True)
-    if not p.is_file() or p.is_symlink():
+    original = Path(name).expanduser()
+    if original.is_symlink():
+        raise ValueError(f"Symlinked evidence path prohibited: {original}")
+    p = original.resolve(strict=True)
+    if not p.is_file():
         raise ValueError(f"Evidence must be a regular file: {p}")
     return p
 
@@ -141,6 +144,7 @@ def probe_header(path: Path) -> dict:
 def prepare(p0_file: Path, b0_file: Path, roots: list[Path], output: Path) -> dict:
     p0_path = real_file(str(p0_file))
     b0_path = real_file(str(b0_file))
+    b0_fingerprint = digest(b0_path)
     p0 = load_json(p0_path)
     b0 = load_json(b0_path)
     if (p0.get("schema") != P0_SCHEMA or
@@ -208,6 +212,8 @@ def prepare(p0_file: Path, b0_file: Path, roots: list[Path], output: Path) -> di
     candidate_rows, count = scan(targets)
     if digest(p0_path) != b0["pilot_report_sha256"]:
         raise ValueError("P0 changed during examination")
+    if digest(b0_path) != b0_fingerprint:
+        raise ValueError("B0 changed during examination")
     if digest(raw_path) != p0["evidence_sha256"]["raw_inventory_json_sha256"]:
         raise ValueError("Source inventory changed during examination")
 
@@ -216,7 +222,7 @@ def prepare(p0_file: Path, b0_file: Path, roots: list[Path], output: Path) -> di
         "status": "TECHNICAL_PROVENANCE_DISCOVERY_ONLY_SCIENCE_HOLD",
         "checked_utc": datetime.now(timezone.utc).isoformat(),
         "p0_sha256": digest(p0_path),
-        "b0_sha256": digest(b0_path),
+        "b0_sha256": b0_fingerprint,
         "raw_manifest_sha256": b0["raw_input_manifest_sha256"],
         "raw_anchor_headers_read": len(header_rows),
         "raw_anchor_source_sha256_reverified": len(header_rows),
