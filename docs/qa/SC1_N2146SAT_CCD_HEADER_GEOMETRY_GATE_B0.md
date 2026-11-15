@@ -80,3 +80,83 @@ be6966c73b7f04aebdbca6739d5d38a279379933b2cf7c80ae567dd65f458765.
 Gate B0 must compare **current RAW bytes** to this historical inventory,
 rather than treating a P0 report as current pixel fidelity. Actual B0
 results remain unknown until the Windows source files are inspected.
+
+## Exact Windows observer result, 2026-11-15 — B0 complete, B physical HOLD
+
+Observer executed the approved header-only SHA-locked #226 code on the
+original Windows 2024-12-06 source cohort. Exact uploaded
+`sc1_ccd_header_sections_20261115_231247_814.json` content SHA-256:
+`52b6ca93daf7c14e24a0a79984e240bab44deb3aec94bfc609acf10ef26eaba2`.
+The B0 report records status
+`HEADER_SECTION_INVENTORY_DIAGNOSTIC_SCIENCE_HOLD`.
+**32/32 current original-FITS bytes rehashed and matched** the pinned P0
+manifest `be6966c73b7f04aebdbca6739d5d38a279379933b2cf7c80ae567dd65f458765`.
+All have `DETECTOR=E2V CCD4240`, `NODE=A`, `BINNING=1x2`,
+`NAXIS1=2080`, `NAXIS2=1032`, `BITPIX=16`,
+`BSCALE=1`, `BZERO=32768`. Old 20 BIAS and seven original OBJ
+(including actual dedicated OFF04) have RATE145 / GAIN0.9. The three
+FLAT and two NEON have RATE225 / GAIN3.5.
+**None of 32 headers declares BIASSEC, DATASEC, TRIMSEC, CCDSEC, DETSEC
+or any supported amp-section key.** Hence zero parse errors/overlaps
+means **zero declared sections**, not a tested valid geometry. No RAW pixel
+arrays opened by the B0 script, no correction and no science qualification.
+
+### Non-redundancy with November 8–9 archived 53-frame physical QA
+
+The read-only research archive [#174](https://github.com/frigidable/Scorpipe/pull/174)
+already examined *53* real SC1 FITS (41 BIAS, seven OBJ, three FLAT,
+two NEON) and found exactly the same absence of header-section keywords.
+Do **not** repeat those archived pixel studies merely because B0 saw no
+sections. The distinct contribution of B0 is a **fresh whole-file SHA
+reverification of the 32 selected exact-night inputs**, through the
+successful P0 config/role evidence chain.
+
+Historical original-data diagnostics, recorded in #174:
+- All 12 illuminated original OBJ/FLAT/NEON frames exhibit abrupt x optical
+  transitions at x15/16 and x2063/2064; flat response left neighbor
+  ~+950 ADU and right ~+12,700 ADU over candidate baseline. This supports
+  `raw[:,16:2064]` (2048 columns) as an **optical image-X hypothesis**,
+  not a certified raw image DATASEC.
+- Candidate x[0:16] and x[2064:2080] are **not constant padding**;
+  per-pixel readout-noise-like spread ~3.4–3.5 ADU in slow exposures
+  and ~2.2 ADU in fast. This supports real noise-like samples but not
+  necessarily charge-unexposed electronic overscan.
+- Normal 39 early/late BIAS L−R offset range **+0.421419 to +0.548112 ADU**;
+  all seven original OBJ **+0.641667 to +0.820117 ADU**, outside
+  that empirical range. This remains true over independent Y subregions
+  to differing degrees and denies scientifically using the mean of
+  both candidate X edges as an unvalidated OBJ electronic zero.
+  Source light, history, transfer differences and readout modes are
+  not disentangled; no p-values follow from these correlated summaries.
+- Vertical optical response persists through y=1026; it sharply
+  transitions by y=1027, with y1027..1029 possibly containing residual
+  light, and y0 may be anomalous. A provisional 1024-row image hypothesis
+  `raw[1:1025,16:2064]` is **not validated**; bright y1025/1026
+  complicates active-versus-service-row classification.
+
+### Exact instrument documentation: unresolved geometry lineage
+
+SAO Laboratory of Advanced Developments identifies a SCORPIO camera
+using an e2v CCD42-40 with **2048 x 2052 physical format**, controller
+**DINACON-I**, whereas the detector manufacturer gives **2048 x 2048
+active image pixels** and historic SCORPIO 2012/2013 user manuals show
+**2068 x 2072 including overscan** (some old 1x2 controller examples use
+2068 x 1046). None establishes the **actual 2024 raw file packing**.
+The observed 2080 = 16+2048+16 and 1032 = 1024+8 are only
+arithmetic decompositions. The controller/firmware's sample order,
+region-of-interest setting, binning and readout clock pattern must be
+independently established before a physical DATASEC, prescan, serial
+overscan or parallel overscan is assigned.
+
+Sources:
+- https://www.sao.ru/hq/adlab/cameras.html
+- https://www.teledynespaceimaging.com/en-us/Products_/Pages/CCD42-40.aspx
+- https://www.sao.ru/hq/lsfvo/devices/scorpio/manuals/scorpio_manual_2013.pdf
+- Original 53-frame #174 comments / reports dated November 8–9, 2026.
+
+**Decision:** Engineering Gate B0 evidence acquisition COMPLETE;
+physical Gate B remains **HOLD**. Do not crop, subtract candidate
+overscan, average L/R electronic offsets, change pre-existing
+MasterBias/VAR/DQ, or release data. Next independent piece of evidence
+is the exact controller readout geometry/firmware and night-specific
+physical response mapping, not another identical 53-frame edge scan.
