@@ -410,6 +410,8 @@ def _require_estimator_masterbias_index(
     index: dict[str, Any],
     group: dict[str, Any],
     work_dir: Path,
+    *,
+    accept_masked_dq: bool = False,
 ) -> None:
     """Refuse cached MasterBias VAR with obsolete *frame-scatter* semantics.
 
@@ -420,6 +422,8 @@ def _require_estimator_masterbias_index(
     """
     schema = str(index.get("schema") or "")
     if not schema:
+        if accept_masked_dq:
+            raise RuntimeError("Masked MasterBias requires a named estimator index")
         # Historical minimally mocked indexes in low-level tests. Production
         # build_superbias always stamps a named schema.
         return
@@ -488,9 +492,8 @@ def _require_estimator_masterbias_index(
             "mask or regenerate before science usage"
         )
 
-    # New opt-in raw-zero policy has explicit on-disk provenance. The current
-    # Cosmics consumer cannot carry MasterBias DQ, so never expose these
-    # calibration products for subtraction until that contract is implemented.
+    # Raw-zero policy has explicit on-disk provenance. Only a consumer
+    # explicitly implementing the masked-DQ contract may accept such products.
     zero_policy = info.get("mask_persistent_zero", False)
     zero_count = info.get("persistent_zero_pixels", 0)
     if (not isinstance(zero_policy, bool)
@@ -500,19 +503,20 @@ def _require_estimator_masterbias_index(
             or header.get("SB_ZPOL", False) != zero_policy
             or header.get("SB_ZCNT", 0) != zero_count):
         raise RuntimeError("MasterBias persistent-zero policy provenance is inconsistent")
-    if zero_count:
+    if zero_count and not accept_masked_dq:
         raise RuntimeError(
             "MasterBias contains masked persistent raw zeros; "
             "Cosmics does not yet propagate MasterBias DQ. "
             "Implement DQ propagation before use."
         )
 
+    bad_support = 0
     if model == "GROSSMED":
         # Gross-rejected sample medians use *per-pixel* Gaussian finite-N
         # factors. There is intentionally no universal SB_VFAC. The producer
         # recalculates SCI and VAR from each pixel's accepted exposure subset.
-        # The current Cosmics consumer does not propagate MasterBias DQ, so
-        # even one pixel with insufficient support must fail closed.
+        # Default consumers must still fail closed on insufficient support.
+        # The independent L.A.Cosmic route validates and propagates the DQ.
         try:
             cutoff = float(info["gross_reject_adu"])
             index_cutoff = float(index["gross_reject_adu"])
@@ -551,7 +555,9 @@ def _require_estimator_masterbias_index(
                 "is inconsistent"
             )
         required = max(2, n_used - max(1, n_used // 10))
-        if bad_support != 0 or n_min < required:
+        if bad_support < 0 or (bad_support > 0) != (n_min < required):
+            raise RuntimeError("Gross-rejected MasterBias support provenance is inconsistent")
+        if bad_support and not accept_masked_dq:
             raise RuntimeError(
                 "Gross-rejected MasterBias has pixels with insufficient "
                 "support; Cosmics does not yet propagate MasterBias DQ. "
@@ -570,6 +576,37 @@ def _require_estimator_masterbias_index(
             raise RuntimeError(
                 "MasterBias estimator variance factor conflicts with FITS"
             )
+
+    if accept_masked_dq:
+        # Verify the actual mask, not merely its claimed count. In the current
+        # finite-sample producer, persistent zeros and insufficient support are
+        # disjoint; nonfinite inputs fail earlier. Only BADPIX is produced.
+        dq_rel = files.get("dq")
+        sci_rel = files.get("sci")
+        if not dq_rel or not sci_rel:
+            raise RuntimeError("Masked MasterBias requires indexed SCI and DQ")
+        dq_path = Path(work_dir) / str(dq_rel)
+        sci_path = Path(work_dir) / str(sci_rel)
+        dq, dh = fits.getdata(dq_path, header=True, memmap=False)
+        sci = fits.getdata(sci_path, memmap=False)
+        var = fits.getdata(path, memmap=False)
+        shape = (int(header["NAXIS2"]), int(header["NAXIS1"]))
+        if (dq.shape != shape or sci.shape != shape or var.shape != shape
+                or not np.issubdtype(dq.dtype, np.integer)
+                or np.any((dq != 0) & (dq != int(maskbits.BADPIX)))
+                or str(dh.get("SB_GID") or "") != str(group.get("gid") or "")
+                or str(dh.get("SB_VMOD") or "") != model
+                or dh.get("SB_ZPOL", False) != zero_policy
+                or dh.get("SB_ZCNT", 0) != zero_count
+                or int(dh.get("NBIAS") or 0) != n_used
+                or int(dh.get("SB_NMIN") or 0) != n_min
+                or int(np.count_nonzero(dq)) != zero_count + bad_support):
+            raise RuntimeError("MasterBias DQ geometry, bits or provenance inconsistent")
+        if (not np.isfinite(sci).all() or not np.isfinite(var).all()
+                or np.any(var < 0) or np.any(sci[dq != 0] != 0)
+                or np.any(var[dq != 0] != 0)):
+            raise RuntimeError("MasterBias masked SCI/VAR sentinel contract violated")
+
 
 def _bias_key_from_header(hdr: fits.Header, *, fallback_shape: tuple[int, int] | None = None) -> BiasGroupKey:
     """Build BiasGroupKey from a science/calib header."""
@@ -610,6 +647,7 @@ def resolve_master_bias(
     *,
     sci_shape: tuple[int, int] | None = None,
     policy_override: str | None = None,
+    accept_masked_dq: bool = False,
 ) -> BiasSelection:
     """Resolve MasterBias artifacts for a given frame.
 
@@ -630,6 +668,8 @@ def resolve_master_bias(
     ).strip().lower()
     if policy not in {"strict", "degraded"}:
         policy = "degraded"
+    if accept_masked_dq and policy != "strict":
+        raise ValueError("Masked MasterBias handoff requires strict readout selection")
 
     idx = load_master_bias_index(work_dir)
     if not idx or not isinstance(idx.get("groups"), list):
@@ -687,7 +727,9 @@ def resolve_master_bias(
 
     if exact:
         best = sorted(exact, key=_score, reverse=True)[0]
-        _require_estimator_masterbias_index(idx, best, work_dir)
+        _require_estimator_masterbias_index(
+            idx, best, work_dir, accept_masked_dq=accept_masked_dq,
+        )
         files = best.get("files") or {}
         sdir = _resolve_work_dir(c)
         sci_p = (work_dir / str(files.get("sci"))).resolve() if files.get("sci") else _resolve_superbias_path(c, work_dir)

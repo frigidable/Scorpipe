@@ -222,8 +222,10 @@ class CosmicsBlock(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     enabled: bool = True
-    # auto | la_cosmic | stack_mad | two_frame_diff | laplacian
+    # auto | la_cosmic | la_cosmic_independent | stack_mad | two_frame_diff | laplacian
     method: str = "auto"
+    # Opt-in only on original ADU in the independent indexed-bias route.
+    mask_raw_zero: bool = False
     # current|fast|quality (reserved for future defaults tuning)
     mode_profile: str = "current"
     # Global detection threshold (see method-specific notes).

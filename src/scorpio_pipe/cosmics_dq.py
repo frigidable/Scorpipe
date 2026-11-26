@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 from astropy.io import fits
 
-from scorpio_pipe.maskbits import COSMIC
+from scorpio_pipe.maskbits import BADPIX, COSMIC
 
 
 def read_clean_dq_sidecar(
@@ -47,6 +47,17 @@ def read_clean_dq_sidecar(
                     raise ValueError(
                         f"Cosmics DQ provenance {key} differs from cleaned SCI: {dq_path}"
                     )
+            if "SBDQVER" in hdr or "SBDQVER" in dq_hdr:
+                if (hdr.get("SBDQVER") != 1 or dq_hdr.get("SBDQVER") != 1
+                        or hdr.get("SBDQCNT") != dq_hdr.get("SBDQCNT")
+                        or not str(hdr.get("SB_GID") or "")
+                        or hdr.get("SB_GID") != dq_hdr.get("SB_GID")):
+                    raise ValueError(f"MasterBias DQ handoff provenance mismatch: {dq_path}")
+                count = hdr.get("SBDQCNT")
+                if (not isinstance(count, int) or count < 0
+                        or not np.issubdtype(m.dtype, np.integer)
+                        or int(np.count_nonzero(m.astype(np.uint16) & np.uint16(BADPIX))) < count):
+                    raise ValueError(f"MasterBias DQ handoff lost flagged pixels: {dq_path}")
         elif str(hdr.get("SATQ") or "").strip().upper() == "RAW_EVAL":
             # A copied RAW_EVAL header without qualified sidecar is not proof.
             raise ValueError(f"Unqualified cosmics DQ with RAW_EVAL header: {dq_path}")
