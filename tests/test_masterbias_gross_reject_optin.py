@@ -273,3 +273,47 @@ def test_grossmed_consumer_rejects_fits_header_mismatch(
         hdu[0].header[card] = new_value
     with pytest.raises(RuntimeError, match="Gross-rejected|sample-count"):
         _require_estimator_masterbias_index(index, group, work_dir)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_persistent_raw_zero_policy_is_explicit_and_fails_closed(tmp_path, enabled):
+    fits = pytest.importorskip("astropy.io.fits")
+    from scorpio_pipe import maskbits
+    from scorpio_pipe.stages.calib import (
+        _require_estimator_masterbias_index,
+        build_superbias,
+    )
+    from tests.golden.mini_night import make_mini_night
+
+    mn = make_mini_night(tmp_path)
+    for i, path in enumerate(mn.cfg["frames"]["bias"]):
+        with fits.open(path, mode="update") as hdul:
+            hdul[0].data[0, 0] = 0.0
+            hdul[0].data[0, 1] = 0.0 if i == 0 else 1000.0
+            hdul[0].data[0, 2] = 1000.0
+    mn.cfg.setdefault("calib", {}).update(
+        bias_combine="median", bias_gross_reject_adu=50.0,
+        bias_mask_persistent_zero=enabled,
+    )
+    stage = mn.work_dir / "03_bias"
+    build_superbias(
+        mn.cfg, run_root=mn.work_dir, stage_dir=stage,
+        allow_legacy_mirrors=False,
+    )
+    index = json.loads((stage / "master_bias_index.json").read_text(encoding="utf8"))
+    group = index["groups"][0]
+    assert index["mask_persistent_zero"] is enabled
+    assert group["variance"]["persistent_zero_pixels"] == int(enabled)
+    assert group["variance"]["bad_support_pixels"] == 0
+    with fits.open(mn.work_dir / group["files"]["dq"]) as hdul:
+        dq = hdul[0].data
+        assert bool(int(dq[0, 0]) & maskbits.BADPIX) is enabled
+        assert not (int(dq[0, 1]) & maskbits.BADPIX)
+        assert not (int(dq[0, 2]) & maskbits.BADPIX)
+        assert bool(hdul[0].header["SB_ZPOL"]) is enabled
+        assert hdul[0].header["SB_ZCNT"] == int(enabled)
+    if enabled:
+        with pytest.raises(RuntimeError, match="masked persistent raw zeros"):
+            _require_estimator_masterbias_index(index, group, mn.work_dir)
+    else:
+        _require_estimator_masterbias_index(index, group, mn.work_dir)

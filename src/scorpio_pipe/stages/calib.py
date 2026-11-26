@@ -488,6 +488,25 @@ def _require_estimator_masterbias_index(
             "mask or regenerate before science usage"
         )
 
+    # New opt-in raw-zero policy has explicit on-disk provenance. The current
+    # Cosmics consumer cannot carry MasterBias DQ, so never expose these
+    # calibration products for subtraction until that contract is implemented.
+    zero_policy = info.get("mask_persistent_zero", False)
+    zero_count = info.get("persistent_zero_pixels", 0)
+    if (not isinstance(zero_policy, bool)
+            or not isinstance(zero_count, int) or isinstance(zero_count, bool)
+            or zero_count < 0 or (zero_count > 0 and not zero_policy)
+            or index.get("mask_persistent_zero", False) != zero_policy
+            or header.get("SB_ZPOL", False) != zero_policy
+            or header.get("SB_ZCNT", 0) != zero_count):
+        raise RuntimeError("MasterBias persistent-zero policy provenance is inconsistent")
+    if zero_count:
+        raise RuntimeError(
+            "MasterBias contains masked persistent raw zeros; "
+            "Cosmics does not yet propagate MasterBias DQ. "
+            "Implement DQ propagation before use."
+        )
+
     if model == "GROSSMED":
         # Gross-rejected sample medians use *per-pixel* Gaussian finite-N
         # factors. There is intentionally no universal SB_VFAC. The producer
@@ -1408,6 +1427,9 @@ def build_superbias(
     combine = str(calib_cfg.get("bias_combine", "median")).strip().lower() or "median"
     sigma_clip = float(calib_cfg.get("bias_sigma_clip", 0.0) or 0.0)
     gross_reject_adu = float(calib_cfg.get("bias_gross_reject_adu", 0.0) or 0.0)
+    mask_persistent_zero = calib_cfg.get("bias_mask_persistent_zero", False)
+    if not isinstance(mask_persistent_zero, bool):
+        raise ValueError("bias_mask_persistent_zero must be a boolean")
 
     groups: dict[BiasGroupKey, list[Path]] = {}
     bad_key = 0
@@ -1485,6 +1507,14 @@ def build_superbias(
             ~np.isfinite(sci) | ~np.isfinite(var)
             | np.asarray(var_meta["invalid_support"], dtype=bool)
         )
+        # A stable raw zero is an invalid detector code in some readout modes.
+        # This policy is explicitly opt-in: zero in calibrated data, a single
+        # transient zero, and zero-variance nonzero pixels are not equivalent.
+        persistent_zero = (
+            np.all(arr == 0.0, axis=0) if mask_persistent_zero
+            else np.zeros(sci.shape, dtype=bool)
+        )
+        badpix |= persistent_zero
         if np.any(badpix):
             dq[badpix] |= np.uint16(maskbits.BADPIX)
             sci = sci.copy(); var = var.copy()
@@ -1502,6 +1532,8 @@ def build_superbias(
             "variance_factor": var_meta["variance_factor"],
             "min_effective_n": int(var_meta["n_effective_min"]),
             "bad_support_pixels": int(np.count_nonzero(var_meta["invalid_support"])),
+            "mask_persistent_zero": mask_persistent_zero,
+            "persistent_zero_pixels": int(np.count_nonzero(persistent_zero)),
             "gross_reject_adu": float(gross_reject_adu),
             "gross_rejected_samples": int(var_meta["gross_rejected_samples"]),
             "gross_affected_pixels": int(var_meta["gross_affected_pixels"]),
@@ -1518,6 +1550,7 @@ def build_superbias(
         "combine": str(combine),
         "sigma_clip": float(sigma_clip),
         "gross_reject_adu": float(gross_reject_adu),
+        "mask_persistent_zero": mask_persistent_zero,
         "groups": [],
         "default_gid": "",
         "bad_key": int(bad_key),
@@ -1549,6 +1582,8 @@ def build_superbias(
             h["SB_GCNT"] = (int(st["gross_rejected_samples"]), "Raw BIAS samples rejected")
             h["SB_VMOD"] = (str(st["variance_model"]), "Bias estimator VAR model")
             h["SB_NMIN"] = (int(st["min_effective_n"]), "Minimum accepted samples")
+            h["SB_ZPOL"] = (bool(st["mask_persistent_zero"]), "Mask persistent raw zero")
+            h["SB_ZCNT"] = (int(st["persistent_zero_pixels"]), "Persistent raw zero pixels masked")
             if st["variance_factor"] is not None:
                 h["SB_VFAC"] = (float(st["variance_factor"]), "VAR/read noise variance factor")
             h["SB_GID"] = (str(gid), "MasterBias group id")
@@ -1642,6 +1677,8 @@ def build_superbias(
                     "factor": st["variance_factor"],
                     "min_effective_n": int(st["min_effective_n"]),
                     "bad_support_pixels": int(st["bad_support_pixels"]),
+                    "mask_persistent_zero": bool(st["mask_persistent_zero"]),
+                    "persistent_zero_pixels": int(st["persistent_zero_pixels"]),
                     "gross_reject_adu": float(st["gross_reject_adu"]),
                     "gross_rejected_samples": int(st["gross_rejected_samples"]),
                     "gross_affected_pixels": int(st["gross_affected_pixels"]),
