@@ -84,7 +84,12 @@ def write_quicklook_png(
     else:
         img = _normalize_linear(a, vmin, vmax)
 
-    # NaNs -> 0 for PNG
+    # Fatal samples must not masquerade as valid science in a quicklook.
+    # Neutral grey is display-only; preserve NaN/row exclusions as black.
+    display_bad = np.zeros(a.shape, dtype=bool)
+    if mask is not None:
+        display_bad = np.isfinite(a) & ((np.asarray(mask) & fatal_bits) != 0)
+        img = np.where(display_bad, 0.5, img)
     img = np.where(np.isfinite(img), img, 0.0).astype(np.float32)
 
     try:
@@ -113,6 +118,8 @@ def write_quicklook_png(
         "vmin": vmin,
         "vmax": vmax,
         "fatal_bits": int(fatal_bits),
+        "display_masked": "neutral_gray",
+        "n_display_masked": int(np.count_nonzero(display_bad)),
     }
     if meta:
         meta_out.update(meta)

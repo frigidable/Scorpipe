@@ -27,6 +27,12 @@ EXPECTED_COLUMNS = [
     "binning",
     "window",
     "shape",
+    "header_imagetyp",
+    "header_kind",
+    "nightlog_kind",
+    "kind_source",
+    "role_conflict",
+    "role_conflict_reason",
 ]
 
 
@@ -38,6 +44,7 @@ KIND_ORDER = [
     "obj",
     "sky",
     "sunsky",
+    "unresolved",
 ]
 
 
@@ -119,6 +126,25 @@ def iter_fits_files(root: Path) -> Iterable[Path]:
             yield p
 
 
+def _explicit_calibration_kind(header) -> str:
+    """Return a calibration type only when FITS declares it explicitly.
+
+    This is deliberately stricter than classify_frame(), which also
+    uses OBJECT-name heuristics. A conflict with the observing log or
+    SUNSKY-name heuristic needs review, not silent reassignment.
+    """
+    typ = _norm_obj(str(_safe_get(
+        header, "IMAGETYP", "OBSTYPE", "IMTYPE", default=""
+    ) or ""))
+    if typ in {"BIAS", "ZERO", "ZEROS"}:
+        return "bias"
+    if typ in {"FLAT", "FLATFIELD", "DOMEFLAT", "SKYFLAT", "TWILIGHTFLAT"}:
+        return "flat"
+    if typ in {"NEON", "ARC", "ARCLAMP", "COMP", "COMPARISON", "LAMP", "HENEAR"}:
+        return "neon"
+    return ""
+
+
 def classify_frame(header) -> str:
     """
     Простейшая классификация. Мы её будем усиливать по мере интеграции твоих правил.
@@ -140,6 +166,10 @@ def classify_frame(header) -> str:
             pass
     if "BIAS" in im_n:
         return "bias"
+
+    explicit_calib = _explicit_calibration_kind(header)
+    if explicit_calib:
+        return explicit_calib
 
     # flat
     if "FLAT" in im_n or "FLAT" in obj_n:
@@ -282,6 +312,10 @@ def inspect_dataset(
 
         obj = str(_safe_get(hdr, "OBJECT", "OBJNAME", default="") or "")
         kind = classify_frame(hdr)
+        explicit_calib = _explicit_calibration_kind(hdr)
+        header_imagetyp = str(_safe_get(
+            hdr, "IMAGETYP", "OBSTYPE", "IMTYPE", default=""
+        ) or "")
 
         mode = str(_safe_get(hdr, "MODE", "OBSMODE", "OBS_MODE", default="") or "")
         disperser = str(
@@ -329,6 +363,12 @@ def inspect_dataset(
             binning=(meta.binning_key if meta is not None else _binning_from_header(hdr)),
             window=_window_from_header(hdr),
             shape=shape,
+            header_imagetyp=header_imagetyp,
+            header_kind=kind,
+            nightlog_kind="",
+            kind_source="header",
+            role_conflict=False,
+            role_conflict_reason="",
         )
 
         # override из ночного лога
@@ -337,6 +377,8 @@ def inspect_dataset(
             row["object"] = m.object
             row["object_norm"] = _norm_obj(m.object)
             row["kind"] = m.kind
+            row["nightlog_kind"] = m.kind
+            row["kind_source"] = "nightlog"
             if m.exptime == m.exptime:  # NaN guard
                 row["exptime"] = m.exptime
             if m.mode:
@@ -346,12 +388,23 @@ def inspect_dataset(
             if m.slit:
                 row["slit"] = m.slit
 
-        # SUNSKY force: MODE may match science frames, so detect by name
-        try:
-            if _is_sunsky_name(str(row.get("object", ""))) or _is_sunsky_name(obj):
-                row["kind"] = "sunsky"
-        except Exception:
-            pass
+        # SUNSKY name is weaker evidence than an explicit calibration
+        # FITS IMAGETYP. Preserve both sources, and quarantine conflicts
+        # from science/arc/flat/sky AutoConfig until an observer assigns
+        # a role in the project's manifest.
+        if _is_sunsky_name(str(row.get("object", ""))) or _is_sunsky_name(obj):
+            row["kind"] = "sunsky"
+            row["kind_source"] = "sunsky_name"
+
+        if explicit_calib and row["kind"] != explicit_calib:
+            row["role_conflict"] = True
+            row["role_conflict_reason"] = (
+                f"FITS IMAGETYP={header_imagetyp!r} implies "
+                f"{explicit_calib}; observational metadata implies "
+                f"{row['kind']}. Manual classification required."
+            )
+            row["kind"] = "unresolved"
+            row["kind_source"] = "conflict"
 
         rows.append(row)
 

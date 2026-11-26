@@ -1,0 +1,11 @@
+# A05 — line coordinates in nm/Å and optical air/vacuum medium
+
+**Historical source:** [PR #58](https://github.com/frigidable/Scorpipe/pull/58). **New integration:** vNext [PR #180](https://github.com/frigidable/Scorpipe/pull/180). **Scientific status: HOLD.**
+
+The Scorpipe line catalogue gives default rest wavelengths in air Angstrom. vNext already converts those rest wavelengths to the declared `WAVEREF=vacuum` coordinate system when necessary. It also requires a declared air/vacuum medium for LineMeasure. Those scientifically useful features were already present and must not be regressed.
+
+However `stages/line_measure.py` passed the native numerical spectral grid directly to `science/lines.py`. COUNT_V1 science products may have `WAVEUNIT=nm`; comparing `500 nm` with Hbeta at `4861 Å` then fails to locate the line. Worse, a window integral with calibrated `F_lambda` per Å and a nm-valued `d_lambda` has a factor-ten dimensional mismatch. Scientific rest-line, observed wavelength and integrated flux therefore require the **same Å coordinate basis**.
+
+The new stage-normalization boundary converts **wavelength coordinates only** to Angstrom before line integration and plotting. Calibrated flux/variance arrays remain in their existing per-Angstrom physical units; no reinterpretation of spectral medium or new velocity correction is performed. The output JSON/QC record native input unit, `measurement_wavelength_unit=Angstrom`, `WAVEREF` and explicit/legacy coordinate status. Unknown units and missing modern COUNT_V1 unit metadata fail closed; historical legacy missing-unit inputs remain numerically usable but are labelled `LEGACY_ASSUMED`, not independently validated.
+
+Regression tests check equivalent nm and Å coordinate grids reaching the actual LineMeasure stage with flux density unchanged, invalid and non-monotone axes, and preservation of metadata. The tests verify the **interface and dimensional contract**, not redshift-frame consistency, absolute flux accuracy, blended-line deconvolution or statistical confidence intervals. Those depend separately on reference standards, wavelength calibration, LSF, shared MasterBias covariance and continuum uncertainty, and remain **SCIENCE HOLD**.

@@ -171,3 +171,17 @@ def test_fluxcal_rejects_incorrect_standard_wavelength_step_metadata(tmp_path):
         hdul[0].header["INSTEP"] = 2.
     with pytest.raises(ValueError, match="inconsistent wavelength grid/INSTEP"):
         apply_fluxcal_to_spec1d(science, sensfunc_path=response)
+
+
+def test_fluxcal_never_claims_trusted_absolute_without_science_extinction(tmp_path):
+    """Standard extinction alone is insufficient for a trusted science flux."""
+    science, response = _flux_cal_inputs(tmp_path)
+    result = apply_fluxcal_to_spec1d(
+        science, sensfunc_path=response,
+        standard_qc={"safe_for": "absolute_candidate"},
+        sensfunc_qc={"extinction_applied": True, "airmass_provenance": "header"},
+    )
+    np.testing.assert_allclose(result["flux"], 5., atol=1e-8)
+    assert result["status"] == "ABSOLUTE_APPROX"
+    assert result["science_extinction_applied"] is False
+    assert "per-exposure" in result["science_extinction_reason"]

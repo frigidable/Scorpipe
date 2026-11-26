@@ -52,6 +52,35 @@ def _load_lambda_map(path: Path) -> tuple[np.ndarray, fits.Header]:
     return np.asarray(data, dtype=float), hdr
 
 
+def _lambda_map_as_angstrom(
+    lam_map: np.ndarray, hdr: fits.Header
+) -> tuple[np.ndarray, str, float]:
+    """Convert a detector wavelength map to Å before any ARC-LSF measurement.
+
+    ARC-line catalogues, fitted Gaussian widths, manual FWHM priors and
+    science-support intervals are all expressed in Angstrom. A wavelength
+    map in nm is valid input, but silently treating it as Angstrom biases
+    every physical width by a factor of ten.
+    """
+    raw = str(hdr.get("WAVEUNIT") or hdr.get("CUNIT1") or "").strip().lower()
+    if raw in {"angstrom", "ang", "a", "aa"}:
+        native, factor = "Angstrom", 1.0
+    elif raw in {"nm", "nanometer", "nanometers"}:
+        native, factor = "nm", 10.0
+    else:
+        raise ValueError(
+            "ARC LSF requires an explicit wavelength-map unit "
+            f"(Angstrom or nm), got {raw!r}"
+        )
+    arr = np.asarray(lam_map, dtype=float)
+    if arr.ndim != 2:
+        raise ValueError("ARC LSF requires a two-dimensional wavelength map")
+    valid = np.isfinite(arr)
+    if not np.any(valid) or np.any(arr[valid] <= 0.0):
+        raise ValueError("ARC LSF wavelength map lacks positive physical support")
+    return arr * factor, native, factor
+
+
 def _read_arc_image(path: Path) -> tuple[np.ndarray, fits.Header]:
     with fits.open(path, memmap=False) as hdul:
         data = hdul[0].data
@@ -105,36 +134,19 @@ def _robust_sigma(arr: np.ndarray) -> float | None:
 
 
 def _estimate_sigma_px(profile: np.ndarray, x0: int, half_window: int, snr_thresh: float) -> tuple[float | None, dict[str, float]]:
-    nx = int(profile.size)
-    lo = max(0, int(x0) - int(half_window))
-    hi = min(nx, int(x0) + int(half_window) + 1)
-    if hi - lo < 5:
-        return None, {"reason": "window_too_small"}
-    xx = np.arange(lo, hi, dtype=float)
-    yy = np.asarray(profile[lo:hi], dtype=float)
-    if not np.isfinite(yy).any():
-        return None, {"reason": "nonfinite"}
-    edge = max(1, min(3, yy.size // 4))
-    baseline = float(np.nanmedian(np.r_[yy[:edge], yy[-edge:]]))
-    resid = yy - baseline
-    noise = _robust_sigma(np.r_[yy[:edge], yy[-edge:]])
-    if noise is None or not np.isfinite(noise) or noise <= 0:
-        noise = float(np.nanstd(np.r_[yy[:edge], yy[-edge:]])) if np.isfinite(yy).any() else 0.0
-    amp = float(np.nanmax(resid)) if np.isfinite(resid).any() else 0.0
-    if not np.isfinite(amp) or amp <= 0 or (noise > 0 and amp / max(noise, 1e-6) < float(snr_thresh)):
-        return None, {"reason": "low_snr", "amp": float(amp), "noise": float(noise)}
-    resid = np.clip(resid, 0.0, None)
-    s = float(np.sum(resid))
-    if not (s > 0):
-        return None, {"reason": "zero_signal"}
-    xc = float(np.sum(xx * resid) / s)
-    var = float(np.sum(((xx - xc) ** 2) * resid) / s)
-    if not np.isfinite(var) or var <= 0:
-        return None, {"reason": "bad_moment", "xc": float(xc)}
-    sigma_px = float(np.sqrt(var))
-    if not np.isfinite(sigma_px) or sigma_px <= 0:
-        return None, {"reason": "bad_sigma", "xc": float(xc)}
-    return sigma_px, {"xc": float(xc), "amp": float(amp), "noise": float(noise)}
+    """Robust Gaussian-equivalent ARC LSF; do not use truncated second moments.
+
+    In particular, a +/-6 pixel window with an actual ~6.5 pixel FWHM
+    artificially returns ~4A instead of ~5.8A for SCORPIO-1 VPHG1200B.
+    """
+    from scorpio_pipe.lsf_arc_profile import fit_gaussian_arc_profile
+
+    return fit_gaussian_arc_profile(
+        profile,
+        center_guess_px=float(x0),
+        half_window_px=int(half_window),
+        min_snr=float(snr_thresh),
+    )
 
 
 def _manual_fallback_map(lam_map: np.ndarray, hdr: fits.Header) -> tuple[np.ndarray, dict[str, Any]]:
@@ -191,30 +203,62 @@ def _build_measured_lsf_map(
     min_snr: float,
     poly_order_y: int,
     min_line_measures: int,
+    expected_arc_fwhm_A: float | None = None,
 ) -> tuple[np.ndarray | None, dict[str, Any]]:
     ny, nx = arc.shape
     y_all = np.arange(ny, dtype=float)
     measurements: list[dict[str, Any]] = []
     per_line: list[dict[str, Any]] = []
+    rejected_blends = 0
+    rejected_profiles = 0
+    # Fit medians of non-overlapping spatial strips, not thousands of
+    # noisy individual rows. With tiny synthetic frames keep sufficient
+    # independent y nodes for the Golden test's min_line_measures.
+    row_step = max(1, min(20, ny // max(2 * int(min_line_measures), 1)))
+    strip_half = min(10, row_step // 2)
+    all_wavelengths = np.asarray(line_centers, dtype=float)
 
-    for lam0 in np.asarray(line_centers, dtype=float):
+    for lam0 in all_wavelengths:
         rows = []
         vals = []
         amps = []
-        for iy in range(ny):
+        for iy in range(0, ny, row_step):
             row_lam = lam_map[iy]
             if not np.isfinite(row_lam).any():
                 continue
             ix = int(np.nanargmin(np.abs(row_lam - lam0)))
             if not np.isfinite(row_lam[ix]) or abs(float(row_lam[ix]) - float(lam0)) > 4.0:
                 continue
-            sigma_px, meta = _estimate_sigma_px(arc[iy], ix, fit_half_window_px, min_snr)
-            if sigma_px is None:
-                continue
-            left = max(0, ix - 1)
-            right = min(nx - 1, ix + 1)
+            left = max(0, ix - 2)
+            right = min(nx - 1, ix + 2)
             disp = float(np.nanmedian(np.abs(np.diff(row_lam[left:right + 1]))))
             if not np.isfinite(disp) or disp <= 0:
+                continue
+            # The nominal LSF is used only to select a physically adequate
+            # fit window; it is never substituted for measured line width.
+            half_width = int(fit_half_window_px)
+            if (expected_arc_fwhm_A is not None and
+                    np.isfinite(expected_arc_fwhm_A) and expected_arc_fwhm_A > 0):
+                sigma_guess_px = float(expected_arc_fwhm_A) / (2.354820045 * disp)
+                half_width = min(half_width, max(5, int(np.ceil(4.0 * sigma_guess_px))))
+            if half_width < 5:
+                raise ValueError("LSF fit_half_window_px must be at least 5")
+            # An isolated-line fit must never include a listed neighbour.
+            # The current LINEID list is independent of fit decisions.
+            known_other = all_wavelengths[all_wavelengths != lam0]
+            if known_other.size:
+                nearest_pix = min(
+                    abs(ix - int(np.nanargmin(np.abs(row_lam - other))))
+                    for other in known_other
+                )
+                if nearest_pix < 2 * half_width + 2:
+                    rejected_blends += 1
+                    continue
+            y0, y1 = max(0, iy-strip_half), min(ny, iy+strip_half+1)
+            profile = np.nanmedian(arc[y0:y1], axis=0)
+            sigma_px, meta = _estimate_sigma_px(profile, ix, half_width, min_snr)
+            if sigma_px is None:
+                rejected_profiles += 1
                 continue
             sigma_a = float(sigma_px * disp)
             if not np.isfinite(sigma_a) or sigma_a <= 0:
@@ -231,6 +275,9 @@ def _build_measured_lsf_map(
                     "sigma_A": float(sigma_a),
                     "amp": float(meta.get("amp", np.nan)),
                     "noise": float(meta.get("noise", np.nan)),
+                    "fit_kind": str(meta.get("fit_kind", "unknown")),
+                    "window_half_px": int(half_width),
+                    "norm_rmse": float(meta.get("norm_rmse", np.nan)),
                 }
             )
         if len(rows) < int(min_line_measures):
@@ -250,9 +297,12 @@ def _build_measured_lsf_map(
             }
         )
 
-    if len(per_line) < 2:
+    if len(per_line) < 3:
         return None, {
             "status": "insufficient_lines",
+            "fit_method": "gaussian_plus_linear_background_isolated",
+            "n_known_blend_rejections": int(rejected_blends),
+            "n_rejected_profiles": int(rejected_profiles),
             "n_lines_modeled": int(len(per_line)),
             "n_measurements": int(len(measurements)),
             "measurements_preview": measurements[:64],
@@ -274,6 +324,11 @@ def _build_measured_lsf_map(
 
     meta = {
         "status": "measured",
+        "fit_method": "gaussian_plus_linear_background_isolated",
+        "n_known_blend_rejections": int(rejected_blends),
+        "n_rejected_profiles": int(rejected_profiles),
+        "row_step_px": int(row_step),
+        "spatial_half_strip_px": int(strip_half),
         "n_lines_modeled": int(len(per_line)),
         "n_measurements": int(len(measurements)),
         "line_models": [
@@ -289,14 +344,33 @@ def _build_measured_lsf_map(
     return out, meta
 
 
+def _columnwise_finite_median(plane: np.ndarray) -> np.ndarray:
+    """Column medians on available data; entirely invalid columns stay NaN.
+
+    np.nanmedian(plane, axis=0) warns for every all-NaN wavelength
+    column. Such columns legitimately arise at wavelength-map edges and
+    must remain explicitly uncalibrated, not filled or extrapolated.
+    """
+    arr = np.asarray(plane, dtype=float)
+    if arr.ndim != 2:
+        raise ValueError("LSF wavelength column median expects a 2D plane")
+    med = np.full(arr.shape[1], np.nan, dtype=float)
+    valid = np.any(np.isfinite(arr), axis=0)
+    if np.any(valid):
+        subset = arr[:, valid]
+        subset = np.where(np.isfinite(subset), subset, np.nan)
+        med[valid] = np.nanmedian(subset, axis=0)
+    return med
+
+
 def _approx_linear_grid_from_lambda_map(lam_map: np.ndarray, hdr: fits.Header) -> WaveGrid | None:
     ny, nx = lam_map.shape
     y0 = int(np.clip(int(round(float(hdr.get("SLITPOS", ny / 2.0) or ny / 2.0))), 0, ny - 1))
     row = np.asarray(lam_map[y0], dtype=float)
     m = np.isfinite(row)
     if int(np.sum(m)) < 8:
-        m = np.isfinite(np.nanmedian(lam_map, axis=0))
-        row = np.asarray(np.nanmedian(lam_map, axis=0), dtype=float)
+        row = _columnwise_finite_median(lam_map)
+        m = np.isfinite(row)
     if int(np.sum(m)) < 8:
         return None
     x = np.flatnonzero(m).astype(float)
@@ -321,24 +395,85 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
         raise FileNotFoundError(f"Missing superneon frame: {arc_path}")
 
     lam_map, lam_hdr = _load_lambda_map(lam_map_path)
+    # Normalize once, at the entry boundary, so all profile fits, physical
+    # support checks and manual priors operate in the same units (Angstrom).
+    lam_map, native_wave_unit, native_to_A_factor = _lambda_map_as_angstrom(
+        lam_map, lam_hdr
+    )
+    lam_hdr = fits.Header(lam_hdr)
+    lam_hdr["WAVEUNIT"] = ("Angstrom", "ARC-LSF spectral coordinate unit")
+    lam_hdr["CUNIT1"] = ("Angstrom", "Approximate spectral WCS unit")
+    lam_hdr["LAMUNIT"] = ("Angstrom", "Wavelength coordinate unit")
+    lam_hdr["NATWUNIT"] = (native_wave_unit, "Native input lambda-map unit")
     arc, arc_hdr = _read_arc_image(arc_path)
     if arc.shape != lam_map.shape:
         raise ValueError(f"superneon shape {arc.shape} != lambda_map shape {lam_map.shape}")
 
     lcfg = cfg.get("lsf_model") if isinstance(cfg.get("lsf_model"), dict) else {}
     line_centers = _load_line_centers(wdir)
+    setup = ((cfg.get("frames") or {}).get("__setup__") or {})
+    disperser = str(
+        setup.get("disperser") or setup.get("disperse") or
+        arc_hdr.get("DISPERSE") or ""
+    ).strip().upper()
+    prior = _MANUAL_GRISM_PRIORS.get(disperser)
+    prior_fwhm = (
+        float(prior["resolution_fwhm_A_1arcsec"]) if prior is not None
+        else None
+    )
+    expected_fwhm = lcfg.get("expected_arc_fwhm_A", prior_fwhm)
+    expected_fwhm = float(expected_fwhm) if expected_fwhm is not None else None
+    # SuperNeon is an intermediate product and may not copy original
+    # DISPERSER/SLITWID cards. Resolve physical setup from the immutable
+    # config rather than silently reporting an empty grism and 1 arcsec.
+    setup = setup if isinstance(setup, dict) else {}
+    slit_raw = (
+        setup.get("slit") or setup.get("slit_width_arcsec") or
+        (cfg.get("instrument") or {}).get("slit") or
+        arc_hdr.get("SLITWID")
+    )
+    try:
+        slit_arcsec = float(slit_raw) if slit_raw is not None else None
+    except (TypeError, ValueError):
+        slit_arcsec = None
+    if slit_arcsec is not None and not (np.isfinite(slit_arcsec) and slit_arcsec > 0):
+        raise ValueError("Invalid configured slit width for ARC LSF")
+    arc_hdr_effective = fits.Header(arc_hdr)
+    if disperser:
+        arc_hdr_effective["DISPERSE"] = disperser
+    if slit_arcsec is not None:
+        arc_hdr_effective["SLITWID"] = slit_arcsec
+    if expected_fwhm is not None and not (
+        np.isfinite(expected_fwhm) and expected_fwhm > 0
+    ):
+        raise ValueError("Invalid expected_arc_fwhm_A")
     measured_map, fit_meta = _build_measured_lsf_map(
-        arc,
-        lam_map,
-        line_centers,
-        fit_half_window_px=int(lcfg.get("fit_half_window_px", 6) or 6),
+        arc, lam_map, line_centers,
+        fit_half_window_px=int(lcfg.get("fit_half_window_px", 12) or 12),
         min_snr=float(lcfg.get("min_line_snr", 4.0) or 4.0),
         poly_order_y=int(lcfg.get("poly_order_y", 2) or 2),
         min_line_measures=int(lcfg.get("min_line_measures", 8) or 8),
+        expected_arc_fwhm_A=expected_fwhm,
     )
 
     if measured_map is None:
-        lsf_map, source_meta = _manual_fallback_map(lam_map, arc_hdr)
+        # An invented nominal FWHM may make a pretty LSF FITS but cannot be
+        # presented as an empirical ARC measurement. Disallow by default.
+        failure = {
+            "stage": "lsf_model", "status": "REJECT",
+            "reason": "insufficient_independent_arc_profile_measurements",
+            "diagnostics": fit_meta,
+            "manual_fallback_allowed": bool(lcfg.get("allow_manual_fallback", False)),
+        }
+        atomic_write_json(out_dir / "lsf_profile_qc_reject.json", failure)
+        if not bool(lcfg.get("allow_manual_fallback", False)):
+            raise RuntimeError(
+                "LSF ARC_PROFILE_QC REJECT: cannot measure at least three "
+                "independent isolated ARC lines with supported profile wings. "
+                f"Inspect {out_dir / 'lsf_profile_qc_reject.json'}. "
+                "No science LSF was written."
+            )
+        lsf_map, source_meta = _manual_fallback_map(lam_map, arc_hdr_effective)
         fit_source = "manual_fallback"
     else:
         lsf_map = measured_map
@@ -347,25 +482,88 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
 
     lsf_map = np.asarray(lsf_map, dtype=float)
     lsf_map[~np.isfinite(lam_map)] = np.nan
+    from scorpio_pipe.lsf_arc_profile import bracketed_arc_wavelength_support
+    modeled_line_centers = np.asarray(
+        source_meta.get("line_lambdas_A", []), dtype=float
+    )
+    if fit_source == "arc_measured":
+        span_support, span_report = bracketed_arc_wavelength_support(
+            lam_map, modeled_line_centers
+        )
+    else:
+        # Manual priors never have empirical ARC-line support.
+        span_support = np.zeros_like(lam_map, dtype=bool)
+        span_report = {
+            "measured_line_span_A": None,
+            "empirical_span_fraction_of_finite_wave_map": 0.0,
+            "extrapolated_fraction_of_finite_wave_map": 1.0,
+            "maximum_gap_between_modeled_lines_A": None,
+            "interpretation": "No empirically fitted ARC line centers",
+        }
+    span_report["science_lsf_validated"] = False
+    span_report["support_kind"] = "BRACKETED_LINE_SPAN_ONLY"
+    # Even if an engineering map is populated by edge-value extrapolation,
+    # the science-supported part only spans independently fitted lamp lines.
+    modeled_lams = np.asarray(source_meta.get("line_lambdas_A", []), dtype=float)
+    if modeled_lams.size >= 2:
+        supported = (
+            np.isfinite(lam_map)
+            & (lam_map >= float(np.min(modeled_lams)))
+            & (lam_map <= float(np.max(modeled_lams)))
+        )
+        extrapolated_frac = float(
+            np.count_nonzero(np.isfinite(lsf_map) & ~supported)
+            / max(1, np.count_nonzero(np.isfinite(lsf_map)))
+        )
+        source_meta["support_range_A"] = [
+            float(np.min(modeled_lams)), float(np.max(modeled_lams))
+        ]
+        source_meta["extrapolated_fraction"] = extrapolated_frac
+    else:
+        extrapolated_frac = 1.0
+        source_meta["support_range_A"] = None
+        source_meta["extrapolated_fraction"] = extrapolated_frac
     grid = _approx_linear_grid_from_lambda_map(lam_map, lam_hdr)
 
     primary_hdr = fits.Header(lam_hdr)
+    primary_hdr["LSFGEOM"] = ("DETECTOR", "Arc LSF is in detector pixel geometry")
+    primary_hdr["LSFQUAL"] = (False, "Not a qualified science-extracted LSF")
     primary_hdr["BUNIT"] = ("Angstrom", "Instrumental sigma unit")
     primary_hdr["LSFUNIT"] = ("sigma_A", "LSF map quantity")
     primary_hdr["LSFSRC"] = (str(fit_source), "LSF source")
+    primary_hdr["LSFSPAN"] = (
+        float(span_report["empirical_span_fraction_of_finite_wave_map"]),
+        "Fraction bracketed by fitted ARC lines",
+    )
+    primary_hdr["LSFSCI"] = (False, "No science LSF validation")
     primary_hdr["PIPEVER"] = (str(PIPELINE_VERSION), "Pipeline version")
     primary_hdr = add_provenance(primary_hdr, cfg, stage="lsf_model")
 
     lsf_path = out_dir / "lsf_map.fits"
     write_sci_var_mask(lsf_path, lsf_map.astype(np.float32), header=primary_hdr, grid=grid, primary_data=lsf_map.astype(np.float32))
 
+    # A finite interpolated/extrapolated FWHM is not necessarily observed.
+    # Preserve a separate *binary* map; never silently advertise 100% science
+    # LSF coverage just because np.interp filled all detector columns.
+    support_path = out_dir / "lsf_span_support.fits"
+    support_hdr = fits.Header()
+    support_hdr["BUNIT"] = ("1", "Binary line-bracketed span mask")
+    support_hdr["LSFSUP"] = ("SPAN_ONLY", "Not science validation")
+    support_hdr["LSFSCI"] = (False, "No science LSF validation")
+    support_hdr = add_provenance(support_hdr, cfg, stage="lsf_model")
+    atomic_write_fits(
+        support_path, span_support.astype(np.uint8), header=support_hdr,
+        overwrite=False,
+    )
+    source_meta["empirical_wavelength_support"] = span_report
+
     finite = lsf_map[np.isfinite(lsf_map)]
     qpath = out_dir / "lsf_qc.json"
     mpath = out_dir / "lsf_model.json"
     summary_1d: dict[str, Any] = {}
     if np.isfinite(lam_map).any() and np.isfinite(lsf_map).any():
-        lam1d = np.nanmedian(lam_map, axis=0)
-        sig1d = np.nanmedian(lsf_map, axis=0)
+        lam1d = _columnwise_finite_median(lam_map)
+        sig1d = _columnwise_finite_median(lsf_map)
         good = np.isfinite(lam1d) & np.isfinite(sig1d)
         summary_1d = {
             "lambda_A": [float(v) for v in lam1d[good]],
@@ -377,6 +575,8 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
         "stage": "lsf_model",
         "pipeline_version": str(PIPELINE_VERSION),
         "source": fit_source,
+        "science_lsf_validated": False,
+        "arc_profile_fit_method": "gaussian_plus_linear_background_isolated",
         "inputs": {
             "lambda_map": str(lam_map_path),
             "superneon": str(arc_path),
@@ -384,15 +584,19 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
             "manual_pairs_auto": str(wdir / "manual_pairs_auto.csv"),
         },
         "instrument": {
-            "disperser": str(arc_hdr.get("DISPERSE", "") or ""),
-            "slit_arcsec": float(arc_hdr.get("SLITWID", np.nan)) if arc_hdr.get("SLITWID") is not None else None,
+            "disperser": disperser,
+            "slit_arcsec": slit_arcsec,
             "wave_ref": str(lam_hdr.get("WAVEREF", "unknown") or "unknown"),
-            "wave_unit": str(lam_hdr.get("WAVEUNIT", "Angstrom") or "Angstrom"),
+            "wave_unit": "Angstrom",
+            "native_wave_unit": native_wave_unit,
+            "native_to_A_factor": float(native_to_A_factor),
+            "lsf_geometry": "DETECTOR",
         },
         "model": source_meta,
         "summary_1d": summary_1d,
         "outputs": {
             "lsf_map": str(lsf_path),
+            "lsf_span_support": str(support_path),
             "lsf_qc": str(qpath),
         },
     }
@@ -401,6 +605,21 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
     qc_payload = {
         "ok": bool(finite.size > 0),
         "source": fit_source,
+        "science_lsf_validated": False,
+        "native_wave_unit": native_wave_unit,
+        "native_to_A_factor": float(native_to_A_factor),
+        "lsf_geometry": "DETECTOR",
+        "arc_profile_fit_method": "gaussian_plus_linear_background_isolated",
+        "support_range_A": source_meta.get("support_range_A"),
+        "extrapolated_fraction": float(extrapolated_frac),
+        "empirical_span_support_fraction": float(
+            span_report["empirical_span_fraction_of_finite_wave_map"]
+        ),
+        "numerically_finite_coverage_only": True,
+        "maximum_line_gap_A": span_report[
+            "maximum_gap_between_modeled_lines_A"
+        ],
+        "support_map_fits": str(support_path),
         "n_finite": int(finite.size),
         "sigma_A_median": float(np.nanmedian(finite)) if finite.size else None,
         "sigma_A_p16": float(np.nanpercentile(finite, 16)) if finite.size else None,
@@ -409,14 +628,22 @@ def run_lsf_model(cfg: dict[str, Any], *, out_dir: Path | None = None) -> dict[s
         "shape": [int(v) for v in lsf_map.shape],
         "coverage_frac": float(np.isfinite(lsf_map).sum() / max(1, lsf_map.size)),
         "model": source_meta,
-        "warnings": [] if finite.size else ["empty_lsf_map"],
+        "warnings": (
+            (["manual_fallback_is_not_empirically_measured"]
+             if fit_source == "manual_fallback" else [])
+            + (["lsf_contains_unbracketed_wavelength_pixels"]
+               if np.any(~span_support & np.isfinite(lam_map)) else [])
+            + ([] if finite.size else ["empty_lsf_map"])
+        ),
     }
     atomic_write_json(qpath, qc_payload)
 
     done = {
         "ok": bool(finite.size > 0),
         "source": fit_source,
+        "science_lsf_validated": False,
         "lsf_map": str(lsf_path),
+        "lsf_span_support": str(support_path),
         "lsf_model_json": str(mpath),
         "lsf_qc_json": str(qpath),
     }

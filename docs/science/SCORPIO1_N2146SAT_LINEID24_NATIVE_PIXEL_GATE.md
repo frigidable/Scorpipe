@@ -1,0 +1,22 @@
+# SCORPIO-1 N2146sat LineID24 — native-pixel forward model and held-out line gates
+Date: 2026-11-10. **Status: DIAGNOSTIC ONLY; SCIENCE HOLD.**
+
+## Why LineID24 is required
+LineID23 `Check 16/16`, direct NIST ASD 5.12 `Atlas 14 windows / 359 recorded transitions / 354 candidate-pair rows`, and 1254 raw-ARC fit attempts (1248 diagnostic outcomes) have completed on Windows. These LineID23 profiles were extracted via an unregistered **21-row median**, which can broaden tilted emission features. Its superior 5341 Å Ne I three-component model is thus a strong *conditional model-shape clue*, not a calibrated science LSF. Different ARC ROTANGLE and shared frozen wavelength mapping do not independently establish flexure.
+
+## LineID24 diagnostic package (distributed separately; source code NOT in production stages)
+A separate standalone Windows ZIP was built and its extracted source re-tested: **21/21 local synthetic/source tests passed**. In the build environment, Astropy FITS parsing was unavailable; the synthetic end-to-end test used a substitute FITS interface, **not real FITS I/O**. Real SCORPIO FITS validation on user Windows is pending.
+
+1. SHA-guard original ARC06/ARC13, historical `_95/_96` air Wave2D, `_96` LSF, hand pairs and **all 14 original NIST ASD response HTML files** from LineID23. Refuse missing/tampered sources.
+2. 11 non-overlapping 7-row neighborhoods for *each original frame*; work on every native detector pixel, with **no median stacking, rectification or detector-flux interpolation**. Fit joint shared Gaussian sigma and *per-row* nonnegative amplitudes plus linear continuum; positions follow each row's original frozen Wave2D curvature.
+3. Candidate reference set outside all four disputed windows: Ar I 3948.979 and 4259.362 Å, He I 4921.9313 Å, Ne I 5037.7512 and 5080.383 Å. These are **not guaranteed isolated** and overlap the set used for the old Wave2D. Estimate only a conditional common per-row offset from ≥3 consistent candidate centroids. An engineering-only 1.5 Å spread safeguard can fail closed for each row/patch. **This is not an independent absolute zero-point calibration.**
+4. Hold out ten additional historic repers and three extra NIST ASD observed air lines **not present among the original 19 manual anchor positions** (Ne I 4852.655, 4928.235, 5052.9443 Å). These extra lines are candidates for detection and must not be assumed unblended.
+5. Four regions, **22 competing profiles total**, with *fixed* offset derived from external-to-region references (no free per-model line center shift). Score same detector pixels, report model width, amplitude condition, residual RMS and blocked-column-heldout RMSE. Nominal BIC is heuristic. Repeat a restricted two-model ±0.30 Å forced-offset sensitivity for each region.
+6. Read-only outputs: `lineid24_reference_zero_per_native_row.csv`, `lineid24_holdout_centroids.csv`, `lineid24_native2d_model_fits.csv`, `lineid24_fixed_zero_sensitivity.csv`, `lineid24_native2d_review.json`. Every scientific-approval flag remains false even for successful engineering execution.
+
+## Independent validation still outstanding
+The old map was calibrated from historical hand pairs: NIST candidate screening and leave-target-out zero tests are **not independent of that existing mapping**. Control-line blending, source-specific lamp excitation, detector gain and correlated noise, non-Gaussian/asymmetric and wavelength-dependent LSF, raw 2-D curvature independently measured (not inferred from the old map), science-object sky/flexure transfer, and more than the four disputed fitting intervals remain scientific gates. Fitting seven adjacent CCD rows is not seven independent spectra. The two lamps and 11 slit locations likewise share systematics. A better blocked-column RMSE does not prove atomic identification.
+
+**Disposition:** keep PR #178 Draft, `SCIENCE HOLD`, `_95/_96` frozen, no `_97`, no production wave/LSF changes. Run on Windows and inspect conditional-quality flags and held-out residuals before planning any physical recalibration.
+
+Primary methods: [NIST ASD](https://physics.nist.gov/PhysRefData/ASD/lines_form.html); [Astropy specreduce 2D tilt correction](https://docs.astropy.org/projects/specreduce/en/stable/tilt_correction/tilt_correction.html); [Astropy wavelength calibration](https://learn.astropy.org/tutorials/2_WavelengthCalibration.html); [SDSS arc/sky flexure policy](https://www.sdss4.org/dr12/algorithms/wavelength/).

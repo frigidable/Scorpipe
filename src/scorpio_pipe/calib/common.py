@@ -134,17 +134,34 @@ def load_library_yaml(path: str | Path) -> dict[str, Any]:
 
 
 def find_standard_record(library: dict[str, Any], selected_name: str | None) -> tuple[str | None, dict[str, Any] | None]:
+    """Resolve a *unique* explicitly identified flux standard; never guess.
+
+    Matching is limited to the library key, display name, and curated aliases.
+    An absent identity or two records with the same normalized alias is
+    ambiguous even if the library contains only one entry.
+    """
     stds = library.get("standards") if isinstance(library, dict) else None
     if not isinstance(stds, dict) or not stds:
         return None, None
-    if selected_name:
-        nsel = normalize_name(selected_name)
-        for key, rec in stds.items():
-            disp = str((rec or {}).get("display_name") or key)
-            if normalize_name(disp) == nsel or normalize_name(str(key)) == nsel:
-                return str(key), dict(rec)
-    first_key = next(iter(stds.keys()))
-    return str(first_key), dict(stds[first_key])
+    nsel = normalize_name(str(selected_name or ""))
+    if not nsel:
+        return None, None
+
+    matches: list[tuple[str, dict[str, Any]]] = []
+    for key, rec in stds.items():
+        if not isinstance(rec, dict):
+            continue
+        names = [str(key), str(rec.get("display_name") or key)]
+        aliases = rec.get("aliases") or []
+        if isinstance(aliases, (list, tuple)):
+            names.extend(str(alias) for alias in aliases)
+        if any(normalize_name(name) == nsel for name in names):
+            matches.append((str(key), rec))
+    if len(matches) != 1:
+        # 0 means unknown; 2+ means aliased collision. Both fail closed.
+        return None, None
+    key, rec = matches[0]
+    return key, dict(rec)
 
 
 def air_to_vacuum(lam_air: np.ndarray) -> np.ndarray:
@@ -190,8 +207,21 @@ def read_spec1d(path: str | Path, *, mode: str = "trace") -> dict[str, Any]:
         tab = hdul[extname].data
         if extname == "SPEC_TRACE":
             flux_col, var_col, mask_col, sky_col, npix_col = "FLUX_TRACE", "VAR_TRACE", "MASK_TRACE", "SKY_TRACE", "NPIX_TRACE"
+            dq_col, frac_col = "DQ_ANY_TRACE", "FRAC_TRACE"
         else:
             flux_col, var_col, mask_col, sky_col, npix_col = "FLUX_FIXED", "VAR_FIXED", "MASK_FIXED", "SKY_FIXED", "NPIX_FIXED"
+            dq_col, frac_col = "DQ_ANY_FIXED", "FRAC_FIXED"
+        dq_version = hdr0.get("DQ1DVER")
+        if dq_version is not None:
+            if int(dq_version) != 1 or str(hdr0.get("DQ1DSEM") or "") != "FATAL":
+                raise ValueError("Unsupported DQ1D science-usability schema")
+            if dq_col not in tab.names or frac_col not in tab.names:
+                raise ValueError("DQ1D schema requires per-mode DQ_ANY and FRAC columns")
+            frac = np.asarray(tab[frac_col], dtype=float)
+            if (not np.isfinite(frac).all() or np.any((frac < 0) | (frac > 1))):
+                raise ValueError("DQ1D fraction-used column must lie within [0,1]")
+        else:
+            frac = None
         return {
             "header": hdr0,
             "wave": np.asarray(tab["LAMBDA"], dtype=float),
@@ -200,6 +230,9 @@ def read_spec1d(path: str | Path, *, mode: str = "trace") -> dict[str, Any]:
             "mask": np.asarray(tab[mask_col]),
             "sky": np.asarray(tab[sky_col], dtype=float) if sky_col in tab.names else np.zeros(len(tab), dtype=float),
             "npix": np.asarray(tab[npix_col], dtype=float) if npix_col in tab.names else np.zeros(len(tab), dtype=float),
+            "dq1d_version": int(dq_version) if dq_version is not None else None,
+            "dq_any": np.asarray(tab[dq_col], dtype=np.uint16) if dq_version is not None else None,
+            "frac_used": frac,
             "waveref": str(hdr0.get("WAVEREF") or "air").strip().lower(),
             "bunit": str(hdr0.get("BUNIT") or hdr0.get("FLUXUNIT") or "ADU").strip(),
             "path": str(p),
@@ -207,19 +240,39 @@ def read_spec1d(path: str | Path, *, mode: str = "trace") -> dict[str, Any]:
 
 
 def write_bintable_fits(path: str | Path, *, primary_header: fits.Header | None = None, extname: str, columns: dict[str, Any]) -> Path:
+    """Write numeric calibration columns without silently converting DQ flags to text."""
+    from astropy.io import fits
+
     cols = []
     for name, arr in columns.items():
         aa = np.asarray(arr)
-        if aa.dtype.kind in 'if':
-            fmt = 'D' if aa.dtype.kind == 'f' and aa.dtype.itemsize > 4 else 'E'
-            if aa.dtype.kind == 'i':
+        if aa.ndim != 1:
+            raise ValueError(f"FITS table column {name!r} must be one-dimensional")
+        if aa.dtype.kind == 'f':
+            fmt = 'D' if aa.dtype.itemsize > 4 else 'E'
+        elif aa.dtype.kind == 'i':
+            fmt = 'K' if aa.dtype.itemsize > 4 else 'J'
+        elif aa.dtype.kind == 'u':
+            # FITS B is unsigned 8-bit. Larger unsigned values fit without
+            # overflow in signed J (uint16) or K (uint32) table columns.
+            if aa.dtype.itemsize == 1:
+                fmt = 'B'
+            elif aa.dtype.itemsize <= 2:
                 fmt = 'J'
+            elif aa.dtype.itemsize <= 4:
+                fmt = 'K'
+            else:
+                raise ValueError(
+                    f"FITS table column {name!r}: uint64 requires explicit "
+                    "unsigned scaling, not a lossy signed conversion"
+                )
+        elif aa.dtype.kind == 'b':
+            fmt = 'L'
         else:
             aa = aa.astype(str)
-            width = max(1, max(len(str(x)) for x in aa))
-            fmt = f'{width}A'
+            width = max((len(str(x)) for x in aa), default=1)
+            fmt = f'{max(1, width)}A'
         cols.append(fits.Column(name=str(name), format=fmt, array=aa))
-    from astropy.io import fits
     hdul = fits.HDUList([fits.PrimaryHDU(header=(fits.Header() if primary_header is None else primary_header)), fits.BinTableHDU.from_columns(cols, name=str(extname))])
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

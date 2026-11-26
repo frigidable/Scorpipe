@@ -87,15 +87,24 @@ def night_date_from_header(header: Any) -> date:
         if m:
             return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
 
-    dt = _parse_date_obs(_pick(h, "DATE-OBS", "DATE", default=""))
+    # SCORPIO-1 writes DATE-OBS=YYYY/DD/MM (ambiguous/non-ISO) and
+    # DATE=YYYY-MM-DDThh:mm:ss (unambiguous). Try each independently;
+    # never let an unparseable DATE-OBS mask a valid DATE.
+    dt = None
+    source = ""
+    for key in ("DATE-OBS", "DATE"):
+        candidate = _pick(h, key, default="")
+        parsed = _parse_date_obs(candidate)
+        if parsed is not None:
+            dt, source = parsed, candidate
+            break
     if dt is None:
-        # Fallback: today (better than crashing); caller may still override.
-        return datetime.utcnow().date()
+        raise ValueError("Cannot establish night date from science FITS; DATE-OBS/DATE missing or unsupported")
 
     d = dt.date()
-    # If the observation time is after midnight (early morning), treat it as
-    # the same observing night as the previous evening.
-    if dt.hour < 12 and ("T" in str(_pick(h, "DATE-OBS", "DATE", default="")) or ":" in str(_pick(h, "DATE-OBS", "DATE", default=""))):
+    # A UTC timestamp between midnight and noon belongs to the previous
+    # evening's night. Date-only sources are not shifted.
+    if dt.hour < 12 and ("T" in source or ":" in source):
         d = (dt - timedelta(days=1)).date()
     return d
 
@@ -127,7 +136,7 @@ def object_key_from_header(header: Any) -> str:
 
 def disperser_key_from_header(header: Any) -> str:
     h = _as_header_mapping(header)
-    disp = _pick(h, "GRISM", "DISPERSER", "GRATING", "GRAT", default="")
+    disp = _pick(h, "DISPERSE", "GRISM", "DISPERSER", "GRATING", "GRAT", default="")
     return _sanitize_key(disp, fallback="unknown")
 
 
@@ -251,7 +260,7 @@ def get_or_create_run_root(
             passport_sig = {
                 "object": str(_pick(h, "OBJECT", "OBJNAME", "TARGNAME", "TARGET", default="")),
                 "object_key": sig.object_key,
-                "disperser": str(_pick(h, "GRISM", "DISPERSER", "GRATING", "GRAT", default="")),
+                "disperser": str(_pick(h, "DISPERSE", "GRISM", "DISPERSER", "GRATING", "GRAT", default="")),
                 "disperser_key": sig.disperser_key,
                 "slit": str(_pick(h, "SLIT", "SLITW", default="")),
                 "binning": str(_pick(h, "CCDSUM", "CCDBIN", "BINNING", "BINX", default="")),

@@ -36,6 +36,7 @@ from statistics import median
 from typing import Any, Iterable, Mapping
 
 from scorpio_pipe.exclude_policy import resolve_exclude_set, resolve_data_dir
+from scorpio_pipe.preflight_selection import assess_selection, snapshot_fingerprint
 from scorpio_pipe.metadata import HeaderContractError, FrameMeta
 from scorpio_pipe.metadata.fits_cache import get_frame_meta, get_header_and_frame_meta, get_header_fields
 from scorpio_pipe.version import PIPELINE_VERSION
@@ -278,6 +279,9 @@ def run_preflight(
 
     paths = _iter_fits_paths(data_dir_p, recursive=recursive)
     n_total = int(len(paths))
+    input_fingerprint = snapshot_fingerprint(
+        cfg, data_dir_p, paths, excluded_abs, recursive=recursive
+    )
 
     for p in paths:
         p_abs = p.expanduser().resolve()
@@ -462,7 +466,13 @@ def run_preflight(
     # Preflight report
     any_error = any(e.get("severity") == "ERROR" for e in quarantine_entries)
     any_warn = any(e.get("severity") == "WARN" for e in quarantine_entries)
-    status = "ERROR" if any_error else ("WARN" if any_warn else "OK")
+    night_status = "ERROR" if any_error else ("WARN" if any_warn else "OK")
+    selection = assess_selection(
+        cfg, data_dir_p, paths, quarantine_entries, excluded_abs
+    )
+    # Only assigned-frame errors block a configured run. Night issues remain
+    # independently available for audit and do not disappear from quarantine.
+    status = selection["status"] if selection is not None else night_status
 
     # Aggregate reasons by (severity, code)
     reasons: list[dict[str, Any]] = []
@@ -482,13 +492,21 @@ def run_preflight(
     preflight_report = {
         "schema": "scorpio-pipe.preflight-report.v1",
         "status": status,
+        "scope": "assigned" if selection is not None else "night",
+        "night_status": night_status,
+        "input_fingerprint": input_fingerprint,
         "data_dir": str(data_dir_p),
         "summary": {
             "n_total_fits": n_total,
             "n_quarantine": int(len(quarantine_entries)),
             "n_reasons": int(len(reasons)),
         },
-        "reasons": reasons,
+        "reasons": selection["reasons"] if selection is not None else reasons,
+        "night_reasons": reasons,
+        "selection_summary": (
+            {k: v for k, v in selection.items() if k != "reasons"}
+            if selection is not None else None
+        ),
     }
 
     quarantine_index = {
@@ -541,11 +559,39 @@ def ensure_preflight(
     night_p = man_dir / "night_profile.json"
     qidx_p = man_dir / "quarantine_index.json"
 
-    if not force and report_p.exists() and night_p.exists() and qidx_p.exists():
+    # Reuse only when the entire scanned FITS inventory, exclusions, and
+    # selected role assignments still match. Old reports have no fingerprint
+    # and must be regenerated rather than trusted by their filename alone.
+    current_fingerprint = None
+    try:
+        current_data_dir = resolve_data_dir(cfg)
+        if current_data_dir is not None and current_data_dir.is_dir():
+            current_data_dir = current_data_dir.resolve()
+            current_paths = _iter_fits_paths(current_data_dir, recursive=recursive)
+            current_excluded = resolve_exclude_set(
+                cfg, data_dir=current_data_dir
+            ).excluded_abs
+            current_fingerprint = snapshot_fingerprint(
+                cfg, current_data_dir, current_paths, current_excluded,
+                recursive=recursive,
+            )
+    except Exception:
+        current_fingerprint = None
+
+    if (
+        not force and current_fingerprint is not None
+        and report_p.exists() and night_p.exists() and qidx_p.exists()
+    ):
         rep = _read_json(report_p) or {}
+        night_data = _read_json(night_p)
+        quarantine_data = _read_json(qidx_p)
         status = str(rep.get("status") or "").upper()
-        if status in {"OK", "WARN", "ERROR"}:
-            # Best-effort: also return the most important counters.
+        if (
+            status in {"OK", "WARN", "ERROR"}
+            and rep.get("input_fingerprint") == current_fingerprint
+            and isinstance(night_data, dict)
+            and isinstance(quarantine_data, dict)
+        ):
             summ = rep.get("summary") if isinstance(rep.get("summary"), dict) else {}
             return {
                 "status": status,

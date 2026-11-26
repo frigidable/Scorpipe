@@ -1,0 +1,242 @@
+"""Fail-closed test contracts for the isolated engineering E2E pilot."""
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+
+import pytest
+
+
+SCRIPT = (
+    Path(__file__).resolve().parents[1] /
+    "scripts/qa/sc1_engineering_pilot.py"
+)
+
+
+def load_module():
+    spec = importlib.util.spec_from_file_location("sc1_engineering_pilot", SCRIPT)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_pilot_selftest():
+    load_module().selftest()
+
+
+def test_copied_config_discards_original_loader_derived_roots():
+    pilot = load_module()
+    raw = {
+        "project_root": r"C:\\old\\run_01",
+        "config_path": r"C:\\old\\run_01\\config.yaml",
+        "config_dir": r"C:\\old\\run_01",
+        "work_dir_abs": r"C:\\old\\run_01",
+        "_project_manifest": {
+            "path": r"C:\\old\\run_01\\project_manifest.yaml",
+            "has_manifest": True,
+            "frames_source": "manifest",
+        },
+        "work_dir": r"C:\\old\\run_01",
+        "data_dir": r"C:\\raw\\exposures",
+        "frames": {"obj": [r"C:\\raw\\exposures\\s001.fts"]},
+    }
+    pilot.strip_loader_derived_root_keys(raw)
+    assert all(k not in raw for k in pilot.LOADER_DERIVED_ROOT_KEYS)
+    assert raw["data_dir"] == r"C:\\raw\\exposures"
+    assert raw["frames"]["obj"] == [r"C:\\raw\\exposures\\s001.fts"]
+    assert raw["work_dir"] == r"C:\\old\\run_01"  # caller rehomes separately
+
+
+def test_copied_config_rebuilds_derived_manifest_metadata(tmp_path):
+    import yaml
+    from scorpio_pipe.config import load_config
+
+    pilot = load_module()
+    old = tmp_path / "source_01"
+    new = tmp_path / "source_91"
+    raw_data = tmp_path / "raw"
+    old.mkdir()
+    new.mkdir()
+    raw_data.mkdir()
+
+    original_manifest = old / "project_manifest.yaml"
+    original_manifest.write_text(
+        "schema: scorpio-pipe.project-manifest.v1.2\nroles: {}\n",
+        encoding="utf-8",
+    )
+    obj = str(raw_data / "science.fts")
+    original = {
+        "work_dir": str(old),
+        "data_dir": str(raw_data),
+        "project_root": str(old),
+        "_project_manifest": {
+            "path": str(original_manifest),
+            "has_manifest": True,
+            "frames_source": "manifest",
+        },
+        "frames": {"obj": [obj]},
+    }
+
+    pilot.strip_loader_derived_root_keys(original)
+    original["work_dir"] = str(new)
+    assert "_project_manifest" not in original
+    pilot_config = new / "config.yaml"
+    pilot_config.write_text(
+        yaml.safe_dump(original, sort_keys=False), encoding="utf-8"
+    )
+    loaded = load_config(pilot_config)
+    assert loaded["frames"]["obj"] == [obj]
+    assert loaded["_project_manifest"]["path"] == str(
+        (new / "project_manifest.yaml").resolve()
+    )
+    assert str(old) not in str(loaded["_project_manifest"])
+    assert original_manifest.read_text(encoding="utf-8").startswith("schema:")
+
+
+def test_pilot_stage_plan_uses_only_distinct_canonical_tasks():
+    from scorpio_pipe.catalog.stages import CATALOG
+
+    tasks = load_module().STAGES
+    assert len(tasks) == 13
+    assert len(set(tasks)) == len(tasks)
+    assert "biascorr" not in tasks
+    assert "arclineid" not in tasks
+    assert CATALOG.canonical_task_name("arclineid") == "lineid_prepare"
+    assert "cosmics" in tasks
+    assert tasks.index("cosmics") < tasks.index("sky")
+    assert all(CATALOG.canonical_task_name(task) == task for task in tasks)
+
+
+def test_phase_plan_stops_before_manual_wavelength_identification():
+    m = load_module()
+    assert m.phase_tasks("lineid") == (
+        "manifest", "superbias", "cosmics", "superneon", "lineid_prepare",
+    )
+    assert m.phase_tasks("resume")[0] == "wavesolution"
+    assert m.phase_tasks("lineid") + m.phase_tasks("resume") == m.STAGES
+    with pytest.raises(ValueError, match="Unknown"):
+        m.phase_tasks("unknown")
+
+
+def test_manual_lineid_review_requires_five_wide_spaced_curated_pairs(tmp_path):
+    m = load_module()
+    from scorpio_pipe.wavesol_paths import wavesol_dir
+
+    work = tmp_path / "pilot_91"
+    work.mkdir()
+    cfg = {
+        "work_dir": str(work),
+        "frames": {"__setup__": {"disperser": "VPHG1200B"}},
+        "wavesol": {
+            "hand_pairs_path": "",
+            "poly_deg_1d": 4,
+            "expected_coverage_A": [3888.0, 5341.0],
+        },
+    }
+    hand = wavesol_dir(cfg, run_root=work) / "hand_pairs.txt"
+    with pytest.raises(FileNotFoundError, match="reviewed"):
+        m.review_lineid_pairs(cfg, work)
+
+    hand.parent.mkdir(parents=True)
+    hand.write_text(
+        "# manually reviewed\n"
+        "100 4000\n450 4300\n800 4600\n1200 5000\n1600 5290\n",
+        encoding="utf-8",
+    )
+    info = m.review_lineid_pairs(cfg, work)
+    assert info["active_pairs"] == 5
+    assert info["manual_pairs_sha256"] == m.checksum(hand)
+    assert info["user_review_confirmed"] is True
+
+    hand.write_text("100 4000\n450 4300\n800 4600\n1200 5000\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="active hand pairs"):
+        m.review_lineid_pairs(cfg, work)
+
+
+def test_pilot_must_be_new_sibling_and_canonical_run(tmp_path):
+    m = load_module()
+    orig = tmp_path / "source_01"
+    orig.mkdir()
+    cfg = orig / "config.yaml"
+    cfg.write_text("work_dir: .")
+    m.check_pilot_destination(cfg, tmp_path / "source_91")
+    with pytest.raises(ValueError, match="SAME night"):
+        m.check_pilot_destination(cfg, tmp_path / "different" / "source_91")
+    with pytest.raises(ValueError, match="canonical"):
+        m.check_pilot_destination(cfg, tmp_path / "pilot_name")
+    with pytest.raises(FileExistsError):
+        m.check_pilot_destination(cfg, orig)
+
+
+def test_no_duplicate_or_missing_selected_raw_frames(tmp_path):
+    m = load_module()
+    paths = {}
+    for key, count in m.EXPECTED.items():
+        vals = []
+        for i in range(1, count+1):
+            name = (
+                f"s228001{i:02d}.fts" if key=="bias"
+                else f"{key}_{i}.fts"
+            )
+            p = tmp_path / name
+            p.write_bytes(b"test")
+            vals.append(str(p))
+        paths[key] = vals
+    m.check_expected_frames({"frames": paths})
+    paths["obj"][1] = paths["obj"][0]
+    with pytest.raises(RuntimeError, match="Duplicate"):
+        m.check_expected_frames({"frames": paths})
+
+
+def test_bias_cohort_must_be_exact_20_audited_files(tmp_path):
+    m = load_module()
+    paths = {}
+    for key, count in m.EXPECTED.items():
+        names = (
+            [f"s228001{i:02d}.fts" for i in range(1,21)]
+            if key == "bias" else
+            [f"{key}_{i}.fts" for i in range(count)]
+        )
+        selected = []
+        for name in names:
+            p = tmp_path / name
+            p.write_bytes(b"test")
+            selected.append(str(p))
+        paths[key] = selected
+    outsider = tmp_path / "s22809999.fts"
+    outsider.write_bytes(b"test")
+    paths["bias"][-1] = str(outsider)
+    with pytest.raises(RuntimeError, match="audited early20"):
+        m.check_expected_frames({"frames": paths})
+
+
+def test_orig_source_fingerprint_detects_source_config_change(tmp_path):
+    m = load_module()
+    folder = tmp_path / "test_01"
+    folder.mkdir()
+    cfg = folder / "config.yaml"
+    cfg.write_text("calib: {}\n")
+    baseline = m.fingerprint_sources(cfg)
+    assert baseline[str(cfg)] == m.checksum(cfg)
+    assert all(baseline[str(folder / f)] is None for f in m.ARTIFACTS)
+    cfg.write_text("calib: {bias_policy: strict}\n")
+    assert m.fingerprint_sources(cfg) != baseline
+
+
+def test_pilot_does_not_use_engine_overrides_or_modify_original_calibration():
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "resume=True, force=False" in source
+    assert "qc_override=False, preflight_override=False" in source
+    assert "source_work_string" in source
+    assert "original_files_unchanged" in source
+    assert "SCIENCE E2E: HOLD" in source
+    assert "bias_gross_reject_adu" in source
+    assert "selected_raw_paths" in source
+    assert "Noncanonical/aliased pilot task" in source
+    assert "Pilot flatfield must remain disabled" in source
+    assert "Pilot Cosmics must bias-correct only OBJ frames" in source
+    assert "Pilot Sky failure_policy must remain strict" in source
+    assert "ENGINEERING_PAUSED_FOR_LINEID_SCIENCE_HOLD" in source
+    assert "lineid_reviewed" in source
+    assert 'out_path.open("w"' not in source

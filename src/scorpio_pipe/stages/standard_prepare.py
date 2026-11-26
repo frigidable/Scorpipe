@@ -189,22 +189,43 @@ def _prepare_rectified_standard(
 ) -> tuple[Path, dict[str, Any]]:
     existing = _try_existing_rectified(run_root, raw_path, cfg)
     if existing is not None:
-        return existing, {"mode": "reuse_existing", "input": str(existing)}
+        # Existing products have not yet been linked to a matching, audited
+        # MasterFlat. Their flux level must not be certified from geometry
+        # and aperture capture alone.
+        return existing, {
+            "mode": "reuse_existing",
+            "input": str(existing),
+            "flatfield_status": "unverified_reuse",
+        }
 
     prep_meta: dict[str, Any] = {"mode": "inline_rectify", "raw_input": str(raw_path)}
     work_input = raw_path
     fcfg = cfg.get("fluxcal") if isinstance(cfg.get("fluxcal"), dict) else {}
     if bool((fcfg or {}).get("standard_apply_flat", True)):
+        superflat_path = _resolve_superflat_path(cfg, run_root)
+        if not Path(superflat_path).is_file():
+            raise FileNotFoundError(
+                f'STANDARD_FLATFIELD_REQUIRED: MasterFlat requested but missing '
+                f'at {superflat_path}; disabling the flag explicitly permits '
+                'a diagnostic-only standard extraction'
+            )
         try:
-            superflat_path = _resolve_superflat_path(cfg, run_root)
-            if Path(superflat_path).exists():
-                flat_path = stage_dir_path / f"{raw_path.stem}_flatcorr.fits"
-                apply_flat(raw_path, Path(superflat_path), flat_path, cfg=cfg, do_bias_subtract=True)
-                work_input = flat_path
-                prep_meta["flatfielded_input"] = str(flat_path)
-                prep_meta["superflat_path"] = str(superflat_path)
+            flat_path = stage_dir_path / f"{raw_path.stem}_flatcorr.fits"
+            apply_flat(
+                raw_path, Path(superflat_path), flat_path,
+                cfg=cfg, do_bias_subtract=True,
+            )
         except Exception as e:
-            prep_meta["flatfield_warning"] = str(e)
+            raise RuntimeError(
+                f'STANDARD_FLATFIELD_FAILED: cannot calibrate {raw_path} '
+                f'using {superflat_path}'
+            ) from e
+        work_input = flat_path
+        prep_meta["flatfielded_input"] = str(flat_path)
+        prep_meta["superflat_path"] = str(superflat_path)
+        prep_meta["flatfield_status"] = "applied"
+    else:
+        prep_meta["flatfield_status"] = "explicitly_disabled"
 
     lambda_map_path = PRODUCT_CATALOG.best_path(cfg, "lambda_map", run_root=run_root)
     lam_map = np.asarray(fits.getdata(lambda_map_path), dtype=float)
@@ -410,7 +431,20 @@ def run_standard_prepare(cfg: dict[str, Any], *, run_root: Path, stage_dir_path:
     else:
         safe_for = "response_only"
 
+    flat_unverified = prep_meta.get("flatfield_status") != "applied"
+    if flat_unverified:
+        # An explicit opt-out or a reused rectified file of unknown flat
+        # lineage may be inspected, but must never claim absolute readiness.
+        safe_for = "response_only"
+
     flags = []
+    if flat_unverified:
+        flags.append(make_flag(
+            "STANDARD_FLATFIELD_UNVERIFIED", "WARN",
+            "Standard-star flat-field correction is not verified; "
+            "absolute flux calibration is unqualified",
+            value=str(prep_meta.get("flatfield_status") or "unknown"),
+        ))
     if report is not None and report.status != StandardCompatibilityStatus.ABSOLUTE_TRUSTED:
         flags.append(make_flag("STANDARD_ASSOCIATION_DEGRADED", "WARN", "Selected standard is degraded relative to the science setup", value=str(report.status.value)))
     if capture_proxy < 0.90:

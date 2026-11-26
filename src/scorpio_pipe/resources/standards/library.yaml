@@ -6,3 +6,7 @@ standards:
     units: "f_lambda"
     wavelength_convention: "air"
     sampling: "tabulated"
+    # Historical four-point scaffold; NOT a traceable CALSPEC reference.
+    # Never use this record as a scientific flux standard.
+    scientific_status: "unvalidated_placeholder"
+    source: "historical_scaffold_not_scientific_reference"

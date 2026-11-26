@@ -27,7 +27,9 @@ class MiniNight:
     cfg_path: Path
 
 
-def _sc2_header(*, imagetyp: str, obj: str, ny: int, nx: int) -> "fits.Header":
+def _sc2_header(
+    *, imagetyp: str, obj: str, ny: int, nx: int, exptime_s: float
+) -> "fits.Header":
     # Local import to keep tests import-time light.
     from astropy.io import fits
 
@@ -37,8 +39,13 @@ def _sc2_header(*, imagetyp: str, obj: str, ny: int, nx: int) -> "fits.Header":
     h["INSTRUME"] = "SCORPIO-2"
     h["OBJECT"] = str(obj)
     h["IMAGETYP"] = str(imagetyp)
+    # Explicit frame acquisition duration. Linearize converts SCI to
+    # electrons/second and VAR to electrons^2/second^2; a synthetic science
+    # exposure must carry a physically meaningful positive EXPTIME.
+    h["EXPTIME"] = (float(exptime_s), "Exposure time (s)")
     h["RATE"] = 185.0
     h["GAIN"] = 0.62
+    h["RDNOISE"] = (3.0, "Synthetic CCD read noise [electrons]")
     h["NODE"] = "E"
     h["BINNING"] = "1x1"
     h["UT"] = "14:59:02.89"
@@ -67,12 +74,41 @@ def _gauss1d(x: np.ndarray, mu: float, sig: float) -> np.ndarray:
     return np.exp(-0.5 * ((x - float(mu)) / float(sig)) ** 2)
 
 
+def _synthetic_ccd(
+    mean_photo_adu: np.ndarray,
+    rng: np.random.Generator,
+    *,
+    gain_e_per_adu: float = 0.62,
+    read_noise_e: float = 3.0,
+) -> np.ndarray:
+    """Sample photoelectron shot noise and independent CCD read noise.
+
+    All Golden input frames have already had their electronic bias pedestal
+    removed (zero-offset ADU). This matches the Poisson+read-noise variance
+    estimator used when a raw science input lacks an upstream VAR extension.
+    Nonzero bias offsets need a separate explicit debiasing pathway.
+    """
+    mean = np.asarray(mean_photo_adu, dtype=np.float64)
+    if not np.all(np.isfinite(mean)) or np.any(mean < 0):
+        raise ValueError("Synthetic photoelectron mean must be nonnegative and finite")
+    gain = float(gain_e_per_adu)
+    rn = float(read_noise_e)
+    if not (np.isfinite(gain) and gain > 0 and np.isfinite(rn) and rn >= 0):
+        raise ValueError("Synthetic CCD gain/read noise must be physical")
+    poisson_e = rng.poisson(mean * gain)
+    noise_e = rng.normal(0.0, rn, size=mean.shape)
+    return (poisson_e + noise_e) / gain
+
+
 def make_mini_night(tmp_path: Path) -> MiniNight:
     """Create a deterministic tiny synthetic dataset + config."""
 
     from astropy.io import fits  # noqa: F401
 
-    work_dir = tmp_path / "work"
+    # Match the production run-folder/passport contract. The night folder
+    # follows DD_MM_YYYY and the run folder follows <object>_<disperser>_<NN>.
+    # Keep all synthetic products under pytest's isolated tmp_path.
+    work_dir = tmp_path / "16_12_2025" / "mini_night_VPHG1200@540_01"
     data_dir = tmp_path / "data"
     resources_dir = tmp_path / "resources"
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -93,28 +129,31 @@ def make_mini_night(tmp_path: Path) -> MiniNight:
     x = np.arange(nx, dtype=float)
 
     # --- bias frames ---
-    bias_level = 1000.0
-    rn = 3.0
+    # All frames use a zero electronic pedestal so the *estimated* Poisson
+    # variance does not mistake a detector bias offset for source photons.
+    bias_level = 0.0
     for i in range(3):
-        h = _sc2_header(imagetyp="bias", obj=f"bias{i+1}", ny=ny, nx=nx)
-        img = bias_level + rng.normal(0.0, rn, size=(ny, nx))
+        h = _sc2_header(imagetyp="bias", obj=f"bias{i+1}", ny=ny, nx=nx, exptime_s=0.0)
+        img = bias_level + _synthetic_ccd(np.zeros((ny, nx)), rng)
         _write_fits(data_dir / f"bias_{i+1:02d}.fits", img, h)
 
     # --- flat frames ---
     for i in range(3):
-        h = _sc2_header(imagetyp="flat", obj=f"flat{i+1}", ny=ny, nx=nx)
+        h = _sc2_header(imagetyp="flat", obj=f"flat{i+1}", ny=ny, nx=nx, exptime_s=10.0)
         grad = 1.0 + 0.15 * (x / float(nx - 1))
-        img = bias_level + 5000.0 * grad[None, :] + rng.normal(0.0, 10.0, size=(ny, nx))
+        flat_signal = np.broadcast_to(5000.0 * grad[None, :], (ny, nx))
+        img = bias_level + _synthetic_ccd(flat_signal, rng)
         _write_fits(data_dir / f"flat_{i+1:02d}.fits", img, h)
 
     # --- neon (arc) frames ---
     line_x = np.array([14, 28, 44, 60, 78, 96, 112], dtype=float)
     for i in range(2):
-        h = _sc2_header(imagetyp="neon", obj=f"neon{i+1}", ny=ny, nx=nx)
+        h = _sc2_header(imagetyp="neon", obj=f"neon{i+1}", ny=ny, nx=nx, exptime_s=30.0)
         spec = np.zeros(nx, dtype=float)
         for mu in line_x:
             spec += 700.0 * _gauss1d(x, mu, 1.2)
-        img = bias_level + 50.0 + spec[None, :] + rng.normal(0.0, 2.0, size=(ny, nx))
+        neon_signal = np.broadcast_to(50.0 + spec[None, :], (ny, nx))
+        img = bias_level + _synthetic_ccd(neon_signal, rng)
         _write_fits(data_dir / f"neon_{i+1:02d}.fits", img, h)
 
     # --- object (science) frames ---
@@ -125,9 +164,15 @@ def make_mini_night(tmp_path: Path) -> MiniNight:
     obj_bump = 25.0 * _gauss1d(x, 64.0, 6.0)
 
     for i in range(2):
-        h = _sc2_header(imagetyp="object", obj=f"obj{i+1}", ny=ny, nx=nx)
-        img = bias_level + 120.0 + sky_spec[None, :] + rng.normal(0.0, 4.0, size=(ny, nx))
-        img[28:36, :] += obj_bump[None, :]
+        h = _sc2_header(imagetyp="object", obj=f"obj{i+1}", ny=ny, nx=nx, exptime_s=300.0)
+        # This fixture explicitly simulates a zero-electronic-pedestal CCD
+        # product, NOT a raw detector exposure. Sky is forbidden to assume
+        # BIASSUB for real SCORPIO data without calibration provenance.
+        h["BIASSUB"] = (True, "Synthetic electronic pedestal removed")
+        h["SIMBZERO"] = (True, "Synthetic CCD bias offset is zero")
+        object_signal = np.broadcast_to(120.0 + sky_spec[None, :], (ny, nx)).copy()
+        object_signal[28:36, :] += obj_bump[None, :]
+        img = bias_level + _synthetic_ccd(object_signal, rng)
         _write_fits(data_dir / f"obj_{i+1:02d}.fits", img, h)
 
     # Hand pairs for wavesolution: enforce a perfectly linear dispersion law.
@@ -158,6 +203,10 @@ def make_mini_night(tmp_path: Path) -> MiniNight:
                 "slit": "1.0",
                 "binning": "1x1",
                 "shape": f"{ny}x{nx}",
+                # FrameSignature.from_setup() requires the same CCD readout
+                # token present in the synthetic SCORPIO-2 FITS headers.
+                # NODE=E, RATE=185.0, GAIN=0.62 (e-/ADU).
+                "readout": "nodeE_rate185.0_gain0.6200",
             },
         },
         "calib": {
@@ -179,6 +228,10 @@ def make_mini_night(tmp_path: Path) -> MiniNight:
             # keep 2D model modest for stability
             "poly_deg_x": 4,
             "poly_deg_y": 2,
+            # The test detector has only 64 spatial rows; the production
+            # trace_min_pts default (120) is geometrically impossible here.
+            # Retain a meaningful >=32-row trace requirement per lamp line.
+            "trace_min_pts": 32,
         },
         "sky": {
             "failure_policy": "strict",

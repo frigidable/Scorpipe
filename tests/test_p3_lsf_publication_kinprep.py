@@ -76,6 +76,31 @@ def test_p3_lsf_publication_ready_and_kinprep_pipeline() -> None:
         lsf_map = fits.getdata(out_lsf["lsf_map"], ext=1).astype(float)
         assert np.isfinite(lsf_map[:, 8:-8]).any()
         assert float(np.nanmedian(lsf_map[:, 8:-8])) > 0.2
+        # A finite extrapolated numerical LSF value is not a measured
+        # laboratory-line bracket. The explicit support product cannot
+        # be inferred from merely inspecting isfinite(lsf_map).
+        lsf_support_path = work_dir / "lsf_model" / "lsf_span_support.fits"
+        assert lsf_support_path.is_file()
+        # On Windows, np.asarray of a FITS memmap can preserve a view that
+        # keeps the temporary file locked even after HDUList.close().
+        # Both disable memmap and detach the array before leaving the block.
+        with fits.open(lsf_support_path, memmap=False) as support_hdu:
+            support = np.array(support_hdu[0].data, dtype=np.uint8, copy=True)
+            # The data must own its buffer after the FITS HDU is closed;
+            # otherwise Windows refuses TemporaryDirectory cleanup.
+            assert support.flags.owndata and support.base is None
+            assert support.shape == lam_map.shape
+            assert set(np.unique(support)).issubset({0, 1})
+            assert support_hdu[0].header["LSFSUP"] == "SPAN_ONLY"
+            assert support_hdu[0].header["LSFSCI"] is False
+        assert np.all(support[~np.isfinite(lam_map)] == 0)
+        assert np.any(support == 1) and np.any(support == 0)
+        qc = json.loads(
+            (work_dir / "lsf_model" / "lsf_qc.json").read_text(encoding="utf-8")
+        )
+        assert qc["numerically_finite_coverage_only"] is True
+        assert 0 < qc["empirical_span_support_fraction"] < 1
+        assert qc["science_lsf_validated"] is False
 
         grid = WaveGrid(lambda0=5002.0, dlambda=0.9, nlam=160, unit="Angstrom", wave_ref="air")
         sci = 10.0 + 20.0 * np.exp(-0.5 * ((np.arange(ny)[:, None] - ny / 2.0) / 3.0) ** 2)
@@ -90,6 +115,17 @@ def test_p3_lsf_publication_ready_and_kinprep_pipeline() -> None:
         assert Path(out_pub["outputs"]["spectrum"]).exists()
         assert Path(out_pub["outputs"]["wl"]).exists()
         assert Path(out_pub["outputs"]["dismap"]).exists()
+        assert out_pub["export_ok"] is True
+        assert out_pub["publication_ready"] is False
+        assert out_pub["science_qc_pass"] is False
+        assert out_pub["validation_level"] == "export_only"
+        for output in out_pub["outputs"].values():
+            with fits.open(output) as exported:
+                header = exported[0].header
+                assert header["EXPORTOK"] is True
+                assert header["PUBRDY"] is False
+                assert header["SCIQPASS"] is False
+                assert header["VALLEVEL"] == "EXPORT_ONLY"
         wl = fits.getdata(out_pub["outputs"]["wl"], ext=1).astype(float)
         dis = fits.getdata(out_pub["outputs"]["dismap"], ext=1).astype(float)
         assert wl.shape == lam_map.shape

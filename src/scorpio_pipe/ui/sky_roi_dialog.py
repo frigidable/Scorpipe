@@ -514,10 +514,10 @@ class SkyRoiDialog(QDialog):
             loader,
             name=f"sky-roi:{mode}:{self.fits_path.name}",
             dedupe_key=f"sky-roi:{self.fits_path.resolve()}",
+            on_finished=_done,
+            on_failed=_fail,
         )
         self._load_job = h
-        h.worker.finished.connect(_done)
-        h.worker.failed.connect(_fail)
 
     def _apply_image_payload(self, payload: RoiImagePayload) -> None:
         self.img = np.asarray(payload.image, dtype=float)

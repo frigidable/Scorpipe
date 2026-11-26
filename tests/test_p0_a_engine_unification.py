@@ -55,7 +55,7 @@ def test_workflow_manifest_task_delegates_to_engine(tmp_path: Path, monkeypatch)
     ns["_engine_run"].__globals__["run_sequence"] = fake_run_sequence
 
     task = ns["task_manifest"]()
-    assert str(task["targets"][0]).endswith("/manifest/done.json")
+    assert Path(task["targets"][0]) == run_root / "manifest" / "done.json"
 
     for act in task["actions"]:
         act()

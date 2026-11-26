@@ -53,7 +53,11 @@ class AutoConfig:
             # duplicated "work/.../work/..." when resolving relative paths.
             work_dir=self.work_dir,
             project={
-                "wave_reference": "UNKNOWN",
+                # The bundled SCORPIO He-Ne-Ar wavelength lists (neon_lines.csv
+                # and henear_lines.csv) explicitly use standard-air Angstroms.
+                # This describes the chosen atlas, not an instrument-intrinsic
+                # prohibition on later air/vacuum conversions.
+                "wave_reference": "air",
                 "barycentric_correction": "OFF",
             },
             instrument=instrument_section,
@@ -61,7 +65,8 @@ class AutoConfig:
                 **(self.calib or {}),
                 # Bias is best combined with a median to suppress rare outliers.
                 "bias_combine": "median",  # or: mean
-                "bias_sigma_clip": 0.0,  # set to e.g. 5.0 to suppress cosmics
+                "bias_sigma_clip": 0.0,  # sigma-clipped mean only; median clipping fails closed
+                "bias_gross_reject_adu": 0.0,  # opt-in experimental median rejection; never enabled automatically
             },
             cosmics={
                 "enabled": True,

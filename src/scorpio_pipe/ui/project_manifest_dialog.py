@@ -60,15 +60,16 @@ class ProjectManifestDialog(QtWidgets.QDialog):
         base_dir = Path(str(cfg.get("config_dir", "."))).expanduser().resolve()
         if not work_dir.is_absolute():
             work_dir = (base_dir / work_dir).resolve()
-        # Night-level manifest lives in data_dir by default (best for collaboration).
-        data_dir = Path(str(cfg.get("data_dir", ""))).expanduser() if cfg.get("data_dir") else None
-        if data_dir is not None:
-            try:
-                data_dir = data_dir.resolve()
-            except Exception:
-                data_dir = None
-        if data_dir is not None:
-            self._manifest_path = (data_dir / "project_manifest.yaml")
+        # The source FITS directory is immutable during science reduction.
+        # Role assignments for one object belong to this run by default.
+        # A shared night-level manifest must be explicitly opted into by
+        # supplying project_manifest_path in the config.
+        explicit_path = str(cfg.get("project_manifest_path") or "").strip()
+        if explicit_path:
+            selected = Path(explicit_path).expanduser()
+            if not selected.is_absolute():
+                selected = work_dir / selected
+            self._manifest_path = selected.resolve()
         else:
             self._manifest_path = resolve_project_manifest_path(work_dir)
 

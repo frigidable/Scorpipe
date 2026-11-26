@@ -91,3 +91,60 @@ def test_optimal_without_input_mask_does_not_create_spurious_flags() -> None:
     assert np.all(npix == 3)
     assert np.all(np.isfinite(flux))
     assert np.all(np.isfinite(out_var))
+
+
+@pytest.mark.parametrize("backend", ["numpy", "numba"])
+@pytest.mark.parametrize("smoothing", [0.0, 3.0])
+def test_masked_cosmic_preserves_full_aperture_flux_and_neighbouring_channels(
+    backend: str, smoothing: float,
+) -> None:
+    """Known 3-row object: an excluded CR must not turn 30 into 20 or 13."""
+    if backend == "numba" and not extraction._NUMBA_OK:
+        pytest.skip("Numba backend is optional")
+    ny, nlam = 9, 65
+    sci = np.zeros((ny, nlam), dtype=float)
+    sci[3:6] = 10.0
+    var = np.ones_like(sci)
+    mask = np.zeros((ny, nlam), dtype=np.uint16)
+    center = nlam // 2
+    sci[4, center] += 1000.0
+    mask[4, center] = np.uint16(COSMIC)
+    before = sci.copy()
+
+    flux, variance, flags, _sky, npix, meta = extraction._optimal_extract(
+        sci, var, mask, np.full(nlam, 4.0),
+        ap_hw=1,
+        fatal_bits=int(COSMIC | BADPIX | USER | NO_COVERAGE),
+        min_good_frac=0.6,
+        sky_resid=None,
+        apply_local_sky=False,
+        smooth_lambda_sigma=smoothing,
+        backend=backend,
+    )
+
+    np.testing.assert_allclose(flux, 30.0, atol=1e-9, rtol=0)
+    np.testing.assert_allclose(variance[np.arange(nlam) != center], 3.0, atol=1e-9)
+    assert variance[center] == pytest.approx(4.5, abs=1e-9)
+    assert npix[center] == 2
+    assert flags[center] & COSMIC
+    assert not (flags[center] & NO_COVERAGE)
+    assert meta["profile_normalization"] == "full_geometric_aperture"
+    assert meta["profile_unconstrained_frac"] == 0.0
+    np.testing.assert_array_equal(sci, before)
+
+
+def test_optimal_flags_profile_that_cannot_be_recovered_from_any_wavelength() -> None:
+    ny, nlam = 9, 40
+    sci = np.zeros((ny, nlam), dtype=float)
+    sci[3:6] = 10.0
+    var = np.ones_like(sci)
+    mask = np.zeros((ny, nlam), dtype=np.uint16)
+    mask[4] = np.uint16(COSMIC)
+    _flux, _var, flags, _sky, _npix, meta = extraction._optimal_extract(
+        sci, var, mask, np.full(nlam, 4.0),
+        ap_hw=1, fatal_bits=int(COSMIC),
+        min_good_frac=0.6, sky_resid=None, apply_local_sky=False,
+        smooth_lambda_sigma=3.0, backend="numpy",
+    )
+    assert np.all((flags & NO_COVERAGE) != 0)
+    assert meta["profile_unconstrained_frac"] == 1.0

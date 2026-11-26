@@ -73,7 +73,8 @@ def _write_clean_mask_bitmask(
     h["BUNIT"] = ("bitmask", "MASK unit (uint16 bitfield)")
     h["SATMSK"] = ("DQ_V1", "Typed cosmics DQ sidecar contract")
     if provenance_header is not None:
-        for key in ("SATQ", "SATADU", "SATMARG", "SATSRC"):
+        for key in ("SATQ", "SATADU", "SATMARG", "SATSRC",
+                    "SBDQVER", "SBDQCNT", "SB_GID"):
             if key in provenance_header:
                 h[key] = provenance_header[key]
     out = clean_dir / f"{base}_clean_mask.fits"
@@ -184,6 +185,193 @@ def _load_superbias(work_dir: Path) -> np.ndarray | None:
         except Exception:
             continue
     return None
+
+
+def _resolve_cosmics_superbias_for_kind(
+    cfg: dict[str, Any],
+    paths: list[Path],
+    work_dir: Path,
+    legacy_superbias: np.ndarray | None,
+    *,
+    selection_out: dict[str, Any] | None = None,
+    accept_masked_dq: bool = False,
+) -> np.ndarray | None:
+    """Pick a geometry/readout-specific bias for one compatible frame set.
+
+    Multi-exposure cosmic rejection requires a homogeneous CCD input group.
+    With a MasterBias index, selecting the global default bias alias is unsafe:
+    select the exact input group or fail before writing any cleaned exposure.
+    Historical unindexed calibrations retain the existing compatibility path;
+    those still require a separate end-to-end uncertainty audit.
+    """
+    if not paths:
+        return None
+    entries: list[tuple[Path, fits.Header, tuple[int, ...]]] = []
+    for path in paths:
+        with fits.open(path, memmap=False) as hdul:
+            if hdul[0].data is None:
+                raise ValueError(f"Cosmics raw image has no primary data: {path}")
+            entries.append((path, hdul[0].header.copy(), hdul[0].data.shape))
+    status = [bool(h.get("BIASSUB", False)) for _, h, _ in entries]
+    if all(status):
+        # The existing Cosmics primary-image writer cannot rehome a linked
+        # pending bias-variance sidecar. Never turn an already-calibrated
+        # frame into a new CLEAN with a dangling BVARREF reference.
+        if any(h.get("BVARREF") for _, h, _ in entries):
+            raise ValueError(
+                "Cosmics cannot reclean exposures with pending MasterBias "
+                "BVARREF: first propagate the linked variance in Flatfield"
+            )
+        return None  # Already corrected: never subtract a second time.
+    if any(status):
+        raise ValueError(
+            "Cosmics input set mixes BIASSUB=True and raw CCD frames. "
+            "Reduce separately or provide homogeneous calibrated inputs."
+        )
+
+    # This stage subtracts a MasterBias defined in ADU; interpreting an
+    # electron-valued CLEAN input as ADU would corrupt both SCI and VAR.
+    from scorpio_pipe.units_model import UnitModel, infer_unit_model
+
+    for path, hdr, _ in entries:
+        if infer_unit_model(hdr, default=UnitModel.ADU) != UnitModel.ADU:
+            raise ValueError(
+                f"Cosmics MasterBias subtraction requires ADU science: {path}"
+            )
+
+    from scorpio_pipe.stages.calib import (
+        load_master_bias_index,
+        resolve_master_bias,
+    )
+
+    index = load_master_bias_index(work_dir)
+    if not (isinstance(index, dict) and index.get("groups")):
+        # Instrument-labelled SCORPIO observations must not use an
+        # unverified global MasterBias alias in Cosmics. Defer correction
+        # to the indexed per-readout Flatfield stage, or let strict Sky
+        # refuse the uncalibrated raw exposure.
+        if any(
+            str(hdr.get("INSTRUME") or "").strip().upper().startswith("SCORPIO")
+            for _, hdr, _ in entries
+        ):
+            log.warning(
+                "Cosmics deferred bias subtraction: SCORPIO MasterBias "
+                "group index is missing; unindexed default alias is unsafe"
+            )
+            return None
+        # Legacy non-SCORPIO unindexed runs retain the original behavior.
+        return legacy_superbias
+
+    selections = [
+        resolve_master_bias(
+            cfg, hdr, sci_shape=tuple(shape), policy_override="strict",
+            **({"accept_masked_dq": True} if accept_masked_dq else {}),
+        )
+        for _, hdr, shape in entries
+    ]
+    groups = {sel.gid for sel in selections}
+    if len(groups) != 1 or not next(iter(groups)):
+        raise ValueError(
+            "Cosmics input exposures require different MasterBias readout "
+            "groups. Process these exposures separately."
+        )
+    selected = selections[0]
+    if selected.degraded:
+        raise ValueError(
+            "Cosmics MasterBias selection was degraded despite strict mode"
+        )
+    if not selected.sci_path.is_file():
+        raise FileNotFoundError(
+            f"Cosmics selected MasterBias is missing: {selected.sci_path}"
+        )
+    bias = np.asarray(fits.getdata(selected.sci_path, memmap=False), dtype=np.float32)
+    shapes = {shape for _, _, shape in entries}
+    if shapes != {bias.shape}:
+        raise ValueError(
+            "Cosmics MasterBias geometry does not match the science frame set: "
+            f"bias={bias.shape}, science={sorted(shapes)}"
+        )
+
+    if selected.var_path is None or not selected.var_path.is_file():
+        raise FileNotFoundError(
+            "Cosmics indexed MasterBias must have a propagated variance "
+            f"map: {selected.var_path}"
+        )
+    with fits.open(selected.var_path, memmap=False) as hdul:
+        if str(hdul[0].header.get("BUNIT") or "").strip().upper() != "ADU^2":
+            raise ValueError(
+                "Indexed Cosmics MasterBias VAR must explicitly use ADU^2"
+            )
+        if hdul[0].data is None:
+            raise ValueError("Selected MasterBias VAR has no image data")
+        var = np.asarray(hdul[0].data, dtype=np.float32)
+    if var.shape != bias.shape or not np.all(np.isfinite(var)) or np.any(var < 0):
+        raise ValueError(
+            "Cosmics selected MasterBias variance is invalid or has "
+            "incompatible geometry"
+        )
+    if selection_out is not None:
+        selection_out["selection"] = selected
+        selection_out["bias_var_adu2"] = var
+        if accept_masked_dq:
+            if selected.dq_path is None or not selected.dq_path.is_file():
+                raise FileNotFoundError("Indexed MasterBias DQ is missing")
+            selection_out["masterbias_dq"] = np.asarray(
+                fits.getdata(selected.dq_path, memmap=False), dtype=np.uint16,
+            )
+    return bias
+
+
+def _attach_cosmics_masterbias_variance(
+    kind_out: Path,
+    paths: list[Path],
+    *,
+    selection: Any,
+    var_adu2: np.ndarray,
+    masterbias_dq: np.ndarray | None = None,
+) -> None:
+    """Link the actual MasterBias uncertainty to each primary-only CLEAN image.
+
+    The image and DQ sidecar remain compatible with the existing Cosmics GUI.
+    Missing output / wrong shape / incorrect BIASSUB raises instead of silently
+    producing a cleaned frame with incomplete noise provenance.
+    """
+    from scorpio_pipe.cosmics_biasvar import write_clean_biasvar_sidecar
+    from scorpio_pipe.stages.calib import stamp_bias_selection
+
+    for raw in paths:
+        clean = kind_out / "clean" / f"{raw.stem}_clean.fits"
+        if not clean.is_file():
+            raise FileNotFoundError(
+                f"Cosmics selected bias but cleaned FITS is absent: {clean}"
+            )
+        with fits.open(clean, memmap=False) as hdul:
+            if hdul[0].data is None:
+                raise ValueError(f"Cosmics cleaned FITS has no data: {clean}")
+            data = np.asarray(hdul[0].data, dtype=np.float32)
+            header = hdul[0].header.copy()
+        if not bool(header.get("BIASSUB", False)):
+            raise ValueError(
+                f"Cosmics selected MasterBias was not applied: {clean}"
+            )
+        if data.shape != np.asarray(var_adu2).shape:
+            raise ValueError(
+                f"Cosmics MasterBias variance shape mismatch: {clean}"
+            )
+        if masterbias_dq is not None:
+            dq = read_clean_dq_sidecar(clean, header, data.shape)
+            if (dq is None or header.get("SBDQVER") != 1
+                    or str(header.get("SB_GID") or "") != str(selection.gid)
+                    or not np.all((dq & masterbias_dq) == masterbias_dq)):
+                raise ValueError(f"Cosmics lost MasterBias DQ: {clean}")
+        sidecar = write_clean_biasvar_sidecar(
+            clean, var_adu2=var_adu2, group_id=str(selection.gid)
+        )
+        header = stamp_bias_selection(header, selection)
+        header["BVARREF"] = (sidecar.name, "MasterBias variance sidecar")
+        header["BVARINC"] = (False, "MasterBias variance not in SCI VAR")
+        header["SB_REF"] = (selection.sci_path.name, "Selected MasterBias")
+        atomic_write_fits(clean, data, header=header, overwrite=True)
 
 
 def _robust_mad(x: np.ndarray, axis: int = 0) -> np.ndarray:
@@ -527,7 +715,12 @@ def _two_frame_diff_clean(
                 )
 
     if bias_subtract and superbias is not None:
-        if superbias.shape[0] >= ny and superbias.shape[1] >= nx:
+        already = [bool(hdr.get("BIASSUB", False)) for hdr in headers]
+        if any(already) and not all(already):
+            raise ValueError("Cosmics cannot mix BIASSUB=True and raw inputs")
+        if all(already):
+            pass  # Respect existing physical calibration provenance.
+        elif superbias.shape[0] >= ny and superbias.shape[1] >= nx:
             sb = superbias[:ny, :nx]
             datas = [d - sb for d in datas]
             for hdr in headers:
@@ -719,7 +912,9 @@ def _single_frame_laplacian_clean(
     # Evaluate detector ADC saturation before any bias correction/inpainting.
     detector_dq, hdr = carry_detector_saturation(img, None, hdr, cfg or {})
 
-    if bias_subtract and superbias is not None and superbias.shape == img.shape:
+    if (bias_subtract and superbias is not None
+            and superbias.shape == img.shape
+            and not bool(hdr.get("BIASSUB", False))):
         img = img - superbias
         hdr["BIASSUB"] = (True, "Superbias subtracted")
 
@@ -853,6 +1048,35 @@ def _single_frame_laplacian_clean(
 
 
 
+def _reconcile_lacosmic_line_protection(
+    original: np.ndarray,
+    cleaned: np.ndarray,
+    crmask: np.ndarray,
+    line_protect: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Reconcile Astro-SCRAPPY's *already replaced* pixels with protected lines.
+
+    Returns CLEAN, retained cosmic mask, and ambiguous line/cosmic overlap.
+    A positive CR classification on an apparent emission line is ambiguous:
+    keep the observed photon counts, but attach BADPIX to the DQ sidecar.
+    Silent replacement without either a mask or preserved signal is forbidden.
+    """
+    before = np.asarray(original, dtype=np.float32)
+    after = np.asarray(cleaned, dtype=np.float32).copy()
+    cr = np.asarray(crmask, dtype=bool)
+    if before.shape != after.shape or cr.shape != before.shape:
+        raise ValueError("Astro-SCRAPPY original, cleaned and mask shapes differ")
+    ambiguous = np.zeros(cr.shape, dtype=bool)
+    if line_protect is not None:
+        protected = np.asarray(line_protect, dtype=bool)
+        if protected.shape != cr.shape:
+            raise ValueError("Line protection shape does not match cosmic mask")
+        ambiguous = cr & protected
+        after[ambiguous] = before[ambiguous]
+        cr = cr & (~protected)
+    return after, cr, ambiguous
+
+
 def _single_frame_lacosmic_clean(
     path: Path,
     *,
@@ -873,6 +1097,10 @@ def _single_frame_lacosmic_clean(
     protect_half_y: int = 1,
     protect_k: float = 5.0,
     roi: _RoiSpec | None = None,
+    masterbias_dq: np.ndarray | None = None,
+    bias_selection: Any = None,
+    mask_raw_zero: bool = False,
+    write_aggregate: bool = True,
 ) -> CosmicsSummary:
     """Single-frame L.A.Cosmic-like detector (van Dokkum 2001 style)."""
 
@@ -886,18 +1114,60 @@ def _single_frame_lacosmic_clean(
     img, hdr, _info = read_image_smart(path, memmap="auto", dtype=np.float32)
     # Evaluate detector ADC saturation before any bias correction/inpainting.
     detector_dq, hdr = carry_detector_saturation(img, None, hdr, cfg or {})
-    if bias_subtract and superbias is not None and superbias.shape == img.shape:
+    if masterbias_dq is not None:
+        if (not bias_subtract or superbias is None or bias_selection is None
+                or bool(hdr.get("BIASSUB", False))
+                or masterbias_dq.shape != img.shape
+                or superbias.shape != img.shape):
+            raise ValueError("Independent L.A.Cosmic requires raw SCI and matching MasterBias SCI/DQ")
+        from scorpio_pipe.stages.calib import stamp_bias_selection
+
+        detector_dq = np.asarray(detector_dq, dtype=np.uint16) | masterbias_dq
+        if mask_raw_zero:
+            detector_dq[img == 0] |= np.uint16(maskbits.BADPIX)
+        hdr = stamp_bias_selection(hdr, bias_selection)
+        hdr["SBDQVER"] = (1, "MasterBias DQ handoff version")
+        hdr["SBDQCNT"] = (int(np.count_nonzero(masterbias_dq)), "MasterBias flagged pixels")
+        hdr["RAWZMASK"] = (bool(mask_raw_zero), "Mask raw zero ADU")
+    if (
+        bias_subtract and superbias is not None
+        and superbias.shape == img.shape
+        and not bool(hdr.get("BIASSUB", False))
+    ):
         img = img - superbias
         hdr["BIASSUB"] = (True, "Superbias subtracted")
 
     roi = _coerce_roi_spec(roi, img.shape)
     img_eval = _crop2d(img, roi)
+    bad_eval = None
+    if masterbias_dq is not None:
+        bad_eval = np.ascontiguousarray(_crop2d(detector_dq, roi) != 0)
+        if bad_eval.all():
+            raise ValueError("No valid pixels for independent L.A.Cosmic")
     line_protect: np.ndarray | None = None
     if bool(protect_lines):
-        rx = img_eval - _boxcar_mean2d(img_eval, r=int(max(1, protect_half_x)))
-        ry = img_eval - _boxcar_mean2d(img_eval, r=int(max(1, protect_half_y)))
-        sx = _robust_sigma_mad_1d(rx)
-        sy = _robust_sigma_mad_1d(ry)
+        if bad_eval is None:
+            rx = img_eval - _boxcar_mean2d(img_eval, r=int(max(1, protect_half_x)))
+            ry = img_eval - _boxcar_mean2d(img_eval, r=int(max(1, protect_half_y)))
+            sx = _robust_sigma_mad_1d(rx)
+            sy = _robust_sigma_mad_1d(ry)
+        else:
+            from scipy.ndimage import uniform_filter
+
+            good = (~bad_eval).astype(np.float64)
+            values = np.where(bad_eval, 0.0, img_eval).astype(np.float64)
+
+            def residual(radius: int) -> np.ndarray:
+                size = 2 * max(1, int(radius)) + 1
+                count = uniform_filter(good, size=size, mode="mirror")
+                total = uniform_filter(values, size=size, mode="mirror")
+                mean = np.divide(total, count, out=values.copy(), where=count > 0)
+                return img_eval - mean
+
+            rx = residual(protect_half_x)
+            ry = residual(protect_half_y)
+            sx = _robust_sigma_mad_1d(rx[~bad_eval])
+            sy = _robust_sigma_mad_1d(ry[~bad_eval])
         if np.isfinite(sx) and np.isfinite(sy) and sx > 0 and sy > 0:
             line_protect = (np.abs(rx) > float(protect_k) * sx) & (
                 np.abs(ry) < 0.8 * float(protect_k) * sy
@@ -911,22 +1181,63 @@ def _single_frame_lacosmic_clean(
             "Install scorpio-pipe with the required dependencies (astroscrappy) or choose another cosmics method."
         ) from e
 
+    # Astro-SCRAPPY builds its noise model from input detector ADU.
+    # Feeding an electron-valued or per-second image with an e-/ADU gain
+    # produces dimensionally incorrect thresholds.
+    from scorpio_pipe.units_model import UnitModel, infer_unit_model
+    if infer_unit_model(hdr, default=UnitModel.ADU) != UnitModel.ADU:
+        raise ValueError("LA-Cosmic requires detector-integrated ADU science")
+    # Astro-SCRAPPY defaults to GAIN=1 e-/ADU and RN=6.5 e-; these
+    # assumptions are not valid for arbitrary SCORPIO readout modes.
+    from scorpio_pipe.noise_model import resolve_noise_params
+
+    npar = resolve_noise_params(
+        hdr, cfg=cfg or {},
+        bias_rn_est_e=(None if bias_selection is None else bias_selection.rdnoise_e),
+        require_gain=str(hdr.get("INSTRUME") or "").upper().startswith("SCORPIO"),
+    )
+    if masterbias_dq is not None:
+        from scorpio_pipe.noise_model import stamp_noise_keywords
+
+        if (not np.isfinite(npar.rdnoise_e) or npar.rdnoise_e <= 0
+                or npar.rn_src not in {"HDR", "EST", "CONF", "OVR"}
+                or npar.gain_src == "DEF"):
+            raise ValueError("Independent L.A.Cosmic requires measured or configured read noise")
+        hdr = stamp_noise_keywords(hdr, npar, overwrite=True)
     crmask, cleaned_eval = astroscrappy.detect_cosmics(
-        img_eval,
+        np.ascontiguousarray(img_eval.copy()) if bad_eval is not None else img_eval,
+        **({"inmask": bad_eval.copy()} if bad_eval is not None else {}),
         sigclip=float(sigclip),
         sigfrac=float(sigfrac),
         objlim=float(objlim),
         niter=int(max(1, niter)),
+        gain=float(npar.gain_e_per_adu),
+        readnoise=float(npar.rdnoise_e),
         verbose=False,
     )
-    m_eval = np.asarray(crmask, dtype=bool)
-    if line_protect is not None:
-        m_eval = m_eval & (~line_protect)
-    cleaned_eval = np.asarray(cleaned_eval, dtype=np.float32)
+    cleaned_eval, m_eval, protected_ambiguous = (
+        _reconcile_lacosmic_line_protection(
+            img_eval, cleaned_eval, crmask, line_protect,
+        )
+    )
+    if bad_eval is not None:
+        # A masked detector pixel cannot become a cosmic detection or a valid
+        # interpolated sample. Do not change any unclassified input SCI.
+        m_eval &= ~bad_eval
+        protected_ambiguous &= ~bad_eval
+        cleaned_eval = np.where(m_eval, cleaned_eval, img_eval)
+    if np.any(protected_ambiguous):
+        ambiguous_full = _merge_roi_bool(
+            protected_ambiguous, img.shape, roi,
+        )
+        detector_dq = np.asarray(detector_dq, dtype=np.uint16).copy()
+        detector_dq[ambiguous_full] |= np.uint16(maskbits.BADPIX)
     engine = "astroscrappy"
     sigma_lap = float("nan")
 
     m_eval = _dilate_mask(m_eval, r=int(max(0, dilate)))
+    if bad_eval is not None:
+        m_eval &= ~bad_eval
     m = _merge_roi_bool(m_eval, img.shape, roi)
     cleaned = _merge_roi_float(img, cleaned_eval, roi)
 
@@ -944,6 +1255,10 @@ def _single_frame_lacosmic_clean(
     h["COSM_SC"] = (float(sigclip), "L.A.Cosmic sigclip")
     h["COSM_SF"] = (float(sigfrac), "L.A.Cosmic sigfrac")
     h["COSM_OL"] = (float(objlim), "L.A.Cosmic objlim")
+    h["COSM_GN"] = (float(npar.gain_e_per_adu), "Astro-SCRAPPY gain e-/ADU")
+    h["COSM_RN"] = (float(npar.rdnoise_e), "Astro-SCRAPPY read noise e-")
+    h["COSM_RS"] = (str(npar.rn_src)[:8], "Cosmics read-noise provenance")
+    h["COSM_N"] = (int(np.count_nonzero(protected_ambiguous)), "Ambiguous line/CR pixels, BADPIX")
     _stamp_roi_header(h, roi)
     h["HISTORY"] = "scorpio_pipe cosmics: la_cosmic (van Dokkum-like)"
     atomic_write_fits(out_f, cleaned.astype(np.float32), header=h, overwrite=True)
@@ -968,8 +1283,9 @@ def _single_frame_lacosmic_clean(
 
     sum_f = out_dir / "sum_excl_cosmics.fits"
     cov_f = out_dir / "coverage.fits"
-    atomic_write_fits(sum_f, (img * (~m)).astype(np.float32), overwrite=True)
-    atomic_write_fits(cov_f, (~m).astype(np.int16), overwrite=True)
+    if write_aggregate:
+        atomic_write_fits(sum_f, (img * (~m)).astype(np.float32), overwrite=True)
+        atomic_write_fits(cov_f, (~m).astype(np.int16), overwrite=True)
 
     outputs: dict[str, Any] = {
         "clean_dir": str((out_dir / "clean").resolve()),
@@ -1358,6 +1674,60 @@ def _stack_mad_clean(
 
 
 
+def _independent_lacosmic_group(
+    paths: list[Path], *, out_dir: Path, masterbias_dq: np.ndarray,
+    bias_selection: Any, **kwargs: Any,
+) -> CosmicsSummary:
+    """Run independent detections on the original CCD grid (no stack matching).
+
+    All nonzero typed DQ is excluded from the diagnostic sum and coverage.
+    These are diagnostic products, not a registered science stack.
+    """
+    per_frame: list[float] = []
+    replaced = 0
+    total = np.zeros(masterbias_dq.shape, dtype=np.float64)
+    coverage = np.zeros(masterbias_dq.shape, dtype=np.int32)
+    for raw in paths:
+        s = _single_frame_lacosmic_clean(
+            raw, out_dir=out_dir, masterbias_dq=masterbias_dq,
+            bias_selection=bias_selection, write_aggregate=False, **kwargs,
+        )
+        per_frame.extend(s.per_frame_fraction)
+        replaced += s.replaced_pixels
+        clean = out_dir / "clean" / f"{raw.stem}_clean.fits"
+        data, header = fits.getdata(clean, header=True, memmap=False)
+        dq = read_clean_dq_sidecar(clean, header, data.shape)
+        if dq is None or not np.all((dq & masterbias_dq) == masterbias_dq):
+            raise ValueError(f"Independent L.A.Cosmic lost MasterBias DQ: {clean}")
+        valid = (dq == 0) & np.isfinite(data)
+        total += np.where(valid, data, 0.0)
+        coverage += valid
+    sum_f = out_dir / "sum_excl_cosmics.fits"
+    cov_f = out_dir / "coverage.fits"
+    atomic_write_fits(sum_f, total.astype(np.float32), overwrite=True)
+    atomic_write_fits(cov_f, coverage, overwrite=True)
+    outputs: dict[str, Any] = {
+        "clean_dir": str((out_dir / "clean").resolve()),
+        "sum_excl_fits": str(sum_f.resolve()),
+        "coverage_fits": str(cov_f.resolve()),
+        "engine": "astroscrappy_independent",
+        "aggregate": "diagnostic_unregistered_exclude_all_dq",
+    }
+    if kwargs.get("save_mask_fits"):
+        outputs["masks_fits_dir"] = str((out_dir / "masks_fits").resolve())
+    if kwargs.get("save_png"):
+        outputs["masks_dir"] = str((out_dir / "masks").resolve())
+    roi = _coerce_roi_spec(kwargs.get("roi"), masterbias_dq.shape)
+    if roi is not None:
+        outputs["roi"] = roi.to_dict()
+    return CosmicsSummary(
+        kind="", n_frames=len(paths), k=float(kwargs.get("sigclip", 4.5)),
+        replaced_pixels=replaced,
+        replaced_fraction=float(replaced / (len(paths) * masterbias_dq.size)),
+        per_frame_fraction=per_frame, outputs=outputs,
+    )
+
+
 def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
     """Clean cosmics and write a report.
 
@@ -1431,6 +1801,14 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
     bias_subtract = bool(ccfg.get("bias_subtract", True))
     save_png = bool(ccfg.get("save_png", True))
     save_mask_fits = bool(ccfg.get("save_mask_fits", True))
+    independent = method == "la_cosmic_independent"
+    mask_raw_zero = bool(ccfg.get("mask_raw_zero", False))
+    if mask_raw_zero and not independent:
+        raise ValueError("mask_raw_zero requires la_cosmic_independent")
+    if independent and (not bias_subtract or bool(ccfg.get("preserve_manual", True))):
+        raise ValueError(
+            "la_cosmic_independent requires indexed bias subtraction and preserve_manual=false"
+        )
 
     # ---- optional tuning knobs (safe defaults keep legacy behavior) ----
     def _as_int(x: Any, default: int) -> int:
@@ -1526,11 +1904,47 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
         if len(paths) == 0:
             continue
 
+        # Exact CCD readout/group selection before any cosmic replacement.
+        # A global default MasterBias can only be used by legacy unindexed
+        # observations. The indexed path fails closed on mixed readouts.
+        kind_bias_meta: dict[str, Any] = {}
+        kind_superbias = (
+            _resolve_cosmics_superbias_for_kind(
+                cfg, paths, work_dir, superbias,
+                selection_out=kind_bias_meta, accept_masked_dq=independent,
+            )
+            if bias_subtract else None
+        )
+
         kind_out = out_root / kind
         kind_out.mkdir(parents=True, exist_ok=True)
 
         summary: CosmicsSummary
-        if method in (
+        if independent:
+            if ("selection" not in kind_bias_meta
+                    or "masterbias_dq" not in kind_bias_meta
+                    or kind_superbias is None):
+                raise RuntimeError("Independent L.A.Cosmic requires indexed raw-frame MasterBias SCI/VAR/DQ")
+            if len({p.stem for p in paths}) != len(paths):
+                raise ValueError("Independent L.A.Cosmic input basenames must be unique")
+            summary = _independent_lacosmic_group(
+                paths, out_dir=kind_out, superbias=kind_superbias,
+                masterbias_dq=kind_bias_meta["masterbias_dq"],
+                bias_selection=kind_bias_meta["selection"],
+                bias_subtract=True, save_png=save_png, save_mask_fits=save_mask_fits,
+                cfg=cfg, niter=la_niter, sigclip=la_sigclip, sigfrac=la_sigfrac,
+                objlim=la_objlim, replace_r=la_replace_r, dilate=la_dilate,
+                protect_lines=la_protect_lines, protect_half_x=la_protect_half_x,
+                protect_half_y=la_protect_half_y, protect_k=la_protect_k,
+                roi=roi_cfg, mask_raw_zero=mask_raw_zero,
+            )
+            summary = CosmicsSummary(
+                kind=kind, n_frames=summary.n_frames, k=summary.k,
+                replaced_pixels=summary.replaced_pixels,
+                replaced_fraction=summary.replaced_fraction,
+                per_frame_fraction=summary.per_frame_fraction, outputs=summary.outputs,
+            )
+        elif method in (
             "auto",
             "la_cosmic",
             "lacosmic",
@@ -1565,7 +1979,7 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
                 summary = _stack_mad_clean(
                     paths,
                     out_dir=kind_out,
-                    superbias=superbias,
+                    superbias=kind_superbias,
                     k=k,
                     mad_scale=mad_scale,
                     min_mad=min_mad,
@@ -1590,7 +2004,7 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
                 summary = _two_frame_diff_clean(
                     paths,
                     out_dir=kind_out,
-                    superbias=superbias,
+                    superbias=kind_superbias,
                     k=k,
                     dilate=int(
                         two_diff_dilate if two_diff_dilate is not None else dilate
@@ -1615,7 +2029,7 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
                 summary = _single_frame_lacosmic_clean(
                     paths[0],
                     out_dir=kind_out,
-                    superbias=superbias,
+                    superbias=kind_superbias,
                     bias_subtract=bias_subtract,
                     save_png=save_png,
                     save_mask_fits=save_mask_fits,
@@ -1636,7 +2050,7 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
                 summary = _single_frame_laplacian_clean(
                     paths[0],
                     out_dir=kind_out,
-                    superbias=superbias,
+                    superbias=kind_superbias,
                     k=k,
                     dilate=int(lap_dilate if lap_dilate is not None else dilate),
                     local_r=int(lap_local_r if lap_local_r is not None else local_r),
@@ -1740,6 +2154,17 @@ def clean_cosmics(cfg: Any, *, out_dir: str | Path | None = None) -> Path:
                 replaced_fraction=0.0,
                 per_frame_fraction=[0.0] * len(paths),
                 outputs=outputs,
+            )
+
+        # An indexed MasterBias may be subtracted only if its declared
+        # uncertainty remains available to Flatfield and Sky. The legacy
+        # cleaned image stays primary-only; variance has a typed sidecar.
+        if "selection" in kind_bias_meta:
+            _attach_cosmics_masterbias_variance(
+                kind_out, paths,
+                selection=kind_bias_meta["selection"],
+                var_adu2=kind_bias_meta["bias_var_adu2"],
+                masterbias_dq=kind_bias_meta.get("masterbias_dq"),
             )
 
         # Write per-kind QC snapshot (machine-readable) for UI/diagnostics.

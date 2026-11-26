@@ -1,17 +1,20 @@
 {
   "qc": {
-    "max_severity": "OK",
-    "flag_codes": []
+    "max_severity": "WARN",
+    "flag_codes": [
+      "FLEXURE_UNVERIFIED",
+      "SKY_MODEL_VAR_UNVERIFIED"
+    ]
   },
   "navigator": {
     "qc_summary": {
-      "max_severity": "OK",
-      "n_warn": 0,
+      "max_severity": "WARN",
+      "n_warn": 2,
       "n_error": 0
     },
     "stages_status": {
       "wavesol": "NOT_RUN",
-      "sky": "DONE_OK",
+      "sky": "DONE_WARN",
       "linearize": "DONE_OK",
       "stack2d": "DONE_OK",
       "extract1d": "DONE_OK"

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 
 def test_recent_ui_actions_tracks_begin_end_and_inflight() -> None:
     from scorpio_pipe.ui import slow_action_profiler as sap
@@ -40,26 +42,23 @@ def test_freeze_watchdog_dump_contains_stack_jobs_backlog_and_recent_actions(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    import sys
-    import types
-
-    from scorpio_pipe.ui import slow_action_profiler as sap
+    # Qt is an optional GUI extra, absent from the headless fast CI job.
+    # Keep the GUI behavior tested when installed, without breaking core CI.
+    pytest.importorskip("PySide6")
+    from scorpio_pipe.ui import async_worker, qt_log, slow_action_profiler as sap
     from scorpio_pipe.ui.freeze_watchdog import FreezeWatchdog
 
     sap._reset_recent_ui_actions_for_tests()
 
-    fake_async_worker = types.ModuleType("scorpio_pipe.ui.async_worker")
-    fake_async_worker.snapshot_active_qthreads = lambda: [
+    # Patch the actual module objects. sys.modules-only replacement is not
+    # enough when earlier GUI tests already imported these as package attrs.
+    monkeypatch.setattr(async_worker, "snapshot_active_qthreads", lambda: [
         "QThreadPool max=4 active=1",
         "job_registry active=2 running=1 queued=1 cancelled_active=0 stale_active=0 queue_limit=200 deduped_total=3 queue_evicted_total=1",
         "job id=41 name='inspect_dataset' key='inspect:/data' age_s=2.50 running=True queued=False stale=False cancelled=False",
         "job id=42 name='fits_preview' key='preview:/frame.fits' age_s=1.20 running=False queued=True stale=False cancelled=False",
-    ]
-    fake_qt_log = types.ModuleType("scorpio_pipe.ui.qt_log")
-    fake_qt_log.get_backlog_snapshot = lambda: {"lines": 123, "chars": 4567}
-
-    monkeypatch.setitem(sys.modules, "scorpio_pipe.ui.async_worker", fake_async_worker)
-    monkeypatch.setitem(sys.modules, "scorpio_pipe.ui.qt_log", fake_qt_log)
+    ])
+    monkeypatch.setattr(qt_log, "get_backlog_snapshot", lambda: {"lines": 123, "chars": 4567})
 
     cm = sap.profile_ui_action("Open heavy ROI dialog", threshold_ms=999999)
     cm.__enter__()

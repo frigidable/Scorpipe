@@ -294,6 +294,27 @@ class RunHandle(Generic[T]):
         return self._done.wait(timeout=float(timeout_ms) / 1000.0)
 
 
+def _emit_worker_signal(worker: WorkerSignals[T], signal_name: str, value: object) -> bool:
+    """Return False if Qt already deleted the signal owner during shutdown.
+
+    A background QRunnable may outlive its QApplication/receiver in a failed
+    test or application teardown. Such a result cannot be delivered; do not
+    compound the situation by trying to emit a second failure signal from
+    the same deleted QObject.
+    """
+    try:
+        getattr(worker, signal_name).emit(value)
+        return True
+    except RuntimeError as exc:
+        msg = str(exc)
+        if (
+            "Signal source has been deleted" in msg
+            or ("Internal C++ object" in msg and "already deleted" in msg)
+        ):
+            return False
+        raise
+
+
 class _PoolRunnable(QtCore.QRunnable):
     def __init__(self, fn: Callable[[], T], handle: RunHandle[T]):
         super().__init__()
@@ -322,7 +343,13 @@ class _PoolRunnable(QtCore.QRunnable):
             elif h.is_stale:
                 outcome = "stale"
             else:
-                h.worker.finished.emit(res)
+                # A Qt callback can run on the receiving thread while
+                # signal.emit() is still in progress. Publish completion
+                # BEFORE delivering the callback, so clients observing a
+                # finished result always see handle.is_done == True.
+                h._done.set()
+                if not _emit_worker_signal(h.worker, "finished", res):
+                    outcome = "stale"
         except Exception:
             tb = traceback.format_exc()
             if h.is_cancelled:
@@ -331,7 +358,11 @@ class _PoolRunnable(QtCore.QRunnable):
                 outcome = "stale"
             else:
                 outcome = "failed"
-                h.worker.failed.emit(tb)
+                # Mirror the successful path: even an immediate failed
+                # callback must observe terminal handle state.
+                h._done.set()
+                if not _emit_worker_signal(h.worker, "failed", tb):
+                    outcome = "stale"
         finally:
             _finish_job(h, outcome=outcome)
 
@@ -507,6 +538,8 @@ def run_in_thread(
     name: str | None = None,
     dedupe_key: str | None = None,
     latest_wins: bool | None = None,
+    on_finished: Callable[[T], None] | None = None,
+    on_failed: Callable[[str], None] | None = None,
 ) -> RunHandle[T]:
     """Submit ``fn`` to the global QThreadPool and return a handle.
 
@@ -521,6 +554,9 @@ def run_in_thread(
         Override whether previous jobs with the same ``dedupe_key`` should be
         cancelled before queuing the new one. Defaults to ``True`` when a
         ``dedupe_key`` is provided.
+    on_finished, on_failed:
+        Optional signal callbacks connected BEFORE the runnable is submitted,
+        preventing lost results when a fast worker finishes immediately.
 
     Notes
     -----
@@ -548,6 +584,13 @@ def run_in_thread(
     )
     _bump_stat("submitted_total")
 
+    # Connect before _POOL.start: workers may complete and emit a signal
+    # before callers can connect to h.worker after run_in_thread returns.
+    if on_finished is not None:
+        sig.finished.connect(on_finished)
+    if on_failed is not None:
+        sig.failed.connect(on_failed)
+
     try:
         with _ACTIVE_JOBS_LOCK:
             _ACTIVE_JOBS[job_id] = h  # keep strong ref until done
@@ -564,9 +607,11 @@ def run_in_thread(
             _mark_job_running(h)
             res = fn()
             if not (h.is_stale or h.is_cancelled):
+                h._done.set()
                 sig.finished.emit(res)
             _finish_job(h, outcome=("cancelled" if h.is_cancelled else ("stale" if h.is_stale else "finished")))
         except Exception:
+            h._done.set()
             sig.failed.emit(traceback.format_exc())
             _finish_job(h, outcome="failed")
 

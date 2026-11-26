@@ -633,6 +633,23 @@ def apply_project_manifest_to_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(roles, dict):
         roles = {}
 
+    # A work layout creates a default manifest containing *all* role
+    # names with empty files/globs. The existence of role keys alone
+    # is not an explicit selection: applying that template as an
+    # override silently deletes valid AutoConfig science/calibrations.
+    # One populated role makes the set an intentionally curated
+    # manifest (including deliberately empty roles); an explicit mode
+    # also supports a deliberate all-empty selection.
+    explicit_role_mode = str(manifest.get("role_policy") or "").strip().lower() == "explicit"
+    has_assigned_roles = any(
+        any(_parse_role_entry(entry))
+        for role, entry in roles.items()
+        if role in ROLE_TO_FRAMES_KEY
+    )
+    apply_role_overrides = bool(
+        explicit_role_mode or has_assigned_roles or active_group
+    )
+
     # data_dir resolution
     data_dir_eff = Path(str(cfg.get("data_dir") or (config_dir or manifest_dir))).expanduser().resolve()
 
@@ -643,7 +660,7 @@ def apply_project_manifest_to_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
     applied_roles: list[str] = []
 
     for role, frames_key in ROLE_TO_FRAMES_KEY.items():
-        if role not in roles:
+        if not apply_role_overrides or role not in roles:
             continue
         files_s, globs_s, excl_s = _parse_role_entry(roles.get(role))
         files = [_resolve_one(x, data_dir=data_dir_eff, manifest_dir=manifest_dir) for x in files_s]
@@ -675,6 +692,26 @@ def apply_project_manifest_to_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
         # Stages/dataset builder can use this unified list.
         cfg["exclude_frames"] = excluded_abs
 
+    # In a curated manifest, a dedicated SKY exposure must not also enter
+    # OBJECT_FRAMES. Resolve relative vs absolute spellings before comparing;
+    # fail before any downstream Cosmics/Stack2D stage sees ambiguous roles.
+    from os.path import normcase
+
+    def _frame_identity(raw_path: Any) -> str:
+        p = Path(str(raw_path)).expanduser()
+        if not p.is_absolute():
+            p = data_dir_eff / p
+        return normcase(str(p.resolve()))
+
+    obj_ids = {_frame_identity(p) for p in (frames.get("obj") or [])}
+    sky_ids = {_frame_identity(p) for p in (frames.get("sky") or [])}
+    role_conflicts = sorted(obj_ids & sky_ids)
+    if role_conflicts:
+        raise ValueError(
+            "A frame cannot be both OBJECT_FRAMES and SKY_FRAMES: "
+            + ", ".join(role_conflicts[:5])
+        )
+
     cfg["frames"] = frames
 
     sky_list = frames.get("sky") if isinstance(frames.get("sky"), list) else []
@@ -683,11 +720,17 @@ def apply_project_manifest_to_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
         {
             "has_manifest": True,
             "path": str(manifest_path),
-            "roles_present": sorted(list(roles_present(manifest))),
+            "roles_present": sorted(list(roles_present(manifest))) if apply_role_overrides else [],
+            "role_selection_status": "explicit" if apply_role_overrides else "template_unconfigured",
+            "roles_applied": sorted(applied_roles),
             "exclude": list(excluded_abs) if excluded_abs else [],
             "has_sky_frames": bool(sky_list),
             "n_sky_frames": int(len(sky_list)) if isinstance(sky_list, list) else 0,
-            "frames_source": "manifest",
+            "frames_source": (
+                "manifest" if apply_role_overrides
+                else "config+manifest_exclude" if excluded_abs
+                else "config"
+            ),
         }
     )
 

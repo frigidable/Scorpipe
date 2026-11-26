@@ -481,12 +481,9 @@ class CosmicsManualDialog(QtWidgets.QDialog):
         def _job() -> _FramePayload:
             return _load_frame_payload_sync(p, work_dir=self.work_dir, kind=request_kind)
 
-        h: RunHandle[_FramePayload] = run_in_thread(
-            _job,
-            name="manual_cosmics_load_frame",
-            dedupe_key=f"manual_cosmics:{p.resolve()}",
-        )
-        self._frame_job = h
+        # Register callbacks before submission: a cache-hot frame worker may
+        # complete before run_in_thread() returns.
+        h: RunHandle[_FramePayload] | None = None
 
         def _on_finished(payload: _FramePayload) -> None:
             if self._frame_job is not h:
@@ -510,8 +507,14 @@ class CosmicsManualDialog(QtWidgets.QDialog):
                 f"Failed to read FITS: {p}\n\n{tb.splitlines()[-1] if tb else tb}",
             )
 
-        h.worker.finished.connect(_on_finished)
-        h.worker.failed.connect(_on_failed)
+        h = run_in_thread(
+            _job,
+            name="manual_cosmics_load_frame",
+            dedupe_key=f"manual_cosmics:{p.resolve()}",
+            on_finished=_on_finished,
+            on_failed=_on_failed,
+        )
+        self._frame_job = h
 
     def _update_info(self, *, extra: str | None = None) -> None:
         if not self._paths:

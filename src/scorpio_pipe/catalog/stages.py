@@ -217,18 +217,18 @@ class StageCatalog:
 
 
 _GUI_STAGES: tuple[GuiStageDef, ...] = (
-    GuiStageDef(1, "project", "project", "Project", ui_only=True),
-    GuiStageDef(2, "setup", "setup", "Setup", ui_only=True),
+    GuiStageDef(1, "project", "project", "Observations", ui_only=True),
+    GuiStageDef(2, "setup", "setup", "Reduction Setup", ui_only=True),
     GuiStageDef(3, "biascorr", "bias", "Bias Correction"),
-    GuiStageDef(4, "flatfield", "flat", "Flat-Fielding"),
-    GuiStageDef(5, "cosmics", "cosmics", "Cosmics Cleaning"),
-    GuiStageDef(6, "superneon", "superneon", "Superneon"),
-    GuiStageDef(7, "arclineid", "arc_line_id", "Arc Line ID"),
-    GuiStageDef(8, "wavesol", "wavesol", "Wavelength Solution"),
-    GuiStageDef(9, "sky", "sky", "Sky Subtraction"),
-    GuiStageDef(10, "linearize", "linearize", "Linearization"),
-    GuiStageDef(11, "stack2d", "stack", "Frame Stacking"),
-    GuiStageDef(12, "extract1d", "extract", "Object Extraction"),
+    GuiStageDef(4, "flatfield", "flat", "Flat-Field Correction"),
+    GuiStageDef(5, "cosmics", "cosmics", "Cosmic-Ray Rejection"),
+    GuiStageDef(6, "superneon", "superneon", "Arc Frame Combination"),
+    GuiStageDef(7, "arclineid", "arc_line_id", "Arc Line Identification"),
+    GuiStageDef(8, "wavesol", "wavesol", "2D Wavelength Calibration"),
+    GuiStageDef(9, "sky", "sky", "Sky Modeling & Subtraction"),
+    GuiStageDef(10, "linearize", "linearize", "Spectral Resampling"),
+    GuiStageDef(11, "stack2d", "stack", "2D Spectral Coaddition"),
+    GuiStageDef(12, "extract1d", "extract", "1D Spectral Extraction"),
 )
 
 
@@ -253,7 +253,7 @@ _TASKS: tuple[StageInfo, ...] = (
     StageInfo(
         id=1,
         key="project",
-        label="Project",
+        label="Observations",
         ui_only=True,
         aliases=(),
         entrypoint=None,
@@ -268,7 +268,7 @@ _TASKS: tuple[StageInfo, ...] = (
     StageInfo(
         id=2,
         key="setup",
-        label="Setup",
+        label="Reduction Setup",
         ui_only=True,
         aliases=(),
         entrypoint=None,
@@ -285,7 +285,7 @@ _TASKS: tuple[StageInfo, ...] = (
     StageInfo(
         id=None,
         key="manifest",
-        label="Manifest",
+        label="Observation Manifest",
         ui_only=False,
         aliases=(),
         entrypoint="scorpio_pipe.pipeline.entry_manifest:run",
@@ -307,7 +307,7 @@ _TASKS: tuple[StageInfo, ...] = (
     StageInfo(
         id=3,
         key="superbias",
-        label="Superbias",
+        label="Master Bias Construction",
         ui_only=False,
         aliases=_u((
             # stage key + common synonyms
@@ -348,7 +348,7 @@ _TASKS: tuple[StageInfo, ...] = (
     StageInfo(
         id=4,
         key="superflat",
-        label="Superflat",
+        label="Master Flat Construction",
         ui_only=False,
         aliases=_u((
             "flat",  # frequent shorthand
@@ -368,7 +368,7 @@ _TASKS: tuple[StageInfo, ...] = (
     StageInfo(
         id=4,
         key="flatfield",
-        label="Flatfield",
+        label="Flat-Field Correction",
         ui_only=False,
         aliases=_u((
             "flatfield",  # explicit
@@ -390,7 +390,7 @@ _TASKS: tuple[StageInfo, ...] = (
     StageInfo(
         id=5,
         key="cosmics",
-        label="Cosmics",
+        label="Cosmic-Ray Rejection",
         ui_only=False,
         aliases=(),
         entrypoint="scorpio_pipe.stages.entry_cosmics:run",
@@ -413,7 +413,7 @@ _TASKS: tuple[StageInfo, ...] = (
     StageInfo(
         id=6,
         key="superneon",
-        label="Superneon",
+        label="Arc Frame Combination",
         ui_only=False,
         aliases=(),
         entrypoint="scorpio_pipe.stages.entry_superneon:run",
@@ -437,7 +437,7 @@ _TASKS: tuple[StageInfo, ...] = (
 StageInfo(
     id=None,
     key="slit_sanity",
-    label="Slit sanity",
+    label="Slit Geometry Check",
     ui_only=False,
     aliases=_u((
         "slitcheck",
@@ -463,7 +463,7 @@ StageInfo(
 StageInfo(
     id=None,
     key="geometry_prior",
-    label="Geometry prior",
+    label="Geometry Constraints",
     ui_only=False,
     aliases=_u((
         "geometry",
@@ -490,7 +490,7 @@ StageInfo(
     StageInfo(
         id=7,
         key="lineid_prepare",
-        label="LineID prep",
+        label="Arc Line Preparation",
         ui_only=False,
         aliases=_u((
             "arclineid",
@@ -518,7 +518,7 @@ StageInfo(
     StageInfo(
         id=8,
         key="wavesolution",
-        label="Wavesol",
+        label="2D Wavelength Calibration",
         ui_only=False,
         aliases=_u((
             "wavesol",
@@ -569,7 +569,7 @@ StageInfo(
     StageInfo(
         id=None,
         key="lsf_model",
-        label="LSF model",
+        label="LSF Characterization",
         ui_only=False,
         aliases=_u((
             "lsf",
@@ -596,7 +596,7 @@ StageInfo(
     StageInfo(
         id=9,
         key="sky",
-        label="Sky subtraction",
+        label="Sky Modeling & Subtraction",
         ui_only=False,
         aliases=_u((
             "sky_sub",
@@ -628,7 +628,7 @@ StageInfo(
     StageInfo(
         id=None,
         key="sky_refine",
-        label="Sky residual refine",
+        label="Sky Residual Refinement",
         ui_only=False,
         aliases=_u((
             "sky_residual_refine",
@@ -663,7 +663,7 @@ StageInfo(
     StageInfo(
         id=10,
         key="linearize",
-        label="Linearize",
+        label="Spectral Resampling",
         ui_only=False,
         aliases=_u(("lin",)),
         entrypoint="scorpio_pipe.stages.entry_linearize:run",
@@ -686,7 +686,7 @@ StageInfo(
     StageInfo(
         id=11,
         key="stack2d",
-        label="Stack2D",
+        label="2D Spectral Coaddition",
         ui_only=False,
         aliases=_u(("stack",)),
         entrypoint="scorpio_pipe.stages.entry_stack2d:run",
@@ -709,7 +709,7 @@ StageInfo(
     StageInfo(
         id=12,
         key="extract1d",
-        label="Extract1D",
+        label="1D Spectral Extraction",
         ui_only=False,
         aliases=_u(("extract",)),
         entrypoint="scorpio_pipe.stages.entry_extract1d:run",
@@ -735,7 +735,7 @@ StageInfo(
     StageInfo(
         id=None,
         key="publication_ready",
-        label="Publication ready",
+        label="Science Product Export",
         ui_only=False,
         aliases=_u(("publication", "pubready")),
         entrypoint="scorpio_pipe.stages.entry_publication_ready:run",
@@ -756,7 +756,7 @@ StageInfo(
     StageInfo(
         id=None,
         key="kinematics_prep",
-        label="Kinematics prep",
+        label="Kinematics Preparation",
         ui_only=False,
         aliases=_u(("kinprep", "ppxf_prep")),
         entrypoint="scorpio_pipe.stages.entry_kinematics_prep:run",
@@ -780,7 +780,7 @@ StageInfo(
     StageInfo(
         id=None,
         key="standard_prepare",
-        label="Standard prepare",
+        label="Standard Star Reduction",
         ui_only=False,
         aliases=_u(("standard", "std_prepare")),
         entrypoint="scorpio_pipe.stages.entry_standard_prepare:run",
@@ -799,7 +799,7 @@ StageInfo(
     StageInfo(
         id=None,
         key="sensfunc",
-        label="Sensfunc",
+        label="Sensitivity Function",
         ui_only=False,
         aliases=_u(("response", "sensitivity")),
         entrypoint="scorpio_pipe.stages.entry_sensfunc:run",
@@ -819,7 +819,7 @@ StageInfo(
     StageInfo(
         id=None,
         key="telluric_model",
-        label="Telluric model",
+        label="Telluric Transmission Model",
         ui_only=False,
         aliases=_u(("telluric",)),
         entrypoint="scorpio_pipe.stages.entry_telluric_model:run",
@@ -838,7 +838,7 @@ StageInfo(
     StageInfo(
         id=None,
         key="fluxcal_apply",
-        label="Flux calibration",
+        label="Flux Calibration",
         ui_only=False,
         aliases=_u(("fluxcal", "flux_calibration")),
         entrypoint="scorpio_pipe.stages.entry_fluxcal_apply:run",
@@ -859,7 +859,7 @@ StageInfo(
     StageInfo(
         id=None,
         key="line_measure",
-        label="Line measurement",
+        label="Emission-Line Measurements",
         ui_only=False,
         aliases=_u(("science_lines",)),
         entrypoint="scorpio_pipe.stages.entry_line_measure:run",
@@ -878,7 +878,7 @@ StageInfo(
     StageInfo(
         id=None,
         key="science_report",
-        label="Science report",
+        label="Science Report",
         ui_only=False,
         aliases=_u(("report_science",)),
         entrypoint="scorpio_pipe.stages.entry_science_report:run",
@@ -896,7 +896,7 @@ StageInfo(
     StageInfo(
         id=None,
         key="qc_report",
-        label="QC report",
+        label="Quality Control Report",
         ui_only=False,
         aliases=_u(("qc",)),
         entrypoint="scorpio_pipe.pipeline.entry_qc_report:run",
@@ -920,7 +920,7 @@ StageInfo(
     StageInfo(
         id=None,
         key="observer_dashboard",
-        label="Observer dashboard",
+        label="Reduction Overview",
         ui_only=False,
         aliases=_u(("dashboard", "observer_qc", "cockpit")),
         entrypoint="scorpio_pipe.stages.entry_observer_dashboard:run",
@@ -939,7 +939,7 @@ StageInfo(
     StageInfo(
         id=None,
         key="navigator",
-        label="Navigator",
+        label="Reduction Navigator",
         ui_only=False,
         aliases=_u(("nav",)),
         entrypoint="scorpio_pipe.pipeline.entry_navigator:run",

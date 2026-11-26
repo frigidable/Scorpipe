@@ -1,0 +1,159 @@
+{
+  "schema": "scorpipe.checkpoint.provenance.v1",
+  "date_utc": "2026-11-11",
+  "status": "SCIENCE_HOLD",
+  "scientific_release_approved": false,
+  "source_basis": [
+    "GitHub repository and PR HEAD inspected 2026-11-11",
+    "Observer-supplied read-only local inventory JSON",
+    "Existing source SHA-verified LineID22–26f and `_95`/`_96` reports"
+  ],
+  "repo": {
+    "name": "frigidable/Scorpipe",
+    "pr178": {
+      "state": "open",
+      "draft": true,
+      "base": "qa/sc1-flat-profile-shift-and-route-20261106",
+      "head": "fix/sc1-masterbias-gross-var-20261109",
+      "head_sha_before_checkpoint": "e1c1e3d2072b7df953128e4e7f046d0efec91fc4"
+    },
+    "archive_source_branch": "archive/pr178-20261111-e1c1e3d2",
+    "archive_local_base_branch": "archive/local-base-20261111-d145f171",
+    "local_commit": "d145f171d057ce56516e0ae755a3afe9a9d80c95",
+    "local_branch": "fix/barycentric-velocity-conventions",
+    "local_worktree_dirty": true,
+    "local_uncommitted_backed_up_to_github": false
+  },
+  "inventory": {
+    "filename": "Scorpipe_Integration_Inventory_20261111_130939.json",
+    "sha256": "307fe97898e84f6f837bf9387719afb82a7f4ce0a8b9d25657ba4ec0e0c8ca25",
+    "config_is_raw_yaml_not_resolved": true,
+    "raw_fits_modified": false,
+    "science_processing_performed": false
+  },
+  "frame_roles": {
+    "observer_confirmed": true,
+    "object_frames": [
+      "s22800607.fts",
+      "s22800608.fts",
+      "s22800609.fts",
+      "s22800610.fts",
+      "s22800611.fts",
+      "s22800612.fts"
+    ],
+    "offset_sky_frames": [
+      "s22800604.fts"
+    ],
+    "bias_count_historical_config": 20,
+    "bias_names": "s22800101.fts through s22800120.fts",
+    "arc_frames": [
+      "s22800606.fts",
+      "s22800613.fts"
+    ],
+    "flat_frames": [
+      "s22800614.fts",
+      "s22800615.fts",
+      "s22800616.fts"
+    ],
+    "acquisition_offset": "s22800603.fts",
+    "acquisition_target": "s22800605.fts",
+    "historical_configs_7_obj_0_sky": true,
+    "offset_sky_rows_scientifically_certified": 0
+  },
+  "local_config_sha256": {
+    "N2146sat_VPHG1200B_01": "15939565230d6eed5b6a5af5e7661bc9f01e1a5306c37042455521ad79e9d34a",
+    "N2146sat_VPHG1200B_91": "f09bfc17ac4b4de6e9930ee48bd1dd88ad1b619c7fa6618bf5fe7a0831b6b018",
+    "N2146sat_VPHG1200B_92": "4f48db9599151d851e6b0f6c84063e5730601dcfe67e2c083627a1f8c1351a5c",
+    "N2146sat_VPHG1200B_93": "5b247566129130f5c42870372e8230d7619145fd43e19d71920013f2f",
+    "N2146sat_VPHG1200B_94": "5d2a7c0d9a4be0b4b15b2671b3a56e917153ac1842a1967c75f9b248b8f13935",
+    "N2146sat_VPHG1200B_95": "167af853fade3dfc3137aee272df6610517d9669a352a050aad59ee56489a4bf",
+    "N2146sat_VPHG1200B_96": "9d0a9736faf0c562070e0b26c83f59215128ba55ef688140c4dbdfc2367cdfaa"
+  },
+  "historical_project_manifest_sha256": "21cc8944c9a65769deb8c4f0036ceeaec5cbba77280e627ce7d5675be00cb292",
+  "original_fits_sha256_verified_by_uploaded_inventory": {
+    "s22800604.fts": "0b99ff26c6cbf2d7902f4e9cf68a552c6018c705d4f9c611bc6e0f0210b8fdca",
+    "s22800606.fts": "54a6d638d2284b9bfd1d947df02399eaf0264f998667a830e144b1c437a61dac",
+    "s22800607.fts": "dc43136f584fa4c5e9b0e66f4ccceb7731c57de43053fe09dc735d549ebf47d6",
+    "s22800608.fts": "008bff06a9292d497e9c9bfc617bbb2139fd0461bfa6202a79e03f8de2341087",
+    "s22800609.fts": "29a827f73b84958c4e2045c57ed74ea4d1e9b8aad925df8ba463b9ef8c29dcd6",
+    "s22800610.fts": "04bb0dd284847412df1ebebb330172aedfb1f79288632dcf610bc7c233aa529e",
+    "s22800611.fts": "0cdea865e8052a063c80734c4b7478358714a1b56950c19754d4c0832e88e25c",
+    "s22800612.fts": "668f2601f6bbb6cf69da49d3daf68d0ca8338ebf1e55cf8a955f4c179b41fa06",
+    "s22800613.fts": "9e2c98f2d2ba1125e18f84722854099f73e435a1fd7810f0b4df84ea07ab0c05"
+  },
+  "acquisition_sha256_prior_lineid26e_windows": {
+    "s22800603.fts": "1966025cabaaae3f09a32f205214e9ed5d9f25a883f25fd305ef664bcd489120",
+    "s22800605.fts": "25ffb5b881795e158a06473abc108ab7e517bad65bffd3045cc59d53800121fe"
+  },
+  "flats_sha256_prior_lineid26d_windows": {
+    "s22800614.fts": "075924d02356cd36b3c2db3f2c9cbb1851f57d85f11306de25351bb9bb3a0f66",
+    "s22800615.fts": "c84203813f0e0f07c622990ccf712b423a0d9ae78899afbb46fd9048104faf2f",
+    "s22800616.fts": "3f7414b1358c0338766d25e19dfe358cc9d632a855e5ff2ba009f197009d51c8"
+  },
+  "frozen_products_sha256": {
+    "95/08_wavesol/VPHG1200B/lambda_map.fits": "37808e73c00279ced67ea520e2245767427bd71dc7edec9af22177fbc8df07ab",
+    "96/08_wavesol/VPHG1200B/lambda_map.fits": "37808e73c00279ced67ea520e2245767427bd71dc7edec9af22177fbc8df07ab",
+    "96/lsf_model/lsf_map.fits": "45f219f044cc9a574778f2df8922928ab8c080a0379aec6c6472767bd118b11b",
+    "95_and_96/hand_pairs.txt": "2d88b6948d9225326bcbf16125dfa844544da6a44ec1e5e8af6438975433d623"
+  },
+  "run_markers_summary": {
+    "91": {
+      "manifest": "ok",
+      "superbias": "ok",
+      "cosmics": "fail"
+    },
+    "92": {
+      "manifest": "ok",
+      "superbias": "ok",
+      "cosmics": "ok",
+      "superneon": "ok",
+      "lineid_prepare": "fail"
+    },
+    "93": {
+      "manifest": "ok",
+      "superbias": "ok",
+      "cosmics": "ok",
+      "superneon": "ok",
+      "lineid_prepare": "ok",
+      "wavesolution": "ok_engineering_but_science_invalid"
+    },
+    "94": {
+      "manifest": "ok",
+      "superbias": "ok",
+      "cosmics": "ok",
+      "superneon": "ok",
+      "lineid_prepare": "ok",
+      "wavesolution": "fail_closed"
+    },
+    "95": {
+      "manifest": "ok",
+      "superbias": "ok",
+      "cosmics": "ok",
+      "superneon": "ok",
+      "lineid_prepare": "ok",
+      "wavesolution": "ok_engineering_not_scientifically_validated"
+    },
+    "96": {
+      "lsf_model": "ok_engineering",
+      "science_lsf_validated": false
+    },
+    "01": {
+      "superbias": "ok"
+    }
+  },
+  "science_gates": {
+    "wave2d": false,
+    "lsf": false,
+    "absolute_wavelength_zero": false,
+    "sky_subtraction": false,
+    "object_flexure": false,
+    "spatial_stack": false,
+    "publication": false
+  },
+  "provenance_limitations": [
+    "Relative paths and run markers originate from read-only inventory, not live engine-resolved config.",
+    "Uncommitted local worktree bytes and untracked artifacts are not in this Git snapshot.",
+    "Only original FITS with provided checksum keys are covered; original BIAS hashes not supplied in this checkpoint.",
+    "No source FITS or local science run products are committed into GitHub."
+  ]
+}

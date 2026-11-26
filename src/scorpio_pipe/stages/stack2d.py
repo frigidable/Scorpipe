@@ -27,8 +27,13 @@ from scorpio_pipe.io.atomic_fits import atomic_write_fits
 import astropy.units as u
 
 from scorpio_pipe.fits_utils import open_fits_smart
+from scorpio_pipe.calib.bias_covariance import bias_group_diagnostics
 
 from scorpio_pipe.io.mef import write_sci_var_mask, try_read_grid, validate_sci_var_mask
+from scorpio_pipe.spectral_axis_contract import (
+    read_spectral_axis_contract,
+    validate_same_spectral_frame,
+)
 from scorpio_pipe.version import PIPELINE_VERSION
 from scorpio_pipe.maskbits import BADPIX, COSMIC, NO_COVERAGE, REJECTED, SATURATED, USER, EDGE
 
@@ -577,20 +582,40 @@ class _WeightedMeanAccumulator:
 
     def __init__(self, shape: tuple[int, int]):
         self.sum_w = np.zeros(shape, dtype=np.float64)
+        # Variance under the FIXED weights actually used to average the
+        # exposures. This is NOT the robust estimator's full sampling variance
+        # or the cross-exposure covariance of shared calibration products.
+        self.sum_w2var = np.zeros(shape, dtype=np.float64)
         self.mean = np.full(shape, np.nan, dtype=np.float64)
 
-    def update(self, values: np.ndarray, weights: np.ndarray) -> None:
+    def update(
+        self, values: np.ndarray, weights: np.ndarray,
+        *, variances: np.ndarray | None = None,
+    ) -> None:
         if values.shape != self.mean.shape or weights.shape != self.mean.shape:
             raise ValueError("Accumulator shape mismatch")
         w = np.asarray(weights, dtype=np.float64)
-        if not np.any(w > 0):
-            return
-        x = np.asarray(values, dtype=np.float64)
-        sw_old = self.sum_w
-        sw_new = sw_old + w
+        if np.any(~np.isfinite(w)) or np.any(w < 0):
+            raise ValueError("Accumulator requires finite nonnegative weights")
         good = w > 0
         if not np.any(good):
             return
+        x = np.asarray(values, dtype=np.float64)
+        if np.any(good & ~np.isfinite(x)):
+            raise ValueError("Accumulator requires finite positive-weight values")
+        if variances is not None:
+            if variances.shape != self.mean.shape:
+                raise ValueError("Accumulator variance shape mismatch")
+            v = np.asarray(variances, dtype=np.float64)
+            if np.any(good & (~np.isfinite(v) | (v < 0))):
+                raise ValueError("Invalid positive-weight input variance")
+            self.sum_w2var[good] += w[good] ** 2 * v[good]
+        else:
+            # Used only by preliminary mean estimation and older benchmark
+            # helpers. The FINAL science pass supplies the original v.
+            self.sum_w2var[good] += w[good]
+        sw_old = self.sum_w
+        sw_new = sw_old + w
         first = good & (sw_old <= 0)
         if np.any(first):
             self.mean[first] = x[first]
@@ -602,7 +627,12 @@ class _WeightedMeanAccumulator:
 
     def finalize(self) -> tuple[np.ndarray, np.ndarray]:
         mean = self.mean.astype(np.float32, copy=False)
-        var = np.where(self.sum_w > 0, 1.0 / self.sum_w, np.nan).astype(np.float32)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            var = np.where(
+                self.sum_w > 0,
+                self.sum_w2var / (self.sum_w ** 2),
+                np.nan,
+            ).astype(np.float32)
         return mean, var
 
 
@@ -635,6 +665,27 @@ def _load_shifted_block(
     v = np.asarray(block_v, dtype=np.float32) * float(var_scale)
     m = np.asarray(block_m, dtype=np.uint16)
     return s, v, m
+
+
+def _huber_weight_block(
+    w0: np.ndarray, residual: np.ndarray, huber_c: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Apply Huber weighting without propagating zero-weight NaN gaps.
+
+    0 * NaN is NaN in IEEE arithmetic, so every zero-weight input must
+    remain exactly zero, regardless of its residual.
+    """
+    ar = np.abs(np.asarray(residual, dtype=np.float64))
+    hub = np.where(
+        ar <= float(huber_c),
+        1.0,
+        float(huber_c) / np.maximum(ar, 1e-20),
+    ).astype(np.float32)
+    base = np.asarray(w0, dtype=np.float32)
+    w = np.zeros_like(base, dtype=np.float32)
+    usable = (base > 0) & np.isfinite(base) & np.isfinite(hub) & (hub > 0)
+    w[usable] = base[usable] * hub[usable]
+    return w, hub
 
 
 def _base_weight_block(
@@ -699,6 +750,7 @@ def _stack_chunk_streaming(
     var_scales: list[float],
     fatal_bits: np.uint16,
     var_floor: float | None,
+    weight_sink: Any | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int]:
     """Streaming Stack2D combine for one Y-chunk.
 
@@ -738,9 +790,7 @@ def _stack_chunk_streaming(
                 v_eff, w0 = _base_weight_block(s, v, m, fatal_bits=fatal_bits, var_floor=var_floor)
                 if method0 in {"invvar_huber", "huber", "huber_invvar"}:
                     r = (s - last_mu) / np.sqrt(np.maximum(v_eff, 1e-20))
-                    ar = np.abs(r)
-                    hub = np.where(ar <= float(huber_c), 1.0, float(huber_c) / np.maximum(ar, 1e-20)).astype(np.float32)
-                    w = w0 * hub
+                    w, hub = _huber_weight_block(w0, r, float(huber_c))
                 elif method0 in {"invvar_clip", "sigma_clip", "clip"}:
                     r = (s - last_mu) / np.sqrt(np.maximum(v_eff, 1e-20))
                     keep = np.abs(r) <= float(clip_sigma)
@@ -772,9 +822,7 @@ def _stack_chunk_streaming(
         v_eff, w0 = _base_weight_block(s, v, m, fatal_bits=fatal_bits, var_floor=var_floor)
         if method0 in {"invvar_huber", "huber", "huber_invvar"}:
             r = (s - last_mu) / np.sqrt(np.maximum(v_eff, 1e-20))
-            ar = np.abs(r)
-            hub = np.where(ar <= float(huber_c), 1.0, float(huber_c) / np.maximum(ar, 1e-20)).astype(np.float32)
-            w = w0 * hub
+            w, hub = _huber_weight_block(w0, r, float(huber_c))
             suppressed |= np.isfinite(s) & (w0 > 0) & (hub < 1.0)
         elif method0 in {"invvar_clip", "sigma_clip", "clip"}:
             r = (s - last_mu) / np.sqrt(np.maximum(v_eff, 1e-20))
@@ -786,9 +834,38 @@ def _stack_chunk_streaming(
         accepted = w > 0
         cov += accepted.astype(np.int16)
         m_or |= np.where(accepted, m, 0).astype(np.uint16)
-        acc_final.update(s, w)
+        acc_final.update(s, w, variances=v)
 
     mu_final, var_final = acc_final.finalize()
+    if weight_sink is not None:
+        # Independent, optional final-pass replay: keep the tested estimator
+        # and W2VAR untouched; store the actual fixed normalized coefficients.
+        # Crucially these are based on the final iteration's frozen last_mu,
+        # not on the final coadded image. No exposure cube held in memory.
+        for i, hdul in enumerate(hduls):
+            s, v, m = _load_shifted_block(
+                hdul, y0=y0, y1=y1, shift=float(y_shifts[i]),
+                y_align_enabled=bool(y_align_enabled),
+                sci_scale=float(sci_scales[i]), var_scale=float(var_scales[i]),
+            )
+            v_eff, w0 = _base_weight_block(
+                s, v, m, fatal_bits=fatal_bits, var_floor=var_floor,
+            )
+            if method0 in {"invvar_huber", "huber", "huber_invvar"}:
+                r = (s - last_mu) / np.sqrt(np.maximum(v_eff, 1e-20))
+                w, _hub = _huber_weight_block(w0, r, float(huber_c))
+            elif method0 in {"invvar_clip", "sigma_clip", "clip"}:
+                r = (s - last_mu) / np.sqrt(np.maximum(v_eff, 1e-20))
+                w = np.where(np.abs(r) <= float(clip_sigma), w0, 0.0).astype(np.float32)
+            else:
+                w = w0
+            w = np.where(np.isfinite(w) & (w > 0), w, 0.0)
+            normalized = np.divide(
+                np.asarray(w, dtype=np.float64), acc_final.sum_w,
+                out=np.zeros(shape, dtype=np.float64),
+                where=acc_final.sum_w > 0,
+            )
+            weight_sink(i, y0, y1, normalized)
     m_out = np.asarray(m_or, dtype=np.uint16)
     m_out = np.where(acc_final.sum_w <= 0, m_out | MASK_NO_COVERAGE, m_out)
     m_out = np.where(suppressed, m_out | MASK_ROBUST_REJECTED, m_out)
@@ -867,8 +944,9 @@ def run_stack2d(
     hduls = [open_fits_smart(p, memmap="auto") for p in files]
 
 
-    # P0-L: upstream degradation propagation + optional operator-controlled rejection.
-    # By default we *do not* auto-exclude frames; we only propagate QADEGRD.
+    # Failed sky subtraction cannot contribute to a scientific stack, even
+    # when sky.failure_policy='soft' produced a diagnostic pass-through.
+    # Optional user rejection flags apply in addition to this mandatory gate.
     from scorpio_pipe.maskbits import SKYMODEL_FAIL
 
     reject_names = st_cfg.get("reject_if_mask_bits") or []
@@ -894,6 +972,7 @@ def run_stack2d(
     inputs_meta: list[dict[str, object]] = []
     kept_files: list[Path] = []
     kept_hduls = []
+    kept_input_meta: list[dict[str, object]] = []
 
     for pth, hdul in zip(files, hduls):
         hdr = hdul[0].header
@@ -910,25 +989,35 @@ def run_stack2d(
             mask = np.zeros_like(_get_sci_data(hdul), dtype=np.uint16)
         has_skymodel_fail = bool(np.any(mask & SKYMODEL_FAIL))
 
-        rejected = False
+        rejected = bool(
+            (skyok is not None and not bool(skyok))
+            or has_skymodel_fail
+        )
         reject_reason = None
-        if reject_bitmask != 0 and bool(np.any(mask & reject_bitmask)):
+        if rejected:
+            reject_reason = {
+                "science_gate": "SKY_MODEL_FAILED",
+                "skyok": skyok,
+                "has_skymodel_fail": has_skymodel_fail,
+            }
+        elif reject_bitmask != 0 and bool(np.any(mask & reject_bitmask)):
             rejected = True
             reject_reason = {
                 "mask_bits": [str(x) for x in reject_names],
                 "bitmask": int(reject_bitmask),
             }
 
-        inputs_meta.append(
-            {
-                "path": str(pth),
-                "qadegrd": qadegrd,
-                "skyok": skyok,
-                "has_skymodel_fail": has_skymodel_fail,
-                "rejected": rejected,
-                "reject_reason": reject_reason,
-            }
-        )
+        input_meta: dict[str, object] = {
+            "path": str(pth),
+            "qadegrd": qadegrd,
+            "skyok": skyok,
+            "has_skymodel_fail": has_skymodel_fail,
+            "rejected": rejected,
+            "reject_reason": reject_reason,
+            # Rejected inputs are not admitted to spectral WCS validation.
+            "spectral_axis_contract": None,
+        }
+        inputs_meta.append(input_meta)
 
         if rejected:
             try:
@@ -938,13 +1027,15 @@ def run_stack2d(
         else:
             kept_files.append(pth)
             kept_hduls.append(hdul)
+            kept_input_meta.append(input_meta)
 
     files = kept_files
     hduls = kept_hduls
 
     if not files:
         raise RuntimeError(
-            "All inputs were rejected by stack2d.reject_if_mask_bits; nothing left to stack."
+            "All Stack2D inputs failed mandatory sky-model QC or configured "
+            "reject_if_mask_bits; no scientifically usable exposure remains."
         )
 
     upstream_degraded = any(
@@ -988,12 +1079,53 @@ def run_stack2d(
     done_json = out_dir / "done.json"
 
     # We keep the geometry object (for var_floor/eta) and a JSON-friendly summary.
+    capture = None
     sky_geom = None
     sky_geometry_meta: dict[str, Any] | None = None
 
     try:
         # First exposure defines reference shape, WCS/grid, and base unit.
         hdr0 = _get_primary_header(hduls[0]).copy()
+        # Header-level spatial admission is independent of a matching
+        # spectral wavelength grid. The N2146sat _95 audit found science
+        # exposures separated by ~109 arcsec and with ROTANGLE differing
+        # by ~27 deg. They must never be stacked as identical spatial rows.
+        from scorpio_pipe.stack_pointing_qc import check_stack_pointing
+
+        geom_cfg = st_cfg.get("pointing_qc") or {}
+        if not isinstance(geom_cfg, dict):
+            raise ValueError("stack2d.pointing_qc must be a mapping")
+        pointing_qc = check_stack_pointing(
+            [_get_primary_header(h).copy() for h in hduls],
+            names=[p.name for p in files],
+            max_pointing_sep_arcsec=float(
+                geom_cfg.get("max_pointing_sep_arcsec", 5.0)
+            ),
+            max_rotator_diff_deg=float(
+                geom_cfg.get("max_rotator_diff_deg", 1.0)
+            ),
+            require_complete_metadata=bool(
+                geom_cfg.get("require_complete_metadata", False)
+            ),
+        )
+        pointing_qc_path = out_dir / "stack_pointing_qc.json"
+        pointing_qc_path.write_text(
+            json.dumps(pointing_qc, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        report["stack_pointing_qc"] = pointing_qc
+        if pointing_qc["status"] == "REJECT":
+            raise RuntimeError(
+                "Stack2D POINTING_QC REJECT: "
+                + " | ".join(pointing_qc["issues"][:6])
+                + f"; see {pointing_qc_path}. "
+                "Split pointings or provide independently verified slit "
+                "registration; matching wavelength grids do not justify stacking."
+            )
+        spectral_contract = read_spectral_axis_contract(
+            hdr0, source=files[0].name,
+        )
+        report["spectral_axis_contract"] = spectral_contract.to_dict()
         # COUNT_V1 products must never be averaged with historically
         # density-normalized products that share the same apparent grid.
         ref_resampling = str(hdr0.get("REBNORM", "") or "").strip()
@@ -1057,7 +1189,10 @@ def run_stack2d(
         unit0_raw = hdr0.get("BUNIT", hdr0.get("SCIUNIT", ""))
         base0, per_sec0 = _split_rate_unit(str(unit0_raw))
         norm0 = bool(hdr0.get("NORMEXP", False))
-        per_sec0 = bool(per_sec0 or norm0)
+        if norm0 and not per_sec0:
+            raise ValueError(
+                "stack2d: first input has NORMEXP=True but BUNIT is not a rate"
+            )
         if not base0:
             raise ValueError("stack2d: missing BUNIT/SCIUNIT in first input")
 
@@ -1068,8 +1203,14 @@ def run_stack2d(
         exptimes: list[float | None] = []
 
         # Per-input metadata + strict validation.
-        for p, h in zip(files, hduls):
+        for p, h, input_meta in zip(files, hduls, kept_input_meta):
             hdr = _get_primary_header(h)
+            this_spectral_contract = read_spectral_axis_contract(
+                hdr, source=p.name,
+            )
+            validate_same_spectral_frame(
+                spectral_contract, this_spectral_contract, source=p.name,
+            )
             this_resampling = str(hdr.get("REBNORM", "") or "").strip()
             if this_resampling != ref_resampling:
                 raise ValueError(
@@ -1120,10 +1261,20 @@ def run_stack2d(
             unit_raw = hdr.get("BUNIT", hdr.get("SCIUNIT", ""))
             base, per_sec = _split_rate_unit(str(unit_raw))
             norm = bool(hdr.get("NORMEXP", False))
-            per_sec = bool(per_sec or norm)
+            if norm and not per_sec:
+                raise ValueError(
+                    f"stack2d: NORMEXP=True contradicts BUNIT in {p.name}: {unit_raw!r}"
+                )
             if base != base_ref:
                 raise ValueError(
                     f"stack2d: incompatible SCI unit base in {p.name}: {base!r} != {base_ref!r}"
+                )
+            if not normalize_exptime and per_sec != per_sec0:
+                raise ValueError(
+                    "stack2d: incompatible SCI dimensions; cannot combine "
+                    f"integrated {base_ref!r} with rate {base_ref!r}/s "
+                    "when normalize_exptime=False. Convert inputs to the "
+                    "same physical unit or enable explicit EXPTIME normalization."
                 )
 
             exptime = _get_exptime_seconds(hdr)
@@ -1143,16 +1294,20 @@ def run_stack2d(
             sci_scales.append(float(s_scale))
             var_scales.append(float(s_scale * s_scale))
 
-            report["inputs"].append(
+            # Enrich the admission record rather than duplicating the input.
+            input_meta.update(
                 {
                     "file": p.name,
                     "path": str(p),
                     "shape": [int(ny), int(nx)],
                     "bunit": str(unit_raw),
+                    "spectral_axis_contract": this_spectral_contract.to_dict(),
                     "base_unit": base,
                     "per_second": bool(per_sec),
                     "exptime_s": float(exptime) if exptime is not None else None,
                     "normalized_by_stack": bool(applied_norm),
+                    "bias_group_id": str(hdr.get("SB_GID") or "").strip() or None,
+                    "bias_var_included": bool(hdr["BVARINC"]) if "BVARINC" in hdr else None,
                     "grid": {
                         "lambda0_A": float(l0),
                         "dlambda_A": float(dl),
@@ -1160,6 +1315,12 @@ def run_stack2d(
                     },
                 }
             )
+
+        # Do not pretend this coadd's first SB_GID represents all inputs.
+        # Input VAR already combines detector and MasterBias estimator error;
+        # no safe correction can be inferred without separate noise components.
+        bias_audit = bias_group_diagnostics(kept_input_meta)
+        report["bias_covariance"] = bias_audit
 
         # Decide output unit string.
         out_bunit = f"{base_ref}/s" if normalize_exptime else str(unit0_raw)
@@ -1305,6 +1466,15 @@ def run_stack2d(
         report["y_offsets"] = y_offsets
         report["sky_geometry"] = sky_geometry_meta
 
+        # Sidecars are off by default, strictly limited by configured bytes
+        # and created only after science-admission and input geometry checks.
+        if bool(st_cfg.get("capture_frozen_operators", False)):
+            from scorpio_pipe.covariance_operator_capture import StackOperatorCapture
+            capture = StackOperatorCapture(
+                out_dir, files, ny=ny, nlam=nx,
+                max_bytes=int(st_cfg.get("capture_max_bytes", 2_147_483_648)),
+            )
+
         # Accumulators for diagnostics.
         suppressed_any = 0
         suppressed_total = 0
@@ -1328,6 +1498,7 @@ def run_stack2d(
                 var_scales=[float(x) for x in var_scales],
                 fatal_bits=np.uint16(FATAL_BITS),
                 var_floor=float(var_floor) if var_floor is not None else None,
+                weight_sink=capture.write if capture is not None else None,
             )
 
             suppressed_any += int(sup_any)
@@ -1426,11 +1597,21 @@ def run_stack2d(
 
         # Write outputs.
         hdr = hdr0.copy()
+        if bias_audit["unique_group"] is None and "SB_GID" in hdr:
+            del hdr["SB_GID"]
+        hdr["SBGRPN"] = (int(bias_audit["n_groups_known"]), "Number of known MasterBias groups")
+        hdr["SBGMISS"] = (int(bias_audit["n_missing_group"]), "Inputs with missing MasterBias group")
+        hdr["SBGSTAT"] = (str(bias_audit["status"]), "MasterBias group sharing state")
+        hdr["SBCOVQ"] = ("UNMODEL", "Shared MasterBias covariance not propagated")
         if upstream_degraded:
             hdr["QADEGRD"] = (1, "Downstream product is degraded (sky-sub pass-through upstream)")
             hdr.add_history("Upstream sky subtraction was skipped/degraded (QADEGRD=1).")
 
         hdr.add_history(f"Scorpio Pipe {PIPELINE_VERSION}: stack2d")
+        hdr["SPCQUAL"] = (
+            "QUALIF" if spectral_contract.qualified else "UNQUAL",
+            "Spectral coordinate qualification",
+        )
         hdr["BUNIT"] = out_bunit
         _out_per_sec = "/s" in str(out_bunit).replace(" ", "").lower() or "s-1" in str(
             out_bunit
@@ -1440,6 +1621,14 @@ def run_stack2d(
             "SCI/VAR in per-second units" if _out_per_sec else "SCI/VAR not normalized per second",
         )
         hdr["STKMETH"] = (method, "stack2d combine method")
+        hdr["STKVRALG"] = ("W2VAR", "Fixed-weight sum(w_i**2*VAR_i)/sum(w_i)**2")
+        hdr["STKVARQ"] = ("COND_ONLY", "Shared covariance/selection unmodelled")
+        # Qualification of marginal per-pixel variance is not a claim of
+        # downstream extracted-spectrum S/N accuracy. MasterBias can
+        # contribute cross-exposure covariance; fractional Y shifts induce
+        # cross-row covariance; clipping weights are data-derived.
+        hdr["STKXCVQ"] = ("UNMODEL", "Shared calibration covariance unmodelled")
+        hdr["STKYCVQ"] = ("UNMODEL" if y_align_enabled else "NONE", "Y-resampling covariance")
         if method in {"invvar_huber", "huber", "huber_invvar"}:
             hdr["STKHC"] = (float(huber_c), "Huber c")
         if method in {"invvar_clip", "sigma_clip", "clip"}:
@@ -1455,6 +1644,31 @@ def run_stack2d(
             hdr["ETAAPPL"] = (False, "eta(lambda) applied to VAR")
 
         _write_mef(out_fits, out_sci, hdr, var=out_var, mask=out_mask, cov=out_cov)
+        if capture is not None:
+            manifest_path = capture.finalize(
+                stack_fits=out_fits,
+                meta={
+                    "method": method,
+                    "robust_iter": int(robust_iter),
+                    "huber_c": float(huber_c),
+                    "clip_sigma": float(clip_sigma),
+                    "fatal_bits": int(FATAL_BITS),
+                    "var_floor": float(var_floor) if var_floor is not None else None,
+                    "normalize_exptime": bool(normalize_exptime),
+                    "resampling_contract": ref_resampling,
+                    "output_bunit": str(out_bunit),
+                    "y_align_enabled": bool(y_align_enabled),
+                    "y_shifts": [float(v) for v in y_shifts],
+                    "sci_scales": [float(v) for v in sci_scales],
+                    "var_scales": [float(v) for v in var_scales],
+                    "variance_status": "STKVARQ=COND_ONLY",
+                    "capture_excludes_upstream_resampling_kernels": True,
+                },
+            )
+            report["covariance_operator_capture"] = {
+                "status": "CONDITIONAL_FROZEN_OPERATOR_ONLY",
+                "manifest": str(manifest_path),
+            }
         # Legacy output for older runs/UI.
         try:
             _write_mef(out_fits_legacy, out_sci, hdr, var=out_var, mask=out_mask, cov=out_cov)
@@ -1502,7 +1716,9 @@ def run_stack2d(
             # eta(lambda) plot
             if eta_fits.exists():
                 try:
-                    from astropy.io import fits
+                    # fits is imported at module scope. A nested import here
+                    # shadowed it for the entire run_stack2d() function and
+                    # prevented eta(lambda) from being written.
                     import matplotlib.pyplot as plt
                     import numpy as _np
 
@@ -1578,6 +1794,17 @@ def run_stack2d(
 
             thr, thr_meta = compute_thresholds(cfg)
             stage_flags: list[dict[str, Any]] = []
+            if bias_audit["shared_group_ids"]:
+                stage_flags.append(
+                    make_flag(
+                        "SHARED_MASTERBIAS_COVARIANCE_UNMODELLED",
+                        "WARN",
+                        "Input exposures share a MasterBias; Stack2D VAR does "
+                        "not include the full correlated calibration uncertainty.",
+                        groups=bias_audit["shared_group_ids"],
+                        all_bias_var_included=bool(bias_audit["all_bias_var_included"]),
+                    )
+                )
 
             # P0-L: carry upstream sky-sub pass-through into downstream QC
             if upstream_degraded:
@@ -1673,9 +1900,23 @@ def run_stack2d(
             except Exception:
                 gap_frac = None
 
+            # The empirical eta correction is part of the declared science
+            # variance model. A runtime exception while eta was requested is
+            # an ERROR, not a silently accepted uncalibrated VAR plane.
+            eta = report.get("eta") if isinstance(report.get("eta"), dict) else {}
+            if eta.get("enabled") and eta.get("error"):
+                stage_flags.append(
+                    make_flag(
+                        "ETA_APPLICATION_FAILED",
+                        "ERROR",
+                        "Requested eta(lambda) variance calibration failed; "
+                        "stack VAR is not empirically calibrated",
+                        error=str(eta["error"]),
+                    )
+                )
+
             # ETA sanity check
             try:
-                eta = report.get("eta") if isinstance(report.get("eta"), dict) else {}
                 if eta.get("applied"):
                     mn = eta.get("eta_min")
                     mx = eta.get("eta_max")
@@ -1751,6 +1992,8 @@ def run_stack2d(
             pass
 
     except Exception as e:
+        if capture is not None:
+            capture.abort()
         report["ok"] = False
         report["status"] = "fail"
         report["error"] = str(e)
