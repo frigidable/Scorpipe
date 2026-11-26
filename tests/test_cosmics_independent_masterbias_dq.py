@@ -131,3 +131,9 @@ def test_independent_requires_no_manual_rewrite(tmp_path):
     mn.cfg["cosmics"]["preserve_manual"] = True
     with pytest.raises(ValueError, match="preserve_manual=false"):
         cosmics.clean_cosmics(mn.cfg, out_dir=mn.work_dir / "05_cosmics")
+
+
+def test_masterbias_dq_marker_requires_typed_sidecar(tmp_path):
+    header = fits.Header({"SBDQVER": 1, "SBDQCNT": 2, "SB_GID": "group"})
+    with pytest.raises(ValueError, match="qualified DQ_V1"):
+        read_clean_dq_sidecar(tmp_path / "a_clean.fits", header, (8, 8))

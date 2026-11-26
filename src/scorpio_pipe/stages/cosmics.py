@@ -1199,7 +1199,9 @@ def _single_frame_lacosmic_clean(
     if masterbias_dq is not None:
         from scorpio_pipe.noise_model import stamp_noise_keywords
 
-        if not np.isfinite(npar.rdnoise_e) or npar.rdnoise_e <= 0 or npar.rn_src == "DEF":
+        if (not np.isfinite(npar.rdnoise_e) or npar.rdnoise_e <= 0
+                or npar.rn_src not in {"HDR", "EST", "CONF", "OVR"}
+                or npar.gain_src == "DEF"):
             raise ValueError("Independent L.A.Cosmic requires measured or configured read noise")
         hdr = stamp_noise_keywords(hdr, npar, overwrite=True)
     crmask, cleaned_eval = astroscrappy.detect_cosmics(

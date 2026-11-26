@@ -26,6 +26,8 @@ def read_clean_dq_sidecar(
     if not path.stem.endswith("_clean"):
         return None
     qualified = str(hdr.get("SATMSK") or "").strip().upper() == "DQ_V1"
+    if "SBDQVER" in hdr and not qualified:
+        raise ValueError("MasterBias DQ handoff requires qualified DQ_V1")
     dq_path = path.with_name(path.stem + "_mask.fits")
     if not dq_path.exists():
         if qualified:
