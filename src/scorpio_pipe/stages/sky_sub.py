@@ -1112,6 +1112,7 @@ def _fit_kelson_bspline(
     sig_before = None
 
     # Robust sigma clipping loop
+    last_solved_idx = None
     for it in range(int(max_iter)):
         idx = np.where(keep)[0]
         if idx.size < int(min_pixels):
@@ -1138,6 +1139,7 @@ def _fit_kelson_bspline(
         dw = (d_k * w_sqrt).astype(float)
 
         sol = lsqr(Aw, dw, atol=1e-10, btol=1e-10, iter_lim=2000)
+        last_solved_idx = idx
         c = np.asarray(sol[0], dtype=float)
 
         c0 = c[:n_basis]
@@ -1167,20 +1169,24 @@ def _fit_kelson_bspline(
     if idx.size < int(min_pixels):
         raise RuntimeError("Too few pixels left after sigma-clipping")
 
-    lam_k = lam_ok[idx]
-    y_k = y_ok[idx]
-    d_k = d_ok[idx]
-    var_k = var_ok[idx]
-    B = _bspline_design_matrix(lam_k, t, k)
-    if int(y_order) <= 0:
-        A = B
-    else:
-        By = diags(y_k.astype(float), 0, format="csr") @ B
-        A = hstack([B, By], format="csr")
-    w_sqrt = (1.0 / np.sqrt(np.maximum(var_k, 1e-20))).astype(float)
-    Aw = diags(w_sqrt, 0, format="csr") @ A
-    dw = (d_k * w_sqrt).astype(float)
-    sol = lsqr(Aw, dw, atol=1e-10, btol=1e-10, iter_lim=2000)
+    # If clipping has converged, the previous solve is already the final WLS.
+    # Do not rebuild a million-row matrix and repeat the identical LSQR.
+    reused_final_solve = last_solved_idx is not None and np.array_equal(idx, last_solved_idx)
+    if not reused_final_solve:
+        lam_k = lam_ok[idx]
+        y_k = y_ok[idx]
+        d_k = d_ok[idx]
+        var_k = var_ok[idx]
+        B = _bspline_design_matrix(lam_k, t, k)
+        if int(y_order) <= 0:
+            A = B
+        else:
+            By = diags(y_k.astype(float), 0, format="csr") @ B
+            A = hstack([B, By], format="csr")
+        w_sqrt = (1.0 / np.sqrt(np.maximum(var_k, 1e-20))).astype(float)
+        Aw = diags(w_sqrt, 0, format="csr") @ A
+        dw = (d_k * w_sqrt).astype(float)
+        sol = lsqr(Aw, dw, atol=1e-10, btol=1e-10, iter_lim=2000)
     c = np.asarray(sol[0], dtype=float)
     c0 = c[:n_basis]
     c1 = c[n_basis:] if int(y_order) > 0 else None
@@ -1217,6 +1223,7 @@ def _fit_kelson_bspline(
             "stop_code": int(sol[1]), "iterations": int(sol[2]),
             "residual_norm": float(sol[3]),
             "condition_estimate": float(sol[6]),
+            "reused_final_solve": bool(reused_final_solve),
         },
         "coeff": {
             "c0": c0.astype(np.float32),
@@ -2478,20 +2485,21 @@ def _run_sky_sub_impl(cfg: dict[str, Any], *, out_dir: Path | None = None) -> di
                 skysub_png = out_dir / f"{stem}_skysub_raw.png"
                 skymodel_png = out_dir / f"{stem}_skymodel_raw.png"
                 skysub_skywin_png = out_dir / f"{stem}_skysub_raw_skywin.png"
-                try:
-                    quicklook_from_mef(skysub_path, skysub_png, k=4.0, method="asinh")
-                    quicklook_from_mef(skymodel_path, skymodel_png, k=4.0, method="linear")
-                    if hasattr(geom, "mask_sky_y"):
-                        quicklook_from_mef(
-                            skysub_path,
-                            skysub_skywin_png,
-                            k=4.0,
-                            method="asinh",
-                            row_mask=np.asarray(geom.mask_sky_y, dtype=bool),
-                            meta={"region": "sky_windows"},
-                        )
-                except Exception:
-                    pass
+                if bool(sky_cfg.get("save_png", True)):
+                    try:
+                        quicklook_from_mef(skysub_path, skysub_png, k=4.0, method="asinh")
+                        quicklook_from_mef(skymodel_path, skymodel_png, k=4.0, method="linear")
+                        if hasattr(geom, "mask_sky_y"):
+                            quicklook_from_mef(
+                                skysub_path,
+                                skysub_skywin_png,
+                                k=4.0,
+                                method="asinh",
+                                row_mask=np.asarray(geom.mask_sky_y, dtype=bool),
+                                meta={"region": "sky_windows"},
+                            )
+                    except Exception:
+                        pass
 
                 preview_stack.append(skysub)
                 preview_bunits.add(str(hdr0.get("BUNIT", "") or "").strip())
